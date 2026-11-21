@@ -69,13 +69,13 @@ def test_npm_version_check_acceptance_offline(tmp_path):
     assert all(check["exit"] == 0 for check in receipt["checks"])
 
 
-def wheel(tmp_path, *, metadata="", extra=None, version="0.31.0.dev1"):
-    filename = tmp_path / f"brigade_cli-{version}-py3-none-any.whl"
-    dist = f"brigade_cli-{version}.dist-info"
+def wheel(tmp_path, *, metadata="", extra=None, version="0.31.0.dev1", distribution="brigade-cli"):
+    filename = tmp_path / prepare.wheel_filename(distribution, version)
+    dist = f"{distribution.replace('-', '_')}-{version}.dist-info"
     files = {
         "brigade/__init__.py": b'__version__ = "0.31.0.dev1"\n',
         f"{dist}/METADATA": (
-            f"Metadata-Version: 2.4\nName: brigade-cli\nVersion: {version}\n"
+            f"Metadata-Version: 2.4\nName: {distribution}\nVersion: {version}\n"
             "License-Expression: MIT\nProvides-Extra: dev\n" + metadata + "\n"
         ).encode(),
         f"{dist}/WHEEL": b"Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n",
@@ -108,7 +108,7 @@ def wheel(tmp_path, *, metadata="", extra=None, version="0.31.0.dev1"):
 )
 def test_wheel_rejects_unsafe_metadata_on_every_supported_platform(tmp_path, metadata, extra):
     with pytest.raises(ValueError):
-        prepare.validate_wheel(wheel(tmp_path, metadata=metadata, extra=extra), "0.31.0.dev1")
+        prepare.validate_wheel(wheel(tmp_path, metadata=metadata, extra=extra), "0.31.0.dev1", "brigade-cli")
 
 
 def test_wheel_record_corruption_is_rejected(tmp_path):
@@ -120,14 +120,70 @@ def test_wheel_record_corruption_is_rejected(tmp_path):
         for name, data in files.items():
             archive.writestr(name, data)
     with pytest.raises(ValueError, match="RECORD"):
-        prepare.validate_wheel(payload, "0.31.0.dev1")
+        prepare.validate_wheel(payload, "0.31.0.dev1", "brigade-cli")
 
 
 def test_pure_wheel_extra_dependency_is_allowed(tmp_path):
     payload = wheel(tmp_path, metadata='Requires-Dist: pytest; extra == "dev"\n')
-    result = prepare.validate_wheel(payload, "0.31.0.dev1")
+    result = prepare.validate_wheel(payload, "0.31.0.dev1", "brigade-cli")
     assert result["sha256"] == hashlib.sha256(payload.read_bytes()).hexdigest()
     assert result["bytes"] == payload.stat().st_size
+    assert result["distribution"] == "brigade-cli"
+
+
+@pytest.mark.parametrize("distribution", ["brigadestack", "brigade-cli"])
+def test_wheel_validation_follows_the_named_distribution(tmp_path, distribution):
+    payload = wheel(tmp_path, distribution=distribution)
+    result = prepare.validate_wheel(payload, "0.31.0.dev1", distribution)
+    assert result["wheel"] == prepare.wheel_filename(distribution, "0.31.0.dev1")
+    assert result["distribution"] == distribution
+    other = "brigade-cli" if distribution == "brigadestack" else "brigadestack"
+    with pytest.raises(ValueError, match="expected exactly one"):
+        prepare.validate_wheel(payload, "0.31.0.dev1", other)
+
+
+def test_wheel_metadata_name_must_match_the_distribution(tmp_path):
+    payload = wheel(tmp_path, distribution="brigadestack")
+    with zipfile.ZipFile(payload) as archive:
+        files = {name: archive.read(name) for name in archive.namelist()}
+    metadata = "brigadestack-0.31.0.dev1.dist-info/METADATA"
+    files[metadata] = files[metadata].replace(b"Name: brigadestack", b"Name: brigade-cli")
+    stream = io.StringIO()
+    rows = [
+        [
+            name,
+            "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode(),
+            str(len(data)),
+        ]
+        for name, data in files.items()
+        if not name.endswith("/RECORD")
+    ]
+    record = "brigadestack-0.31.0.dev1.dist-info/RECORD"
+    csv.writer(stream).writerows([*rows, [record, "", ""]])
+    files[record] = stream.getvalue().encode()
+    with zipfile.ZipFile(payload, "w") as archive:
+        for name, data in files.items():
+            archive.writestr(name, data)
+    with pytest.raises(ValueError, match="metadata mismatch: Name"):
+        prepare.validate_wheel(payload, "0.31.0.dev1", "brigadestack")
+
+
+def test_unknown_payload_distribution_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="unsupported payload distribution"):
+        prepare.validate_wheel(wheel(tmp_path, distribution="other"), "0.31.0.dev1", "other")
+
+
+def test_runtime_pin_names_its_payload_distribution():
+    runtime = json.loads((Path(prepare.__file__).parent / "runtime.json").read_text())
+    assert runtime["payloadWheel"]["distribution"] in prepare.PAYLOAD_DISTRIBUTIONS
+    wheel_name = runtime["payloadWheel"]["distribution"].replace("-", "_")
+    assert runtime["payloadWheel"]["url"].endswith(f"/{wheel_name}-{runtime['payloadVersion']}-py3-none-any.whl")
+
+
+def test_launcher_package_is_brigadestack_and_never_the_compatibility_name():
+    package = json.loads((Path(prepare.__file__).parent / "package.json").read_text())
+    assert package["name"] == prepare.LAUNCHER_PACKAGE == "brigadestack"
+    assert package["bin"] == {"brigade": "launcher.cjs", "brigadestack": "launcher.cjs"}
 
 
 @pytest.mark.parametrize("untracked", [False, True])
@@ -265,6 +321,8 @@ def test_stable_payload_audit_binds_tag_inventory_and_only_release_manifest(tmp_
         "blank-versions-invalid-string",
         "blank-versions-invalid-semver",
         "malformed-integrity",
+        "reused-name-id",
+        "unaccepted-name",
     ],
 )
 def test_registry_publisher_reconciles_immutable_archives_before_launcher(tmp_path, state):
@@ -277,7 +335,7 @@ def test_registry_publisher_reconciles_immutable_archives_before_launcher(tmp_pa
         filename = f"package-{i}.tgz"
         (tmp_path / filename).write_bytes(data)
         artifact = {
-            "name": f"@escoffier-labs/brigade-uv-test-{i}" if i < 5 else "@escoffier-labs/brigade",
+            "name": f"@escoffier-labs/brigade-uv-test-{i}" if i < 5 else "brigadestack",
             "filename": filename,
             "bytes": len(data),
             "sha256": hashlib.sha256(data).hexdigest(),
@@ -379,6 +437,9 @@ else:
             "npm_execpath": str(cli),
             "NODE_OPTIONS": "--require=" + str(SOURCE.parent / "fixtures/publisher-provenance-preload.cjs"),
             "GITHUB_SHA": "" if state == "missing-sha" else "b" * 40 if state == "sha-mismatch" else "a" * 40,
+            # A reused repository name carries another ID, and only the two Brigade names are accepted.
+            "GITHUB_REPOSITORY": "someone-else/brigade" if state == "unaccepted-name" else "escoffier-labs/brigade",
+            "GITHUB_REPOSITORY_ID": "999" if state == "reused-name-id" else "1238165856",
         },
         capture_output=True,
         text=True,
@@ -448,6 +509,9 @@ else:
         assert packages[0]["name"] in result.stderr
     if state in {"sha-mismatch", "missing-sha"}:
         assert not calls, "source SHA must fail before any registry read"
+    if state in {"reused-name-id", "unaccepted-name"}:
+        assert not calls, "the repository identity must fail before any registry read"
+        assert "repository" in result.stderr.lower()
 
 
 @pytest.mark.parametrize(
@@ -477,7 +541,7 @@ def test_registry_acceptance_retries_only_missing_metadata(tmp_path, state, fiel
     import tarfile
 
     platform = subprocess.check_output(["node", "-p", "process.platform+'-'+process.arch"], text=True).strip()
-    packages = [f"@escoffier-labs/brigade-uv-test-{i}" for i in range(5)] + ["@escoffier-labs/brigade"]
+    packages = [f"@escoffier-labs/brigade-uv-test-{i}" for i in range(5)] + ["brigadestack"]
     payload = b"registry-only fixture; never installed"
     runtime = {
         "version": "0.31.0",
@@ -564,7 +628,7 @@ console.log(JSON.stringify(args[2]==='dist.integrity'?artifact.integrity:
         "--out",
         str(out),
         "--registry-spec",
-        "@escoffier-labs/brigade@0.31.0",
+        "brigadestack@0.31.0",
     ]
     if state.startswith("explicit"):
         argv += ["--expected-packaging-sha", ("c" if state == "explicit-mismatch" else "a") * 40]
@@ -645,6 +709,8 @@ console.log(JSON.stringify(args[2]==='dist.integrity'?artifact.integrity:
         ("reviewed-pin", "runtime differs from reviewed"),
         ("payload-wheel-sha", "stable payload pin identity"),
         ("payload-wheel-name", "stable payload pin identity"),
+        ("payload-distribution", "stable payload pin identity"),
+        ("compat-launcher-name", "six-archive inventory"),
         ("payload-manifest-sha", "stable payload pin identity"),
         ("extra-tgz", "six-archive inventory"),
         ("missing-tgz", "six-archive inventory"),
@@ -653,7 +719,10 @@ console.log(JSON.stringify(args[2]==='dist.integrity'?artifact.integrity:
         ("runtime-receipt", "runtime receipt mismatch"),
     ],
 )
-def test_artifact_verification_binds_six_original_archives_to_reviewed_source(tmp_path, monkeypatch, mutation, reason):
+@pytest.mark.parametrize("distribution", ["brigade-cli", "brigadestack"])
+def test_artifact_verification_binds_six_original_archives_to_reviewed_source(
+    tmp_path, monkeypatch, mutation, reason, distribution
+):
     import copy
     import json
     import tarfile
@@ -670,6 +739,7 @@ def test_artifact_verification_binds_six_original_archives_to_reviewed_source(tm
             for platform in platforms
         },
         "payloadWheel": {
+            "distribution": distribution,
             "sha256": hashlib.sha256(b"fixture release wheel").hexdigest(),
             "releaseTag": "v0.31.0",
             "sourceCommit": "a" * 40,
@@ -680,7 +750,8 @@ def test_artifact_verification_binds_six_original_archives_to_reviewed_source(tm
     source.mkdir()
     (source / "runtime.json").write_text(json.dumps(runtime))
     runtime["payload"] = {
-        "wheel": "brigade_cli-0.31.0-py3-none-any.whl",
+        "distribution": distribution,
+        "wheel": prepare.wheel_filename(distribution, "0.31.0"),
         "sha256": runtime["payloadWheel"]["sha256"],
         "componentManifestSha256": runtime["payloadWheel"]["componentManifest"]["sha256"],
         "sourceCommit": "a" * 40,
@@ -697,7 +768,7 @@ def test_artifact_verification_binds_six_original_archives_to_reviewed_source(tm
     monkeypatch.setattr(prepare, "source_snapshot", lambda _: (identity, []))
     artifacts = []
     for i, platform in enumerate((*platforms, None)):
-        name = runtime["platforms"][platform]["package"] if platform else "@escoffier-labs/brigade"
+        name = runtime["platforms"][platform]["package"] if platform else "brigadestack"
         filename = f"package-{i}.tgz"
         with tarfile.open(tmp_path / filename, "w:gz") as archive:
             content = json.dumps({"name": name, "version": "0.31.0"}).encode()
@@ -736,7 +807,12 @@ def test_artifact_verification_binds_six_original_archives_to_reviewed_source(tm
     elif mutation == "payload-wheel-sha":
         runtime["payload"]["sha256"] = "0" * 64
     elif mutation == "payload-wheel-name":
-        runtime["payload"]["wheel"] = "brigade_cli-0.29.1-py3-none-any.whl"
+        runtime["payload"]["wheel"] = prepare.wheel_filename(distribution, "0.29.1")
+    elif mutation == "payload-distribution":
+        runtime["payload"]["distribution"] = "brigadestack" if distribution == "brigade-cli" else "brigade-cli"
+        runtime["payload"]["wheel"] = prepare.wheel_filename(runtime["payload"]["distribution"], "0.31.0")
+    elif mutation == "compat-launcher-name":
+        artifacts[-1]["name"] = "@escoffier-labs/brigade"
     elif mutation == "payload-manifest-sha":
         runtime["payload"]["componentManifestSha256"] = "0" * 64
     elif mutation == "extra-tgz":
@@ -1028,7 +1104,7 @@ def candidate_wheel(directory, runtime, root, *, mutation=None):
         extra["brigade/current.py"] = b"CURRENT = False\n"
     elif mutation == "source-inventory":
         extra.pop("brigade/current.py")
-    return wheel(directory, version=runtime["payloadVersion"], extra=extra)
+    return wheel(directory, version=runtime["payloadVersion"], extra=extra, distribution="brigadestack")
 
 
 def write_candidate_archive(output, item, files):
@@ -1055,7 +1131,7 @@ def candidate_artifacts(tmp_path, candidate_source):
     runtime = prepare.candidate_runtime(reviewed, identity)
     payload = candidate_wheel(output, runtime, root)
     runtime["payload"] = {
-        **prepare.validate_wheel(payload, runtime["payloadVersion"]),
+        **prepare.validate_wheel(payload, runtime["payloadVersion"], "brigadestack"),
         **{k: identity[k] for k in ("sourceCommit", "sourceTree", "sourceIdentity")},
     }
     packages = []

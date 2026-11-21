@@ -23,7 +23,7 @@ function runtimeEnvironment(parent, runtime) {
   const pythonRoot=path.join(root,'python',`${runtime.pythonVersion}-${runtime.pythonBuild}`);
   Object.assign(env, {
     UV_CACHE_DIR:path.join(toolRoot,'uv-cache'), UV_TOOL_DIR:path.join(toolRoot,'tools'),
-    UV_TOOL_BIN_DIR:path.join(toolRoot,'tools','brigade-cli','.npm-bin'), UV_PYTHON_INSTALL_DIR:path.join(pythonRoot,'install'),
+    UV_TOOL_BIN_DIR:path.join(toolRoot,'tools',toolName(runtime),'.npm-bin'), UV_PYTHON_INSTALL_DIR:path.join(pythonRoot,'install'),
     UV_PYTHON_BIN_DIR:path.join(pythonRoot,'bin'), UV_PYTHON_CACHE_DIR:path.join(pythonRoot,'cache'),
     UV_MANAGED_PYTHON:'true', UV_PYTHON_CPYTHON_BUILD:runtime.pythonBuild,
     UV_NO_CONFIG:'true', UV_NO_ENV_FILE:'true', UV_PYTHON_INSTALL_BIN:'false',
@@ -38,7 +38,7 @@ function resolveRuntime(runtime) {
   const platform = runtime.platforms[key];
   process.report.excludeNetwork=true;
   if (!platform || (process.platform==='linux' && !process.report.getReport().header.glibcVersionRuntime)) {
-    throw new Error(`Unsupported platform ${key}. Use Python 3.11+ and pipx install brigade-cli instead.`);
+    throw new Error(`Unsupported platform ${key}. Use Python 3.11+ and pipx install brigadestack instead.`);
   }
   let manifestPath;
   try { manifestPath=require.resolve(`${platform.package}/manifest.json`); }
@@ -59,12 +59,35 @@ function resolveRuntime(runtime) {
   if (hash!==platform.binarySha256) throw new Error('Companion integrity SHA-256 mismatch. Reinstall the exact package version.');
   return binary;
 }
+// uv names a tool's directory after the installed distribution, so the directory
+// name follows the bundled wheel. Payload roots are keyed by that wheel's SHA-256,
+// so a wheel with a different name always lands in a fresh root and never reuses
+// (or deletes) the tools/brigade-cli directory of an older install. brigade-cli is
+// allowed only for the legacy payloads up to 0.31.0, so a later wheel can never be
+// installed into the legacy tool directory.
+const LEGACY_DISTRIBUTION='brigade-cli',LEGACY_LAST_VERSION=[0,31,0];
+function legacyVersion(version) {
+  const match=/^(\d+)\.(\d+)\.(\d+)/.exec(typeof version==='string'?version:'');
+  if(!match) return false;
+  const parts=match.slice(1).map(Number);
+  for(let i=0;i<3;i++) if(parts[i]!==LEGACY_LAST_VERSION[i]) return parts[i]<LEGACY_LAST_VERSION[i];
+  return true;
+}
+function allowedDistribution(runtime,distribution) {
+  return distribution==='brigadestack' || (distribution===LEGACY_DISTRIBUTION && legacyVersion(runtime.payloadVersion));
+}
+function toolName(runtime) {
+  const distribution=runtime.payload && runtime.payload.distribution;
+  if(!allowedDistribution(runtime,distribution)) throw new Error('Bundled wheel integrity manifest invalid. Reinstall the exact package version.');
+  return distribution;
+}
+function wheelName(distribution,version) {return `${distribution.replace(/-/g,'_')}-${version}-py3-none-any.whl`;}
 function payloadWheel(runtime) {
   const p=runtime.payload;
   if(!p || !/^[a-f0-9]{64}$/.test(p.sha256) || !Number.isSafeInteger(p.bytes) || p.bytes<=0 ||
-     p.distribution!=='brigade-cli' || p.version!==runtime.payloadVersion ||
-     typeof p.wheel!=='string' || !/^brigade_cli-\d+\.\d+\.\d+(?:\.dev\d+)?-py3-none-any\.whl$/.test(p.wheel) ||
-     p.wheel!==`brigade_cli-${runtime.payloadVersion}-py3-none-any.whl`) {
+     !allowedDistribution(runtime,p.distribution) || p.version!==runtime.payloadVersion ||
+     typeof p.wheel!=='string' || !/^[a-z0-9_]+-\d+\.\d+\.\d+(?:\.dev\d+)?-py3-none-any\.whl$/.test(p.wheel) ||
+     p.wheel!==wheelName(p.distribution,runtime.payloadVersion)) {
     throw new Error('Bundled wheel integrity manifest invalid. Reinstall the exact package version.');
   }
   const directory=path.join(__dirname,'wheel');
@@ -91,8 +114,8 @@ function markerPath(env) {return path.join(path.dirname(env.UV_TOOL_DIR),'initia
 function markerBase(runtime) {
   return {schema:1,wheelSha256:runtime.payload.sha256,pythonVersion:runtime.pythonVersion,pythonBuild:runtime.pythonBuild,uvVersion:runtime.uvVersion};
 }
-function validIdentity(identity,env) {
-  const venv=fs.realpathSync(path.join(env.UV_TOOL_DIR,'brigade-cli'));
+function validIdentity(identity,env,runtime) {
+  const venv=fs.realpathSync(path.join(env.UV_TOOL_DIR,toolName(runtime)));
   return identity && typeof identity.path==='string' && inside(venv,identity.path) &&
     path.basename(identity.path)==='_brigade_npm.pth' && identity.sha256===sha256(identityContent) &&
     fs.lstatSync(identity.path).isFile() && fs.realpathSync(identity.path)===identity.path &&
@@ -102,7 +125,7 @@ async function initialized(runtime,env,locate) {
   try {
     const marker=JSON.parse(fs.readFileSync(markerPath(env),'utf8'));
     if(!Object.entries(markerBase(runtime)).every(([k,v])=>marker[k]===v) ||
-       !fs.existsSync(toolPython(env)) || !validIdentity(marker.identity,env)) return false;
+       !fs.existsSync(toolPython(env,runtime)) || !validIdentity(marker.identity,env,runtime)) return false;
     const purelib=await locate();
     return marker.identity.path===path.join(purelib,'_brigade_npm.pth');
   } catch {return false;}
@@ -111,8 +134,8 @@ function toolArguments(runtime) {
   return ['--no-config','tool','install','--managed-python','--python',runtime.pythonVersion,
     '--no-index',payloadWheel(runtime)];
 }
-function toolPython(env) {
-  return path.join(env.UV_TOOL_DIR,'brigade-cli',process.platform==='win32'?'Scripts/python.exe':'bin/python');
+function toolPython(env,runtime) {
+  return path.join(env.UV_TOOL_DIR,toolName(runtime),process.platform==='win32'?'Scripts/python.exe':'bin/python');
 }
 async function main() {
   let child, phase, escalation, forwarding, cancelled=false,receivedSignal=null;
@@ -195,12 +218,12 @@ async function main() {
     }
     payloadWheel(runtime); // Validate payload even on warm launches, before uv.
     async function locatePurelib() {
-      const expectedVenv=validateOwnedPath(path.join(privateEnv.UV_TOOL_DIR,'brigade-cli'));
+      const expectedVenv=validateOwnedPath(path.join(privateEnv.UV_TOOL_DIR,toolName(runtime)));
       if(!fs.lstatSync(expectedVenv).isDirectory() || fs.realpathSync(expectedVenv)!==expectedVenv) throw new Error('Private tool environment must be an exact non-symlink directory.');
-      const located=await run(toolPython(privateEnv),['-I','-c',"import json,sys,sysconfig; print(json.dumps({'prefix':sys.prefix,'purelib':sysconfig.get_path('purelib')}))"],privateEnv,true,true);
+      const located=await run(toolPython(privateEnv,runtime),['-I','-c',"import json,sys,sysconfig; print(json.dumps({'prefix':sys.prefix,'purelib':sysconfig.get_path('purelib')}))"],privateEnv,true,true);
       if(located.code!==0 || located.signal || cancelled) throw new Error('Private interpreter identity provisioning failed. No initialized marker was written.');
       const location=JSON.parse(located.stdout);
-      const venv=fs.realpathSync(path.join(privateEnv.UV_TOOL_DIR,'brigade-cli'));
+      const venv=fs.realpathSync(path.join(privateEnv.UV_TOOL_DIR,toolName(runtime)));
       const purelib=fs.realpathSync(location.purelib);
       if(fs.realpathSync(location.prefix)!==venv || !inside(venv,purelib) || !fs.statSync(purelib).isDirectory()) {
         throw new Error('Private interpreter purelib is outside the exact tool environment. Identity provisioning refused.');
@@ -215,7 +238,7 @@ async function main() {
     if(!ready) {
       const marker=markerPath(privateEnv);
       fs.rmSync(marker,{force:true});
-      validateOwnedPath(path.join(privateEnv.UV_TOOL_DIR,'brigade-cli'));
+      validateOwnedPath(path.join(privateEnv.UV_TOOL_DIR,toolName(runtime)));
       const installed=await run(binary,toolArguments(runtime),privateEnv,true);
       if(installed.code!==0 || installed.signal || cancelled) {
         if(installed.code!==0 && !cancelled) console.error('Brigade npm provisioning failed. The bundled wheel needs managed Python. Check offline/download restrictions, proxy settings and BRIGADE_NPM_PYTHON_MIRROR. No package index is used.');
@@ -226,12 +249,12 @@ async function main() {
       const purelib=await locatePurelib();
       const identity={path:path.join(purelib,'_brigade_npm.pth'),sha256:sha256(identityContent)};
       atomicWrite(identity.path,identityContent);
-      if(!validIdentity(identity,privateEnv)) throw new Error('Private interpreter identity validation failed.');
+      if(!validIdentity(identity,privateEnv,runtime)) throw new Error('Private interpreter identity validation failed.');
       atomicWrite(marker,JSON.stringify({...markerBase(runtime),identity})+'\n');
     }
     validateManagedPythonPaths();
     const callerEnv={...process.env};
-    const result=await run(toolPython(privateEnv),['-I','-c',"import sys; sys.argv[0]='brigade'; import brigade.distribution as d; d._name='npm'; from brigade.cli import process_main; process_main()",...process.argv.slice(2)],callerEnv);
+    const result=await run(toolPython(privateEnv,runtime),['-I','-c',"import sys; sys.argv[0]='brigade'; import brigade.distribution as d; d._name='npm'; from brigade.cli import process_main; process_main()",...process.argv.slice(2)],callerEnv);
     clearTimeout(escalation);clearTimeout(forwarding);
     for(const [signal,handler] of Object.entries(handlers)) process.removeListener(signal,handler);
     finish(result);
@@ -247,5 +270,5 @@ async function main() {
     for(const [signal,handler] of Object.entries(handlers)) process.removeListener(signal,handler);
   }
 }
-module.exports={runtimeEnvironment,resolveRuntime,toolArguments,toolPython};
+module.exports={runtimeEnvironment,resolveRuntime,toolArguments,toolPython,toolName};
 if (require.main===module) main();

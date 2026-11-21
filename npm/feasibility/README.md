@@ -1,14 +1,27 @@
 # Brigade npm distribution
 
-The approved stable package set is `@escoffier-labs/brigade@0.31.0` and five exact-version uv companions. The launcher bundles the official published `brigade-cli==0.31.0` wheel, unchanged. Runtime installation uses that wheel without a PyPI fallback.
+The package set is `brigadestack` and five exact-version uv companions. The launcher bundles the official published Brigade wheel, unchanged: the `brigadestack` wheel from 0.32.0 on. The pin in `runtime.json` records which distribution it names (`payloadWheel.distribution`), and the 0.31.0 pin predates the rename and still names `brigade-cli`. Runtime installation uses that wheel without a PyPI fallback.
 
 ```sh
-npx --yes @escoffier-labs/brigade@0.31.0 --version
-npm install --global @escoffier-labs/brigade@0.31.0
+npx --yes brigadestack --version
+npm install --global brigadestack
 brigade --version
 ```
 
-The explicit package form also works: `npx --yes --package=@escoffier-labs/brigade@0.31.0 -- brigade --version`. Installing with `--omit=optional` prevents startup. Reinstall with optional dependencies enabled. Linux glibc x64/ARM64, macOS x64/ARM64 and Windows x64 are supported targets. Unsupported platforms should use the Python installation route. Global npm bins can overlap existing pipx or uv installations, so inspect command resolution after installation.
+The package installs both the `brigade` and `brigadestack` commands. The explicit package form also works: `npx --yes --package=brigadestack -- brigade --version`. Installing with `--omit=optional` prevents startup. Reinstall with optional dependencies enabled. Linux glibc x64/ARM64, macOS x64/ARM64 and Windows x64 are supported targets. Unsupported platforms should use the Python installation route. Global npm bins can overlap existing pipx or uv installations, so inspect command resolution after installation.
+
+Install only one of `brigadestack` and `@escoffier-labs/brigade` globally. Both link a `brigade` command, so npm stops with `EEXIST` on the second install. If `@escoffier-labs/brigade` is already installed, switch with:
+
+```sh
+npm uninstall --global @escoffier-labs/brigade
+npm install --global brigadestack
+```
+
+To go back, run `npm uninstall --global brigadestack`, then `npm install --global @escoffier-labs/brigade`.
+
+### The `@escoffier-labs/brigade` compatibility package
+
+`@escoffier-labs/brigade` was the real package through 0.31.0. From 0.32.0 it is a small compatibility package, built from [`distribution/escoffier-labs-brigade/npm`](../../distribution/escoffier-labs-brigade/npm/README.md), that depends on exactly `brigadestack@<same version>` and declares its own `brigade` command. npm links only the bins of the package you installed, so `npm update --global @escoffier-labs/brigade` keeps a working `brigade`. It publishes from `npm-publish.yml` after `brigadestack` is on the registry and has passed registry acceptance.
 
 ## Preparation and local evaluation
 
@@ -43,7 +56,7 @@ Before each publish, a registry 404 permits publication, equal integrity permits
 
 Runtime users need Node 22 or newer, as declared in the launcher's `engines` field, and npm. The pinned Node 24.22.0 and npm 11.19.1 toolchain applies only to preparation and publication. Git is not bundled. First use downloads pinned managed CPython 3.12.15, build 20261003, through uv's catalogue. Brigade itself is installed solely from the bundled absolute wheel path using `uv --no-config tool install --managed-python --python 3.12.15 --no-index`. There is no package-index fallback. A corrupt wheel or companion fails before execution.
 
-`BRIGADE_NPM_CACHE` selects the state root. The default is `~/.cache/brigade-npm`, including on Windows. `payloads/<full-wheel-sha256>/` holds that payload's tool environment, uv cache and initialization marker. uv command shims live inside their owning tool environment, so deleting it also removes stale shims before reinstall. `python/<version>-<build>/` shares only the exact managed Python identity between payloads. No automatic pruning occurs. Service units installed through npm pin that payload’s `sys.executable`. Reinstall those units after each npm upgrade and retain every payload cache still referenced by a unit. Stop all users of a state directory before deleting it manually.
+`BRIGADE_NPM_CACHE` selects the state root. The default is `~/.cache/brigade-npm`, including on Windows. `payloads/<full-wheel-sha256>/` holds that payload's tool environment, uv cache and initialization marker. uv names the tool environment after the installed distribution, so it is `tools/brigadestack` for the current wheel and `tools/brigade-cli` for the legacy 0.31.0 pin; the launcher derives the name from the validated `payload.distribution` and accepts only those two. Because the root is keyed by the wheel hash, a renamed wheel always starts in a fresh root. An upgrade from an old npm install never reads, rewrites, follows links in or deletes the old root, which stays usable for a rollback or a service unit that still points into it. uv command shims live inside their owning tool environment, so deleting it also removes stale shims before reinstall. `python/<version>-<build>/` shares only the exact managed Python identity between payloads. No automatic pruning occurs. Service units installed through npm pin that payload’s `sys.executable`. Reinstall those units after each npm upgrade and retain every payload cache still referenced by a unit. Stop all users of a state directory before deleting it manually.
 
 The atomic initialized marker binds the full wheel SHA, uv version, Python version/build and the private identity file's path, bytes and hash. Warm startup validates the payload, interpreter, actual sysconfig purelib and identity file, then skips uv. Missing or mismatched state reprovisions or fails. Provisioning errors cannot create a success marker. uv owns concurrent installation locking.
 
@@ -71,7 +84,7 @@ The user-selected cache root may have a symlinked ancestor or alias. On POSIX, t
 
 Run repository checks through Brigade's verification capture. `launcher.test.cjs` uses subprocess stand-ins for transport and lifecycle boundaries. `acceptance.cjs` installs the exact tarballs under a temporary HOME with a fresh npm cache and a PATH containing Node, Git and required OS utilities, with Python and uv absent. The approved disposable Docker route confines Linux process signals to its own PID namespace and removes the container on exit.
 
-Acceptance exercises the actual cold npx CLI before any prefix installation. Packed mode uses local offline inputs. `--registry-spec @escoffier-labs/brigade@0.31.0` uses a fresh online npm cache, HOME and empty npmrc against the public registry. Only the launcher is requested, so npm resolves its companion through optional dependencies. Registry mode compares both installed lockfile integrities, including the npx cache installation, to the original archive receipt and runs `npm audit signatures`. It retains direct and npm exec checks, argv/nonzero behavior, concurrency, initialization recovery, optional-companion omission, integrity rejection, offline restrictions and cached-Python reinstall. Installed `__init__.py` and `verify_runtime.py` must match the bundled wheel and RECORD. Private-interpreter respawns exercise update refusal and passive gates under seeded cache state and deterministic side-effect sentinels. Receipts include actual artifact hashes, source identity, runtime versions, timings and disk usage. Managed Python network transfer bytes are not metered.
+Acceptance exercises the actual cold npx CLI before any prefix installation. Packed mode uses local offline inputs. `--registry-spec brigadestack@<version>` uses a fresh online npm cache, HOME and empty npmrc against the public registry. Only the launcher is requested, so npm resolves its companion through optional dependencies. Registry mode compares both installed lockfile integrities, including the npx cache installation, to the original archive receipt and runs `npm audit signatures`. It retains direct and npm exec checks, argv/nonzero behavior, concurrency, initialization recovery, optional-companion omission, integrity rejection, offline restrictions and cached-Python reinstall. Installed `__init__.py` and `verify_runtime.py` must match the bundled wheel and RECORD. Private-interpreter respawns exercise update refusal and passive gates under seeded cache state and deterministic side-effect sentinels. Receipts include actual artifact hashes, source identity, runtime versions, timings and disk usage. Managed Python network transfer bytes are not metered.
 
 Catchable POSIX INT, TERM and HUP tests target both the launcher PID and process group while a real verification command owns a detached grandchild. Acceptance fails nonzero on surviving test descendants or missing/invalid canonical canceled receipts. Cleanup must finish before the launcher's 20-second forced termination. Repeated application cancellation forwards the original signal without resetting that deadline. Provisioning repeats can force termination.
 

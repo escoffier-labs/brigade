@@ -6,7 +6,7 @@ const os=require('node:os');
 const crypto=require('node:crypto');
 const assert=require('node:assert/strict');
 const {spawnSync}=require('node:child_process');
-const {resolveNpmCli,createVerifier}=require('./provenance.cjs');
+const {resolveNpmCli,createVerifier,publishingIdentity}=require('./provenance.cjs');
 const {readbackDelays}=require('./readback.cjs');
 const index=process.argv.indexOf('--artifacts');
 assert.ok(index>=0 && process.argv[index+1],'--artifacts required');
@@ -27,15 +27,17 @@ const npmCli=resolveNpmCli();
 const tufCache=fs.mkdtempSync(path.join(os.tmpdir(),'brigade-publish-tuf-'));
 const verifier=createVerifier(npmCli,tufCache);
 const version=metadata.runtime.version;
+// Fails before any registry read unless the run is in the Brigade repository (by immutable ID) on an accepted name.
+publishingIdentity(process.env,'brigadestack',metadata.runtime.version,verifier);
 assert.equal(version,'0.31.0');assert.equal(metadata.runtime.payloadVersion,version);
 const artifacts=metadata.artifacts;
 assert.equal(artifacts.length,6);assert.equal(new Set(artifacts.map(a=>a.name)).size,6);
 const companions=artifacts.filter(a=>a.platform),launchers=artifacts.filter(a=>!a.platform);
-assert.equal(companions.length,5);assert.equal(launchers.length,1);assert.equal(launchers[0].name,'@escoffier-labs/brigade');
+assert.equal(companions.length,5);assert.equal(launchers.length,1);assert.equal(launchers[0].name,'brigadestack');
 const filenames=new Set();
 const archiveDigests=new Map();
 for(const a of artifacts) {
-  assert.ok(a.name.startsWith('@escoffier-labs/brigade'));
+  assert.ok(a.name==='brigadestack' || a.name.startsWith('@escoffier-labs/brigade-uv-'));
   assert.ok(a.filename===path.basename(a.filename) && !/[\\/]/.test(a.filename) && a.filename.endsWith('.tgz'));
   assert.ok(!filenames.has(a.filename));filenames.add(a.filename);
   const file=path.join(root,a.filename);assert.ok(fs.lstatSync(file).isFile() && !fs.lstatSync(file).isSymbolicLink());
@@ -90,10 +92,7 @@ async function reconcile(a,field) {
       if(r.status===0 && r.json?.url) {
         try {
           if(await verifier.verifyRegistry(r.json.url,archiveDigests.get(a.name),{
-            purl:verifier.purl(a.name,version),sourceCommit:metadata.sourceCommit,
-            repository:'https://github.com/escoffier-labs/brigade',workflow:'.github/workflows/npm-publish.yml',ref:'refs/heads/main',
-            san:'https://github.com/escoffier-labs/brigade/.github/workflows/npm-publish.yml@refs/heads/main',
-            issuer:'https://token.actions.githubusercontent.com',builder:'https://github.com/actions/runner/github-hosted',
+            ...publishingIdentity(process.env,a.name,version,verifier),sourceCommit:metadata.sourceCommit,
           })) return;
         } catch(error) {throw new Error(`Invalid registry provenance: ${a.name}: ${error.message}`,{cause:error});}
       }

@@ -7,6 +7,7 @@ const assert=require('node:assert/strict');
 const zlib=require('node:zlib');
 const {spawn,spawnSync}=require('node:child_process');
 const {performance}=require('node:perf_hooks');
+const {REPOSITORY_ID}=require('./provenance.cjs');
 
 const args=process.argv.slice(2);
 function option(name) { const i=args.indexOf(name); if(i<0 || !args[i+1]) throw new Error(`Required: ${name}`); return path.resolve(args[i+1]); }
@@ -176,8 +177,8 @@ async function npxCall(name,argv) {
 }
 async function proveInstalledWheel(privateEnv) {
   const wheel=path.join(path.dirname(launcher),'wheel',runtime.payload.wheel);
-  const code=`import base64,csv,hashlib,importlib.metadata as m,io,json,zipfile\nfrom pathlib import Path\nwith zipfile.ZipFile(${JSON.stringify(wheel)}) as z:\n d=m.distribution('brigade-cli'); rows={r[0]:r for r in csv.reader(io.StringIO(z.read('brigade_cli-${runtime.payload.version}.dist-info/RECORD').decode()))}; result={}\n for name in ['brigade/__init__.py','brigade/work_cmd/verify_runtime.py']:\n  data=Path(d.locate_file(name)).read_bytes(); assert data==z.read(name); digest=base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode(); assert rows[name][1]=='sha256='+digest; result[name]=hashlib.sha256(data).hexdigest()\n print(json.dumps(result))`;
-  const r=await execute(contract.toolPython(privateEnv),['-I','-c',code]);record('installed-wheel-RECORD',r);assert.equal(r.exit,0,r.stderr);
+  const code=`import base64,csv,hashlib,importlib.metadata as m,io,json,zipfile\nfrom pathlib import Path\nwith zipfile.ZipFile(${JSON.stringify(wheel)}) as z:\n d=m.distribution(${JSON.stringify(runtime.payload.distribution)}); rows={r[0]:r for r in csv.reader(io.StringIO(z.read(${JSON.stringify(runtime.payload.distribution.replace(/-/g,'_')+'-'+runtime.payload.version+'.dist-info/RECORD')}).decode()))}; result={}\n for name in ['brigade/__init__.py','brigade/work_cmd/verify_runtime.py']:\n  data=Path(d.locate_file(name)).read_bytes(); assert data==z.read(name); digest=base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode(); assert rows[name][1]=='sha256='+digest; result[name]=hashlib.sha256(data).hexdigest()\n print(json.dumps(result))`;
+  const r=await execute(contract.toolPython(privateEnv,runtime),['-I','-c',code]);record('installed-wheel-RECORD',r);assert.equal(r.exit,0,r.stderr);
 }
 async function proveVersionRefresh(privatePython,identityEnv,scratch) {
   const sentinel=path.join(scratch,'forbidden.log');
@@ -243,7 +244,7 @@ print('npm refresh: one bounded mocked GET per refresh, cache updated, notice su
   }
 }
 async function proveIdentity(privateEnv,independent) {
-  const privatePython=contract.toolPython(privateEnv);
+  const privatePython=contract.toolPython(privateEnv,runtime);
   const scratch=path.join(root,'identity-home');fs.mkdirSync(scratch,{recursive:true});
   const identityEnv={...env,HOME:scratch,USERPROFILE:scratch,XDG_CACHE_HOME:path.join(scratch,'cache')};
   delete identityEnv.BRIGADE_NO_UPDATE_CHECK;delete identityEnv.BRIGADE_DISTRIBUTION;delete identityEnv.CI;
@@ -270,7 +271,7 @@ async function tamperIdentity(privateEnv) {
   for(const mutation of ['missing','corrupt','wrong-path']) {
     if(mutation==='missing') fs.rmSync(m.identity.path);
     if(mutation==='corrupt') fs.writeFileSync(m.identity.path,'# corrupt identity\n');
-    if(mutation==='wrong-path') {const changed=JSON.parse(fs.readFileSync(marker));const wrong=path.join(privateEnv.UV_TOOL_DIR,'brigade-cli','unused','_brigade_npm.pth');fs.mkdirSync(path.dirname(wrong),{recursive:true});fs.copyFileSync(changed.identity.path,wrong);fs.rmSync(changed.identity.path);changed.identity.path=wrong;fs.writeFileSync(marker,JSON.stringify(changed));}
+    if(mutation==='wrong-path') {const changed=JSON.parse(fs.readFileSync(marker));const wrong=path.join(privateEnv.UV_TOOL_DIR,contract.toolName(runtime),'unused','_brigade_npm.pth');fs.mkdirSync(path.dirname(wrong),{recursive:true});fs.copyFileSync(changed.identity.path,wrong);fs.rmSync(changed.identity.path);changed.identity.path=wrong;fs.writeFileSync(marker,JSON.stringify(changed));}
     const r=await call('identity-tamper-'+mutation,['--version']);versionOK(r);
     const repaired=JSON.parse(fs.readFileSync(marker));assert.equal(hash(fs.readFileSync(repaired.identity.path)),repaired.identity.sha256);assert.equal(repaired.identity.path,m.identity.path);
   }
@@ -286,7 +287,7 @@ function identityAlive(identity) {
 async function proveCanceledReceipt(target,run) {
   const privateEnv=contract.runtimeEnvironment(env,runtime);
   const code=`import json\nfrom pathlib import Path\nfrom brigade import localio\np=Path(${JSON.stringify(path.join(target,'.brigade/work/verify-runs'))})/${JSON.stringify('PLACEHOLDER')}\nr=json.loads((p/'receipt.json').read_text()); assert r['status']=='canceled',r; assert r['digests']['receipt_sha256']==localio.canonical_json_digest(r,exclude_keys={'digests'})\nfor log,digest in r['digests'].get('logs',{}).items(): assert __import__('hashlib').sha256((p/log).read_bytes()).hexdigest()==digest\nrecords=[json.loads(line) for line in (Path(${JSON.stringify(target)})/'memory/outcome/records.jsonl').read_text().splitlines()]; matches=[row for row in records if ${JSON.stringify(run)} in row.get('evidence_ref','')]; assert len(matches)==1,matches; assert matches[0]['signal_value']==0,matches\nprint(json.dumps({'run':r['run_id'],'status':r['status'],'digest':r['digests']['receipt_sha256'],'neutralCapture':True}))`.replace('PLACEHOLDER',run);
-  const r=await execute(contract.toolPython(privateEnv),['-I','-c',code]);record('canonical-canceled-receipt',r);assert.equal(r.exit,0,r.stderr);
+  const r=await execute(contract.toolPython(privateEnv,runtime),['-I','-c',code]);record('canonical-canceled-receipt',r);assert.equal(r.exit,0,r.stderr);
 }
 async function main() {
   const seen=new Set();
@@ -375,7 +376,7 @@ async function main() {
         try {
           if(await verifier.verifyRegistry(url,digest,{
             purl:verifier.purl(artifact.name,runtime.version),sourceCommit:metadata.sourceCommit,
-            repository:'https://github.com/escoffier-labs/brigade',workflow:'.github/workflows/npm-publish.yml',ref:'refs/heads/main',
+            repository:'https://github.com/escoffier-labs/brigade',repositoryId:REPOSITORY_ID,workflow:'.github/workflows/npm-publish.yml',ref:'refs/heads/main',
             san:'https://github.com/escoffier-labs/brigade/.github/workflows/npm-publish.yml@refs/heads/main',
             issuer:'https://token.actions.githubusercontent.com',builder:'https://github.com/actions/runner/github-hosted',
           })) {verified=true;break;}
@@ -422,8 +423,12 @@ async function main() {
   receipt.path=env.PATH;
   receipt.pathEntries=env.PATH.split(path.delimiter).flatMap(dir=>fs.readdirSync(dir)).filter(name=>/^(?:pythonw?(?:\d+(?:\.\d+)*[dmtu]*)?(?:_d)?|pyw?(?:_d)?|uv[wx]?)(?:\.(?:exe|com|cmd|bat|ps1))?$/i.test(name));
   assert.deepEqual(receipt.pathEntries,[],'PATH must exclude Python, py.exe and uv');
+  // Upgrade from an older npm install: its payload root belongs to a different wheel hash and must survive untouched.
+  const legacyTool=path.join(path.dirname(path.dirname(contract.runtimeEnvironment(env,runtime).UV_TOOL_DIR)),'f'.repeat(64),'tools','brigade-cli');
+  fs.mkdirSync(legacyTool,{recursive:true,mode:0o700});fs.writeFileSync(path.join(legacyTool,'sentinel'),'legacy');
   const cold=await call('cold-version',['--version']);versionOK(cold);
-  const toolReceipt=path.join(contract.runtimeEnvironment(env,runtime).UV_TOOL_DIR,'brigade-cli','uv-receipt.toml');
+  assert.deepEqual(fs.readdirSync(legacyTool),['sentinel'],'old-layout payload root must not be modified');assert.equal(fs.readFileSync(path.join(legacyTool,'sentinel'),'utf8'),'legacy');
+  const toolReceipt=path.join(contract.runtimeEnvironment(env,runtime).UV_TOOL_DIR,contract.toolName(runtime),'uv-receipt.toml');
   const installedMtime=fs.statSync(toolReceipt).mtimeMs;
   const warm=await call('warm-version',['--version']);versionOK(warm);assert.equal(cold.stdout,warm.stdout,'bootstrap stdout must be byte identical');assert.equal(fs.statSync(toolReceipt).mtimeMs,installedMtime);assert.equal(warm.stderr,'');
   assert.equal(fs.statSync(toolReceipt).mtimeMs,installedMtime,'warm startup must not rewrite installation receipt');assert.equal(warm.stderr,'','warm bootstrap should be quiet');
@@ -436,7 +441,7 @@ async function main() {
     aliasResults.push(result);versionOK(result);
     const selected=contract.runtimeEnvironment({...env,BRIGADE_NPM_CACHE:cache},runtime);
     const marker=path.join(path.dirname(selected.UV_TOOL_DIR),'initialized.json');
-    const installed=path.join(selected.UV_TOOL_DIR,'brigade-cli','uv-receipt.toml');
+    const installed=path.join(selected.UV_TOOL_DIR,contract.toolName(runtime),'uv-receipt.toml');
     if(!aliasMarkerBytes) {aliasMarker=fs.realpathSync(marker);aliasMarkerBytes=fs.readFileSync(marker);aliasInstallTime=fs.statSync(installed).mtimeMs;}
     else {assert.equal(fs.realpathSync(marker),aliasMarker);assert.deepEqual(fs.readFileSync(marker),aliasMarkerBytes);assert.equal(fs.statSync(installed).mtimeMs,aliasInstallTime);assert.equal(result.stderr,'');}
   }
@@ -456,8 +461,8 @@ async function main() {
   receipt.managedBuild=fs.readFileSync(path.join(privateEnv.UV_PYTHON_INSTALL_DIR,pythonDirs[0],'BUILD'),'utf8').trim();
   assert.equal(receipt.managedBuild,runtime.pythonBuild,'uv installed BUILD metadata must prove exact build');
   assert.match(receipt.managedPython.version,new RegExp('^'+runtime.pythonVersion.replaceAll('.','\\.')));
-  receipt.privateToolPython=contract.toolPython(privateEnv);
-  const tool=await execute(contract.toolPython(privateEnv),['-I','-c',probe],{env});record('tool-interpreter',tool);assert.equal(tool.exit,0,tool.stderr);
+  receipt.privateToolPython=contract.toolPython(privateEnv,runtime);
+  const tool=await execute(contract.toolPython(privateEnv,runtime),['-I','-c',probe],{env});record('tool-interpreter',tool);assert.equal(tool.exit,0,tool.stderr);
   receipt.toolPython=JSON.parse(tool.stdout);
   assert.ok(fs.realpathSync(receipt.toolPython.baseExecutable).startsWith(fs.realpathSync(path.join(privateEnv.UV_PYTHON_INSTALL_DIR,pythonDirs[0]))+path.sep));
   await proveInstalledWheel(privateEnv);

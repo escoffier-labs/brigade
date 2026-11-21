@@ -30,6 +30,19 @@ MAX_DOWNLOAD = 64 * 1024 * 1024
 MAX_EXPANDED = 160 * 1024 * 1024
 
 
+# The npm launcher package is brigadestack. @escoffier-labs/brigade is the compatibility
+# package built from distribution/escoffier-labs-brigade/npm, not from this directory.
+LAUNCHER_PACKAGE = "brigadestack"
+# The bundled wheel is brigadestack from 0.32.0. The 0.31.0 stable pin still names the
+# brigade-cli wheel that was on PyPI then. The pin states which one it is.
+PAYLOAD_DISTRIBUTIONS = ("brigadestack", "brigade-cli")
+CANDIDATE_DISTRIBUTION = "brigadestack"
+
+
+def wheel_filename(distribution: str, version: str) -> str:
+    return f"{distribution.replace('-', '_')}-{version}-py3-none-any.whl"
+
+
 def digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
@@ -159,12 +172,14 @@ def source_snapshot(allow_dirty: bool) -> tuple[dict, list[str]]:
     return identity, list(hashes)
 
 
-def validate_wheel(wheel: Path, version: str) -> dict:
+def validate_wheel(wheel: Path, version: str, distribution: str) -> dict:
     """Fail closed on unsafe archives, metadata, dependencies, and RECORD bytes."""
-    expected = f"brigade_cli-{version}-py3-none-any.whl"
+    if distribution not in PAYLOAD_DISTRIBUTIONS:
+        raise ValueError(f"unsupported payload distribution: {distribution}")
+    expected = wheel_filename(distribution, version)
     if wheel.name != expected or not wheel.is_file() or wheel.is_symlink():
-        raise ValueError("expected exactly one brigade-cli pure py3-none-any wheel")
-    dist = f"brigade_cli-{version}.dist-info"
+        raise ValueError(f"expected exactly one {distribution} pure py3-none-any wheel")
+    dist = f"{distribution.replace('-', '_')}-{version}.dist-info"
     try:
         with zipfile.ZipFile(wheel) as archive:
             files: dict[str, bytes] = {}
@@ -191,7 +206,7 @@ def validate_wheel(wheel: Path, version: str) -> dict:
                     raise ValueError(f"unsafe wheel entry: {name}")
                 files[name] = archive.read(entry)
             metadata = email.parser.BytesParser().parsebytes(files[f"{dist}/METADATA"])
-            for key, expected_value in (("Name", "brigade-cli"), ("Version", version)):
+            for key, expected_value in (("Name", distribution), ("Version", version)):
                 if metadata.get_all(key) != [expected_value]:
                     raise ValueError(f"wheel metadata mismatch: {key}")
             if metadata.get("License-Expression", metadata.get("License")) != "MIT":
@@ -231,7 +246,7 @@ def validate_wheel(wheel: Path, version: str) -> dict:
     return {
         "wheel": wheel.name,
         "version": version,
-        "distribution": "brigade-cli",
+        "distribution": distribution,
         "sha256": digest(wheel.read_bytes()),
         "bytes": wheel.stat().st_size,
     }
@@ -274,6 +289,7 @@ def build_payload(output: Path, runtime: dict, identity: dict, paths: list[str])
     if not pin:
         raise ValueError("verified published stable wheel pin required")
     version = runtime["payloadVersion"]
+    distribution = pin["distribution"]
     tag = f"v{version}"
     if pin["releaseTag"] != tag or not re.fullmatch(r"\d+\.\d+\.\d+", version):
         raise ValueError("stable release tag/version mismatch")
@@ -301,11 +317,11 @@ def build_payload(output: Path, runtime: dict, identity: dict, paths: list[str])
         dest = source / name
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_bytes(content)
-    wheel = build / f"brigade_cli-{version}-py3-none-any.whl"
+    wheel = build / wheel_filename(distribution, version)
     if not pin["url"].startswith("https://files.pythonhosted.org/") or not pin["url"].endswith("/" + wheel.name):
         raise ValueError("official published wheel URL required")
     download(pin["url"], wheel, pin["sha256"])
-    payload = validate_wheel(wheel, version)
+    payload = validate_wheel(wheel, version, distribution)
     component = pin["componentManifest"]
     manifest = build / "component-manifest-v1.json"
     # The repository is renamed to escoffier-labs/brigadestack after 0.32.0; a release is pinned under the
@@ -362,7 +378,7 @@ def build_payload(output: Path, runtime: dict, identity: dict, paths: list[str])
     references = list(wheel_dir.glob("*.whl"))
     if len(references) != 1:
         raise ValueError("tag reference must produce exactly one wheel")
-    validate_wheel(references[0], version)
+    validate_wheel(references[0], version, distribution)
     audit = audit_stable_payload(wheel, references[0], source, manifest, version, commit)
     payload.update(
         sourceCommit=commit,
@@ -464,7 +480,7 @@ def build_candidate_payload(output: Path, runtime: dict, identity: dict, paths: 
     if len(wheels) != 1:
         raise ValueError("candidate must produce exactly one wheel")
     wheel = wheels[0]
-    payload = validate_wheel(wheel, version)
+    payload = validate_wheel(wheel, version, CANDIDATE_DISTRIBUTION)
     audit_candidate_wheel(wheel, version, paths)
     payload.update(sourceCommit=identity["sourceCommit"], sourceTree="clean", sourceIdentity=identity["sourceIdentity"])
     runtime["payload"] = payload
@@ -533,17 +549,19 @@ def verify_artifacts(output: Path, *, candidate: bool = False) -> dict:
             raise ValueError("candidate payload source identity mismatch")
         if (
             payload.get("version") != runtime["payloadVersion"]
-            or payload.get("wheel") != f"brigade_cli-{runtime['payloadVersion']}-py3-none-any.whl"
+            or payload.get("distribution") != CANDIDATE_DISTRIBUTION
+            or payload.get("wheel") != wheel_filename(CANDIDATE_DISTRIBUTION, runtime["payloadVersion"])
         ):
             raise ValueError("candidate payload version mismatch")
     elif (
-        runtime["version"] != "0.31.0"
-        or runtime["payloadVersion"] != "0.31.0"
+        runtime["version"] != reviewed["version"]
+        or runtime["payloadVersion"] != reviewed["payloadVersion"]
         or payload["sourceCommit"] != pin["sourceCommit"]
         or payload["releaseTag"] != pin["releaseTag"]
         or payload["sha256"] != pin["sha256"]
         or payload["componentManifestSha256"] != pin["componentManifest"]["sha256"]
-        or payload["wheel"] != f"brigade_cli-{runtime['payloadVersion']}-py3-none-any.whl"
+        or payload["distribution"] != pin["distribution"]
+        or payload["wheel"] != wheel_filename(pin["distribution"], runtime["payloadVersion"])
     ):
         raise ValueError("stable payload pin identity mismatch")
     artifacts = metadata["artifacts"]
@@ -554,7 +572,7 @@ def verify_artifacts(output: Path, *, candidate: bool = False) -> dict:
         or len(names) != 6
         or {a["platform"] for a in artifacts if "platform" in a} != set(platforms)
         or sum("platform" not in a for a in artifacts) != 1
-        or {a["name"] for a in artifacts} != {"@escoffier-labs/brigade", *(p["package"] for p in platforms.values())}
+        or {a["name"] for a in artifacts} != {LAUNCHER_PACKAGE, *(p["package"] for p in platforms.values())}
         or {p.name for p in output.glob("*.tgz")} != set(names)
     ):
         raise ValueError("exact six-archive inventory required")
@@ -655,7 +673,7 @@ def verify_artifacts(output: Path, *, candidate: bool = False) -> dict:
         with tempfile.TemporaryDirectory() as scratch:
             wheel = Path(scratch) / payload["wheel"]
             wheel.write_bytes(data)
-            validate_wheel(wheel, runtime["payloadVersion"])
+            validate_wheel(wheel, runtime["payloadVersion"], payload["distribution"])
             audit_candidate_wheel(wheel, runtime["payloadVersion"], paths)
     return metadata
 

@@ -525,14 +525,17 @@ def test_npm_release_workflow_has_dispatch_source_oidc_and_native_gates():
     assert workflow["permissions"] == {"contents": "read"}
     assert workflow["concurrency"]["cancel-in-progress"] is False
     jobs = workflow["jobs"]
-    assert set(jobs) == {"build", "acceptance", "publish", "registry-acceptance", "release-gate"}
+    assert set(jobs) == {"build", "acceptance", "publish", "registry-acceptance", "publish-compat", "release-gate"}
     assert set(jobs["publish"]["needs"]) == {"build", "acceptance"}
     assert jobs["publish"]["environment"] == "npm"
     assert jobs["publish"]["permissions"] == {"contents": "read", "id-token": "write"}
     assert jobs["registry-acceptance"]["needs"] == "publish"
     assert set(jobs["release-gate"]["needs"]) == set(jobs) - {"release-gate"}
+    assert jobs["publish-compat"]["needs"] == ["build", "registry-acceptance"]
+    assert jobs["publish-compat"]["environment"] == "npm"
+    assert jobs["publish-compat"]["permissions"] == {"contents": "read", "id-token": "write"}
     for name, job in jobs.items():
-        if name != "publish":
+        if name not in {"publish", "publish-compat"}:
             assert "id-token" not in job.get("permissions", {})
             assert "environment" not in job
         for step in job["steps"]:
@@ -569,6 +572,10 @@ def test_npm_release_workflow_has_dispatch_source_oidc_and_native_gates():
     assert guard["env"]["RELEASE_TAG"] == "${{ inputs.release_tag }}"
     registry = "\n".join(s.get("run", "") for s in jobs["registry-acceptance"]["steps"])
     assert "--registry-spec" in registry
+    argv = next(
+        step["run"] for step in jobs["registry-acceptance"]["steps"] if "--registry-spec" in step.get("run", "")
+    )
+    assert '"--registry-spec","brigadestack@0.31.0"' in argv
 
 
 def revalidation_python(step_name):

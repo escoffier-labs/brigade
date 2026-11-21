@@ -16,7 +16,10 @@ from urllib.request import Request, urlopen
 # existing installs, pipx apps and scripts still pull, so both count as PyPI downloads.
 PYPI_PACKAGES = ("brigadestack", "brigade-cli")
 PYPI_URLS = {name: f"https://pypistats.org/api/packages/{name}/overall?mirrors=false" for name in PYPI_PACKAGES}
-NPM_URL = "https://api.npmjs.org/downloads/range/last-year/@escoffier-labs/brigade"
+# The same split on npm: brigadestack is the real package and @escoffier-labs/brigade is
+# the compatibility package that existing global installs keep updating.
+NPM_PACKAGES = ("brigadestack", "@escoffier-labs/brigade")
+NPM_URLS = {name: f"https://api.npmjs.org/downloads/range/last-year/{name}" for name in NPM_PACKAGES}
 MAX_BYTES = 2 * 1024 * 1024
 # Keep public JSON counts within JavaScript's exactly representable integer range.
 MAX_SAFE_INTEGER = 2**53 - 1
@@ -56,8 +59,7 @@ def parse_day(value):
     return day
 
 
-def daily_counts(payload, *, pypi, today, package=None):
-    package = package or ("brigadestack" if pypi else "@escoffier-labs/brigade")
+def daily_counts(payload, *, pypi, today, package):
     if not isinstance(payload, dict) or payload.get("package") != package:
         raise ValueError("unexpected source package")
     if pypi and payload.get("type") != "overall_downloads":
@@ -98,21 +100,26 @@ def aggregate(pypi, npm, *, now):
     if now.tzinfo is None:
         raise ValueError("updated time must include a timezone")
     now = now.astimezone(timezone.utc)
-    # ``pypi`` maps each PyPI package name to its pypistats payload.
+    # ``pypi`` and ``npm`` map each package name to its source payload.
     if not isinstance(pypi, dict) or set(pypi) != set(PYPI_PACKAGES):
         raise ValueError("unexpected PyPI package set")
+    if not isinstance(npm, dict) or set(npm) != set(NPM_PACKAGES):
+        raise ValueError("unexpected npm package set")
     pypi_series = {
         name: daily_counts(pypi[name], pypi=True, today=now.date(), package=name) for name in PYPI_PACKAGES
     }
-    npm_days = daily_counts(npm, pypi=False, today=now.date())
-    end = min([max(days) for days in pypi_series.values()] + [max(npm_days)])
+    npm_series = {
+        name: daily_counts(npm[name], pypi=False, today=now.date(), package=name) for name in NPM_PACKAGES
+    }
+    end = min(max(days) for days in (*pypi_series.values(), *npm_series.values()))
     start = end - timedelta(days=29)
     days = [start + timedelta(days=n) for n in range(30)]
-    if any(day not in series for series in (*pypi_series.values(), npm_days) for day in days):
+    if any(day not in series for series in (*pypi_series.values(), *npm_series.values()) for day in days):
         raise ValueError("missing day in the shared 30-day window")
     pypi_packages = {name: sum(series[day] for day in days) for name, series in pypi_series.items()}
     pypi_total = sum(pypi_packages.values())
-    npm_total = sum(npm_days[day] for day in days)
+    npm_packages = {name: sum(series[day] for day in days) for name, series in npm_series.items()}
+    npm_total = sum(npm_packages.values())
     total = pypi_total + npm_total
     # Nonnegative counts mean this bound also bounds each source subtotal.
     if total > MAX_SAFE_INTEGER:
@@ -130,7 +137,7 @@ def aggregate(pypi, npm, *, now):
                 "mirrors": False,
                 "packages": pypi_packages,
             },
-            "npm": {"package": "@escoffier-labs/brigade", "downloads": npm_total},
+            "npm": {"package": NPM_PACKAGES[0], "downloads": npm_total, "packages": npm_packages},
         },
         "period": {"start": start.isoformat(), "end": end.isoformat(), "days": 30, "timezone": "UTC"},
         "updatedAt": now.isoformat(timespec="seconds").replace("+00:00", "Z"),
@@ -144,7 +151,8 @@ def main(argv=None):
     temporary = None
     try:
         pypi = {name: fetch_json(url) for name, url in PYPI_URLS.items()}
-        badge = aggregate(pypi, fetch_json(NPM_URL), now=datetime.now(timezone.utc))
+        npm = {name: fetch_json(url) for name, url in NPM_URLS.items()}
+        badge = aggregate(pypi, npm, now=datetime.now(timezone.utc))
         # Replace only after both sources validate and the entire file is written.
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=args.output.parent, delete=False) as stream:
             temporary = Path(stream.name)

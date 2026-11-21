@@ -46,6 +46,7 @@
   },
   "payloadVersion": "0.31.0",
   "payloadWheel": {
+    "distribution": "brigade-cli",
     "url": "https://files.pythonhosted.org/packages/fe/bf/8fca307c2d56a1f61a6da56954998b9e5325e83d0ab6b98410e0edaeee6e/brigade_cli-0.31.0-py3-none-any.whl",
     "sha256": "9c0cadebfda624d3009e6a1381382f945c75acbe04297da37fd6a22c79e1daae",
     "releaseTag": "v0.31.0",

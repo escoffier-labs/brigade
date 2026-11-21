@@ -1,5 +1,5 @@
 {
-  "name": "@escoffier-labs/brigade",
+  "name": "brigadestack",
   "version": "0.31.0",
   "description": "Brigade CLI with a verified bundled Python wheel and managed runtime",
   "license": "MIT",
@@ -8,7 +8,8 @@
     "node": ">=22"
   },
   "bin": {
-    "brigade": "launcher.cjs"
+    "brigade": "launcher.cjs",
+    "brigadestack": "launcher.cjs"
   },
   "files": [
     "launcher.cjs",

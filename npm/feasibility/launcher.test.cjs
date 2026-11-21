@@ -9,7 +9,8 @@ const crypto = require('node:crypto');
 const { spawn, spawnSync } = require('node:child_process');
 const source = process.env.BRIGADE_NPM_TRANSPORT_SOURCE || path.join(__dirname, 'launcher.cjs');
 
-function fixture(t, mode = 'echo') {
+function fixture(t, mode = 'echo', distribution = 'brigadestack') {
+  const wheelFile = `${distribution.replace(/-/g, '_')}-0.29.0.dev1-py3-none-any.whl`;
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'brigade-transport-'));
   t.after(() => fs.rmSync(root, { recursive: true, force: true }));
   const pkg = path.join(root, 'launcher');
@@ -48,7 +49,7 @@ if(process.argv[4]?.includes('sysconfig.get_path')) {
 `;
   const installer=`#!${process.execPath}\nconst fs=require('node:fs'); const path=require('node:path');
 if(process.argv.includes('run') || ${JSON.stringify(mode)}==='bootstrap-wait') {eval(${JSON.stringify(script.replace(/^#![^\n]*\n/,''))});} else {
-const bin=path.join(process.env.UV_TOOL_DIR,'brigade-cli','bin'); fs.mkdirSync(bin,{recursive:true});
+const bin=path.join(process.env.UV_TOOL_DIR,${JSON.stringify(distribution)},'bin'); fs.mkdirSync(bin,{recursive:true});
 if(process.env.TRANSPORT_REDIRECT_PYTHON) {const selected=process.env[process.env.TRANSPORT_REDIRECT_PYTHON];fs.mkdirSync(path.dirname(selected),{recursive:true});fs.symlinkSync(process.env.TRANSPORT_OUTSIDE,selected,'dir');}
 fs.writeFileSync(path.join(bin,'python'),${JSON.stringify(script)},{mode:0o755});
 fs.appendFileSync(path.join(process.env.BRIGADE_NPM_CACHE,'install-count'),'1');
@@ -61,8 +62,8 @@ console.error('provisioning stderr');
   const sha = crypto.createHash('sha256').update(installer).digest('hex');
   fs.writeFileSync(path.join(companion, 'manifest.json'), JSON.stringify({version:'0.29.0-dev.1',uvVersion:'0.12.23',executable:'uv',sha256:sha}));
   fs.mkdirSync(path.join(pkg,'wheel'));
-  const wheel=Buffer.from('transport payload');fs.writeFileSync(path.join(pkg,'wheel','brigade_cli-0.29.0.dev1-py3-none-any.whl'),wheel);
-  const payload={wheel:'brigade_cli-0.29.0.dev1-py3-none-any.whl',version:'0.29.0.dev1',distribution:'brigade-cli',sha256:crypto.createHash('sha256').update(wheel).digest('hex'),bytes:wheel.length,sourceCommit:'a'.repeat(40),sourceTree:'dirty'};
+  const wheel=Buffer.from('transport payload');fs.writeFileSync(path.join(pkg,'wheel',wheelFile),wheel);
+  const payload={wheel:wheelFile,version:'0.29.0.dev1',distribution,sha256:crypto.createHash('sha256').update(wheel).digest('hex'),bytes:wheel.length,sourceCommit:'a'.repeat(40),sourceTree:'dirty'};
   fs.writeFileSync(path.join(pkg, 'runtime.json'), JSON.stringify({payload,payloadVersion:'0.29.0.dev1',version:'0.29.0-dev.1',uvVersion:'0.12.23',pythonVersion:'3.12.12',pythonBuild:'20260101',platforms:{[`${process.platform}-${process.arch}`]:{package:'@example/uv',executable:'uv',binarySha256:sha}}}));
   return {root,pkg,companion, launcher:path.join(pkg,'launcher.cjs')};
 }
@@ -86,7 +87,7 @@ test('argv cwd stdin stdout stderr and nonzero status survive transport', posix,
   assert.deepEqual(observed.args.slice(-args.length),args);
   assert.deepEqual(observed.args.slice(0,2),['-I','-c']);assert.match(observed.args[2],/sys.argv\[0\]='brigade'/);
   const bootstrap=JSON.parse(fs.readFileSync(path.join(f.root,'state','bootstrap.json')));
-  assert.ok(bootstrap.args.includes('--managed-python')); assert.ok(bootstrap.args.includes('--no-index')); assert.equal(bootstrap.args.at(-1),path.join(f.pkg,'wheel','brigade_cli-0.29.0.dev1-py3-none-any.whl'));
+  assert.ok(bootstrap.args.includes('--managed-python')); assert.ok(bootstrap.args.includes('--no-index')); assert.equal(bootstrap.args.at(-1),path.join(f.pkg,'wheel','brigadestack-0.29.0.dev1-py3-none-any.whl'));
 });
 test('inherited uv/project/Python configuration cannot redirect private runtime', posix, t => {
   const f=fixture(t);
@@ -300,7 +301,7 @@ test('a second bootstrap cancellation signal forces termination before cleanup f
 
 // Owner regressions use the launched executable boundary, never production test hooks.
 test('corrupt bundled wheel is rejected before uv executes', posix, t => {
- const f=fixture(t);fs.appendFileSync(path.join(f.pkg,'wheel','brigade_cli-0.29.0.dev1-py3-none-any.whl'),'corrupt');
+ const f=fixture(t);fs.appendFileSync(path.join(f.pkg,'wheel','brigadestack-0.29.0.dev1-py3-none-any.whl'),'corrupt');
  const r=run(f);assert.equal(r.status,1);assert.match(r.stderr,/wheel.*(integrity|SHA|size)/i);
  assert.ok(!fs.existsSync(path.join(f.root,'state','bootstrap.json')));
 });
@@ -313,7 +314,7 @@ test('warm marker skips uv and mismatched marker or missing interpreter recovers
  const marker=path.join(path.dirname(e.UV_TOOL_DIR),'initialized.json');
  const m=JSON.parse(fs.readFileSync(marker));m.wheelSha256='0'.repeat(64);fs.writeFileSync(marker,JSON.stringify(m));
  assert.equal(run(f).status,0);assert.equal(count(),2);
- fs.rmSync(require(f.launcher).toolPython(e));assert.equal(run(f).status,0);assert.equal(count(),3);
+ fs.rmSync(require(f.launcher).toolPython(e,runtime));assert.equal(run(f).status,0);assert.equal(count(),3);
 });
 test('private identity file missing corrupt or misdirected is repaired or rejected', posix, t => {
  const f=fixture(t);assert.equal(run(f).status,0);
@@ -342,7 +343,7 @@ test('warm marker cannot redirect identity to an unused directory inside the ven
  const runtime=JSON.parse(fs.readFileSync(path.join(f.pkg,'runtime.json')));
  const e=require(f.launcher).runtimeEnvironment({BRIGADE_NPM_CACHE:path.join(f.root,'state')},runtime);
  const marker=path.join(path.dirname(e.UV_TOOL_DIR),'initialized.json');const m=JSON.parse(fs.readFileSync(marker));
- const actual=m.identity.path;const wrong=path.join(e.UV_TOOL_DIR,'brigade-cli','unused','_brigade_npm.pth');
+ const actual=m.identity.path;const wrong=path.join(e.UV_TOOL_DIR,'brigadestack','unused','_brigade_npm.pth');
  fs.mkdirSync(path.dirname(wrong));fs.copyFileSync(actual,wrong);fs.rmSync(actual);m.identity.path=wrong;fs.writeFileSync(marker,JSON.stringify(m));
  const r=run(f);assert.ok(r.status===0||r.status===1);
  if(r.status===0) {assert.equal(JSON.parse(fs.readFileSync(marker)).identity.path,actual);assert.ok(fs.existsSync(actual));}
@@ -372,7 +373,7 @@ test('trusted cache aliases reuse cold and warm state while owned symlinks are r
  }
  const stable=fs.readFileSync(marker);
  assert.equal(run(f,[],{BRIGADE_NPM_CACHE:aliased}).status,0);assert.deepEqual(fs.readFileSync(marker),stable);
- for(const owned of [path.join(e.UV_TOOL_DIR,'brigade-cli'),e.UV_TOOL_DIR]) {
+ for(const owned of [path.join(e.UV_TOOL_DIR,'brigadestack'),e.UV_TOOL_DIR]) {
   const saved=owned+'-saved';fs.renameSync(owned,saved);
   const outside=fs.mkdtempSync(path.join(f.root,'untrusted-'));fs.writeFileSync(path.join(outside,'sentinel'),'untouched');
   fs.symlinkSync(outside,owned,'dir');
@@ -437,11 +438,153 @@ for(const key of ['UV_PYTHON_INSTALL_DIR','UV_PYTHON_BIN_DIR','UV_PYTHON_CACHE_D
 for (const variant of ['valid','filename-mismatch','missing-version']) test(`stable wheel exact runtime filename (${variant})`,posix,t=>{
   const f=fixture(t);const file=path.join(f.pkg,'runtime.json');const r=JSON.parse(fs.readFileSync(file));
   r.payloadVersion=r.payload.version='0.29.0';
-  const old=path.join(f.pkg,'wheel',r.payload.wheel);r.payload.wheel='brigade_cli-0.29.0-py3-none-any.whl';
+  const old=path.join(f.pkg,'wheel',r.payload.wheel);r.payload.wheel='brigadestack-0.29.0-py3-none-any.whl';
   fs.renameSync(old,path.join(f.pkg,'wheel',r.payload.wheel));
-  if(variant==='filename-mismatch') r.payload.wheel='brigade_cli-0.29.1-py3-none-any.whl';
+  if(variant==='filename-mismatch') r.payload.wheel='brigadestack-0.29.1-py3-none-any.whl';
   if(variant==='missing-version') delete r.payloadVersion;
   fs.writeFileSync(file,JSON.stringify(r));const result=run(f,['--version']);
   assert.equal(result.status,variant==='valid'?0:1,result.stderr);
   if(variant!=='valid') assert.match(result.stderr,/manifest invalid/);
 });
+
+// brigadestack is the payload wheel name now, so uv's tool directory is
+// tools/brigadestack. Payload roots are keyed by the wheel SHA-256, so a renamed
+// wheel always starts in a fresh root: these tests pin that nothing in an old
+// tools/brigade-cli layout is read, followed, rewritten or deleted.
+function payloadRoot(f,state=path.join(f.root,'state')) {
+  const runtime=JSON.parse(fs.readFileSync(path.join(f.pkg,'runtime.json')));
+  const e=require(f.launcher).runtimeEnvironment({BRIGADE_NPM_CACHE:state},runtime);
+  return {runtime,env:e,root:path.dirname(e.UV_TOOL_DIR),marker:path.join(path.dirname(e.UV_TOOL_DIR),'initialized.json')};
+}
+// Records every entry under a directory without following links.
+function snapshot(directory) {
+  const entries={};
+  (function walk(current) {
+    for(const name of fs.readdirSync(current).sort()) {
+      const full=path.join(current,name),entry=fs.lstatSync(full),key=path.relative(directory,full);
+      if(entry.isSymbolicLink()) entries[key]='link:'+fs.readlinkSync(full);
+      else if(entry.isDirectory()) {entries[key]='dir';walk(full);}
+      else entries[key]='file:'+fs.readFileSync(full,'utf8');
+    }
+  })(directory);
+  return entries;
+}
+// An install left by a launcher that bundled the old brigade-cli wheel: a different payload root.
+function seedLegacyLayout(f,state=path.join(f.root,'state')) {
+  const legacy=path.join(state,'payloads','f'.repeat(64));
+  const tool=path.join(legacy,'tools','brigade-cli');
+  fs.mkdirSync(path.join(tool,'bin'),{recursive:true,mode:0o700});
+  fs.mkdirSync(path.join(tool,'.npm-bin'),{recursive:true});
+  fs.writeFileSync(path.join(tool,'bin','python'),'legacy interpreter');
+  fs.writeFileSync(path.join(tool,'uv-receipt.toml'),'legacy receipt');
+  fs.writeFileSync(path.join(legacy,'initialized.json'),JSON.stringify({schema:1,wheelSha256:'f'.repeat(64)}));
+  const outside=fs.mkdtempSync(path.join(f.root,'legacy-outside-'));
+  fs.writeFileSync(path.join(outside,'sentinel'),'untouched');
+  // A link inside the old tree must never be followed, whether or not it is dangling.
+  fs.symlinkSync(outside,path.join(tool,'escape'),'dir');
+  fs.symlinkSync(path.join(f.root,'missing-target'),path.join(tool,'dangling'));
+  return {legacy,tool,outside};
+}
+
+test('fresh install provisions only the brigadestack tool directory', posix, t => {
+  const f=fixture(t);const r=run(f,['--version']);assert.equal(r.status,0,r.stderr);
+  const p=payloadRoot(f);
+  assert.deepEqual(fs.readdirSync(path.join(p.root,'tools')).sort(),['brigadestack']);
+  assert.ok(fs.existsSync(p.marker));
+  assert.equal(p.env.UV_TOOL_BIN_DIR,path.join(p.env.UV_TOOL_DIR,'brigadestack','.npm-bin'));
+  assert.equal(fs.readFileSync(path.join(f.root,'state','install-count'),'utf8'),'1');
+});
+
+test('upgrade from an old-layout install leaves the old payload root untouched', posix, t => {
+  const f=fixture(t);const seeded=seedLegacyLayout(f);
+  const before=snapshot(seeded.legacy),outsideBefore=snapshot(seeded.outside);
+  const r=run(f,['--version']);assert.equal(r.status,0,r.stderr);
+  const p=payloadRoot(f);
+  assert.notEqual(p.root,seeded.legacy,'a renamed wheel must start in its own payload root');
+  assert.deepEqual(fs.readdirSync(path.join(p.root,'tools')),['brigadestack']);
+  assert.deepEqual(snapshot(seeded.legacy),before,'old layout must not be read, rewritten or deleted');
+  assert.deepEqual(snapshot(seeded.outside),outsideBefore,'links inside the old layout must not be followed');
+  assert.equal(fs.readFileSync(path.join(f.root,'state','install-count'),'utf8'),'1');
+  // The next launch is warm: neither tool directory is reprovisioned.
+  assert.equal(run(f,['--version']).status,0);
+  assert.equal(fs.readFileSync(path.join(f.root,'state','install-count'),'utf8'),'1');
+  assert.deepEqual(snapshot(seeded.legacy),before);
+});
+
+test('a payload root holding both layouts only uses and validates the brigadestack tool directory', posix, t => {
+  const f=fixture(t);const p=payloadRoot(f);
+  // Hand-made state: a leftover brigade-cli tool dir (a symlink out of the cache) beside the real root.
+  const outside=fs.mkdtempSync(path.join(f.root,'legacy-outside-'));fs.writeFileSync(path.join(outside,'sentinel'),'untouched');
+  fs.mkdirSync(path.join(p.root,'tools'),{recursive:true,mode:0o700});
+  fs.symlinkSync(outside,path.join(p.root,'tools','brigade-cli'),'dir');
+  const r=run(f,['--version']);assert.equal(r.status,0,r.stderr);
+  assert.deepEqual(snapshot(outside),{sentinel:'file:untouched'});
+  assert.ok(fs.lstatSync(path.join(p.root,'tools','brigade-cli')).isSymbolicLink(),'foreign entry is not ours to remove');
+  assert.ok(fs.existsSync(p.marker));
+});
+
+test('interrupted first launch after an old-layout install leaves no marker and the next launch recovers', posix, async t => {
+  const f=fixture(t);const seeded=seedLegacyLayout(f);const before=snapshot(seeded.legacy);
+  const state=path.join(f.root,'state');const p=payloadRoot(f);
+  // A uv that dies half way through: it creates the tool directory and hangs.
+  const binary=path.join(f.companion,'uv');const ready=path.join(f.root,'half-installed');
+  const working=fs.readFileSync(binary,'utf8');
+  const hang=`#!${process.execPath}\nconst fs=require('node:fs'),path=require('node:path');fs.mkdirSync(path.join(process.env.UV_TOOL_DIR,'brigadestack','bin'),{recursive:true});fs.writeFileSync(${JSON.stringify(ready)},'ready');setInterval(()=>{},1000);`;
+  const swap=script=>{
+    fs.writeFileSync(binary,script,{mode:0o755});
+    const hash=crypto.createHash('sha256').update(script).digest('hex');
+    const manifest=JSON.parse(fs.readFileSync(path.join(f.companion,'manifest.json')));manifest.sha256=hash;fs.writeFileSync(path.join(f.companion,'manifest.json'),JSON.stringify(manifest));
+    const runtime=JSON.parse(fs.readFileSync(path.join(f.pkg,'runtime.json')));runtime.platforms[`${process.platform}-${process.arch}`].binarySha256=hash;fs.writeFileSync(path.join(f.pkg,'runtime.json'),JSON.stringify(runtime));
+  };
+  swap(hang);
+  const child=spawn(process.execPath,[f.launcher],{detached:true,env:{...process.env,BRIGADE_NPM_CACHE:state},stdio:['ignore','pipe','pipe']});
+  t.after(()=>{try{process.kill(-child.pid,'SIGKILL');}catch{}});
+  const end=new Promise(resolve=>child.once('exit',(code,signal)=>resolve({code,signal})));
+  await waitForFile(ready);
+  // A crash, not a handled cancellation: nothing gets to clean up.
+  process.kill(-child.pid,'SIGKILL');await end;
+  assert.ok(fs.existsSync(path.join(p.root,'tools','brigadestack','bin')),'interrupted install left a partial tool directory');
+  assert.ok(!fs.existsSync(p.marker),'no initialized marker may exist after an interrupted install');
+  assert.deepEqual(snapshot(seeded.legacy),before);
+  // The next launch re-provisions and ends up fully initialized.
+  swap(working);
+  const retry=run(f,['--version']);assert.equal(retry.status,0,retry.stderr);
+  assert.ok(fs.existsSync(p.marker));
+  assert.equal(fs.readFileSync(path.join(state,'install-count'),'utf8'),'1');
+  assert.deepEqual(snapshot(seeded.legacy),before);
+  assert.deepEqual(snapshot(seeded.outside),{sentinel:'file:untouched'});
+  assert.equal(run(f,['--version']).status,0);
+  assert.equal(fs.readFileSync(path.join(state,'install-count'),'utf8'),'1','recovered install is warm');
+});
+
+test('legacy brigade-cli payload pin still launches from its own tool directory', posix, t => {
+  const f=fixture(t,'echo','brigade-cli');
+  const r=run(f,['--version']);assert.equal(r.status,0,r.stderr);
+  const p=payloadRoot(f);
+  assert.deepEqual(fs.readdirSync(path.join(p.root,'tools')),['brigade-cli']);
+  assert.equal(p.env.UV_TOOL_BIN_DIR,path.join(p.env.UV_TOOL_DIR,'brigade-cli','.npm-bin'));
+});
+
+test('an unknown payload distribution is refused before uv executes', posix, t => {
+  const f=fixture(t);const file=path.join(f.pkg,'runtime.json');const r=JSON.parse(fs.readFileSync(file));
+  r.payload.distribution='../../escape';fs.writeFileSync(file,JSON.stringify(r));
+  const result=run(f,['--version']);assert.equal(result.status,1);assert.match(result.stderr,/manifest invalid/);
+  assert.ok(!fs.existsSync(path.join(f.root,'state','bootstrap.json')));
+  assert.ok(!fs.existsSync(path.join(f.root,'state','install-count')));
+});
+
+for (const [version,allowed] of [['0.31.0',true],['0.30.2',true],['0.31.1',false],['0.32.0',false],['0.32.0.dev20261121',false],['1.0.0',false]]) {
+  test(`legacy brigade-cli payload ${version} is ${allowed?'accepted':'refused'}`, posix, t => {
+    const f=fixture(t,'echo','brigade-cli');const file=path.join(f.pkg,'runtime.json');const r=JSON.parse(fs.readFileSync(file));
+    const old=path.join(f.pkg,'wheel',r.payload.wheel);
+    r.payloadVersion=r.payload.version=version;r.payload.wheel=`brigade_cli-${version}-py3-none-any.whl`;
+    fs.renameSync(old,path.join(f.pkg,'wheel',r.payload.wheel));fs.writeFileSync(file,JSON.stringify(r));
+    const result=run(f,['--version']);
+    assert.equal(result.status,allowed?0:1,result.stderr);
+    if(!allowed) {
+      assert.match(result.stderr,/manifest invalid/);
+      assert.ok(!fs.existsSync(path.join(f.root,'state','install-count')),'uv must not run');
+      assert.ok(!fs.existsSync(path.join(f.root,'state','payloads')),'no payload root may be created');
+    }
+  });
+}

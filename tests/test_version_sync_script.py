@@ -101,4 +101,6 @@ def test_shipped_version_sync_covers_the_compat_package():
     spec.loader.exec_module(module)
     paths = {path for path, _pattern in module._locations()}
     assert "distribution/brigade-cli/pypi/pyproject.toml" in paths
+    # The npm compatibility package follows npm/feasibility/runtime.json, not pyproject.toml.
+    assert not any(path.startswith("distribution/escoffier-labs-brigade/") for path in paths)
     assert module.check(module._expected()) == 0
