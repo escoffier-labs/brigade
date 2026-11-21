@@ -384,7 +384,8 @@ def test_orca_1_4_269_budget_and_abandoned_capacity(coordinator):
         "schema_version": 1,
         "ceilings": {"wall_clock_seconds": None, "worker_dispatch_count": 1},
     }
-    path.write_text(json.dumps(meta, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # Bytes, not text mode: Windows text mode writes CRLF and the checkpoint refuses it as writer-bytes.
+    path.write_bytes((json.dumps(meta, indent=2, sort_keys=True) + "\n").encode("utf-8"))
     coordinator.start()
     coordinator.claim("two", SECOND_TASK, error="budget-exhausted")
     assert coordinator.invoke("hold-resolve", run_id, "one", "--abandon")["mode"] == "abandoned-unknown"
