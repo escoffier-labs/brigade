@@ -138,15 +138,14 @@ def parse_start(binding: LaunchBinding, target: NativeTarget, payload: object, *
     require_supported_target(target)
     reply = result_fields(payload, ok=False)
     error = payload.get("error") if isinstance(payload, Mapping) else None
-    details = error.get("data") if isinstance(error, Mapping) else None
-    failure_count = details.get("failureCount") if isinstance(details, Mapping) else None
-    if reply.get("state") == "circuit_broken" or (
-        isinstance(error, Mapping)
+    if (
+        exit_code != 0
+        and isinstance(payload, Mapping)
+        and payload.get("ok") is False
+        and isinstance(error, Mapping)
         and error.get("code") == "task_not_startable"
-        and type(failure_count) is int
-        and failure_count >= 3
     ):
-        raise NativeChildError("circuit-broken", "Orca refused the dispatch at its circuit breaker")
+        raise NativeChildError("start-refused", "Orca refused to start the retained Task")
     if reply.get("state") == "failed":
         raise NativeChildError("start-failed", "Orca reported a failed worker start")
     if exit_code != 0 or reply.get("state") != "ready" or not result_fields(payload):

@@ -12,7 +12,7 @@ from uuid import UUID
 
 import pytest
 
-from brigade import native_child_admission, native_child_capacity, native_child_claim, roster, run_journal
+from brigade import agents, native_child_admission, native_child_capacity, native_child_claim, roster, run_journal
 from brigade.native_child_host import NativeChildError
 from brigade.native_orca_host import HOST, target_for_seat
 from brigade.native_orca_dispatch import LaunchBinding, launch_argv, parse_start, request_key
@@ -159,7 +159,6 @@ def test_start_replay_correlates_the_same_attempt():
     [
         ("outcome_unknown", 0, "start-unknown"),
         ("failed", 1, "start-failed"),
-        ("circuit_broken", 1, "circuit-broken"),
         ("ready", 1, "start-unknown"),
     ],
 )
@@ -181,11 +180,12 @@ def test_start_cannot_bind_unrelated_receipt(mismatch):
         parse_start(_binding(), _target(), payload, exit_code=0)
 
 
-def test_circuit_breaker_rpc_refusal_has_no_recovery_argv():
-    payload = _fixture("circuit-broken")
+def test_task_not_startable_is_a_definite_refusal():
+    payload = _fixture("task-not-startable")
     with pytest.raises(NativeChildError) as exc:
         parse_start(_binding(), _target(), payload, exit_code=1)
-    assert exc.value.code == "circuit-broken"
+    assert exc.value.code == "start-refused"
+    assert "Synthetic" not in str(exc.value)
 
 
 def test_missing_receipt_does_not_correlate():
@@ -236,25 +236,15 @@ def test_dispatch_states_without_a_result(state):
     )
 
 
-def _settled():
-    show = _fixture("worker-show")
-    show["result"]["dispatch"]["status"] = "completed"
-    show["result"]["worker"]["state"] = "succeeded"
-    show["result"]["observation"]["status"] = "exited"
-    show["result"]["projection"]["liveness"]["verdict"] = "exited"
-    return show
-
-
 @pytest.mark.parametrize("outcome", ["succeeded", "failed"])
-def test_worker_done_and_exact_transcript_make_a_quiescent_result(outcome):
-    show = _settled()
-    done = _fixture("worker-done")
-    transcript = _fixture("worker-read")
+@pytest.mark.parametrize("show_name", ["worker-show-structured", "worker-show-released"])
+def test_worker_done_and_exact_transcript_make_a_quiescent_result(outcome, show_name):
+    show, done, transcript = _fixture(show_name), _fixture("worker-done"), _fixture("worker-read")
     status = "completed" if outcome == "succeeded" else "failed"
     show["result"]["dispatch"]["status"] = status
     show["result"]["worker"]["state"] = outcome
-    done["result"]["lifecycle"]["action"] = status
-    done["result"]["message"]["payload"] = done["result"]["message"]["payload"].replace("succeeded", outcome)
+    mail = done["result"]["messages"][0]
+    mail["payload"] = mail["payload"].replace("succeeded", outcome)
     transcript["result"]["status"]["worker"] = outcome
     obs = classify_show(_worker(), show, worker_done=done, transcript=transcript)
     assert (obs.family, obs.status, obs.containment) == ("terminal-candidate", status, "quiescent")
@@ -263,17 +253,47 @@ def test_worker_done_and_exact_transcript_make_a_quiescent_result(outcome):
     assert "synthetic transcript text" not in repr(obs)
 
 
-@pytest.mark.parametrize("gap", ["liveness", "wait", "body", "report", "dispatch", "read", "clipped", "remote"])
+@pytest.mark.parametrize("show_name", ["worker-show-resting", "worker-show-kept-open"])
+def test_settled_terminal_worker_stays_open_until_released(show_name):
+    done, transcript = _fixture("worker-done"), _fixture("worker-read")
+    awaiting = classify_show(_worker(), _fixture(show_name), worker_done=done, transcript=transcript)
+    assert (awaiting.family, awaiting.reason) == ("awaiting", "containment-unconfirmed")
+    released = classify_show(_worker(), _fixture("worker-show-released"), worker_done=done, transcript=transcript)
+    assert released.status == "completed"
+
+
+@pytest.mark.parametrize(
+    "gap",
+    [
+        "liveness",
+        "addressable",
+        "body",
+        "report",
+        "mail-run",
+        "rejected-report",
+        "dispatch",
+        "read",
+        "clipped",
+        "remote",
+    ],
+)
 def test_incomplete_or_conflicting_result_evidence_stays_open(gap):
-    show, done, transcript = _settled(), _fixture("worker-done"), _fixture("worker-read")
+    show, done, transcript = _fixture("worker-show-structured"), _fixture("worker-done"), _fixture("worker-read")
+    mail = done["result"]["messages"][0]
     if gap == "liveness":
         show["result"]["observation"]["status"] = "unverifiable"
-    elif gap == "wait":
-        del show["result"]["observation"]["agentWait"]
+    elif gap == "addressable":
+        show["result"]["observation"]["addressable"] = True
     elif gap == "body":
-        done["result"]["message"]["payload"] = "invalid"
+        mail["payload"] = "invalid"
     elif gap == "report":
-        done["result"]["lifecycle"]["action"] = "failed"
+        mail["payload"] = mail["payload"].replace("succeeded", "failed")
+    elif gap == "mail-run":
+        mail["run_id"] = "run_000000000005"
+    elif gap == "rejected-report":
+        report = json.loads(mail["payload"])
+        report["_orcaLifecycleRejection"] = {"code": "sender_not_assignee", "reason": "synthetic refusal"}
+        mail["payload"] = json.dumps(report)
     elif gap == "dispatch":
         show["result"]["dispatch"]["id"] = "ctx_000000000005"
     elif gap == "read":
@@ -285,10 +305,9 @@ def test_incomplete_or_conflicting_result_evidence_stays_open(gap):
     assert classify_show(_worker(), show, worker_done=done, transcript=transcript).family != "terminal-candidate"
 
 
-def test_only_a_proven_stop_can_return_cancelled():
-    show = _settled()
-    show["result"]["dispatch"]["status"] = "failed"
-    show["result"]["worker"]["state"] = "stopped"
+@pytest.mark.parametrize("show_name", ["worker-show-stopped", "worker-show-structured-stopped"])
+def test_only_a_proven_stop_can_return_cancelled(show_name):
+    show = _fixture(show_name)
     stop = _fixture("worker-stop")
     stop["result"]["mutation"]["requestId"] = cancel_argv(_worker())[8]
     assert parse_stop(_worker(), stop, exit_code=0).family == "awaiting"
@@ -296,11 +315,30 @@ def test_only_a_proven_stop_can_return_cancelled():
     stop["result"]["helpers"] = [{"outcome": "kept_open"}]
     assert parse_stop(_worker(), stop, exit_code=0, show=show).family == "awaiting"
     stop["result"]["helpers"] = []
-    del show["result"]["observation"]["agentWait"]
-    assert parse_stop(_worker(), stop, exit_code=0, show=show).family == "awaiting"
     stop["ok"] = False
     stop["result"]["state"] = "stop_unknown"
     assert parse_stop(_worker(), stop, exit_code=1, show=show).family == "awaiting"
+
+
+def test_terminal_release_must_belong_to_the_worker():
+    show = _fixture("worker-show-released")
+    show["result"]["terminalResource"]["ownerDispatchId"] = "ctx_000000000005"
+    result = classify_show(_worker(), show, worker_done=_fixture("worker-done"), transcript=_fixture("worker-read"))
+    assert (result.family, result.reason) == ("awaiting", "containment-unconfirmed")
+
+
+def test_roster_refuses_a_seat_declared_for_both_native_hosts():
+    with pytest.raises(ValueError, match="native host"):
+        _roster(options="[t3_targets.builder]\nmax_live = 1")
+
+
+def test_muse_has_a_clear_headless_refusal():
+    assert _roster(agent="muse").agents["builder"].cli == "muse"
+    with pytest.raises(ValueError, match="Orca-only"):
+        agents.build_argv("muse", "synthetic prompt")
+    result = agents.run_agent("muse", "synthetic prompt")
+    assert (result.ok, result.failure_kind) == (False, "native-only")
+    assert "Orca-only" in result.detail
 
 
 def _orca_run(workspace: Path, *, launched: bool) -> Path:
@@ -372,3 +410,56 @@ def test_live_orca_unit_blocks_t3_claim(tmp_path):
     t3_run = _enroll_run(workspace, tmp_path, request_id="test-cross-host-claim")
     _orca_run(workspace, launched=True)
     assert _claim_code(workspace, t3_run) == "capacity-denied"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="capacity scans bound run directories")
+@pytest.mark.parametrize("outcome", ["completed", "cancelled"])
+def test_orca_terminal_outcome_frees_capacity_only_after_ack(tmp_path, outcome):
+    workspace = _workspace(tmp_path, max_workers=1)
+    t3_run = _enroll_run(workspace, tmp_path, request_id="test-cross-host-ack")
+    orca_run = _orca_run(workspace, launched=True)
+    worker = _worker()
+    if outcome == "completed":
+        observation = classify_show(
+            worker,
+            _fixture("worker-show-structured"),
+            worker_done=_fixture("worker-done"),
+            transcript=_fixture("worker-read"),
+        )
+    else:
+        stop = _fixture("worker-stop")
+        stop["result"]["mutation"]["requestId"] = cancel_argv(worker)[8]
+        observation = parse_stop(worker, stop, exit_code=0, show=_fixture("worker-show-stopped"))
+    assert (observation.family, observation.status) == ("terminal-candidate", outcome)
+
+    journal = orca_run / "events" / "lifecycle.jsonl"
+    result_id = "d" * 64
+    run_journal.append_event(
+        journal,
+        run_id=orca_run.name,
+        event_type="task.observed",
+        payload={
+            "task_id": "build",
+            "attempt_id": ATTEMPT,
+            "status": observation.status,
+            "containment": observation.containment,
+            "result_id": result_id,
+            "artifact_kind": "receipt",
+            "artifact_digest": observation.result_transfer_id,
+            "provider_task_id": DISPATCH,
+            "original_run_id": RUN,
+            "provider_result_id": None,
+        },
+        idempotency_key="example-result",
+        expected_previous_sequence=1,
+    )
+    assert _claim_code(workspace, t3_run) == "capacity-denied"
+    run_journal.append_event(
+        journal,
+        run_id=orca_run.name,
+        event_type="task.acknowledged",
+        payload={"task_id": "build", "result_id": result_id},
+        idempotency_key="example-ack",
+        expected_previous_sequence=2,
+    )
+    assert _claim_code(workspace, t3_run) is None

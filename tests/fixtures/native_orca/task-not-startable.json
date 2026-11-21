@@ -1,0 +1,23 @@
+{
+  "orca_version": "1.4.268",
+  "source": "src/main/runtime/orchestration/db/tasks/task-start-claim.ts",
+  "payload": {
+    "id": "rpc-example",
+    "ok": false,
+    "_meta": {
+      "runtimeId": "runtime-example"
+    },
+    "error": {
+      "code": "task_not_startable",
+      "message": "Synthetic Task is failed; only a ready Task can start.",
+      "data": {
+        "taskId": "task_000000000002",
+        "status": "failed",
+        "unmetDependencies": [],
+        "nextSteps": [
+          "Synthetic recovery text"
+        ]
+      }
+    }
+  }
+}

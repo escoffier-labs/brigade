@@ -72,26 +72,57 @@ def _show(worker: WorkerReference, payload: object) -> tuple[Mapping[str, object
     return reply, None
 
 
-def _liveness(reply: Mapping[str, object], verdict: str) -> bool:
+def _agent_liveness(reply: Mapping[str, object]) -> Mapping[str, object]:
+    return _fields(_fields(reply.get("projection")).get("liveness"))
+
+
+def _exited(worker: WorkerReference, reply: Mapping[str, object]) -> bool:
     observation = _fields(reply.get("observation"))
-    projection = _fields(reply.get("projection"))
-    agent_liveness = _fields(projection.get("liveness"))
-    return (
+    # A structured session can have no process but still restart on mail.
+    if (
         observation.get("exactWorker") is True
-        and observation.get("status") == verdict
-        and agent_liveness.get("verdict") == verdict
+        and observation.get("status") == "exited"
+        and observation.get("addressable") is False
+    ):
+        return True
+
+    # A released PTY disappears from terminal inspection. The fleet projection
+    # and the Dispatch's own resource row retain the proof after the pane closes.
+    resource = _fields(reply.get("terminalResource"))
+    liveness = _agent_liveness(reply)
+    return (
+        observation.get("status") != "live"
+        and resource.get("ownerDispatchId") == worker.dispatch_id
+        and resource.get("releaseState") == "released"
+        and liveness.get("verdict") == "exited"
+        and liveness.get("source") in ("resource_release", "worker_stop")
     )
 
 
-def _report_id(worker: WorkerReference, worker_done: object, status: str) -> str | None:
-    reply = result_fields(worker_done)
-    message = _fields(reply.get("message"))
-    lifecycle = _fields(reply.get("lifecycle"))
+def _active(worker: WorkerReference, reply: Mapping[str, object]) -> NativeObservation:
+    observation = _fields(reply.get("observation"))
+    if "agentWait" not in observation:
+        return _awaiting(worker, "missing-evidence")
+    wait = observation["agentWait"]
+    if wait is not None and _fields(wait).get("source") not in _WAIT_SOURCES:
+        return _awaiting(worker, "malformed-snapshot")
+    if (
+        observation.get("exactWorker") is not True
+        or observation.get("status") != "live"
+        or _agent_liveness(reply).get("verdict") != "live"
+    ):
+        return _awaiting(worker, "containment-unconfirmed")
+    status = "running" if wait is None else "waiting"
+    return NativeObservation("active", "native-active", worker, status, None, None, "active")
+
+
+def _matching_report_id(worker: WorkerReference, message: Mapping[str, object], outcome: str) -> str | None:
     message_id = message.get("id")
     raw = message.get("payload")
     if (
         message.get("type") != "worker_done"
         or message.get("run_id") != worker.run_id
+        or message.get("delivery_contract") == "audit_only"
         or not valid_id(message_id, "msg")
         or not isinstance(raw, str)
         or len(raw) > 65_536
@@ -101,22 +132,29 @@ def _report_id(worker: WorkerReference, worker_done: object, status: str) -> str
         report = _fields(json.loads(raw))
     except (ValueError, RecursionError):
         return None
-    outcome = _TERMINAL_WORKER[status]
-    if (report.get("dispatchId"), report.get("taskId"), report.get("outcome")) != (
-        worker.dispatch_id,
-        worker.task_id,
-        outcome,
-    ):
-        return None
-    if lifecycle.get("action") == "settled":
-        return message_id if lifecycle.get("outcome") == outcome else None
-    if (lifecycle.get("action"), lifecycle.get("dispatchId"), lifecycle.get("taskId")) != (
-        status,
-        worker.dispatch_id,
-        worker.task_id,
-    ):
+    # Orca keeps rejected worker_done rows in the mailbox with their original type.
+    if "_orcaLifecycleRejection" in report or (
+        report.get("dispatchId"),
+        report.get("taskId"),
+        report.get("outcome"),
+    ) != (worker.dispatch_id, worker.task_id, outcome):
         return None
     return message_id
+
+
+def _report_id(worker: WorkerReference, worker_done: object, status: str) -> str | None:
+    # Use the coordinator's full check or inbox output. Only the full view keeps
+    # each message's Run identity alongside the worker-provided payload.
+    messages = result_fields(worker_done).get("messages")
+    if not isinstance(messages, list):
+        return None
+    outcome = _TERMINAL_WORKER[status]
+    matches = {
+        report_id
+        for message in messages
+        if (report_id := _matching_report_id(worker, _fields(message), outcome)) is not None
+    }
+    return matches.pop() if len(matches) == 1 else None
 
 
 def _transcript_digest(worker: WorkerReference, payload: object, worker_state: str) -> str | None:
@@ -160,23 +198,13 @@ def classify_show(
     if refusal is not None:
         return refusal
     status = _fields(reply.get("dispatch")).get("status")
-    observation = _fields(reply.get("observation"))
-    if "agentWait" not in observation:
-        return _awaiting(worker, "missing-evidence")
-    wait = observation["agentWait"]
-    if wait is not None:
-        if _fields(wait).get("source") not in _WAIT_SOURCES:
-            return _awaiting(worker, "malformed-snapshot")
-        if not _liveness(reply, "live"):
-            return _awaiting(worker, "containment-unconfirmed")
-        return NativeObservation("active", "native-active", worker, "waiting", None, None, "active")
     if status == "pending":
         return _awaiting(worker, "pending-work", "queued")
-    if status == "dispatched" and _liveness(reply, "live"):
-        return NativeObservation("active", "native-active", worker, "running", None, None, "active")
+    if status == "dispatched":
+        return _active(worker, reply)
     if not isinstance(status, str) or status not in _TERMINAL_WORKER:
         return _awaiting(worker, "work-state-inconsistent")
-    if not _liveness(reply, "exited"):
+    if not _exited(worker, reply):
         return _awaiting(worker, "containment-unconfirmed")
     worker_state = _TERMINAL_WORKER[status]
     if _fields(reply.get("worker")).get("state") != worker_state:
@@ -225,8 +253,7 @@ def parse_stop(
     if (
         _fields(reply.get("worker")).get("state") != "stopped"
         or _fields(reply.get("dispatch")).get("status") != "failed"
-        or not _liveness(reply, "exited")
-        or _fields(reply.get("observation")).get("agentWait", False) is not None
+        or not _exited(worker, reply)
     ):
         return _awaiting(worker, "containment-unconfirmed")
     transfer = digest({"handle": worker.handle_digest, "outcome": "cancelled"}, _RESULT_DOMAIN)

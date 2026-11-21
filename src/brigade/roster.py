@@ -472,6 +472,8 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None, text:
 
     t3_targets = _native_targets(data, "t3_targets")
     orca_targets = _native_targets(data, "orca_targets")
+    if t3_targets.keys() & orca_targets.keys():
+        raise ValueError("a seat may declare a target for only one native host")
 
     parsed_agents: dict[str, Agent] = {}
     for name, raw_agent in raw_agents.items():
