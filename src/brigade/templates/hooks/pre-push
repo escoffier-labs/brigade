@@ -94,7 +94,7 @@ if [[ -n "${CONTENT_GUARD_DIR:-}" ]]; then
 else
   POLICY="${CONTENT_GUARD_POLICY:-public-repo}"
   if ! command -v brigade >/dev/null 2>&1; then
-    echo "pre-push: brigade not found; reinstall brigade-cli to restore the embedded guard" >&2
+    echo "pre-push: brigade not found; reinstall brigadestack to restore the embedded guard" >&2
     exit 1
   fi
   echo "pre-push: scanning $REPO_ROOT with Brigade's embedded guard"

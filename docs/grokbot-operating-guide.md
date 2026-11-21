@@ -18,7 +18,7 @@ receives bounded, validated envelopes.
 
 The integration follows four rules.
 
-**One repository.** Every supported component installs from `brigade-cli`. There
+**One repository.** Every supported component installs from `brigadestack`. There
 is no second repository to clone and no separately packaged sidecar. The legacy
 `grokbot-dispatch-mcp` sidecar is retired; see
 [Retirement and rollback window](phase-grokbot-one-repository-distribution.md).

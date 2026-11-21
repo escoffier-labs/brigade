@@ -13,7 +13,7 @@
     {
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
-      "identifier": "brigade-cli",
+      "identifier": "brigadestack",
       "version": "0.32.0",
       "runtimeHint": "uvx",
       "transport": {

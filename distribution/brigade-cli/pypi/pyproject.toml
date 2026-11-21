@@ -1,0 +1,36 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "brigade-cli"
+version = "0.32.0"
+description = "Compatibility package for brigadestack, the Brigade CLI"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+dependencies = ["brigadestack==0.32.0"]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Operating System :: OS Independent",
+]
+
+[project.urls]
+Homepage = "https://brigadestack.com"
+Documentation = "https://brigade.tools/docs"
+Repository = "https://github.com/escoffier-labs/brigade"
+Source = "https://github.com/escoffier-labs/brigade/tree/main/distribution/brigade-cli/pypi"
+Issues = "https://github.com/escoffier-labs/brigade/issues"
+
+# pipx exposes only the installed package's own scripts, not its dependencies', so
+# `pipx upgrade brigade-cli` needs these here to keep `brigade` working. `brigade-hook`
+# is the lightweight entry the managed Claude hooks run beside `brigade`.
+[project.scripts]
+brigade = "brigade.cli:process_main"
+brigade-cli = "brigade.cli:process_main"
+brigade-hook = "brigade.claude_hooks.entry:main"
+
+[tool.setuptools]
+packages = []
+py-modules = []

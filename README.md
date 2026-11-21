@@ -27,14 +27,14 @@
 
 BrigadeStack gives the agent tools you already use one shared memory and one set of MCP servers and skills. It keeps a record of the work they check.
 
-Install with pipx (Python 3.11 or newer) or npm (Node.js `^22.15.0 || >=23.11.0`). The command is `brigadestack`. The `brigade-cli` and `@escoffier-labs/brigade` packages install the same CLI as `brigade`, so existing users keep their command.
+Install with pipx (Python 3.11 or newer) or npm (Node.js `^22.15.0 || >=23.11.0`). The command is `brigadestack`. `brigadestack` on PyPI is the Python package. The `brigade-cli` compatibility package and the `@escoffier-labs/brigade` npm package install the same CLI as `brigade`, so existing users keep their command and `pipx upgrade brigade-cli` keeps working.
 
 ```bash
 pipx install brigadestack
 npm install -g brigadestack
 ```
 
-Sections marked <sup>*</sup> describe the 0.32.0 beta. It is published as daily pre-release builds of `brigade-cli`, which install the `brigade` command: `pipx install --pip-args='--pre' brigade-cli`. Stable is 0.31.0.
+Sections marked <sup>*</sup> describe the 0.32.0 beta. It is published as daily pre-release builds of `brigadestack`, which install the `brigade` command: `pipx install --pip-args='--pre' brigadestack`. Stable is 0.31.0.
 
 ## Shared memory, shared tools
 
@@ -185,6 +185,6 @@ The Python CLI may send a passive version request. [Telemetry](https://github.co
 <details>
 <summary>About the downloads badge</summary>
 
-The downloads badge sums `brigade-cli` on PyPI (excluding mirrors) and `@escoffier-labs/brigade` on npm over the same 30 completed UTC days. Downloads include automation and do not count unique people. The [metric JSON](https://raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json) records each source, the period, and the last successful refresh. npm platform companions are excluded. Daily refreshes retain the previous metric if a source fails validation or its latest day is more than three UTC days old.
+The downloads badge sums `brigadestack` and `brigade-cli` on PyPI (excluding mirrors) and `@escoffier-labs/brigade` on npm over the same 30 completed UTC days. Downloads include automation and do not count unique people. The [metric JSON](https://raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json) records each source, the period, and the last successful refresh. npm platform companions are excluded. Daily refreshes retain the previous metric if a source fails validation or its latest day is more than three UTC days old.
 
 </details>

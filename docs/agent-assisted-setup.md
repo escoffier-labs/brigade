@@ -8,7 +8,7 @@ Root `AGENTS.md` is for **developing Brigade**. For install and adapt, agents fo
 
 ```text
 Read https://github.com/escoffier-labs/brigade and follow docs/agents-guide.md.
-Install brigade-cli with pipx if missing (or uv tool install brigade-cli).
+Install brigadestack with pipx if missing (or uv tool install brigadestack).
 Run operator quickstart with --dry-run first and show the plan. Then apply,
 run brigade operator doctor, and report ready: yes. Keep existing memory
 layout. Do not touch remotes, do not commit, stop before anything destructive.
@@ -32,8 +32,8 @@ If an agent has access to this repository, it should start by reading:
 Then work inside the **target** repo or operator workspace and run:
 
 ```bash
-pipx install brigade-cli
-# alternative: uv tool install brigade-cli
+pipx install brigadestack
+# alternative: uv tool install brigadestack
 brigade setup
 brigade --version
 brigade operator quickstart --target . --harnesses codex --dry-run
@@ -53,7 +53,7 @@ brigade operator doctor --target . --profile local-operator
 
 The agent should:
 
-- install the `brigade-cli` package if missing (humans often will not)
+- install the `brigadestack` package if missing (humans often will not)
 - run `brigade setup` so the code map and evidence engines are present
 - run quickstart in dry-run mode first
 - apply quickstart only after the dry-run looks reasonable

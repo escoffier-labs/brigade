@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import os
 import re
@@ -33,7 +34,11 @@ REPOSITORY_ID = 1238165856
 _RELEASE_REPOSITORIES = (REPOSITORY, RENAMED_REPOSITORY)
 STATE_SCHEMA_VERSION = 1
 MANIFEST_ASSET = "component-manifest-v1.json"
-PYPI_PROJECT = "brigade-cli"
+PYPI_PROJECT = "brigadestack"
+# The pre-0.32 package name. It stays published as a compatibility package that depends
+# on PYPI_PROJECT at the same version, so a pipx app installed under this name keeps
+# upgrading under it instead of gaining a second app that shadows `brigade`.
+LEGACY_PYPI_PROJECT = "brigade-cli"
 PYPI_PROJECT_JSON_URL = f"https://pypi.org/pypi/{PYPI_PROJECT}/json"
 BETA_PREVIEW_BASE = "0.32.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -702,6 +707,27 @@ def _same_coordinates(left: UpdateState, right: UpdateState) -> bool:
     )
 
 
+def installed_pypi_project() -> str:
+    """Name of the PyPI distribution this installation was made from.
+
+    pipx records the requested package in ``pipx_metadata.json``, which is exact even
+    when the compatibility package pulled in its real dependency. Other layouts fall
+    back to the installed distribution metadata. Anything unknown is the real package.
+    """
+    try:
+        recorded = json.loads((Path(sys.prefix) / "pipx_metadata.json").read_text(encoding="utf-8"))
+        package = recorded["main_package"]["package"]
+    except (OSError, ValueError, KeyError, TypeError):
+        package = None
+    if package in (PYPI_PROJECT, LEGACY_PYPI_PROJECT):
+        return package
+    try:
+        importlib.metadata.distribution(LEGACY_PYPI_PROJECT)
+    except importlib.metadata.PackageNotFoundError:
+        return PYPI_PROJECT
+    return LEGACY_PYPI_PROJECT
+
+
 def _default_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(argv, check=False, text=True)
 
@@ -765,7 +791,10 @@ def run_update(
                 return 0
             # Stable and beta both force-reinstall the one user-global pipx app
             # with an exact package pin. Beta never uses a mutable Git main SHA.
-            pipx_spec = f"{PYPI_PROJECT}=={coordinate}"
+            # Stable keeps the installed package name. Beta resolves daily wheels of the real
+            # package only: the compatibility package has no development builds.
+            install_project = installed_pypi_project() if channel == "stable" else PYPI_PROJECT
+            pipx_spec = f"{install_project}=={coordinate}"
             cached_manifest_path = Path(
                 component_paths.verified_manifest_path(str(selected_paths.cache_root), release.manifest_sha256)
             )

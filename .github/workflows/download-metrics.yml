@@ -61,7 +61,7 @@ jobs:
               raise SystemExit('Refusing unrelated download-metrics branch')
           data = json.loads(path.read_text())
           if (data.get('schemaVersion') != 1 or data.get('label') != 'downloads/month'
-              or data.get('sources', {}).get('pypi', {}).get('package') != 'brigade-cli'
+              or data.get('sources', {}).get('pypi', {}).get('package') not in ('brigadestack', 'brigade-cli')
               or data.get('sources', {}).get('npm', {}).get('package') != '@escoffier-labs/brigade'):
               raise SystemExit('Refusing unrelated download-metrics branch')
           PY

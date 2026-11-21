@@ -57,37 +57,53 @@ def metrics(monkeypatch):
     return module
 
 
+def _aggregate(metrics, payloads):
+    pypi = {"brigadestack": payloads[0], "brigade-cli": payloads[2]}
+    return metrics.aggregate(pypi, payloads[1], now=NOW)
+
+
 @pytest.fixture
 def payloads():
     days = [(NOW.date() - timedelta(days=n)).isoformat() for n in range(35, 0, -1)]
-    pypi = {
-        "package": "brigade-cli",
-        "type": "overall_downloads",
-        "data": [
-            {"category": category, "date": day, "downloads": count}
-            for category, count in [("without_mirrors", 10), ("with_mirrors", 900)]
-            for day in days[:-1]
-        ],
-    }
+
+    def pypi_series(package, count):
+        return {
+            "package": package,
+            "type": "overall_downloads",
+            "data": [
+                {"category": category, "date": day, "downloads": n}
+                for category, n in [("without_mirrors", count), ("with_mirrors", 900)]
+                for day in days[:-1]
+            ],
+        }
+
+    pypi = pypi_series("brigadestack", 10)
+    compat = pypi_series("brigade-cli", 5)
     npm = {
         "package": "@escoffier-labs/brigade",
         "start": days[0],
         "end": days[-1],
         "downloads": [{"day": day, "downloads": 2} for day in days],
     }
-    return pypi, npm
+    # Index 0 is brigadestack, 1 is npm, 2 is the brigade-cli compatibility name.
+    return [pypi, npm, compat]
 
 
 def test_combines_thirty_matching_completed_days_and_excludes_mirrors(metrics, payloads):
-    badge = metrics.aggregate(*payloads, now=NOW)
+    badge = _aggregate(metrics, payloads)
     assert badge == {
         "schemaVersion": 1,
         "label": "downloads/month",
-        "message": "360",
+        "message": "510",
         "color": "blue",
-        "total": 360,
+        "total": 510,
         "sources": {
-            "pypi": {"package": "brigade-cli", "downloads": 300, "mirrors": False},
+            "pypi": {
+                "package": "brigadestack",
+                "downloads": 450,
+                "mirrors": False,
+                "packages": {"brigadestack": 300, "brigade-cli": 150},
+            },
             "npm": {"package": "@escoffier-labs/brigade", "downloads": 60},
         },
         "period": {"start": "2026-05-20", "end": "2026-06-18", "days": 30, "timezone": "UTC"},
@@ -95,91 +111,115 @@ def test_combines_thirty_matching_completed_days_and_excludes_mirrors(metrics, p
     }
 
 
-@pytest.mark.parametrize("source", [0, 1], ids=["pypi", "npm"])
+@pytest.mark.parametrize("source", [0, 1, 2], ids=["pypi", "npm", "pypi-compat"])
 @pytest.mark.parametrize("count", [-1, 1.5, "2", True, None, 2**53])
 def test_rejects_invalid_counts(metrics, payloads, source, count):
-    rows = payloads[source]["data" if source == 0 else "downloads"]
+    rows = payloads[source]["downloads" if source == 1 else "data"]
     rows[-1]["downloads"] = count
     with pytest.raises(ValueError):
-        metrics.aggregate(*payloads, now=NOW)
+        _aggregate(metrics, payloads)
 
 
-@pytest.mark.parametrize("source", [0, 1], ids=["pypi", "npm"])
+@pytest.mark.parametrize("source", [0, 1, 2], ids=["pypi", "npm", "pypi-compat"])
 @pytest.mark.parametrize(
     "damage", ["duplicate", "gap", "bad-date", "empty", "wrong-package", "future", "missing-count"]
 )
 def test_rejects_incomplete_or_malformed_series(metrics, payloads, source, damage):
     payload = payloads[source]
-    rows = payload["data" if source == 0 else "downloads"]
+    rows = payload["downloads" if source == 1 else "data"]
     if damage == "duplicate":
         rows.append(deepcopy(rows[10]))
     elif damage == "gap":
         del rows[10]
     elif damage == "bad-date":
-        rows[10]["date" if source == 0 else "day"] = "2026-02-30"
+        rows[10]["day" if source == 1 else "date"] = "2026-02-30"
     elif damage == "empty":
         rows.clear()
     elif damage == "wrong-package":
         payload["package"] = "@example/companion"
     elif damage == "future":
-        rows[10]["date" if source == 0 else "day"] = NOW.date().isoformat()
+        rows[10]["day" if source == 1 else "date"] = NOW.date().isoformat()
     else:
         del rows[10]["downloads"]
     with pytest.raises(ValueError):
-        metrics.aggregate(*payloads, now=NOW)
+        _aggregate(metrics, payloads)
 
 
-@pytest.mark.parametrize("source", [0, 1], ids=["pypi", "npm"])
+@pytest.mark.parametrize("source", [0, 1, 2], ids=["pypi", "npm", "pypi-compat"])
 def test_rejects_stale_watermark_in_either_source(metrics, payloads, source):
     payload = payloads[source]
-    key = "data" if source == 0 else "downloads"
-    date_key = "date" if source == 0 else "day"
+    key = "downloads" if source == 1 else "data"
+    date_key = "day" if source == 1 else "date"
     payload[key] = [row for row in payload[key] if row[date_key] <= "2026-06-16"]
     if source == 1:
         payload["end"] = "2026-06-16"
     with pytest.raises(ValueError, match="stale"):
-        metrics.aggregate(*payloads, now=NOW)
+        _aggregate(metrics, payloads)
 
 
 @pytest.mark.parametrize("field,value", [("start", "2026-05-01"), ("end", "2026-06-18")])
 def test_rejects_npm_envelope_that_disagrees_with_daily_data(metrics, payloads, field, value):
     payloads[1][field] = value
     with pytest.raises(ValueError):
-        metrics.aggregate(*payloads, now=NOW)
+        _aggregate(metrics, payloads)
 
 
 def test_explicit_zero_days_are_valid(metrics, payloads):
     for row in payloads[1]["downloads"]:
         row["downloads"] = 0
-    assert metrics.aggregate(*payloads, now=NOW)["total"] == 300
+    assert _aggregate(metrics, payloads)["total"] == 450
 
 
-@pytest.mark.parametrize("source", [0, 1], ids=["pypi", "npm"])
-def test_accepts_largest_exact_javascript_integer(metrics, payloads, source):
-    for payload, key in zip(payloads, ["data", "downloads"], strict=True):
+def _zero_everything(payloads):
+    for payload, key in zip(payloads, ["data", "downloads", "data"], strict=True):
         for row in payload[key]:
             row["downloads"] = 0
-    payloads[source]["data" if source == 0 else "downloads"][10]["downloads"] = 2**53 - 1
-    badge = metrics.aggregate(*payloads, now=NOW)
+
+
+@pytest.mark.parametrize("source", [0, 1, 2], ids=["pypi", "npm", "pypi-compat"])
+def test_accepts_largest_exact_javascript_integer(metrics, payloads, source):
+    _zero_everything(payloads)
+    payloads[source]["downloads" if source == 1 else "data"][10]["downloads"] = 2**53 - 1
+    badge = _aggregate(metrics, payloads)
     assert badge["total"] == 9007199254740991
     assert badge["message"] == "9,007,199,254,740,991"
-    assert badge["sources"]["pypi" if source == 0 else "npm"]["downloads"] == 9007199254740991
+    assert badge["sources"]["npm" if source == 1 else "pypi"]["downloads"] == 9007199254740991
 
 
-@pytest.mark.parametrize("overflow", ["pypi-subtotal", "npm-subtotal", "combined"])
+@pytest.mark.parametrize("overflow", ["pypi-subtotal", "npm-subtotal", "combined", "pypi-names-combined"])
 def test_rejects_overflow_from_individually_valid_counts(metrics, payloads, overflow):
-    for payload, key in zip(payloads, ["data", "downloads"], strict=True):
-        for row in payload[key]:
-            row["downloads"] = 0
+    _zero_everything(payloads)
     if overflow == "combined":
         payloads[0]["data"][10]["downloads"] = 2**52
         payloads[1]["downloads"][10]["downloads"] = 2**52
+    elif overflow == "pypi-names-combined":
+        payloads[0]["data"][10]["downloads"] = 2**52
+        payloads[2]["data"][10]["downloads"] = 2**52
     else:
         rows = payloads[0]["data"] if overflow == "pypi-subtotal" else payloads[1]["downloads"]
         rows[10]["downloads"] = 2**53 - 1
         rows[11]["downloads"] = 1
     with pytest.raises(ValueError):
-        metrics.aggregate(*payloads, now=NOW)
+        _aggregate(metrics, payloads)
+
+
+def test_per_package_breakdown_sums_to_the_pypi_total(metrics, payloads):
+    pypi = _aggregate(metrics, payloads)["sources"]["pypi"]
+    assert set(pypi["packages"]) == {"brigadestack", "brigade-cli"}
+    assert sum(pypi["packages"].values()) == pypi["downloads"]
+
+
+def test_rejects_missing_or_unexpected_pypi_package_set(metrics, payloads):
+    with pytest.raises(ValueError, match="package set"):
+        metrics.aggregate({"brigadestack": payloads[0]}, payloads[1], now=NOW)
+    with pytest.raises(ValueError, match="package set"):
+        metrics.aggregate({"brigadestack": payloads[0], "other": payloads[2]}, payloads[1], now=NOW)
+
+
+def test_compat_series_must_name_the_compat_package(metrics, payloads):
+    payloads[2]["package"] = "brigadestack"
+    with pytest.raises(ValueError, match="unexpected source package"):
+        _aggregate(metrics, payloads)
 
 
 @pytest.mark.parametrize(
@@ -220,19 +260,22 @@ def test_nested_json_failure_is_sanitized_and_preserves_metric(metrics, monkeypa
 
 def test_cli_writes_metric_only_after_both_official_sources_validate(metrics, payloads, monkeypatch, tmp_path):
     urls = []
+    order = [0, 2, 1]  # brigadestack, brigade-cli, then npm
 
     def fetch(url):
         urls.append(url)
-        return payloads[len(urls) - 1]
+        return payloads[order[len(urls) - 1]]
 
     monkeypatch.setattr(metrics, "fetch_json", fetch)
     output = tmp_path / "downloads.json"
     assert metrics.main([str(output)]) == 0
     badge = json.loads(output.read_text())
-    assert badge["total"] == 360
-    assert badge["sources"]["pypi"]["downloads"] == 300
+    assert badge["total"] == 510
+    assert badge["sources"]["pypi"]["downloads"] == 450
+    assert badge["sources"]["pypi"]["packages"] == {"brigadestack": 300, "brigade-cli": 150}
     assert badge["sources"]["npm"]["downloads"] == 60
     assert urls == [
+        "https://pypistats.org/api/packages/brigadestack/overall?mirrors=false",
         "https://pypistats.org/api/packages/brigade-cli/overall?mirrors=false",
         "https://api.npmjs.org/downloads/range/last-year/@escoffier-labs/brigade",
     ]
@@ -247,7 +290,7 @@ def test_fetch_rejects_ambiguous_or_invalid_json(metrics, monkeypatch, body):
 
 def test_invalid_source_data_also_preserves_existing_metric(metrics, payloads, monkeypatch, tmp_path):
     payloads[1]["downloads"][10]["downloads"] = -1
-    responses = iter(payloads)
+    responses = iter([payloads[0], payloads[2], payloads[1]])
     monkeypatch.setattr(metrics, "fetch_json", lambda _url: next(responses))
     output = tmp_path / "downloads.json"
     output.write_text("previous success\n")
@@ -255,7 +298,7 @@ def test_invalid_source_data_also_preserves_existing_metric(metrics, payloads, m
     assert output.read_text() == "previous success\n"
 
 
-@pytest.mark.parametrize("existing", ["absent", "owned", "unrelated"])
+@pytest.mark.parametrize("existing", ["absent", "owned", "owned-flipped", "unrelated"])
 def test_workflow_bootstraps_only_absent_branch_and_preserves_owned_contents(tmp_path, existing):
     import subprocess
     import textwrap
@@ -269,14 +312,18 @@ def test_workflow_bootstraps_only_absent_branch_and_preserves_owned_contents(tmp
         "schemaVersion": 1,
         "label": "downloads/month",
         "total": 360,
-        "sources": {"pypi": {"package": "brigade-cli"}, "npm": {"package": "@escoffier-labs/brigade"}},
+        # "owned" is a branch written before the brigadestack flip; both stay accepted.
+        "sources": {
+            "pypi": {"package": "brigadestack" if existing == "owned-flipped" else "brigade-cli"},
+            "npm": {"package": "@escoffier-labs/brigade"},
+        },
     }
     if existing != "absent":
         seed = tmp_path / "seed"
         git("init", str(seed))
         git("checkout", "--orphan", "download-metrics", cwd=seed)
         (seed / "ref").write_text("preserve this content\n")
-        if existing == "owned":
+        if existing.startswith("owned"):
             (seed / "downloads.json").write_text(json.dumps(badge))
         git("add", ".", cwd=seed)
         git("-c", "user.name=Example", "-c", "user.email=example@example.invalid", "commit", "-m", "seed", cwd=seed)
@@ -310,8 +357,8 @@ def test_workflow_bootstraps_only_absent_branch_and_preserves_owned_contents(tmp
         stored = json.loads(git("--git-dir", str(remote), "show", "download-metrics:downloads.json"))
         assert stored["total"] == 720
         files = git("--git-dir", str(remote), "ls-tree", "--name-only", "download-metrics").splitlines()
-        assert files == (["downloads.json", "ref"] if existing == "owned" else ["downloads.json"])
-        if existing == "owned":
+        assert files == (["downloads.json", "ref"] if existing.startswith("owned") else ["downloads.json"])
+        if existing.startswith("owned"):
             assert git("--git-dir", str(remote), "show", "download-metrics:ref") == "preserve this content\n"
         head = git("--git-dir", str(remote), "rev-parse", "download-metrics")
         replay = subprocess.run(command, env=env, cwd=tmp_path, capture_output=True, text=True)

@@ -24,7 +24,7 @@ in the [execution model](execution-model.md).
 Prerequisites:
 
 ```bash
-pipx install brigade-cli
+pipx install brigadestack
 pipx ensurepath   # open a new shell, or set PATH manually (see Scheduler wiring)
 brigade init --depth repo --harnesses codex --target .   # also runs `brigade extras on` and `brigade care install`
 brigade memory care init --target .
@@ -200,7 +200,7 @@ Related docs: [memory care](memory-care.md), [scanner registry](scanner-registry
 
 ### PATH
 
-Cron and systemd user units do not load your shell profile. After `pipx install brigade-cli`, resolve the binary once:
+Cron and systemd user units do not load your shell profile. After `pipx install brigadestack`, resolve the binary once:
 
 ```bash
 command -v brigade   # typically ~/.local/bin/brigade
@@ -260,7 +260,7 @@ Use this step block before the recipe commands in each workflow below. Restore t
         with:
           python-version: '3.12'
       - run: python -m pip install --upgrade pip pipx
-      - run: pipx install brigade-cli
+      - run: pipx install brigadestack
       - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - uses: actions/cache@v4
         with:
@@ -366,7 +366,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --upgrade pip pipx
-      - run: pipx install brigade-cli
+      - run: pipx install brigadestack
       - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - uses: actions/cache@v4
         with:
@@ -452,7 +452,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --upgrade pip pipx
-      - run: pipx install brigade-cli
+      - run: pipx install brigadestack
       - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - uses: actions/cache@v4
         with:
@@ -612,7 +612,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --upgrade pip pipx
-      - run: pipx install brigade-cli
+      - run: pipx install brigadestack
       - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - uses: actions/cache@v4
         with:
@@ -636,7 +636,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --upgrade pip pipx
-      - run: pipx install brigade-cli
+      - run: pipx install brigadestack
       - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - uses: actions/cache@v4
         with:
@@ -728,7 +728,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --upgrade pip pipx
-      - run: pipx install brigade-cli
+      - run: pipx install brigadestack
       - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - uses: actions/cache@v4
         with:
@@ -830,7 +830,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: python -m pip install --upgrade pip pipx
-      - run: pipx install brigade-cli
+      - run: pipx install brigadestack
       - run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - uses: actions/cache@v4
         with:

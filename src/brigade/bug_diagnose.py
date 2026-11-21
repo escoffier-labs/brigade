@@ -359,7 +359,7 @@ def diagnose(args: argparse.Namespace) -> int:
             # state, recent receipts, diagnostics or the global error record.
             collected: dict[str, Any] = {
                 "schema": "brigade.bug-report.v1",
-                "brigade": {"version": __version__, "channel": "unknown", "distribution": "brigade-cli"},
+                "brigade": {"version": __version__, "channel": "unknown", "distribution": "brigadestack"},
                 "runtime": {key: "unknown" for key in ("python", "os", "release", "arch")},
                 "bug_diagnostics": {"target": "<target>", "checks": [], "summary": {"failed": 0, "warn": 0}},
                 "recent_failures": {"runs": [], "verify": []},

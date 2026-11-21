@@ -47,7 +47,7 @@ Read https://github.com/escoffier-labs/brigade and follow docs/agents-guide.md.
 If brigade is missing, install it with npm install --global
 @escoffier-labs/brigade@0.31.0 only when Node.js 22+ and npm are present and
 the target is glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64.
-Otherwise use pipx install brigade-cli (or uv tool install brigade-cli),
+Otherwise use pipx install brigadestack (or uv tool install brigadestack),
 including on musl Linux (such as Alpine) and Windows ARM64.
 Run operator quickstart with --dry-run first and show the plan. Then apply,
 run brigade operator doctor, and report ready: yes. Keep existing memory
@@ -66,7 +66,7 @@ Always dry-run before write. Then apply. Then doctor.
 
 ```bash
 npm install --global @escoffier-labs/brigade@0.31.0
-# alternatives: pipx install brigade-cli, or uv tool install brigade-cli
+# alternatives: pipx install brigadestack, or uv tool install brigadestack
 brigade setup
 brigade --version
 brigade operator quickstart --target . --harnesses <harness> --dry-run

@@ -1073,7 +1073,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
         dot.run_listener(dot_config, dot_tools, dot_runtime)
     except transport.OptionalDependencyError:
         print(
-            "error: Grok Bot listener requires pip install brigade-cli[connector]. The grokbot extra remains an alias during the removal window",
+            "error: Grok Bot listener requires pip install brigadestack[connector]. The grokbot extra remains an alias during the removal window",
             file=sys.stderr,
         )
         return 2

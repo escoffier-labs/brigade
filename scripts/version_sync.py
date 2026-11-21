@@ -8,6 +8,8 @@ from the ``[project].version`` source of truth:
   - ``src/brigade/__init__.py``      -> ``__version__ = "X"``
   - ``src/brigade/templates/**/*.json`` -> ``"_brigade_version": "X"``
   - ``mcp-registry/*/server.json``    -> ``"version": "X"`` (server and package)
+  - ``distribution/brigade-cli/pypi/pyproject.toml`` -> the compatibility package
+                                        version and its ``brigadestack==X`` pin
   - recorded demo assets             -> a ``brigade X.Y.Z`` token baked into the
                                         rendered frames (``.cast`` and ``.svg``)
 
@@ -66,6 +68,11 @@ PLUGIN_LOCATIONS = [
     ("plugins/brigade/.mcp.json", r'"@escoffier-labs/brigade@([^"]+)"'),
     ("plugins/brigade/codex.mcp.json", r'"@escoffier-labs/brigade@([^"]+)"'),
 ]
+# The brigade-cli compatibility package: its own version and its exact brigadestack pin.
+COMPAT_PACKAGE_LOCATIONS = [
+    ("distribution/brigade-cli/pypi/pyproject.toml", r'(?m)^version\s*=\s*"([^"]+)"'),
+    ("distribution/brigade-cli/pypi/pyproject.toml", r'"brigadestack==([^"]+)"'),
+]
 # ---------------------------------------------------------------------------
 
 
@@ -84,6 +91,7 @@ def _locations() -> list[tuple[str, str]]:
         locs.append((path.relative_to(ROOT).as_posix(), MCP_SERVER_PATTERN))
     locs.extend(RECORDINGS)
     locs.extend(PLUGIN_LOCATIONS)
+    locs.extend(COMPAT_PACKAGE_LOCATIONS)
     return locs
 
 

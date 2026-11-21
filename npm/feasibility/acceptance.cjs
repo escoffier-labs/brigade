@@ -220,7 +220,7 @@ for extra in ({},{'DO_NOT_TRACK':'1'},{'BRIGADE_TELEMETRY':'0'}):
  if extra:
   assert request.get_header('User-agent')=='Python-urllib' and request.get_header('X-brigade-channel') is None
  else:
-  assert request.get_header('User-agent')==f'brigade-cli/{__version__} ({platform.system()})'
+  assert request.get_header('User-agent')==f'brigadestack/{__version__} ({platform.system()})'
   assert request.get_header('X-brigade-channel')=='npm'
  state=json.loads(p.read_text()); assert state['latest']=='98.0.0' and state['checked_at']==1000000 and p.read_bytes()!=before
  n.maybe_notify(['work','brief'],0,now=1000001,stderr=err)

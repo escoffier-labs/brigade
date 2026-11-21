@@ -1,4 +1,4 @@
-"""Bridge package contracts, independent of the development CLI version."""
+"""Distribution contracts: brigadestack is the real package, brigade-cli the compatibility one."""
 
 import json
 import os
@@ -18,7 +18,8 @@ from tests.test_publish_workflow import _load_workflow_yaml
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
-BRIDGE = ROOT / "distribution/brigadestack"
+BRIDGE = ROOT / "distribution/brigadestack"  # npm bridge, flipped in the npm slice
+COMPAT = ROOT / "distribution/brigade-cli/pypi"
 MAIN_DISPATCH = (
     "github.repository == 'escoffier-labs/brigade' && github.ref == 'refs/heads/main'"
     " && github.event_name == 'workflow_dispatch'"
@@ -28,7 +29,6 @@ MAIN_DISPATCH = (
 @pytest.mark.parametrize(
     ("workflow_file", "environment", "publish_permissions"),
     [
-        ("brigadestack-publish.yml", "pypi", {"id-token": "write"}),
         ("brigadestack-npm-publish.yml", "npm", {"contents": "read", "id-token": "write"}),
     ],
 )
@@ -47,16 +47,54 @@ def test_bridge_publication_keeps_oidc_in_the_main_only_publish_job(workflow_fil
         assert job["if"] == MAIN_DISPATCH
 
 
-def test_python_bridge_adds_only_an_alias_for_the_exact_stable_dependency():
-    manifest = tomllib.loads((BRIDGE / "pypi/pyproject.toml").read_text())
+def test_root_package_is_brigadestack_with_the_brigadestack_and_brigade_scripts():
+    project = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    assert project["name"] == "brigadestack"
+    assert project["dependencies"] == []
+    assert project["scripts"]["brigadestack"] == "brigade.cli:process_main"
+    assert project["scripts"]["brigade"] == "brigade.cli:process_main"
+    assert project["scripts"]["brigade-hook"] == "brigade.claude_hooks.entry:main"
+    # The compatibility package owns this script now.
+    assert "brigade-cli" not in project["scripts"]
+
+
+def test_compat_package_depends_on_exactly_the_root_version_and_declares_its_own_scripts():
+    root = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+    manifest = tomllib.loads((COMPAT / "pyproject.toml").read_text())
     project = manifest["project"]
-    assert (project["name"], project["version"]) == ("brigadestack", "0.31.0")
-    assert project["requires-python"] == ">=3.11"
-    assert project["dependencies"] == ["brigade-cli==0.31.0"]
-    assert project["scripts"] == {"brigadestack": "brigade.cli:process_main"}
+    assert project["name"] == "brigade-cli"
+    assert project["version"] == root["version"]
+    assert project["requires-python"] == root["requires-python"]
+    assert project["dependencies"] == [f"brigadestack=={root['version']}"]
+    # pipx exposes only the installed package's own scripts, so these must live here.
+    assert project["scripts"] == {
+        "brigade": "brigade.cli:process_main",
+        "brigade-cli": "brigade.cli:process_main",
+        "brigade-hook": "brigade.claude_hooks.entry:main",
+    }
     # No discovery of a second brigade package or alternate implementation.
     assert manifest["tool"]["setuptools"]["packages"] == []
     assert manifest["tool"]["setuptools"]["py-modules"] == []
+
+
+def test_compat_readme_points_to_brigadestack_and_does_not_claim_the_registry_markers():
+    readme = (COMPAT / "README.md").read_text()
+    assert "compatibility" in readme
+    assert "pipx install brigadestack" in readme
+    # The MCP registry reads these from the README PyPI shows for `brigadestack`.
+    assert "mcp-name" not in readme
+    assert "mcp-name: io.github.escoffier-labs/brigade-memory" in (ROOT / "README.md").read_text()
+
+
+def test_mcp_registry_manifests_launch_the_brigadestack_package():
+    for server in ("memory", "skills"):
+        manifest = json.loads((ROOT / f"mcp-registry/{server}/server.json").read_text())
+        assert [package["identifier"] for package in manifest["packages"]] == ["brigadestack"]
+
+
+def test_retired_bridge_publish_workflow_is_gone():
+    assert not (ROOT / ".github/workflows/brigadestack-publish.yml").exists()
+    assert not (ROOT / "distribution/brigadestack/pypi").exists()
 
 
 def test_npm_bridge_keeps_existing_global_brigade_bin_and_pins_stable():

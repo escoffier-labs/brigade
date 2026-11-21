@@ -7,7 +7,7 @@ Install the listener with Brigade. The `grokbot-dispatch-mcp` sidecar is retired
 For the whole integration (pack reference, queue actor authorization, lifecycle semantics, finding delivery, and Bot configuration), see [Grok Bot operating guide](grokbot-operating-guide.md).
 
 ```bash
-pipx install "brigade-cli[grokbot]"
+pipx install "brigadestack[grokbot]"
 ```
 
 The package contains the adapter source, but it does not turn the Brigade CLI into a listener. Each role runs a separate listener process with a fixed role. The listener delegates queue operations to the queue below its selected Brigade target. It has no independent queue authority. Keep every target local to the operator that owns that queue.

@@ -1,7 +1,8 @@
 # AGENTS.md
 
 Brigade is a zero-runtime-dependency Python CLI for agent memory, handoffs, and
-local guardrails, published to PyPI as `brigade-cli`. Source lives in
+local guardrails, published to PyPI as `brigadestack` (with `brigade-cli` as a
+compatibility package). Source lives in
 `src/brigade/`, tests in `tests/`, harness/depth/include manifests in
 `src/brigade/templates/`.
 

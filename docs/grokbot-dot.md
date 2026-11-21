@@ -134,7 +134,7 @@ one with `message_send`.
 
 ## Setup and service units
 
-Install the MCP SDK with `pip install brigade-cli[connector]` (the `grokbot` extra remains an alias during the removal window). The listener also
+Install the MCP SDK with `pip install brigadestack[connector]` (the `grokbot` extra remains an alias during the removal window). The listener also
 requires `uvicorn` and `PyJWT[crypto]` in its Python environment.
 Prepare the runtime, enrolled Hub credential, and private state directory first.
 Use `--id dot` for pack commands, matching the other registered packs.

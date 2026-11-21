@@ -11,7 +11,7 @@ For the shortest path, see [`first-10-minutes.md`](first-10-minutes.md). This pa
 Brigade supports Linux, macOS, and Windows with Python 3.11 or newer. Follow the [per-OS install steps](../QUICKSTART.md#1-install) if `pipx` is not already available.
 
 ```bash
-pipx install brigade-cli
+pipx install brigadestack
 brigade setup
 brigade --version
 ```

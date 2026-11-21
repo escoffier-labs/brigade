@@ -221,7 +221,7 @@ def run_refresh(*, env: Mapping[str, str] | None = None, now: float | None = Non
             {"User-Agent": "Python-urllib"}
             if telemetry_usage.uncounted(environment)
             else {
-                "User-Agent": f"brigade-cli/{__version__} ({platform.system()})",
+                "User-Agent": f"brigadestack/{__version__} ({platform.system()})",
                 "X-Brigade-Channel": telemetry_usage.install_channel(environment),
             }
         )

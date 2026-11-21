@@ -282,7 +282,7 @@ def test_listener_install_hint_names_connector_extra(tmp_path, monkeypatch, caps
     monkeypatch.setattr(dot, "build_listener_from_target", missing_dependency)
     assert cli.main(["run", "cloud", "grokbot", "serve", "--pack", "dot", "--target", str(tmp_path)]) == 2
     message = capsys.readouterr().err
-    assert "pip install brigade-cli[connector]" in message
+    assert "pip install brigadestack[connector]" in message
     assert "grokbot extra remains an alias during the removal window" in message
 
 
