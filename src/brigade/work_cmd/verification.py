@@ -34,7 +34,7 @@ from ..claude_hooks import producer_session as hook_producer
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
-from . import verify_argv_files, verify_ranking, verify_runtime
+from . import verify_argv_files, verify_ci, verify_ranking, verify_runtime
 from .verify_scoreability import _print_graph_impact, _print_scoreability_notice, _scoreability_notice
 
 
@@ -73,18 +73,6 @@ def _verification_split_command(command: str) -> list[str]:
     if _verification_is_windows():
         parts = [_verification_strip_outer_quotes(token) for token in parts]
     return parts
-
-
-def _default_verify_commands(target: Path) -> list[str]:
-    if (target / "pyproject.toml").is_file() and (target / "tests").is_dir():
-        if (target / "src").is_dir():
-            return ["PYTHONPATH=src python3 -m pytest -q"]
-        return ["python3 -m pytest -q"]
-    if (target / "pytest.ini").is_file() or (target / "tests").is_dir():
-        return ["python3 -m pytest -q"]
-    if (target / "package.json").is_file():
-        return ["npm test"]
-    return []
 
 
 def _receipt_git_snapshot(target: Path) -> dict[str, Any] | None:
@@ -1327,7 +1315,7 @@ def _verify_run_suggestion(target: Path, *, commands: list[str] | None = None, m
     if manifest_id:
         argv.append(f"--manifest={manifest_id}")
     else:
-        argv.extend(f"--command={command}" for command in commands or ["..."])
+        argv.extend(f"--command={command}" for command in commands or ["python -m pytest -q tests/test_example.py"])
     return shlex.join(argv)
 
 
@@ -1346,6 +1334,7 @@ def _verify_plan_payload(
         affected_runner=affected_runner,
     )
     manifest: verify_manifest.VerifyManifest | None = None
+    from_ranking = False
     if manifest_id:
         manifest, error = verify_manifest.resolve_manifest(target, manifest_id)
         if manifest is None:
@@ -1362,11 +1351,13 @@ def _verify_plan_payload(
             }
         planned_commands = manifest.planned_commands
     else:
-        planned_commands = commands if commands is not None else _default_verify_commands(target)
+        ranked = ranking.get("suggested_command")
+        from_ranking = commands is None and isinstance(ranked, str) and bool(ranked.strip())
+        planned_commands = [ranked.strip()] if from_ranking else commands or []
     evidence = _verification_evidence_payload(target)
     blockers: list[str] = []
     if not planned_commands:
-        blockers.append("no verification commands found; pass --command or --manifest")
+        blockers.append("Choose a focused test selector with --command or pass --manifest.")
     for command in planned_commands:
         if isinstance(command, list):
             _, _, error = _verify_parse_argv(command, target)
@@ -1387,17 +1378,7 @@ def _verify_plan_payload(
         ),
         "suggested_command_shell": "posix",
     }
-    # Advisory only: when GraphTrail ranked affected tests and the caller did not
-    # lock a command/manifest, prefer the combined affected-test command as the
-    # next-step hint. ``commands`` still carries the default/full plan.
-    if (
-        commands is None
-        and manifest is None
-        and isinstance(ranking.get("suggested_command"), str)
-        and ranking["suggested_command"].strip()
-    ):
-        ranked_cmd = ranking["suggested_command"].strip()
-        payload["suggested_command"] = _verify_run_suggestion(target, commands=[ranked_cmd])
+    if from_ranking:
         payload["suggested_from_graph_impact"] = True
     if manifest is not None:
         payload["manifest_id"] = manifest.manifest_id
@@ -1817,7 +1798,8 @@ def _write_work_closeout_markdown(path: Path, closeout: dict[str, Any]) -> None:
         f"- Status: {closeout.get('status')}",
         f"- Ready: {closeout.get('ready')}",
         f"- Session: `{closeout.get('session', {}).get('id') if isinstance(closeout.get('session'), dict) else ''}`",
-        f"- Verification: `{closeout.get('verification', {}).get('run_id') if isinstance(closeout.get('verification'), dict) else ''}`",
+        f"- Local checks: `{closeout.get('verification', {}).get('run_id') if isinstance(closeout.get('verification'), dict) else ''}`",
+        f"- {verify_ci.closeout_summary(closeout['ci_verification'])}",
         "",
         "## Blockers",
         "",
@@ -1889,6 +1871,7 @@ def _work_closeout_payload(target: Path, session_id: str, *, write: bool = False
         }
         if latest_verify
         else None,
+        "ci_verification": verify_ci.closeout_evidence(target),
         "scanner_sweep": scanner_sweep,
         "code_review": code_review,
         "handoff_drafts": handoff_drafts,
@@ -1998,7 +1981,7 @@ def verify_run(
             return 1 if error and "not found" in error else 2
         planned = manifest.planned_commands
     else:
-        planned = commands if commands is not None else _default_verify_commands(target)
+        planned = commands or []
     if not planned:
         verify_runtime._print_verify_console(
             "error: no verification commands found; pass --command or --manifest", file=sys.stderr
@@ -2230,7 +2213,10 @@ def closeout(*, target: Path, session_id: str, json_output: bool = False) -> int
     print(f"session: {session.get('id')}")
     verification = payload.get("verification") if isinstance(payload.get("verification"), dict) else None
     if verification:
-        print(f"verification: {verification.get('run_id')} [{verification.get('status')}]")
+        print(f"Local checks: {verification.get('run_id')} [{verification.get('status')}]")
+    else:
+        print("Local checks: no receipt")
+    print(verify_ci.closeout_summary(payload["ci_verification"]))
     blockers = payload.get("blockers") if isinstance(payload.get("blockers"), list) else []
     if blockers:
         print("blockers:")

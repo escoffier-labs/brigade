@@ -336,7 +336,6 @@ from .reviews import (  # noqa: F401
     review_closeout,
 )
 from .verification import (  # noqa: F401
-    _default_verify_commands,
     _verify_parse_command,
     _latest_verify_receipt,
     _verify_read_receipt,

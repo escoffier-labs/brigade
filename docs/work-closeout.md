@@ -6,20 +6,24 @@ Brigade can write local verification receipts and work closeout records for comp
 
 ```bash
 brigade work verify plan
-brigade work verify run
-brigade work verify run --command "PYTHONPATH=src python3 -m pytest -q"
+brigade work verify run --command "python -m pytest -q tests/test_example.py"
 brigade work verify runs
+brigade work verify ci
 brigade work verify show <run-id>
 brigade work closeout latest
 brigade work closeout <session-id>
 ```
 
-`verify plan` inspects the repo and proposes local verification commands. It recognizes Python test layouts and package.json projects, and it reports blockers without running anything. When the code map is installed and indexed, it also ranks affected-test candidates from changed files (`--file`, or `git diff --name-only HEAD`) with graph evidence and confidence. The ranking is advisory and the worker still chooses the command. Without the code map the plan degrades cleanly and keeps the default command list.
+`verify plan` checks an explicit command or verifier manifest without running it.
+When the code map is installed and indexed, the plan ranks affected tests from
+changed files (`--file`, or `git diff --name-only HEAD`) and can suggest a
+focused command. With no command, manifest, or ranked suggestion, the plan
+asks for a focused test selector or a manifest.
 
-`verify run` executes commands supplied by `--command` / `--argv-json`, a selected
-`--manifest`, or discovered repo defaults when none is supplied
-([selection logic](../src/brigade/work_cmd/verification.py)). Commands run directly
-with `shell=False`. It supports simple leading environment assignments such as `PYTHONPATH=src`, rejects high-risk shell-like commands, captures stdout and stderr logs locally, and writes a receipt under:
+`verify run` executes an explicit `--command`, `--argv-json`, or `--manifest`.
+Commands run with `shell=False` and support leading environment assignments
+such as `PYTHONPATH=src`. Brigade rejects high-risk shell-like commands and
+stores stdout, stderr, and the receipt under the following directory.
 
 ```text
 .brigade/work/verify-runs/
@@ -33,7 +37,11 @@ with `shell=False`. It supports simple leading environment assignments such as `
 .brigade/work/closeouts/
 ```
 
-The closeout includes the selected work session, task acceptance criteria when present, latest verification receipt, latest scanner sweep state, code review closeout state, handoff draft queue state, and blockers. It also stores a compact closeout reference on the session `session.json`.
+The closeout reports the latest local checks and the CI result for the current
+commit and tree. It includes the work session, task acceptance criteria when
+present, scanner sweep and review state, handoff draft state, and blockers.
+The session's `session.json` stores a compact closeout reference. See
+[CI evidence for HEAD](verify-ci.md).
 
 ## Abridged receipt example (`schema_version` 2)
 
@@ -47,8 +55,8 @@ New verify receipts use integer `schema_version: 2`. `commands` is an array of c
   "duration_seconds": 15.18,
   "commands": [
     {
-      "command": "pytest -q",
-      "argv": ["pytest", "-q"],
+      "command": "pytest -q tests/test_example.py",
+      "argv": ["pytest", "-q", "tests/test_example.py"],
       "status": "completed",
       "exit_code": 0
     }
@@ -82,4 +90,4 @@ Blocked closeouts are still written, so the operator has a local record of what 
 
 ## Boundary
 
-Verification and closeout are local and explicit. Brigade does not mutate CI, GitHub, reviewers, scanner imports, handoff drafts, canonical memory, daemons, schedulers, or remotes. Verification commands run only when the operator asks for `brigade work verify run`.
+Local verification commands run only on an explicit `brigade work verify run` invocation. Closeout reads local records. `brigade work verify ci` contacts GitHub to refresh the saved CI result.

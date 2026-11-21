@@ -194,11 +194,10 @@ def _candidate_rank_key(item: dict[str, Any]) -> tuple[float, int, str]:
 
 
 def _verification_command_prefix(target: Path) -> str | None:
-    """Return a combined-command prefix when it matches ``_default_verify_commands``.
+    """Return a pytest prefix to which the ranked file selectors are appended.
 
-    When the plan default is ``npm test`` (package.json without a Python test
-    layout), return ``None`` so graph impact does not promote a combined command
-    over the plan-level default.
+    For npm projects, list candidates individually because test scripts vary
+    in how they handle file arguments.
     """
     if (target / "pyproject.toml").is_file() and (target / "tests").is_dir():
         if (target / "src").is_dir():

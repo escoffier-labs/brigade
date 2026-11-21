@@ -20,7 +20,7 @@ def test_verify_plan_degrades_without_graphtrail(tmp_path, capsys):
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "demo.py").write_text("VALUE = 1\n")
 
-    assert work_cmd.verify_plan(target=tmp_path, files=["src/demo.py"], json_output=True) == 0
+    assert work_cmd.verify_plan(target=tmp_path, files=["src/demo.py"], json_output=True) == 1
     payload = json.loads(capsys.readouterr().out)
     ranking = payload["graph_impact"]
     assert ranking["degraded"] is True
@@ -28,13 +28,14 @@ def test_verify_plan_degrades_without_graphtrail(tmp_path, capsys):
     assert ranking["changed_files"] == ["src/demo.py"]
     assert ranking["candidates"] == []
     assert payload["ranked_candidates"] == []
-    assert payload["commands"] == ["PYTHONPATH=src python3 -m pytest -q"]
+    assert payload["commands"] == []
+    assert "focused test selector" in payload["blockers"][0]
 
 
 def test_verify_plan_text_prints_degraded_graph_impact(tmp_path, capsys):
     _init_git_repo(tmp_path)
     (tmp_path / "tests").mkdir()
-    assert work_cmd.verify_plan(target=tmp_path, files=["src/a.py"], json_output=False) == 0
+    assert work_cmd.verify_plan(target=tmp_path, files=["src/a.py"], json_output=False) == 1
     out = capsys.readouterr().out
     assert "graph_impact: degraded" in out
     assert "graphtrail" in out
@@ -143,8 +144,7 @@ def test_verify_plan_enriched_suggests_ranked_command(tmp_path, monkeypatch, cap
         "--command=PYTHONPATH=src python3 -m pytest -q tests/test_a.py",
     ]
     assert "tests/test_a.py" in payload["suggested_command"]
-    # Default full-suite command remains in the plan; ranking is advisory.
-    assert payload["commands"] == ["PYTHONPATH=src python3 -m pytest -q"]
+    assert payload["commands"] == ["PYTHONPATH=src python3 -m pytest -q tests/test_a.py"]
 
 
 def test_verify_plan_explicit_command_keeps_worker_choice(tmp_path, monkeypatch, capsys):
@@ -265,7 +265,7 @@ def test_rank_verification_candidates_deduplicates_duplicate_paths(tmp_path, mon
     assert ranking["suggested_command"] == ("PYTHONPATH=src python3 -m pytest -q tests/test_mod.py tests/test_other.py")
 
 
-def test_rank_verification_candidates_npm_default_keeps_advisory_paths_only(tmp_path, monkeypatch):
+def test_rank_verification_candidates_npm_keeps_advisory_paths_only(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
     (tmp_path / "package.json").write_text('{"name":"demo","scripts":{"test":"node --test"}}')
     (tmp_path / "src").mkdir()
@@ -293,7 +293,7 @@ def test_rank_verification_candidates_npm_default_keeps_advisory_paths_only(tmp_
     assert ranking["suggested_command"] is None
 
 
-def test_verify_plan_npm_default_does_not_promote_pytest_graph_impact(tmp_path, monkeypatch, capsys):
+def test_verify_plan_npm_lists_candidates_without_a_default(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     (tmp_path / "package.json").write_text('{"name":"demo","scripts":{"test":"node --test"}}')
     (tmp_path / "src").mkdir()
@@ -314,16 +314,16 @@ def test_verify_plan_npm_default_does_not_promote_pytest_graph_impact(tmp_path, 
 
     monkeypatch.setattr(verify_ranking, "_run_graphtrail_affected", fake_affected)
 
-    assert work_cmd.verify_plan(target=tmp_path, files=["src/mod.js"], json_output=True) == 0
+    assert work_cmd.verify_plan(target=tmp_path, files=["src/mod.js"], json_output=True) == 1
     payload = json.loads(capsys.readouterr().out)
-    assert payload["commands"] == ["npm test"]
+    assert payload["commands"] == []
     assert shlex.split(payload["suggested_command"]) == [
         "brigade",
         "work",
         "verify",
         "run",
         f"--target={tmp_path.resolve()}",
-        "--command=npm test",
+        "--command=python -m pytest -q tests/test_example.py",
     ]
     assert "suggested_from_graph_impact" not in payload
     assert payload["ranked_candidates"][0]["test_path"] == "src/mod.test.js"

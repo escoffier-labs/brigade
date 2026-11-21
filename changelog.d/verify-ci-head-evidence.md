@@ -1,0 +1,2 @@
+- Add `brigade work verify ci` to record the required CI check on the exact head commit and show its result alongside local checks in work closeout.
+- Require a focused command, a verifier manifest, or a ranked test suggestion when planning local verification.
