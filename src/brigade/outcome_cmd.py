@@ -2377,6 +2377,12 @@ def _scorecard_attestation_counts(scorecard_entry: Any) -> tuple[int, int]:
     )
 
 
+def _scorecard_ci_observed(scorecard_entry: Any) -> int:
+    """Return the display-only count of trials whose CI check run was seen passing (#2779)."""
+    value = getattr(scorecard_entry, "ci_observed_trials", 0)
+    return value if isinstance(value, int) and not isinstance(value, bool) else 0
+
+
 def rank(
     *,
     target: Path,
@@ -2510,7 +2516,7 @@ def rank(
             local_trials, attested_trials = _scorecard_attestation_counts(scorecard_entry)
             entry["local_trials"] = local_trials
             entry["attested_trials"] = attested_trials
-            entry["ci_observed_trials"] = scorecard_entry.ci_observed_trials  # display only (#2779)
+            entry["ci_observed_trials"] = _scorecard_ci_observed(scorecard_entry)  # display only (#2779)
             if scorecard_entry.ineligible_summary:
                 entry["ineligible_summary"] = scorecard_entry.ineligible_summary
         ranking_payload.append(entry)
@@ -2544,7 +2550,7 @@ def rank(
         local_trials, attested_trials = _scorecard_attestation_counts(scorecard_entry)
         entry["local_trials"] = local_trials
         entry["attested_trials"] = attested_trials
-        entry["ci_observed_trials"] = scorecard_entry.ci_observed_trials  # display only (#2779)
+        entry["ci_observed_trials"] = _scorecard_ci_observed(scorecard_entry)  # display only (#2779)
         if scorecard_entry.ineligible_summary:
             entry["ineligible_summary"] = scorecard_entry.ineligible_summary
         ranking_payload.append(entry)
@@ -2589,8 +2595,10 @@ def rank(
             trials_tail = (
                 f" trials={int(scorecard_entry.dimensions.get('effectiveness', {}).get('trials', 0))}"
                 f" local={local_trials} attested={attested_trials}"
-                f" seen_passing_in_ci={scorecard_entry.ci_observed_trials} (display only)"
             )
+            ci_seen = _scorecard_ci_observed(scorecard_entry)
+            if ci_seen:
+                trials_tail += f" seen_passing_in_ci={ci_seen} (display only)"
         print(
             f"- {artifact_id} score={current.score:.3f} helped={current.helped} "
             f"hurt={current.hurt}{trials_tail}{recency_tail}{fingerprint_tail}{capability_tail}{graph_tail}{brief_tail}"
