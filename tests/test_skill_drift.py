@@ -117,13 +117,24 @@ def test_a_linked_copy_is_skipped_not_flagged_or_written(tmp_path, monkeypatch):
     assert (elsewhere / "SKILL.md").read_bytes() == OLD
 
 
-def _row(status: str, *, kind: str = "brigade-bundle", update: str | None = "update") -> dict:
+def _row(
+    status: str,
+    *,
+    kind: str = "brigade-bundle",
+    update: str | None = "update",
+    local_edit: str = "current",
+    receipt_known: bool = True,
+    supported: bool | None = True,
+    harness: str = "claude",
+) -> dict:
     return {
         "skill_id": "brigade-work",
-        "harness": "claude",
+        "harness": harness,
         "installed_path": "/ws/.claude/skills/brigade-work",
         "status": status,
         "source": {"kind": kind},
+        "supported": supported,
+        "drift": {"local_edit": local_edit, "receipt_known": receipt_known},
         "update_command": update,
     }
 
@@ -131,12 +142,17 @@ def _row(status: str, *, kind: str = "brigade-bundle", update: str | None = "upd
 def _stub_fleet(monkeypatch, tmp_path: Path, rows: list[dict], calls: list[dict]) -> Path:
     target = tmp_path / "ws"
     target.mkdir()
+    copy = target / ".claude" / "skills" / "brigade-work"
+    copy.mkdir(parents=True)
+    (copy / "SKILL.md").write_bytes(OLD)
+    _record_history(tmp_path, monkeypatch, OLD, _bundled())
     for row in rows:
-        row["installed_path"] = str(target / ".claude" / "skills" / "brigade-work")
+        row["installed_path"] = str(copy)
     monkeypatch.setattr("brigade.skills_cmd._fleet_status_payload", lambda _target: {"copies": rows})
 
     def fake_install(**kwargs):
         calls.append(kwargs)
+        print(json.dumps({"installed": True, "receipt": {"receipts": [{"target": kwargs["harness"]}]}}))
         return 0
 
     monkeypatch.setattr("brigade.skills_cmd.install", fake_install)
@@ -153,7 +169,13 @@ def test_a_stale_bundled_copy_is_refreshed_through_install_force(tmp_path, monke
 
     assert result["counts"]["refreshed"] == 1
     assert calls == [
-        {"workspace": target.resolve(), "skill": "bundled:brigade-work", "harness": "claude", "force": True}
+        {
+            "workspace": target.resolve(),
+            "skill": "bundled:brigade-work",
+            "harness": "claude",
+            "force": True,
+            "json_output": True,
+        }
     ]
 
 
@@ -374,3 +396,168 @@ def test_care_install_adds_the_drift_step_to_an_existing_pristine_weekly_runbook
 
     assert [step["id"] for step in _weekly(tmp_path)["steps"]] == ["rank", "reconcile", "skill-drift"]
     assert not list(path.parent.glob("*.bak-*"))
+
+
+# --- refresh proof, scope and report integrity (review round) ---
+
+
+def _bundle_install(target: Path, harness: str = "claude") -> Path:
+    """Install the bundled skill the real way, so a receipt exists, and return the copy."""
+    import shutil
+
+    from brigade import skills_cmd
+
+    wired = target / f".{harness}" / "skills" / "brigade-work"
+    if wired.exists():
+        shutil.rmtree(wired)  # init wired a receiptless copy here, and a receipt needs a real install
+    assert skills_cmd.install(workspace=target, skill="bundled:brigade-work", harness=harness, json_output=True) == 0
+    return target / f".{harness}" / "skills" / "brigade-work"
+
+
+def _receipt_path(target: Path, harness: str = "claude") -> Path:
+    return target / ".brigade" / "skills" / "installs" / f"brigade-work-{harness}.json"
+
+
+def _make_stale(target: Path, harness: str = "claude", *, legacy: bool = False) -> None:
+    """Pretend a newer Brigade changed the bundled source, optionally with a pre-edit-digest receipt."""
+    path = _receipt_path(target, harness)
+    receipt = json.loads(path.read_text())
+    receipt["source"]["fingerprint"] = "0" * 64
+    if legacy:
+        receipt["installed"].pop("edit_fingerprint", None)
+    path.write_text(json.dumps(receipt, indent=2))
+
+
+def test_a_legacy_receipt_copy_with_an_operator_file_is_flagged_and_the_file_survives(tmp_path):
+    target = _workspace(tmp_path)
+    copy = _bundle_install(target)
+    operator_file = copy / "assets" / "skill.json"
+    operator_file.parent.mkdir()
+    operator_file.write_text('{"mine": true}')
+    _make_stale(target, legacy=True)
+
+    result = skill_drift.run(target, refresh=True)
+
+    assert operator_file.read_text() == '{"mine": true}'
+    assert result["counts"]["refreshed"] == 0
+    row = next(item for item in result["flagged"] if item["harness"] == "claude")
+    assert row["path"] == ".claude/skills/brigade-work"
+    assert "not provably an unedited release copy" in row["reason"]
+
+
+def test_a_stale_copy_with_a_current_receipt_is_refreshed_through_the_real_install(tmp_path, monkeypatch):
+    target = _workspace(tmp_path)
+    copy = _bundle_install(target)
+    _record_history(tmp_path, monkeypatch, (copy / "SKILL.md").read_bytes())
+    _make_stale(target)
+
+    checked = skill_drift.run(target, refresh=False)
+    assert checked["counts"]["refreshable"] == 1 and checked["counts"]["flagged"] == 0
+
+    result = skill_drift.run(target, refresh=True)
+
+    assert result["counts"]["refreshed"] == 1 and result["counts"]["flagged"] == 0
+    assert json.loads(_receipt_path(target).read_text())["source"]["fingerprint"] != "0" * 64
+
+
+def test_a_stale_copy_whose_text_is_no_recorded_release_is_flagged(tmp_path, monkeypatch):
+    calls: list[dict] = []
+    target = _stub_fleet(monkeypatch, tmp_path, [_row("stale")], calls)
+    (target / ".claude/skills/brigade-work/SKILL.md").write_bytes(EDITED)
+
+    result = skill_drift.run(target, refresh=True)
+
+    assert calls == [] and result["counts"]["flagged"] == 1 and result["counts"]["refreshed"] == 0
+
+
+def test_an_install_that_wrote_nothing_is_not_counted_as_refreshed(tmp_path, monkeypatch):
+    calls: list[dict] = []
+    target = _stub_fleet(monkeypatch, tmp_path, [_row("stale")], calls)
+
+    def skipped_install(**kwargs):
+        calls.append(kwargs)
+        print(json.dumps({"installed": False, "receipt": {"receipts": [], "skipped": [{"target": "claude"}]}}))
+        return 0
+
+    monkeypatch.setattr("brigade.skills_cmd.install", skipped_install)
+
+    result = skill_drift.run(target, refresh=True)
+
+    assert len(calls) == 1
+    assert result["counts"]["refreshed"] == 0 and result["counts"]["flagged"] == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="needs POSIX symlinks")
+def test_a_copy_that_became_a_link_is_flagged_not_refreshed(tmp_path, monkeypatch):
+    target = _workspace(tmp_path)
+    _record_history(tmp_path, monkeypatch, OLD, _bundled())
+    copy = target / ".claude/skills/brigade-work"
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    (elsewhere / "SKILL.md").write_bytes(OLD)
+    for child in copy.iterdir():
+        child.unlink()
+    copy.rmdir()
+    copy.symlink_to(elsewhere, target_is_directory=True)
+    # Fleet status saw a plain stale copy a moment ago, then the copy became a link. The real
+    # install skips a linked copy and still exits 0, which must not count as a refresh.
+    row = {**_row("stale"), "installed_path": str(copy)}
+    monkeypatch.setattr("brigade.skills_cmd._fleet_status_payload", lambda _target: {"copies": [row]})
+
+    result = skill_drift.run(target, refresh=True)
+
+    assert result["counts"]["refreshed"] == 0 and result["counts"]["flagged"] == 1
+    assert (elsewhere / "SKILL.md").read_bytes() == OLD
+    assert copy.is_symlink()
+
+
+def test_a_hermes_copy_is_external_never_refreshed_and_its_path_is_never_reported(tmp_path, monkeypatch):
+    home = tmp_path / "hermes-home"
+    home.mkdir()
+    monkeypatch.setenv("HERMES_HOME", str(home))
+    target = _workspace(tmp_path)
+    _bundle_install(target, "hermes")
+    hermes_copy = next(home.rglob("SKILL.md"))
+    before = hermes_copy.read_bytes()
+    _make_stale(target, "hermes")
+
+    result = skill_drift.run(target, refresh=True)
+
+    assert hermes_copy.read_bytes() == before
+    assert result["counts"]["refreshed"] == 0 and result["counts"]["flagged"] == 0
+    assert result["counts"]["skipped"] >= 1
+    assert str(tmp_path) not in json.dumps(result) and str(home) not in json.dumps(result)
+
+
+def test_a_row_that_failed_to_lint_is_not_judged_as_a_wired_copy(tmp_path, monkeypatch):
+    calls: list[dict] = []
+    row = _row("unknown", receipt_known=False, supported=None, update=None)
+    target = _stub_fleet(monkeypatch, tmp_path, [row], calls)
+    (target / ".claude/skills/brigade-work/SKILL.md").write_bytes(EDITED)
+
+    result = skill_drift.run(target, refresh=True)
+
+    assert result["counts"] == {"current": 0, "refreshed": 0, "refreshable": 0, "flagged": 0, "skipped": 1}
+
+
+def test_a_copy_that_vanished_before_the_refresh_is_reported_missing_not_recreated(tmp_path, monkeypatch):
+    calls: list[dict] = []
+    row = _row("unknown", receipt_known=False, update=None)
+    target = _stub_fleet(monkeypatch, tmp_path, [row], calls)
+    skill = target / ".claude/skills/brigade-work/SKILL.md"
+    reads = []
+    real_read = skill_drift._read_installed
+
+    def vanishing(path):
+        reads.append(path)
+        data = real_read(path)
+        if len(reads) == 1:
+            skill.unlink()  # gone right after the classification read
+        return data
+
+    monkeypatch.setattr(skill_drift, "_read_installed", vanishing)
+
+    result = skill_drift.run(target, refresh=True)
+
+    assert not skill.exists()
+    assert result["counts"]["skipped"] == 1 and result["counts"]["flagged"] == 0 and result["counts"]["refreshed"] == 0
