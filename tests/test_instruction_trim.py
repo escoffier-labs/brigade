@@ -46,6 +46,7 @@ def _plan(data, **changes):
         overflow=(),
         max_moves=8,
         max_card_bytes=12_000,
+        moved_cards=0,
     )
     return plan_append(parse(data), **{**options, **changes})
 
@@ -136,6 +137,23 @@ def test_owner_smaller_file_moves_nothing():
     data = owner_user_md(sections=(("Voice & Communication", 651), ("Preferences (core)", 510)))
     plan = _plan(data)
     assert (len(data), plan.reason, plan.after, plan.runs) == (2869, "within", data, ())
+
+
+def test_the_moved_card_count_is_required():  # issue #2565 review
+    with pytest.raises(TypeError, match="moved_cards"):
+        plan_append(
+            parse(b"# T\n"),
+            file_key="user-md",
+            limits=LIMITS,
+            today=TODAY,
+            decision_id=ID,
+            taken=frozenset(),
+            held=frozenset(),
+            config_pins=(),
+            overflow=(),
+            max_moves=8,
+            max_card_bytes=12_000,
+        )
 
 
 def test_a_file_at_the_moved_card_cap_creates_no_card():  # issue #2565

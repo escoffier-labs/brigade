@@ -38,13 +38,24 @@ def _fingerprint(info: os.stat_result) -> tuple[int, int, int, int, int]:
     return info.st_dev, info.st_ino, info.st_mode, info.st_size, info.st_mtime_ns
 
 
-def read_regular_file(path: Path | str, *, max_bytes: int, require_stable: bool = False) -> BoundedRead:
+def read_regular_file(
+    path: Path | str,
+    *,
+    max_bytes: int,
+    require_stable: bool = False,
+    no_follow: bool = False,
+) -> BoundedRead:
     """Read `path` when it is a regular file of at most `max_bytes` bytes.
 
     `require_stable` also fails with "changed" when the descriptor's size or
     modification time moves during the read, or when the path no longer names
     the file that was opened. Use it for configuration, where a half-written file
     must not be trusted. A file another program appends to can be read without it.
+
+    `no_follow` refuses a symbolic link at the final path where the platform has
+    `O_NOFOLLOW` (Linux and macOS), so a caller that counted a directory entry as
+    a regular file never reads through a link swapped in after that check. Windows
+    has no `O_NOFOLLOW` and cannot create such a race from a directory entry there.
     """
     nonblock = getattr(os, "O_NONBLOCK", 0)
     if not nonblock:
@@ -59,6 +70,8 @@ def read_regular_file(path: Path | str, *, max_bytes: int, require_stable: bool 
         if not stat.S_ISREG(pre.st_mode):
             return BoundedRead(None, 0, "not-regular")
     flags = os.O_RDONLY | nonblock | getattr(os, "O_BINARY", 0) | getattr(os, "O_CLOEXEC", 0)
+    if no_follow:
+        flags |= getattr(os, "O_NOFOLLOW", 0)
     try:
         fd = os.open(path, flags)
     except (FileNotFoundError, NotADirectoryError):

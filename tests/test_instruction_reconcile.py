@@ -54,6 +54,7 @@ def _moved(data: bytes | None = None, *, overflow: tuple[str, ...] = ()) -> Move
         overflow=overflow,
         max_moves=8,
         max_card_bytes=12_000,
+        moved_cards=0,
     )
     runs: list[RecordedRun] = []
     cards: dict[str, bytes | None] = {}
@@ -588,6 +589,7 @@ def test_editing_inside_a_widened_hold_releases_it():  # review of #2567: a hold
             overflow=(),
             max_moves=8,
             max_card_bytes=12_000,
+            moved_cards=0,
         )
 
     held_plan = plan(result.after)

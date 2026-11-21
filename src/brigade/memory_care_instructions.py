@@ -90,6 +90,19 @@ def encode_value(text: str, *, max_len: int = VALUE_MAX) -> str:
     return "".join(out) + TRUNCATED
 
 
+def normalize_source(text: str) -> str:
+    """A source path as a card stores and compares it: POSIX separators, no leading `./`, no case change."""
+    value = text.replace("\\", "/")
+    while value.startswith("./"):
+        value = value[2:]
+    return value
+
+
+def encode_source(text: str) -> str:
+    """`source_file` for an instruction card, encoded after `normalize_source` so one path has one form."""
+    return encode_value(normalize_source(text))
+
+
 def field(name: str, text: str) -> str:
     """`name="<encoded text>"`, the one shape an untrusted value takes in a line."""
     return f'{name}="{encode_value(text)}"'

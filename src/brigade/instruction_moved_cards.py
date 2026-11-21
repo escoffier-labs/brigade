@@ -3,26 +3,37 @@
 A moved card carries `archive: never`, so the retire stage never removes one and a file
 that keeps receiving appends would keep producing cards. `instruction_trim` bounds that
 growth with `MAX_MOVED_CARDS_PER_FILE` and reports `moved_card_cap_reached` when a file
-reaches it. The move stage passes `count` to the planner.
+reaches it. The move stage (slice 2 PR A3) must pass `count` to the planner as
+`moved_cards`, so the cap takes effect when that stage lands.
 
 Counting reads the card folder, not the journal, so it stays exact after a card is
-deleted or a move is undone: only a card that still exists and still names the file in
-`source_file` counts. Nothing here merges, compacts or deletes a card, so every decision
-the journal still records keeps its before-image and its card and can still be undone
-byte for byte.
+deleted or a move is undone: a card that no longer exists does not count, and a card
+that does not carry this file's `source_file` does not count. Nothing here merges,
+compacts or deletes a card, so every decision the journal still records keeps its
+before-image and its card and can still be undone byte for byte.
+
+The count fails closed. A missing folder is 0, because no card exists. Every other scan
+failure (a permission error, a name that is not a directory, too many open files) returns
+`MAX_MOVED_CARDS_PER_FILE`, so the planner reports the cap and creates nothing rather
+than growing a folder it cannot read. A symlinked card entry is never counted. A card
+folder that is itself a symlink or not a directory also fails closed, and a matching
+entry that cannot be read in full, is oversized, is not a regular file or is not UTF-8
+counts, because it holds the place.
 """
 
 from __future__ import annotations
 
 import os
 import re
+import stat
 from pathlib import Path
 
 from .bounded_read import read_regular_file
 from .instruction_inventory import INSPECTION_CEILING
 from .instruction_overflow import CARDS_REL
 from .instruction_sections import FILE_KEY
-from .memory_care_instructions import encode_value
+from .instruction_trim import MAX_MOVED_CARDS_PER_FILE
+from .memory_care_instructions import encode_source, normalize_source
 
 # The tag every card this feature creates carries, and the member that separates a moved
 # card from an overflow card. Both must be exact members of the card's `tags` value.
@@ -71,42 +82,77 @@ def _source(values: list[str]) -> str | None:
 
 
 def is_moved_card(text: str, *, source_name: str) -> bool:
-    """Whether `text` is a moved card this feature created for the file named by `source_name`."""
+    """Whether `text` is a moved card this feature created for the file named by `source_name`.
+
+    `source_file` is compared in its POSIX form without a leading `./` and without a case
+    change, the form `card_bytes` writes after this change. A raw backslash path written
+    by hand compares the same way.
+    """
     fields = _frontmatter(text)
     if fields is None:
         return False
     tags = _tags(fields.get("tags", []))
     if MARKER_TAG not in tags or MOVED_TAG not in tags:
         return False
-    return _source(fields.get("source_file", [])) == encode_value(source_name)
+    stored = _source(fields.get("source_file", []))
+    return stored is not None and normalize_source(stored) == encode_source(source_name)
+
+
+def _occupies_place(path: Path, *, source_name: str) -> int:
+    """1 when this matching entry holds a cap place, 0 when it is another card this file can ignore.
+
+    A directory entry that is not a regular file, cannot be read in full, or is not UTF-8
+    holds a place: it has the name a moved card would use and nothing proves it is not one.
+    A readable card that names another source, or is not a moved card, does not hold one.
+    """
+    try:
+        if not stat.S_ISREG(os.lstat(path).st_mode):
+            return 1
+    except OSError:
+        return 1
+    read = read_regular_file(path, max_bytes=INSPECTION_CEILING, no_follow=True)
+    if read.data is None:
+        return 1
+    try:
+        text = read.data.decode("utf-8")
+    except UnicodeDecodeError:
+        return 1
+    return 1 if is_moved_card(text, source_name=source_name) else 0
 
 
 def count(target: Path, *, file_key: str, source_name: str) -> int:
-    """Existing moved cards for one instruction file, named by its key and its card source value.
+    """Existing moved cards for one instruction file, or `MAX_MOVED_CARDS_PER_FILE` when the folder cannot be trusted.
 
     `source_name` is the value the move stage passes to `card_bytes`, so creation and this
-    count always compare the same encoded `source_file` value. A card that cannot be read
-    in full, or does not parse, does not count: it cannot be shown to carry this source.
+    count always compare the same `source_file` form. The scan stops as soon as the count
+    reaches the cap, so a folder with more matching names costs one pass to the cap, not a
+    read of every match.
     """
     if FILE_KEY.fullmatch(file_key) is None:
-        return 0
-    pattern = re.compile(rf"^{re.escape(file_key)}--[a-z0-9-]+\.md$")
+        return 0  # no card can be named for it, so no card can carry its source
+    folder = target / CARDS_REL
     try:
-        with os.scandir(target / CARDS_REL) as entries:
-            names = sorted(entry.name for entry in entries)
-    except (OSError, ValueError):
+        info = os.lstat(folder)
+    except FileNotFoundError:
         return 0
+    except OSError:
+        return MAX_MOVED_CARDS_PER_FILE
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        return MAX_MOVED_CARDS_PER_FILE
+    pattern = re.compile(rf"^{re.escape(file_key)}--[a-z0-9-]+\.md$")
     found = 0
-    for name in names:
-        if pattern.match(name) is None:
-            continue
-        read = read_regular_file(target / CARDS_REL / name, max_bytes=INSPECTION_CEILING)
-        if read.data is None:
-            continue
-        try:
-            text = read.data.decode("utf-8")
-        except UnicodeDecodeError:
-            continue
-        if is_moved_card(text, source_name=source_name):
-            found += 1
+    try:
+        with os.scandir(folder) as entries:
+            for entry in entries:
+                if pattern.match(entry.name) is None:
+                    continue
+                if entry.is_symlink():
+                    continue  # never read through a link, and a link holds no place
+                found += _occupies_place(folder / entry.name, source_name=source_name)
+                if found >= MAX_MOVED_CARDS_PER_FILE:
+                    return MAX_MOVED_CARDS_PER_FILE
+    except FileNotFoundError:
+        return 0
+    except OSError:
+        return MAX_MOVED_CARDS_PER_FILE
     return found

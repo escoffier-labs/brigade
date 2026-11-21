@@ -38,8 +38,9 @@ CARD_DIR = "memory/cards/instructions/"
 # A moved card carries `archive: never`, so the retire stage never removes one and a file that keeps
 # receiving appends would keep producing cards. The cap keeps that folder bounded per source file
 # without merging or deleting a card, which would break undo for a decision whose before-image must
-# still match live bytes. Fifty is more than six times `max_moves_per_file` (8), so a normal file
-# takes many passes to reach it, and the folder holds at most fifty cards of `max_card_bytes` each.
+# still match live bytes. The check runs before a pass, so a pass that starts below the cap can still
+# add up to `max_moves_per_file` (8) cards and the folder can reach the cap plus seven before it
+# stops. Fifty leaves a normal file many passes before that point.
 MAX_MOVED_CARDS_PER_FILE = 50
 # The fixed reason a file at the cap reports. It is not an error, the pass continues.
 CAP_REASON = "moved_card_cap_reached"
@@ -221,7 +222,7 @@ def plan_append(
     overflow: Sequence[str],
     max_moves: int,
     max_card_bytes: int,
-    moved_cards: int = 0,  # cards that still exist for this file and carry its source
+    moved_cards: int,  # cards that still exist for this file and carry its source
 ) -> TrimPlan:
     data = doc.data
 
@@ -347,7 +348,7 @@ def card_bytes(
 ) -> bytes:
     """The private card for one moved run: frontmatter, then the run's bytes unchanged. No heading text enters it.
     Every frontmatter value is checked, so no string can add a line or a field. Raises `ValueError` otherwise."""
-    from .memory_care_instructions import encode_value
+    from .memory_care_instructions import encode_source
 
     _check_card_values(file_key=file_key, slug=slug, decision_id=decision_id, fresh_until=fresh_until, card_id=card_id)
 
@@ -355,7 +356,7 @@ def card_bytes(
         _frontmatter(
             file_key=file_key,
             slug=slug,
-            source_value=encode_value(source_name),
+            source_value=encode_source(source_name),
             today=today,
             decision_id=decision_id,
             fresh_until=fresh_until,
