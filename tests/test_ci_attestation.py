@@ -206,6 +206,33 @@ def test_the_answer_is_memoised_per_commit_and_manifest(merged_repo):
     assert len(gh.calls) == calls
 
 
+def test_a_spent_call_budget_stops_lookups_for_the_rest_of_the_build(merged_repo):
+    target, merge = merged_repo
+    gh = FakeGh(_world(merge))
+    observer = ci_attestation.CiObserver(target, gh_api=gh, max_calls=1)
+    assert observer.observed(_receipt()) is False, "the pull request lookup spends the only call"
+    assert len(gh.calls) == 1
+    assert observer.observed({**_receipt(), "git": {"head": "e" * 40, "branch": BRANCH}}) is False
+    assert len(gh.calls) == 1, "an exhausted budget reads as offline"
+
+
+def test_a_spent_time_budget_stops_lookups_even_when_each_call_succeeds(merged_repo):
+    target, merge = merged_repo
+    now = [0.0]
+
+    class SlowGh(FakeGh):
+        def __call__(self, endpoint: str) -> Any:
+            now[0] += 40.0
+            return super().__call__(endpoint)
+
+    gh = SlowGh(_world(merge))
+    observer = ci_attestation.CiObserver(target, gh_api=gh, budget_seconds=60.0, clock=lambda: now[0])
+    assert observer.observed(_receipt()) is True
+    calls = len(gh.calls)
+    assert observer.observed({**_receipt(), "git": {"head": "e" * 40, "branch": BRANCH}}) is False
+    assert len(gh.calls) == calls, "no call starts after the build-wide deadline"
+
+
 def test_default_gh_api_fails_closed_without_gh(monkeypatch):
     def missing(*_a: Any, **_k: Any) -> Any:
         raise FileNotFoundError("gh")
@@ -303,5 +330,9 @@ def test_the_workflow_matches_the_contract_the_reader_checks():
     assert "branches: [main]" in text
     assert "permissions:\n  contents: read\n" in text
     assert "secrets." not in text
+    for line in text.splitlines():
+        if "uses:" in line:
+            ref = line.split("uses:", 1)[1].split("#", 1)[0].strip().rsplit("@", 1)[1]
+            assert len(ref) == 40 and all(c in "0123456789abcdef" for c in ref), line
     assert f"name: {ci_attestation.ATTEST_CHECK_PREFIX}${{{{ matrix.manifest }}}}" in text
     assert 'brigade work verify run --target . --manifest "$MANIFEST_ID"' in text

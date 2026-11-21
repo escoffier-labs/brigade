@@ -5,14 +5,15 @@ check run on the merge commit of the receipt's pull request pass? The answer is 
 people reading ``outcome rank`` and the work brief. It is never an input to
 promotion, eligibility, a band or the ratchet decision.
 
-State on the workspace host cannot authorize an unattended write. Everything this
-module reads on the host (PATH, the ``gh`` config, receipts, the git remote) is
+State on the workspace host cannot authorize an unattended write. This lookup is
 forgeable by a same-user agent, so a "seen passing" answer can only be shown. The
 scheduled CI job that makes promotion decisions is a separate change.
 
 The lookup goes through ``gh api`` and stays fail-closed and fail-quiet: any error
 (no ``gh``, no network, bad JSON, a rate limit, a missing field) means "not
-observed", and nothing here raises into a caller.
+observed", and nothing here raises into a caller. One observer spends at most
+``LOOKUP_BUDGET_SECONDS`` and ``LOOKUP_MAX_CALLS`` across a whole build, then reports
+"not observed" for the rest, so a slow network cannot stall ``outcome rank``.
 """
 
 from __future__ import annotations
@@ -21,6 +22,7 @@ import json
 import os
 import re
 import subprocess
+import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
@@ -30,6 +32,8 @@ ATTEST_APP_SLUG = "github-actions"
 ATTEST_BRANCH = "main"
 DISABLE_ENV = "BRIGADE_CI_ATTESTATION"
 GH_TIMEOUT_SECONDS = 20
+LOOKUP_BUDGET_SECONDS = 60.0
+LOOKUP_MAX_CALLS = 60
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _REMOTE_RE = re.compile(r"github\.com[:/]+([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+?)(?:\.git)?/?$")
 
@@ -136,11 +140,37 @@ def _check_passed(gh: GhApi, slug: str, commit: str, manifest_id: str) -> bool:
 class CiObserver:
     """Look up the CI result for receipts in one workspace, memoised for the life of the instance."""
 
-    def __init__(self, target: Path, *, gh_api: GhApi | None = None) -> None:
+    def __init__(
+        self,
+        target: Path,
+        *,
+        gh_api: GhApi | None = None,
+        budget_seconds: float = LOOKUP_BUDGET_SECONDS,
+        max_calls: int = LOOKUP_MAX_CALLS,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
         self.target = target
         self._gh = gh_api or default_gh_api
         self._memo: dict[str, bool] = {}
         self._offline = False
+        self._clock = clock
+        self._deadline = clock() + budget_seconds
+        self._calls_left = max_calls
+        self._slug: str | None = None
+        self._slug_loaded = False
+
+    def _api(self, endpoint: str) -> Any:
+        """Call the transport within the build-wide budget. An exhausted budget reads as offline."""
+        if self._calls_left <= 0 or self._clock() >= self._deadline:
+            raise GhUnavailable("lookup budget spent")
+        self._calls_left -= 1
+        return self._gh(endpoint)
+
+    def _repo_slug(self) -> str | None:
+        if not self._slug_loaded:
+            self._slug = repo_slug(self.target)
+            self._slug_loaded = True
+        return self._slug
 
     def observed(self, receipt: Mapping[str, Any]) -> bool:
         """Whether CI was seen passing for this receipt's trial. Display only."""
@@ -153,7 +183,7 @@ class CiObserver:
         if os.environ.get(DISABLE_ENV, "").strip().lower() in {"0", "off", "false", "no"}:
             return False
         claims = receipt_claims(receipt)
-        slug = repo_slug(self.target) if claims else None
+        slug = self._repo_slug() if claims else None
         if claims is None or slug is None or self._offline:
             return False
         manifest_id, head = claims
@@ -162,7 +192,7 @@ class CiObserver:
             return self._memo[key]
         try:
             result = any(
-                _check_passed(self._gh, slug, commit, manifest_id) for commit in _merge_commits(self._gh, slug, head)
+                _check_passed(self._api, slug, commit, manifest_id) for commit in _merge_commits(self._api, slug, head)
             )
         except GhNotFound:
             result = False
