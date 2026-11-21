@@ -404,8 +404,8 @@ def test_derive_dev_version_rejects_invalid_stable_bases(stable_version):
 def test_update_channels_documents_exact_dev_wheel_install():
     text = (ROOT / "docs" / "update-channels.md").read_text()
 
-    assert "pipx install 'brigade-cli==0.28.0.dev20260907'" in text
-    assert "pip install 'brigade-cli==0.28.0.dev20260907'" in text
+    assert "pipx install 'brigadestack==0.32.0.dev20261120'" in text
+    assert "pip install 'brigadestack==0.32.0.dev20261120'" in text
     assert "default resolver does not select them" in text
 
 
