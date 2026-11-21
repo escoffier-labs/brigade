@@ -561,3 +561,140 @@ def test_a_copy_that_vanished_before_the_refresh_is_reported_missing_not_recreat
 
     assert not skill.exists()
     assert result["counts"]["skipped"] == 1 and result["counts"]["flagged"] == 0 and result["counts"]["refreshed"] == 0
+
+
+# --- ratchet report size and integrity ---
+
+
+def _hold_item(index: int):
+    from brigade import outcome
+
+    return type(
+        "Item",
+        (),
+        {
+            "decision": outcome.Decision(
+                f"skill-{index:05d}",
+                "hold",
+                "candidate",
+                "withheld: verified regression present",
+                code=outcome.REGRESSION_HOLD,
+            ),
+            "prior_status": "candidate",
+            "cohorts": None,
+            "scorecard": None,
+            "artifact_kind": "skill",
+        },
+    )()
+
+
+def _fat_drift() -> dict:
+    rows = [
+        {"skill_id": f"s{i}", "harness": "claude", "path": "p" * 200, "reason": "r" * 200}
+        for i in range(outcome_ratchet_report.DRIFT_MAX_ROWS)
+    ]
+    return _drift(
+        counts={"current": 1, "refreshed": 0, "refreshable": 0, "flagged": len(rows), "skipped": 0}, flagged=rows
+    )
+
+
+def test_a_report_near_the_cap_still_writes_with_the_drift_block_counted(tmp_path):
+    from datetime import datetime, timezone
+
+    cap = outcome_ratchet_report.REPORT_MAX_BYTES
+    now = datetime.now(timezone.utc)
+    base = len(
+        outcome_ratchet_report._encode(
+            outcome_ratchet_report.build_report([], apply=False, generated_at=now, target=tmp_path)
+        )
+    )
+    one = (
+        len(
+            outcome_ratchet_report._encode(
+                outcome_ratchet_report.build_report([_hold_item(0)], apply=False, generated_at=now, target=tmp_path)
+            )
+        )
+        - base
+    )
+    items = [_hold_item(i) for i in range((cap - base - 512) // one)]
+    # Without drift this report fits whole, so the drift block is what pushes it over the cap.
+    assert outcome_ratchet_report.write_report(tmp_path, items, apply=False, generated_at=now) is not None
+    assert "truncated" not in outcome_ratchet_report.load_report(tmp_path)
+    assert outcome_ratchet_report.merge_skill_drift(tmp_path, _fat_drift()) is not None
+
+    path = outcome_ratchet_report.write_report(tmp_path, items, apply=False, generated_at=now)
+
+    assert path is not None and path.stat().st_size <= cap
+    loaded = outcome_ratchet_report.load_report(tmp_path)
+    assert loaded["summary"]["regression_holds"] == len(items)
+    assert loaded["skill_drift"]["counts"]["flagged"] == outcome_ratchet_report.DRIFT_MAX_ROWS
+    # A second run keeps writing instead of failing every time.
+    assert outcome_ratchet_report.write_report(tmp_path, items, apply=False, generated_at=now) is not None
+
+
+def test_merging_drift_into_a_near_cap_report_keeps_it_loadable(tmp_path):
+    from datetime import datetime, timezone
+
+    cap = outcome_ratchet_report.REPORT_MAX_BYTES
+    now = datetime.now(timezone.utc)
+    base = len(
+        outcome_ratchet_report._encode(
+            outcome_ratchet_report.build_report([], apply=False, generated_at=now, target=tmp_path)
+        )
+    )
+    one = (
+        len(
+            outcome_ratchet_report._encode(
+                outcome_ratchet_report.build_report([_hold_item(0)], apply=False, generated_at=now, target=tmp_path)
+            )
+        )
+        - base
+    )
+    items = [_hold_item(i) for i in range((cap - base - 512) // one)]
+    assert outcome_ratchet_report.write_report(tmp_path, items, apply=False, generated_at=now) is not None
+
+    path = outcome_ratchet_report.merge_skill_drift(tmp_path, _fat_drift())
+
+    assert path is not None and path.stat().st_size <= cap
+    loaded = outcome_ratchet_report.load_report(tmp_path)
+    assert loaded["summary"]["regression_holds"] == len(items)
+    assert loaded["skill_drift"]["counts"]["flagged"] == outcome_ratchet_report.DRIFT_MAX_ROWS
+
+
+def test_drift_with_no_ratchet_report_stores_only_the_drift_and_readers_say_the_ratchet_is_absent(tmp_path):
+    from brigade.center_cmd.dashboard.views import outcome_rank
+
+    path = outcome_ratchet_report.merge_skill_drift(tmp_path, _drift())
+
+    assert path is not None
+    stored = json.loads(path.read_text())
+    assert set(stored) == {"version", "skill_drift"}
+    loaded = outcome_ratchet_report.load_report(tmp_path)
+    payload = outcome_ratchet_report.brief_payload(loaded)
+    assert payload["present"] is False and payload["skill_drift"]["counts"]["flagged"] == 1
+    assert briefing._outcome_ratchet_line(payload) == "outcome_ratchet: no report yet"
+    assert briefing._skill_drift_line(payload).startswith("skill_drift: generated_at=2026-11-21")
+    html = outcome_rank._ratchet_panel(loaded)
+    assert "No outcome ratchet report yet" in html and "flagged 1" in html and ".codex/skills/brigade-work" in html
+
+
+def test_the_outcome_ratchet_command_says_none_and_still_prints_drift(tmp_path, capsys):
+    outcome_ratchet_report.merge_skill_drift(tmp_path, _drift())
+    capsys.readouterr()
+
+    assert main(["outcome", "ratchet", "--target", str(tmp_path)]) == 0
+
+    out = capsys.readouterr().out
+    assert "report: none" in out and "skill_drift:" in out and "flagged: brigade-work [codex]" in out
+
+
+@pytest.mark.parametrize("content", [b"{not json", b"x" * (outcome_ratchet_report.REPORT_MAX_BYTES + 1)])
+def test_a_report_that_cannot_be_loaded_is_never_replaced(tmp_path, content, capsys):
+    path = outcome_ratchet_report.report_path(tmp_path)
+    path.parent.mkdir(parents=True)
+    path.write_bytes(content)
+
+    assert outcome_ratchet_report.merge_skill_drift(tmp_path, _drift()) is None
+
+    assert path.read_bytes() == content
+    assert "could not be read" in capsys.readouterr().err

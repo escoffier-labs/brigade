@@ -107,14 +107,18 @@ def _write_report(
         # The previous report stays in place, so say this run's write was skipped.
         print(f"warning: outcome ratchet report not written: symlinked path refused: {path}", file=sys.stderr)
         return None
-    report = build_report(
-        items, apply=apply, generated_at=generated_at, target=target, pending=pending, proposal_counts=proposal_counts
-    )
     # The drift check runs as its own runbook step and stores its result here. A later
     # reconcile run rewrites the file, so keep the last drift result rather than drop it.
-    previous_drift = drift_payload(load_report(target).get("skill_drift"))
-    if previous_drift is not None:
-        report["skill_drift"] = previous_drift
+    # It is built into the report before the size fit, so the cap covers both.
+    report = build_report(
+        items,
+        apply=apply,
+        generated_at=generated_at,
+        target=target,
+        pending=pending,
+        proposal_counts=proposal_counts,
+        skill_drift=drift_payload(load_report(target).get("skill_drift")),
+    )
     return _store(path, report)
 
 
@@ -133,28 +137,39 @@ def _store(path: Path, report: Mapping[str, Any]) -> Path | None:
 def merge_skill_drift(target: Path, drift: Mapping[str, Any]) -> Path | None:
     """Store the scheduled skill drift result in the ratchet report and return its path.
 
-    The report is read, given a ``skill_drift`` block and written back whole. With no
-    readable report yet, an empty reconcile summary stands in for it, so the brief and the
-    dashboard show the drift result before the first ratchet run. Skipped with a warning
-    on a symlinked or unwritable path, exactly like ``write_report``.
+    A report that loads gets a ``skill_drift`` block and is written back whole, fitted to the
+    size cap with the block counted. With no report on disk, only ``version`` and ``skill_drift``
+    are stored: no reconcile summary is invented, so readers still say the ratchet has not run.
+    A file that exists but cannot be loaded (unreadable, over the cap, a symlink, another
+    version) is never replaced, because the bytes were not read. The result is skipped with a
+    warning on a symlinked or unwritable path, exactly like ``write_report``.
     """
     try:
         path = report_path(target)
         if _has_symlinked_component(path, path.parents[len(REPORT_RELATIVE_PATH.parts) - 1]):
             print(f"warning: skill drift not recorded: symlinked report path refused: {path}", file=sys.stderr)
             return None
-        report = load_report(target)
-        if not report:
-            report = build_report(
-                [], apply=False, generated_at=localio.utc_now(), target=target, pending=None, proposal_counts=None
-            )
         bounded = drift_payload(drift)
         if bounded is None:
             return None
-        return _store(path, {**report, "skill_drift": bounded})
+        report = load_report(target)
+        if not report:
+            if os.path.lexists(path):
+                print(
+                    f"warning: skill drift not recorded: the existing ratchet report could not be read: {path}",
+                    file=sys.stderr,
+                )
+                return None
+            report = {"version": REPORT_VERSION}
+        return _store(path, _fit({**report, "skill_drift": bounded}))
     except OSError as exc:
         print(f"warning: skill drift not recorded: {exc}", file=sys.stderr)
         return None
+
+
+def has_ratchet(report: Mapping[str, Any]) -> bool:
+    """True when the report holds a reconcile summary, not only a stored drift result."""
+    return isinstance(report.get("summary"), dict)
 
 
 def _count(value: object) -> int:
@@ -198,8 +213,13 @@ def build_report(
     target: Path,
     pending: PendingPhysical | None = None,
     proposal_counts: Mapping[str, int] | None = None,
+    skill_drift: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build the versioned report payload from reconcile decision items."""
+    """Build the versioned report payload from reconcile decision items.
+
+    ``skill_drift`` is an already bounded drift block to carry over. It is attached before
+    the size fit so the cap accounts for it, and the fit may drop its listed rows (never its counts).
+    """
     counts: Counter[str] = Counter()
     regressions: list[dict[str, Any]] = []
     local_trials_total = 0
@@ -257,6 +277,8 @@ def build_report(
     }
     if proposal_counts is not None:
         report["summary"]["outcome_proposals"] = {key: int(proposal_counts.get(key, 0)) for key in _PROPOSAL_KEYS}
+    if skill_drift is not None:
+        report["skill_drift"] = dict(skill_drift)
     return _fit(report)
 
 
@@ -356,8 +378,11 @@ def brief_payload(report: Mapping[str, Any]) -> dict[str, Any]:
     before the size cap can drop regression rows, so a capped report still names
     holds instead of reading ``(none)`` beside a nonzero hold count.
     """
-    if not report:
-        return {"present": False}
+    if not has_ratchet(report):
+        # No reconcile summary: either nothing is stored or only the drift check has run.
+        # The ratchet is absent either way, and a stored drift result is still shown.
+        drift = drift_payload(report.get("skill_drift"))
+        return {"present": False} if drift is None else {"present": False, "skill_drift": drift}
     raw_summary = report.get("summary")
     summary = raw_summary if isinstance(raw_summary, dict) else {}
     raw_regressions = report.get("regressions")
@@ -444,34 +469,52 @@ def _encode(report: Mapping[str, Any]) -> bytes:
     return (json.dumps(report, indent=2, sort_keys=True) + "\n").encode("utf-8")
 
 
-def _fit(report: dict[str, Any]) -> dict[str, Any]:
-    """Drop trailing regression rows until the payload fits the byte cap.
+def _fits(report: Mapping[str, Any]) -> bool:
+    return len(_encode(report)) <= REPORT_MAX_BYTES
 
-    Counts stay complete, so a truncated list never understates how many holds
-    or rollbacks the run took. ``regressions_omitted`` says how many rows were
-    dropped and ``truncated`` marks the payload as partial. Rows are trimmed in
-    batches so a large report cannot turn the cap into a long serialization loop.
+
+def _fit(report: dict[str, Any]) -> dict[str, Any]:
+    """Drop rows until the payload fits the byte cap, least important first.
+
+    Stale pending rows go first, then trailing regression rows, then the listed drift
+    rows. Counts stay complete, so a truncated list never understates how many holds,
+    rollbacks or flagged copies there are. ``regressions_omitted`` and the drift block's
+    ``flagged_omitted`` say how many rows were dropped and ``truncated`` marks the payload
+    as partial. Regression rows are trimmed in batches so a large report cannot turn the
+    cap into a long serialization loop.
     """
-    if len(_encode(report)) <= REPORT_MAX_BYTES:
+    if _fits(report):
         return report
     # Stale rows are listed only for reference and their count stays in
     # ``stale_physical_actions``, so drop them before any regression row.
     if report.get("stale_physical"):
         report = {**report, "stale_physical": [], "stale_physical_truncated": True}
-        if len(_encode(report)) <= REPORT_MAX_BYTES:
+        if _fits(report):
             return report
     regressions = report.get("regressions")
-    if not isinstance(regressions, list) or not regressions:
-        return report
-    kept = list(regressions)
-    while True:
-        drop = max(1, len(kept) // 4)
-        kept = kept[:-drop]
-        trimmed = {
+    if isinstance(regressions, list) and regressions:
+        kept = list(regressions)
+        while True:
+            drop = max(1, len(kept) // 4)
+            kept = kept[:-drop]
+            report = {
+                **report,
+                "regressions": kept,
+                "truncated": True,
+                "regressions_omitted": len(regressions) - len(kept),
+            }
+            if not kept or _fits(report):
+                break
+        if _fits(report):
+            return report
+    drift = drift_payload(report.get("skill_drift"))
+    if drift is not None and drift["flagged"]:
+        report = {
             **report,
-            "regressions": kept,
-            "truncated": True,
-            "regressions_omitted": len(regressions) - len(kept),
+            "skill_drift": {
+                **drift,
+                "flagged": [],
+                "flagged_omitted": max(drift["flagged_omitted"], len(drift["flagged"])),
+            },
         }
-        if not kept or len(_encode(trimmed)) <= REPORT_MAX_BYTES:
-            return trimmed
+    return report

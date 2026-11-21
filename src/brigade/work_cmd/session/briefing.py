@@ -934,7 +934,8 @@ def _brief_section_failed(payload: dict[str, Any], label: str) -> bool:
 def _skill_drift_line(ratchet: object) -> str:
     """Return the brief summary of the last scheduled installed-skill drift check, flagged copies named."""
     report = ratchet if isinstance(ratchet, dict) else {}
-    raw_drift = report.get("skill_drift") if report.get("present") else None
+    # The drift result is read even when the ratchet itself has not run yet.
+    raw_drift = report.get("skill_drift")
     if not isinstance(raw_drift, dict):
         return (
             "skill_drift: no report yet "

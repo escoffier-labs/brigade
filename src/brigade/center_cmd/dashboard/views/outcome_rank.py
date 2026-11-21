@@ -95,8 +95,9 @@ def _ratchet_panel(raw: object) -> str:
     ratchet = raw if isinstance(raw, dict) else {}
     if ratchet.get("error"):
         return html.error_panel("Outcome ratchet report", str(ratchet["error"]))
-    if not ratchet:
-        return html.panel(title, f"<p>{html.esc(_RATCHET_EMPTY_MESSAGE)}</p>")
+    if not outcome_ratchet_report.has_ratchet(ratchet):
+        # No reconcile summary yet, but the scheduled drift check may have stored its result.
+        return html.panel(title, f"<p>{html.esc(_RATCHET_EMPTY_MESSAGE)}</p>" + _drift_html(ratchet.get("skill_drift")))
 
     summary_raw = ratchet.get("summary")
     summary = summary_raw if isinstance(summary_raw, dict) else {}
