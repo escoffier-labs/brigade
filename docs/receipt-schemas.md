@@ -197,13 +197,13 @@ merged, pushed or published. Integration is described in
 
 ---
 
-## `brigade.work_verify_receipt`: `schema_version: 3`
+## `brigade.work_verify_receipt`: `schema_version: 2`
 
 **Path:** `.brigade/work/verify-runs/<run-id>/receipt.json`
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
-| `schema_version` | integer | yes (new writes) | Always `3` for this contract |
+| `schema_version` | integer | yes (new writes) | Always `2` for this contract |
 | `run_id` | string | yes | Timestamp-prefixed id |
 | `target` | string | yes | Absolute workspace path |
 | `status` | string | yes | `running`, `completed`, `failed`, `rejected`, `canceled`, `busy` |
@@ -218,8 +218,8 @@ merged, pushed or published. Integration is described in
 | `evidence` | object | no | Workspace evidence snapshot |
 | `baseline_commit` | string \| null | yes | Verified Git baseline, or `null` when identity capture is unavailable |
 | `tree_fingerprint` | string \| null | yes | Verified Git tree hash, or `null` with the unavailable identity tuple |
-| `tree_fingerprint_after` | string \| null | yes | Git tree fingerprint captured after a non-canceled run |
-| `tree_stable` | boolean \| null | yes | Whether the before and after fingerprints match, or `null` when either is unavailable |
+| `tree_fingerprint_after` | string \| null | no (additive) | Git tree fingerprint captured after a non-canceled run |
+| `tree_stable` | boolean \| null | no (additive) | Whether the before and after fingerprints match, or `null` when either is unavailable |
 | `tree_fingerprint_head` | string \| null | yes | Fingerprint-time HEAD commit used to reset excluded evidence paths, or `null` with the unavailable identity tuple |
 | `changes_patch_sha256` | string \| null | yes | SHA-256 of `changes.patch`, or `null` with the unavailable identity tuple |
 | `git` | object | no | `{head, branch, dirty_files}` |
@@ -233,11 +233,16 @@ merged, pushed or published. Integration is described in
 | `subject_binding` | object | no | Verifier-authored scoreable subject metadata (manifest runs only) |
 | `failure_class` | string | no | Receipt-level #474-style failure class when status is not completed |
 | `failure_kind` | string | no | Receipt-level failure kind paired with `failure_class` |
-| `inherited_test_env` | object | yes | Values of inherited `PYTEST_ADDOPTS` and `PYTEST_PLUGINS` when set, plus `pythonpath_set` without exposing `PYTHONPATH` |
+| `inherited_test_env` | object | no (additive) | Values of inherited `PYTEST_ADDOPTS` and `PYTEST_PLUGINS` when set, plus `pythonpath_set` without exposing `PYTHONPATH` |
 | `verification_contract` | object | no | Declared `brigade.verification_contract.v1` when the verify manifest carried one (#500) |
 | `budget_use` | object | no | Observed latency/token use against the declared verification budget (#500). Hard wall-clock / worker-dispatch enforcement is #593 (`run_budget.*` lifecycle events). |
 | `verification` | object | no | Verification outcome stamped separately from model completion (#500) |
 | `model_completion` | object | no | For contract-bearing verify receipts: `{status: not_applicable, detail}` because verify is verifier-owned |
+
+The `busy` status, the three fields marked additive and the command-level
+`test_outcomes` field were added without a version change. Receipts written
+before them are still valid version 2 receipts, so a reader must treat the
+fields as optional.
 
 Each command object uses `busy` when its process exits 75. Its `test_outcomes`
 field is either `null` or an object containing integer `passed`, `failed`,

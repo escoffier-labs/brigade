@@ -6,7 +6,7 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-VERIFY_RECEIPT_SCHEMA_VERSION = 3
+VERIFY_RECEIPT_SCHEMA_VERSION = 2
 
 # Stable env key: orchestrator run identity exported into worker environments
 # via run/transport (#499). Receipt producers may stamp the value as optional
