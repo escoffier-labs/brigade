@@ -31,6 +31,16 @@ COMPONENT_PLATFORMS = {"brigade-hub": ("linux-amd64", "linux-arm64")}
 CANONICAL_IDS = ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 REPOSITORY = "escoffier-labs/brigade"
+RENAMED_REPOSITORY = "escoffier-labs/brigadestack"
+# The repository is renamed after 0.32.0 publishes. Exactly these two names are accepted,
+# never another repository: a release records the repository its workflow ran in and its
+# attestations are signed under that name, so verification uses the repository the manifest
+# records. Keep in step with src/brigade/update_cmd.py (tests/test_repository_rename_names.py).
+ACCEPTED_REPOSITORIES = (REPOSITORY, RENAMED_REPOSITORY)
+# A name is only a label: after the rename anyone in the organization can create a new repository
+# called escoffier-labs/brigade, and GitHub then stops redirecting that name. The immutable
+# repository ID survives the rename, so every name above is trusted only while it resolves to it.
+REPOSITORY_ID = 1238165856
 GITHUB_API_HOST = "api.github.com"
 PYPI_PROJECT_URL = "https://pypi.org/pypi/brigadestack/json"
 PYPI_AVAILABILITY_TIMEOUT_SECONDS = 6 * 60
@@ -86,8 +96,45 @@ def fetch_bytes(url: str) -> bytes:
         return response.read()
 
 
-def _github_release_tag_url(tag: str) -> str:
-    return f"https://{GITHUB_API_HOST}/repos/{REPOSITORY}/releases/tags/{tag}"
+def pinned_repository() -> str:
+    """The workflow's own repository, for runs that pin to it with --pin-workflow-repository."""
+    current = os.environ.get("GITHUB_REPOSITORY", "")
+    if current not in ACCEPTED_REPOSITORIES:
+        raise AcceptanceError(
+            f"GITHUB_REPOSITORY {current!r} must be one of {', '.join(ACCEPTED_REPOSITORIES)} to pin the release to it"
+        )
+    return current
+
+
+def manifest_repository(manifest: Any) -> str:
+    """The one accepted repository every component of a release manifest records.
+
+    The release's repository comes from its own manifest, never from the environment: a release
+    built before the rename records the old name and one built after records the new name, and
+    the attestations were signed under that same name.
+    """
+    components = manifest.get("components") if isinstance(manifest, dict) else None
+    if not isinstance(components, dict):
+        raise AcceptanceError("release manifest has no components object")
+    allowed = (*COMPONENT_IDS, *OPTIONAL_IDS)
+    if not set(COMPONENT_IDS) <= set(components) or set(components) - set(allowed):
+        raise AcceptanceError("release component manifest must contain the five default components and no unknown one")
+    recorded = set()
+    for component in components:
+        record = components[component]
+        source = record.get("source") if isinstance(record, dict) else None
+        repository = source.get("repository") if isinstance(source, dict) else None
+        # A list or dict here would be unhashable, so only strings are ever collected.
+        recorded.add(repository if isinstance(repository, str) else None)
+    if len(recorded) != 1 or not recorded <= set(ACCEPTED_REPOSITORIES):
+        raise AcceptanceError(
+            f"release manifest must record exactly one of {', '.join(ACCEPTED_REPOSITORIES)} for every component"
+        )
+    return next(iter(recorded))
+
+
+def _github_release_tag_url(tag: str, repository: str = REPOSITORY) -> str:
+    return f"https://{GITHUB_API_HOST}/repos/{repository}/releases/tags/{tag}"
 
 
 def _is_allowed_github_api_url(url: str) -> bool:
@@ -137,11 +184,52 @@ def _fetch_github_json_once(url: str) -> tuple[int, Any]:
         return exc.code, payload
 
 
+def fetch_repository(repository: str) -> tuple[int, Any]:
+    """GET /repos/<repository>. A pre-rename name redirects to the same repository ID."""
+    return _fetch_github_json_once(f"https://{GITHUB_API_HOST}/repos/{repository}")
+
+
+def require_repository_id(repository: str) -> None:
+    """Trust a repository name only while it resolves to the Brigade repository ID.
+
+    A pre-rename name keeps redirecting to the same ID until someone reuses it. A reused name
+    resolves to another repository, whose self-consistent release must never be accepted.
+    """
+    status, payload = fetch_repository(repository)
+    if status != 200 or not isinstance(payload, dict):
+        raise AcceptanceError(f"GitHub repository lookup failed for {repository}: HTTP {status}")
+    identifier = payload.get("id")
+    if type(identifier) is not int or identifier != REPOSITORY_ID:
+        raise AcceptanceError(f"GitHub repository {repository} is repository ID {identifier!r}, not {REPOSITORY_ID}")
+
+
+def require_attestation_repository_id(output: str) -> None:
+    """Require every verified attestation's certificate to name the Brigade repository ID.
+
+    `output` is `gh attestation verify --format json`; the certificate field is
+    verificationResult.signature.certificate.sourceRepositoryIdentifier, a decimal string.
+    """
+    try:
+        results = json.loads(output)
+    except json.JSONDecodeError as exc:
+        raise AcceptanceError("attestation verification output is not JSON") from exc
+    if not isinstance(results, list) or not results:
+        raise AcceptanceError("attestation verification returned no verified attestation")
+    for result in results:
+        certificate: Any = result
+        for key in ("verificationResult", "signature", "certificate"):
+            certificate = certificate.get(key) if isinstance(certificate, dict) else None
+        identifier = certificate.get("sourceRepositoryIdentifier") if isinstance(certificate, dict) else None
+        if identifier != str(REPOSITORY_ID):
+            raise AcceptanceError(f"attestation was signed for repository ID {identifier!r}, not {REPOSITORY_ID}")
+
+
 def wait_for_github_release_tag(
     version: str,
     *,
     fetch: GithubStatusFetcher = _fetch_github_json_once,
     sleep: Callable[[float], None] = time.sleep,
+    repository: str = REPOSITORY,
     max_attempts: int = GITHUB_RELEASE_TAG_MAX_ATTEMPTS,
     initial_backoff_seconds: float = GITHUB_RELEASE_TAG_INITIAL_BACKOFF_SECONDS,
     max_backoff_seconds: float = GITHUB_RELEASE_TAG_MAX_BACKOFF_SECONDS,
@@ -153,9 +241,9 @@ def wait_for_github_release_tag(
     an otherwise healthy publish.
     """
     tag = f"v{version}"
-    url = _github_release_tag_url(tag)
+    url = _github_release_tag_url(tag, repository)
     backoff = initial_backoff_seconds
-    detail = f"GitHub release lookup for {REPOSITORY}@{tag} failed"
+    detail = f"GitHub release lookup for {repository}@{tag} failed"
     for attempt in range(max_attempts):
         status, payload = fetch(url)
         if status == 200:
@@ -165,14 +253,14 @@ def wait_for_github_release_tag(
                 raise AcceptanceError("GitHub release must be a published non-prerelease")
             return payload
         if not _is_transient_github_http_status(status):
-            raise AcceptanceError(f"GitHub release lookup failed for {REPOSITORY}@{tag}: HTTP {status}")
-        detail = f"GitHub release lookup for {REPOSITORY}@{tag} returned HTTP {status}"
+            raise AcceptanceError(f"GitHub release lookup failed for {repository}@{tag}: HTTP {status}")
+        detail = f"GitHub release lookup for {repository}@{tag} returned HTTP {status}"
         if attempt + 1 >= max_attempts:
             break
         sleep(min(backoff, max_backoff_seconds))
         backoff = min(backoff * 2, max_backoff_seconds)
     raise AcceptanceError(
-        f"GitHub release lookup for {REPOSITORY}@{tag} was not available after {max_attempts} attempts: {detail}"
+        f"GitHub release lookup for {repository}@{tag} was not available after {max_attempts} attempts: {detail}"
     )
 
 
@@ -192,8 +280,8 @@ def _sha256_path(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _release_url(version: str, filename: str) -> str:
-    return f"https://github.com/{REPOSITORY}/releases/download/v{version}/{filename}"
+def _release_url(version: str, filename: str, repository: str = REPOSITORY) -> str:
+    return f"https://github.com/{repository}/releases/download/v{version}/{filename}"
 
 
 def _parse_checksums(text: str) -> dict[str, str]:
@@ -223,23 +311,41 @@ def verify_release_assets(
     destination: Path,
     *,
     fetch_bytes: BytesFetcher = fetch_bytes,
+    repositories: Sequence[str] = ACCEPTED_REPOSITORIES,
+    identity_check: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
-    """Fetch the immutable release manifest and verify every native release asset."""
+    """Fetch the immutable release manifest and verify every native release asset.
+
+    The manifest is looked up under each of ``repositories`` in turn. Every later URL uses the
+    repository the manifest records, which must be one of the two accepted names and, when the
+    caller narrows ``repositories`` to one (a pinned run), that one.
+    """
     tag = f"v{version}"
     release_dir = destination / "release-assets"
     release_dir.mkdir(parents=True, exist_ok=True)
-    manifest_url = _release_url(version, "component-manifest-v1.json")
-    try:
-        manifest_bytes = fetch_bytes(manifest_url)
-        manifest = json.loads(manifest_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise AcceptanceError(f"could not fetch release component manifest: {exc}") from exc
+    check_identity = identity_check or require_repository_id
+    failure: Exception | None = None
+    for candidate in repositories:
+        try:
+            # Resolve the name to the repository ID before any release or asset request under it.
+            check_identity(candidate)
+            manifest_bytes = fetch_bytes(_release_url(version, "component-manifest-v1.json", candidate))
+            manifest = json.loads(manifest_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object)
+            break
+        except (AcceptanceError, OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            failure = failure or exc
+    else:
+        raise AcceptanceError(f"could not fetch release component manifest: {failure}") from failure
     if not isinstance(manifest, dict) or not isinstance(manifest.get("components"), dict):
         raise AcceptanceError("release component manifest has no components object")
     components = manifest["components"]
     released = tuple(component for component in (*COMPONENT_IDS, *OPTIONAL_IDS) if component in components)
     if set(components) != set(released) or not set(COMPONENT_IDS) <= set(released):
         raise AcceptanceError("release component manifest must contain the five default components and no unknown one")
+    repository = manifest_repository(manifest)
+    if repository not in repositories:
+        raise AcceptanceError(f"release manifest records {repository}, expected {', '.join(repositories)}")
+    check_identity(repository)
 
     expected: dict[str, tuple[str, str]] = {}
     native_paths: dict[str, dict[str, Path]] = {component: {} for component in COMPONENT_IDS}
@@ -249,8 +355,8 @@ def verify_release_assets(
         if not isinstance(record, dict):
             raise AcceptanceError(f"release component manifest entry {component!r} is invalid")
         source = record.get("source")
-        if not isinstance(source, dict) or source.get("repository") != REPOSITORY or source.get("release_tag") != tag:
-            raise AcceptanceError(f"release component {component!r} does not point to {REPOSITORY}@{tag}")
+        if not isinstance(source, dict) or source.get("repository") != repository or source.get("release_tag") != tag:
+            raise AcceptanceError(f"release component {component!r} does not point to {repository}@{tag}")
         component_assets = record.get("assets")
         if not isinstance(component_assets, dict) or set(component_assets) != set(platforms):
             raise AcceptanceError(f"release component {component!r} does not publish the full platform matrix")
@@ -264,7 +370,7 @@ def verify_release_assets(
             expected_name = f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else "")
             if name != expected_name or not isinstance(digest, str) or len(digest) != 64:
                 raise AcceptanceError(f"release component {component!r} asset {platform!r} has invalid metadata")
-            if url != _release_url(version, name):
+            if url != _release_url(version, name, repository):
                 raise AcceptanceError(
                     f"release component {component!r} asset {name!r} does not use its immutable release URL"
                 )
@@ -272,7 +378,7 @@ def verify_release_assets(
                 raise AcceptanceError(f"release component manifest repeats native asset {name!r}")
             expected[name] = (digest, url)
 
-    checksums_url = _release_url(version, "checksums.txt")
+    checksums_url = _release_url(version, "checksums.txt", repository)
     try:
         checksums_bytes = fetch_bytes(checksums_url)
         checksums = _parse_checksums(checksums_bytes.decode("utf-8"))
@@ -286,7 +392,7 @@ def verify_release_assets(
     }
     if set(checksums) == expected_checksum_names | set(canonical_assets):
         for name in canonical_assets:
-            expected[name] = (checksums[name], _release_url(version, name))
+            expected[name] = (checksums[name], _release_url(version, name, repository))
     elif set(checksums) != expected_checksum_names:
         raise AcceptanceError(
             "checksums.txt must cover exactly the manifest's native assets and component-manifest-v1.json"
@@ -841,25 +947,33 @@ def smoke_verified_canonical_release(
         raise AcceptanceError("primary manifest must contain one valid source commit for all components")
     # Bind the manifest itself as well as the aliases to signed source identity.
     # A checksum map alone is not provenance, and releases can be mutable.
+    # The attestation is signed under the repository name the release was built in, which
+    # the manifest records, so --repo and the signer workflow both follow the manifest.
+    repository = manifest_repository(manifest)
+    require_repository_id(repository)
     for path in [manifest_path, *paths.values()]:
-        run_checked(
+        verified = run_checked(
             [
                 "gh",
                 "attestation",
                 "verify",
                 path,
                 "--repo",
-                REPOSITORY,
+                repository,
                 "--signer-workflow",
-                f"{REPOSITORY}/.github/workflows/publish.yml",
+                f"{repository}/.github/workflows/publish.yml",
                 "--source-digest",
                 revisions[0],
                 "--source-ref",
                 f"refs/tags/v{version}",
+                "--format",
+                "json",
             ],
             runner=runner,
             env=env,
         )
+        # A name is only a label: the signing certificate must name the Brigade repository ID.
+        require_attestation_repository_id(verified.stdout)
     native_env = {
         key: value
         for key, value in env.items()
@@ -868,7 +982,13 @@ def smoke_verified_canonical_release(
     smoke_canonical_components(paths, runner=runner, env=native_env)
 
 
-def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_darwin_amd64: bool = False) -> None:
+def run_acceptance(
+    version: str,
+    *,
+    runner: Runner = subprocess.run,
+    rosetta_darwin_amd64: bool = False,
+    pin_workflow_repository: bool = False,
+) -> None:
     if not version or version.startswith("v"):
         raise AcceptanceError("--brigade-version must be an exact PyPI version without a v prefix")
 
@@ -884,8 +1004,18 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_dar
         for directory in (profile, data_home, pipx_home, pipx_bin, root / "xdg-config", root / "xdg-cache"):
             directory.mkdir(parents=True)
         _write_poison_binaries(poison_dir, marker)
-        wait_for_github_release_tag(version)
-        release = verify_release_assets(version, root)
+        # A pinned run (the release workflow's own, fresh release) accepts only GITHUB_REPOSITORY.
+        # Otherwise the release's repository comes from its manifest, tried under each name.
+        repositories = (pinned_repository(),) if pin_workflow_repository else ACCEPTED_REPOSITORIES
+        for index, candidate in enumerate(repositories):
+            try:
+                require_repository_id(candidate)
+                wait_for_github_release_tag(version, repository=candidate)
+                break
+            except AcceptanceError:
+                if index + 1 == len(repositories):
+                    raise
+        release = verify_release_assets(version, root, repositories=repositories)
         manifest_path = root / "release-assets" / "component-manifest-v1.json"
 
         env = os.environ.copy()
@@ -949,9 +1079,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--brigade-version", required=True)
     parser.add_argument("--rosetta-darwin-amd64", action="store_true")
+    parser.add_argument(
+        "--pin-workflow-repository",
+        action="store_true",
+        help="accept only a release recorded under GITHUB_REPOSITORY (the release workflow's own repository)",
+    )
     args = parser.parse_args(argv)
     try:
-        run_acceptance(args.brigade_version, rosetta_darwin_amd64=args.rosetta_darwin_amd64)
+        run_acceptance(
+            args.brigade_version,
+            rosetta_darwin_amd64=args.rosetta_darwin_amd64,
+            pin_workflow_repository=args.pin_workflow_repository,
+        )
     except AcceptanceError as exc:
         print(f"published artifact acceptance failed: {exc}", file=sys.stderr)
         return 1

@@ -31,6 +31,7 @@ DEFAULT_BRIEF_SECTION_TIMEOUT_SECONDS = 5.0
 DEFAULT_BRIEF_BUDGET_SECONDS = 20.0
 BRIEF_SECTION_TIMEOUT_ENV = "BRIGADE_WORK_BRIEF_SECTION_TIMEOUT"
 BRIEF_BUDGET_ENV = "BRIGADE_WORK_BRIEF_BUDGET"
+_DRIFT_BRIEF_ROWS = 5
 
 
 class _UnavailableSection(dict):
@@ -938,6 +939,51 @@ def _brief_section_failed(payload: dict[str, Any], label: str) -> bool:
     )
 
 
+def _drift_brief_rows(raw: object, hidden: int) -> str:
+    """Up to ``_DRIFT_BRIEF_ROWS`` rows as ``id[harness] path``. A row without a safe relative path is dropped."""
+    rows = [
+        row
+        for row in (raw if isinstance(raw, list) else [])
+        if isinstance(row, dict) and outcome_ratchet_report.is_workspace_relative_path(row.get("path"))
+    ]
+    listed = ", ".join(
+        f"{brief_values.name(row.get('skill_id'))}[{brief_values.name(row.get('harness'))}] "
+        f"{brief_values.text(row.get('path'))}"
+        for row in rows[:_DRIFT_BRIEF_ROWS]
+    )
+    more = hidden - min(len(rows), _DRIFT_BRIEF_ROWS)
+    return listed + (f" +{more} more" if more > 0 else "")
+
+
+def _skill_drift_line(ratchet: object) -> str:
+    """Return the brief summary of the last read-only installed-skill drift check, copies named."""
+    report = ratchet if isinstance(ratchet, dict) else {}
+    # The drift result is read even when the ratchet itself has not run yet.
+    raw_drift = report.get("skill_drift")
+    if not isinstance(raw_drift, dict):
+        return (
+            "skill_drift: no report yet (the weekly ratchet runbook runs `brigade skills fleet drift --report`, "
+            "which writes no skill copy)"
+        )
+    drift: dict[str, Any] = raw_drift
+    raw_counts = drift.get("counts")
+    counts: dict[str, Any] = raw_counts if isinstance(raw_counts, dict) else {}
+    line = (
+        f"skill_drift: generated_at={brief_values.name(drift.get('generated_at'))} "
+        f"current={brief_values.name(counts.get('current', 0))} "
+        f"refreshable={brief_values.name(counts.get('refreshable', 0))} "
+        f"flagged={brief_values.name(counts.get('flagged', 0))}"
+    )
+    groups = []
+    for key in ("flagged", "refreshable"):
+        listed = _drift_brief_rows(drift.get(key), int(counts.get(key) or 0))
+        if listed:
+            groups.append(f"{key}: {listed}")
+    if groups:
+        line += " (" + "; ".join(groups) + ")"
+    return line
+
+
 def _outcome_proposals_line(ratchet: object) -> str:
     """Return the one-line brief summary of inbox proposals filed by the last ratchet run."""
     report = ratchet if isinstance(ratchet, dict) else {}
@@ -1176,6 +1222,7 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
     if isinstance(ratchet, dict):
         print(_outcome_ratchet_line(ratchet))
         print(_outcome_proposals_line(ratchet))
+        print(_skill_drift_line(ratchet))
     elif _brief_section_failed(payload, "outcome-ratchet"):
         print("outcome_ratchet: unavailable (section timed out or failed)")
 

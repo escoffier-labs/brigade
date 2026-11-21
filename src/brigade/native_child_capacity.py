@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 from collections import Counter
 from contextlib import contextmanager
@@ -43,6 +44,11 @@ CAPACITY_UNKNOWN = "capacity-unknown"
 HOLD_EVENT = "task.native-held"
 HOLD_RESOLVED_EVENT = "task.native-hold-resolved"
 LAUNCH_CLAIM = "task.launch-claimed"
+_NATIVE_KIND_PREFIX = "native-"
+# Native adapters derive run IDs as <host>-<request SHA-256>. Batch has its
+# own legacy hash-derived namespace. Detect damaged native kind fields even
+# when the caller belongs to a different host.
+_HASHED_RUN = re.compile(r"([a-z][a-z0-9-]*)-[0-9a-f]{64}", re.ASCII)
 _ACCEPT_CONFLICT = "accept-conflict"
 _ABANDONED = "abandoned-unknown"
 _HELD_REASONS = frozenset({_ACCEPT_CONFLICT, _ABANDONED})
@@ -143,10 +149,12 @@ def _scan_run(host: NativeChildHost, run_dir: Path, name: str, workspace: Path) 
     try:
         with run_dirfd.bound_run_dir(run_dir) as bound:
             receipt = _run_receipt(bound)
-            native = receipt.get("kind") == host.run_kind
-            if not native and name.startswith(host.run_prefix):
-                # A native run whose kind was rewritten away from the host kind is
-                # unverifiable, not an ordinary run to skip.
+            kind = receipt.get("kind")
+            native = isinstance(kind, str) and kind.startswith(_NATIVE_KIND_PREFIX)
+            identity = _HASHED_RUN.fullmatch(name)
+            if name.startswith(host.run_prefix) and kind != host.run_kind:
+                raise _Unverified("kind")
+            if identity is not None and identity[1] != "batch" and kind != _NATIVE_KIND_PREFIX + identity[1]:
                 raise _Unverified("kind")
             if not native and receipt.get("lifecycle_journal_requested") is not True:
                 return Counter(), 0, True
@@ -232,7 +240,7 @@ def _scan_units(events: list[run_journal.RunEvent]) -> Counter[str]:
 
 
 def governed_occupancy(host: NativeChildHost, workspace: Path) -> Occupancy:
-    """Count live governed native units for one host under the workspace runs root."""
+    """Count live governed units across all native hosts under the workspace runs root."""
     workspace = workspace.expanduser().resolve()
     root = runs_root(workspace)
     try:

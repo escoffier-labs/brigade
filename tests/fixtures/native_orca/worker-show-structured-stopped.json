@@ -1,0 +1,74 @@
+{
+  "orca_version": "1.4.268",
+  "source": "src/main/runtime/rpc/methods/orchestration/worker/observation/session-worker-observation.ts",
+  "payload": {
+    "id": "rpc-example",
+    "ok": true,
+    "_meta": {
+      "runtimeId": "runtime-example"
+    },
+    "result": {
+      "dispatch": {
+        "id": "ctx_000000000003",
+        "taskId": "task_000000000002",
+        "runId": "run_000000000001",
+        "status": "failed",
+        "hostScope": {
+          "kind": "local",
+          "hostId": "local"
+        }
+      },
+      "worker": {
+        "dispatchId": "ctx_000000000003",
+        "state": "stopped",
+        "stage": "process_stopped",
+        "agentTerminalHandle": "structworker_example"
+      },
+      "projection": {
+        "host": {
+          "id": "local"
+        },
+        "stage": {
+          "activity": "done"
+        },
+        "liveness": {
+          "verdict": "exited",
+          "source": "worker_stop"
+        },
+        "nextAction": {
+          "argv": []
+        }
+      },
+      "observation": {
+        "exactWorker": true,
+        "status": "exited",
+        "addressable": false
+      },
+      "coordinatedFrom": null,
+      "terminal": null,
+      "terminalResource": {
+        "ownerDispatchId": "ctx_000000000003",
+        "releaseState": "not_requested",
+        "ownershipState": "owned",
+        "terminalHandle": "structworker_example",
+        "autoReleaseAt": null,
+        "id": "wtr_000000000006",
+        "worktreeId": "example-checkout",
+        "endpointId": null,
+        "endpointIncarnation": null,
+        "originDispatchId": "ctx_000000000003",
+        "releaseRequestedAt": null,
+        "releaseCompletedAt": null,
+        "releaseError": null,
+        "recoveryAttemptCount": 0,
+        "lastRecoveryAt": null,
+        "archive": {
+          "source": null,
+          "status": null
+        },
+        "retainedReason": null
+      },
+      "autoReleaseAt": null
+    }
+  }
+}

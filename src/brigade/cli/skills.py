@@ -136,6 +136,19 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--target", "-t", type=Path, default=Path("."), help="Workspace skill fleet to inspect."
     )
     p_skills_fleet_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_skills_fleet_drift = skills_fleet_sub.add_parser(
+        "drift",
+        help="Scheduled read-only drift check: list copies safe to refresh and flag every other drifted copy.",
+    )
+    p_skills_fleet_drift.add_argument(
+        "--target", "-t", type=Path, default=Path("."), help="Workspace skill fleet to check."
+    )
+    p_skills_fleet_drift.add_argument(
+        "--report",
+        action="store_true",
+        help="Store the result in the advisory ratchet report the brief and dashboard read. The only write.",
+    )
+    p_skills_fleet_drift.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_uninstall = skills_sub.add_parser("uninstall", help="Remove an installed skill from one or all harnesses.")
     p_skills_uninstall.add_argument("skill", help="Installed skill id.")
     p_skills_uninstall.add_argument("--workspace", type=Path, default=Path("."), help="Workspace to update.")
@@ -279,6 +292,16 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_skills.set_defaults(func=dispatch)
 
 
+def _dispatch_fleet_drift(args) -> int:
+    from .. import outcome_ratchet_report, skill_drift
+
+    result = skill_drift.run(args.target)
+    if args.report:
+        outcome_ratchet_report.merge_skill_drift(args.target, result)
+    skill_drift.print_result(result, json_output=args.json)
+    return 0
+
+
 def dispatch(args) -> int:
     from .. import skills_cmd
 
@@ -356,6 +379,8 @@ def dispatch(args) -> int:
     if args.skills_command == "fleet":
         if args.skills_fleet_command == "status":
             return skills_cmd.fleet_status(target=args.target, json_output=args.json)
+        if args.skills_fleet_command == "drift":
+            return _dispatch_fleet_drift(args)
         args._brigade_parser.error(f"unknown skills fleet command: {args.skills_fleet_command}")
         return 2
     if args.skills_command == "rollback":

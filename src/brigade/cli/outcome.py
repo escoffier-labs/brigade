@@ -233,6 +233,22 @@ def _dispatch_reconcile(args) -> int:
     )
 
 
+def _print_skill_drift(report: dict) -> None:
+    from .. import outcome_ratchet_report
+
+    drift = outcome_ratchet_report.drift_payload(report.get("skill_drift"))
+    if drift is not None:
+        counts = drift["counts"]
+        print(
+            f"skill_drift: generated_at={drift['generated_at']} current={counts['current']} "
+            f"refreshable={counts['refreshable']} flagged={counts['flagged']}"
+        )
+        for row in drift["flagged"]:
+            print(f"  flagged: {row['skill_id']} [{row['harness']}] {row['path']}: {row['reason']}")
+        for row in drift["refreshable"]:
+            print(f"  refreshable: {row['skill_id']} [{row['harness']}] {row['path']}: run `{row['command']}`")
+
+
 def _dispatch_ratchet(args) -> int:
     from datetime import datetime, timezone
 
@@ -243,8 +259,10 @@ def _dispatch_ratchet(args) -> int:
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0
     print(f"outcome ratchet: {args.target.expanduser().resolve()}")
-    if not report:
+    if not outcome_ratchet_report.has_ratchet(report):
+        # Nothing stored, or only the drift check has run: the ratchet itself has not.
         print("report: none (run `brigade outcome reconcile --report`)")
+        _print_skill_drift(report)
         return 0
     summary_raw = report.get("summary")
     summary = summary_raw if isinstance(summary_raw, dict) else {}
@@ -262,6 +280,7 @@ def _dispatch_ratchet(args) -> int:
     proposals = outcome_ratchet_report.proposal_counts(summary)
     if proposals is not None:
         print("outcome_proposals: " + " ".join(f"{key}={value}" for key, value in proposals.items()))
+    _print_skill_drift(report)
     print(f"pending_physical_actions: {summary.get('pending_physical_actions') or 0}")
     if summary.get("stale_physical_actions"):
         print(f"stale_physical_actions: {summary['stale_physical_actions']} (status older than the pending window)")

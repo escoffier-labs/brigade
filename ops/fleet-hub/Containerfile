@@ -17,6 +17,10 @@ FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc07
 ARG BRIGADE_REF=a7746b6da2eec257890674de30635ca5036a2115
 ARG BRIGADE_SHA256=5a0cd597e970d17eedf3597cfd33d1a909c1e8f33f9077184abb421cedf3e67f
 
+# The archive URL names escoffier-labs/brigade, which GitHub redirects once the repository is
+# renamed to escoffier-labs/brigadestack. The archive's top folder is named after the repository,
+# so the same commit's tarball has a different sha256 after the rename: a rebuild after the
+# rename needs a new BRIGADE_SHA256 (the pinned digest here is for the pre-rename archive).
 RUN python -c "import hashlib, urllib.request; data = urllib.request.urlopen('https://github.com/escoffier-labs/brigade/archive/${BRIGADE_REF}.tar.gz').read(); assert hashlib.sha256(data).hexdigest() == '${BRIGADE_SHA256}', 'Brigade source archive checksum mismatch'; open('/tmp/brigade.tar.gz', 'wb').write(data)" \
     && mkdir /src \
     && tar -xzf /tmp/brigade.tar.gz -C /src --strip-components=1 \
@@ -43,6 +47,7 @@ LABEL org.opencontainers.image.source="https://github.com/escoffier-labs/brigade
       org.opencontainers.image.revision="${BRIGADE_REF}" \
       org.opencontainers.image.description="Brigade Fleet Hub"
 
+# Same archive URL and rename caveat as the `source` stage above.
 RUN python -m pip install --no-cache-dir setuptools==75.8.0 wheel==0.45.1 \
     && python -c "import hashlib, urllib.request; data = urllib.request.urlopen('https://github.com/escoffier-labs/brigade/archive/${BRIGADE_REF}.tar.gz').read(); assert hashlib.sha256(data).hexdigest() == '${BRIGADE_SHA256}', 'Brigade source archive checksum mismatch'; open('/tmp/brigade.tar.gz', 'wb').write(data)" \
     && python -m pip install --no-cache-dir --no-build-isolation /tmp/brigade.tar.gz \

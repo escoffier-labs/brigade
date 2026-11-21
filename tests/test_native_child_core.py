@@ -212,17 +212,15 @@ def test_capacity_limit_comes_from_the_hosts_declarations() -> None:
 
 
 @pytest.mark.skipif(os.name == "nt", reason="occupancy scans bound run directories")
-def test_occupancy_scans_only_the_hosts_own_run_namespace(tmp_path: Path) -> None:
+def test_occupancy_checks_other_native_run_namespaces(tmp_path: Path) -> None:
     runs = capacity_core.runs_root(tmp_path)
-    foreign = runs / "t3-aaaa"
+    foreign = runs / ("t3-" + "a" * 64)
     foreign.mkdir(parents=True)
-    (foreign / "run.json").write_text('{"kind": "native-t3"}', encoding="utf-8")
-    # Another host's run is outside this host's namespace, so it is skipped.
-    assert capacity_core.governed_occupancy(_other_host(), tmp_path).authoritative
-    # The same run is native for its own host, and it names no workspace.
+    receipt = foreign / "run.json"
+    receipt.write_text('{"kind": "native-t3"}', encoding="utf-8")
+    # A missing native journal prevents claims for either host.
+    assert not capacity_core.governed_occupancy(_other_host(), tmp_path).authoritative
     assert not capacity_core.governed_occupancy(HOST, tmp_path).authoritative
-    # A run in this host's namespace whose kind was rewritten is unverifiable.
-    own = runs / "other-bbbb"
-    own.mkdir()
-    (own / "run.json").write_text('{"kind": "native-t3"}', encoding="utf-8")
+    # Rewriting the other host's kind must not hide a potentially live run.
+    receipt.write_text('{"kind": "batch"}', encoding="utf-8")
     assert not capacity_core.governed_occupancy(_other_host(), tmp_path).authoritative

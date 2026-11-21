@@ -329,7 +329,7 @@ def test_interrupt_during_handoff_rescue_keeps_checkout(tmp_path, monkeypatch, c
         _write_successful_worktree_run(output_dir, cwd)
         return 0
 
-    def interrupted_rescue(source, dest, *, dest_fd):
+    def interrupted_rescue(source, dest, *, dest_fd, hold_out=None):
         # A pending handoff appeared after the clean check, before removal.
         handoff = source / ".claude" / "memory-handoffs" / "pending.md"
         handoff.parent.mkdir(parents=True)
