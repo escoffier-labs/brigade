@@ -95,8 +95,9 @@ def _ratchet_panel(raw: object) -> str:
     ratchet = raw if isinstance(raw, dict) else {}
     if ratchet.get("error"):
         return html.error_panel("Outcome ratchet report", str(ratchet["error"]))
-    if not ratchet:
-        return html.panel(title, f"<p>{html.esc(_RATCHET_EMPTY_MESSAGE)}</p>")
+    if not outcome_ratchet_report.has_ratchet(ratchet):
+        # No reconcile summary yet, but the scheduled drift check may have stored its result.
+        return html.panel(title, f"<p>{html.esc(_RATCHET_EMPTY_MESSAGE)}</p>" + _drift_html(ratchet.get("skill_drift")))
 
     summary_raw = ratchet.get("summary")
     summary = summary_raw if isinstance(summary_raw, dict) else {}
@@ -120,13 +121,16 @@ def _ratchet_panel(raw: object) -> str:
     if ratchet.get("truncated"):
         strip += f"; {ratchet.get('regressions_omitted', 0)} regression row(s) omitted by the size cap"
 
+    drift_html = _drift_html(ratchet.get("skill_drift"))
     regressions = ratchet.get("regressions")
     if not isinstance(regressions, list):
         regressions = []
     rows = [row for row in regressions if isinstance(row, dict)]
     if not rows:
         return html.panel(
-            title, f"<p>{html.esc(strip)}</p><p>{html.esc('No regression holds or rollbacks in the last run.')}</p>"
+            title,
+            f"<p>{html.esc(strip)}</p><p>{html.esc('No regression holds or rollbacks in the last run.')}</p>"
+            + drift_html,
         )
 
     headers = [
@@ -155,7 +159,43 @@ def _ratchet_panel(raw: object) -> str:
             ]
         )
     escaped_headers = [html.esc(header) for header in headers]
-    return html.panel(title, f"<p>{html.esc(strip)}</p>" + html.table(escaped_headers, body))
+    return html.panel(title, f"<p>{html.esc(strip)}</p>" + html.table(escaped_headers, body) + drift_html)
+
+
+def _drift_html(raw: object) -> str:
+    """Render the read-only installed-skill drift result: counts, then each flagged and refreshable copy."""
+    drift = outcome_ratchet_report.drift_payload(raw)
+    if drift is None:
+        return f"<p>{html.esc('Skill drift: no scheduled check recorded yet.')}</p>"
+    counts = drift["counts"]
+    generated_at = str(drift.get("generated_at") or "-")
+    strip = (
+        f"Skill drift: generated_at {generated_at} ({_age_label(drift.get('generated_at'))}); "
+        f"current {counts['current']}, refreshable {counts['refreshable']}, flagged {counts['flagged']}"
+    )
+    # Only a normalized workspace-relative path is ever shown, even if the payload were built elsewhere.
+    flagged = [row for row in drift["flagged"] if outcome_ratchet_report.is_workspace_relative_path(row["path"])]
+    refreshable = [
+        row for row in drift["refreshable"] if outcome_ratchet_report.is_workspace_relative_path(row["path"])
+    ]
+    parts = [f"<p>{html.esc(strip)}</p>"]
+    if flagged:
+        body = [
+            [html.esc(row["skill_id"]), html.esc(row["harness"]), html.esc(row["path"]), html.esc(row["reason"])]
+            for row in flagged
+        ]
+        note = f"{drift['flagged_omitted']} flagged row(s) not listed" if drift["flagged_omitted"] else ""
+        headers = [html.esc(header) for header in ("Skill", "Harness", "Path", "Reason")]
+        parts.append((f"<p>{html.esc(note)}</p>" if note else "") + html.table(headers, body))
+    if refreshable:
+        body = [
+            [html.esc(row["skill_id"]), html.esc(row["harness"]), html.esc(row["path"]), html.esc(row["command"])]
+            for row in refreshable
+        ]
+        note = f"{drift['refreshable_omitted']} refreshable row(s) not listed" if drift["refreshable_omitted"] else ""
+        headers = [html.esc(header) for header in ("Skill", "Harness", "Path", "Refresh with")]
+        parts.append((f"<p>{html.esc(note)}</p>" if note else "") + html.table(headers, body))
+    return "".join(parts)
 
 
 def _age_label(generated_at: object) -> str:

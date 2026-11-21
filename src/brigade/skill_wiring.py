@@ -81,6 +81,7 @@ REFRESHED = "refreshed"
 RACED = "changed-during-refresh"
 EDITED = "edited"
 PRISTINE_STALE = "pristine-stale"
+REFRESHABLE = "refreshable"  # classify_copy only: a past-release text `place` would replace
 SYMLINKED = "symlinked"
 BLOCKED = "not-a-regular-file"
 
@@ -92,6 +93,34 @@ def _sha256(data: bytes) -> str:
 def normalize_newlines(data: bytes) -> bytes:
     """Return ``data`` with CRLF folded to LF, the form SKILL.md text is compared in."""
     return data.replace(b"\r\n", b"\n")
+
+
+def pristine_test(skill_id: str, current: bytes) -> Callable[[bytes], bool] | None:
+    """A test for "this installed text is a past bundled release of this skill", or None to never refresh.
+
+    Both the installed text and the bundled text about to be written must be recorded
+    release texts of the skill, so a rendered or unrecorded text is never published.
+    ``SkillWirer.place`` and ``classify_copy`` share this one rule.
+    """
+    known = shipped_history.digests(shipped_history.skill_key(skill_id))
+    if shipped_history.skill_digest(current) not in known:
+        return None
+    return lambda body: shipped_history.skill_digest(body) in known
+
+
+def classify_copy(skill_id: str, installed: bytes, current: bytes) -> str:
+    """Read-only verdict on an installed SKILL.md against the bundled text: what ``place`` would do.
+
+    Returns ``IDENTICAL`` (newline-folded equal), ``REFRESHABLE`` (a text a past
+    release shipped, so ``place`` would refresh it) or ``EDITED`` (anything else,
+    which ``place`` keeps). The pristine rule is :func:`pristine_test`.
+    """
+    if normalize_newlines(installed) == normalize_newlines(current):
+        return IDENTICAL
+    pristine = pristine_test(skill_id, current)
+    if pristine is not None and pristine(installed):
+        return REFRESHABLE
+    return EDITED
 
 
 def _read_regular(fd: int) -> bytes | None:
@@ -164,7 +193,7 @@ class SkillWirer:
         data = text.encode("utf-8")
         dst = self.target.joinpath(*rel_parts)
         try:
-            state, existing = self._walk(rel_parts, data, self._pristine_check(skill_id, data))
+            state, existing = self._walk(rel_parts, data, pristine_test(skill_id, data))
         except OSError as exc:
             # Not a race (those are classified inside the walk): the destination could
             # not be read, created or published. Keep what is there, say why, move on.
@@ -304,17 +333,6 @@ class SkillWirer:
                 return self._refresh(parent, name, existing, data)
             return "existing", existing
         return self._publish(parent, name, data)
-
-    def _pristine_check(self, skill_id: str, data: bytes) -> Callable[[bytes], bool] | None:
-        """A test for "this installed text is a past bundled release of this skill", or None to never refresh.
-
-        Both the installed text and the text about to be written must be recorded
-        bundled texts of the skill, so a rendered or unrecorded text is never published.
-        """
-        known = shipped_history.digests(shipped_history.skill_key(skill_id))
-        if shipped_history.skill_digest(data) not in known:
-            return None
-        return lambda body: shipped_history.skill_digest(body) in known
 
     def _refresh(self, parent: int, name: str, expected: bytes, data: bytes) -> tuple[str, bytes | None]:
         """Replace a pristine past-release copy with ``data`` if it is still exactly ``expected``.

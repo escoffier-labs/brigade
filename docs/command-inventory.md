@@ -67,7 +67,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade search`: 6 command path(s)
 - `brigade security`: 16 command path(s)
 - `brigade setup`: 1 command path(s)
-- `brigade skills`: 30 command path(s)
+- `brigade skills`: 31 command path(s)
 - `brigade stations`: 3 command path(s)
 - `brigade status`: 1 command path(s)
 - `brigade t3`: 9 command path(s)
@@ -761,6 +761,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade skills compatibility`
 - `brigade skills diff`
 - `brigade skills doctor`
+- `brigade skills fleet drift`
 - `brigade skills fleet status`
 - `brigade skills history`
 - `brigade skills import`

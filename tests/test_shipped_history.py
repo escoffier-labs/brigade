@@ -513,6 +513,26 @@ def test_the_weekly_ratchet_runbook_passes_proposals_and_keeps_its_previous_text
     steps = {step["id"]: step["run"] for step in json.loads(path.read_text())["steps"]}
     assert steps["reconcile"] == "brigade outcome reconcile --target . --report --proposals"
     assert shipped_history.runbook_bytes_digest(path.read_bytes()) in shipped_history.digests(key)
-    # The text before --proposals stays recorded, so an untouched installed copy refreshes instead of being kept.
-    previous = path.read_text().replace(" --proposals", "").encode()
-    assert shipped_history.runbook_bytes_digest(previous) in shipped_history.digests(key)
+    # The released text before --proposals and the skill-drift step stays recorded, so an untouched
+    # installed copy refreshes instead of being kept.
+    released = json.loads(path.read_text())
+    released["description"] = (
+        "Weekly outcome rank and reconcile (dry-run by default). Run from the repo or workspace root: "
+        "brigade runbook run --approved .brigade/memory-care/runbooks/weekly-outcome-ratchet.json"
+    )
+    released["steps"] = [
+        {"id": "rank", "run": "brigade outcome rank --target ."},
+        {"id": "reconcile", "run": "brigade outcome reconcile --target ."},
+    ]
+    assert shipped_history.runbook_bytes_digest(json.dumps(released).encode()) in shipped_history.digests(key)
+    # The text 0.32.0 installs hold, with --proposals and no skill-drift step, stays recorded by digest.
+    pre_drift = {
+        **released,
+        "steps": [
+            {"id": "rank", "run": "brigade outcome rank --target ."},
+            {"id": "reconcile", "run": "brigade outcome reconcile --target . --report --proposals"},
+        ],
+    }
+    pre_drift_digest = "f7ca3f9660c085016bb14238d3da55169438646ae204122c3a82db0b5b00892d"
+    assert shipped_history.runbook_bytes_digest(json.dumps(pre_drift).encode()) == pre_drift_digest
+    assert pre_drift_digest in shipped_history.digests(key)
