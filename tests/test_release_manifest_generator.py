@@ -30,6 +30,12 @@ def _platforms(component: str) -> tuple[str, ...]:
     return LINUX if component == "brigade-hub" else PLATFORMS
 
 
+@pytest.fixture(autouse=True)
+def _workflow_repository(monkeypatch):
+    # The generator records GITHUB_REPOSITORY; pin it so the suite does not depend on the runner.
+    monkeypatch.setenv("GITHUB_REPOSITORY", "escoffier-labs/brigade")
+
+
 @pytest.fixture()
 def generator_module():
     spec = importlib.util.spec_from_file_location("generate_component_manifest_test", SCRIPT)
@@ -230,3 +236,61 @@ def test_generator_preserves_lf_bytes_with_windows_text_defaults(generator_modul
     )
     assert output.read_bytes() == (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
     assert b"\r" not in checksums.read_bytes()
+
+
+@pytest.mark.parametrize("repository", ["escoffier-labs/brigade", "escoffier-labs/brigadestack"])
+def test_generator_records_the_workflow_repository_and_the_result_verifies(
+    generator_module, tmp_path, monkeypatch, repository
+):
+    from tests.test_component_manifest_provenance import _fetcher, _module, _release
+
+    monkeypatch.setenv("GITHUB_REPOSITORY", repository)
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    _write_inventory(assets)
+    output = tmp_path / "component-manifest-v1.json"
+    manifest = generator_module.generate_manifest(
+        tag="v1.2.3", commit="a" * 40, assets_dir=assets, output=output, checksums_output=tmp_path / "checksums.txt"
+    )
+
+    for component in manifest["components"].values():
+        assert component["source"]["repository"] == repository
+        for asset in component["assets"].values():
+            assert asset["download_url"].startswith(f"https://github.com/{repository}/releases/download/v1.2.3/")
+    release, checksums, body = _release(manifest, repository)
+    fetch = _fetcher(release, checksums, body, repository=repository)
+    assert _module().verify_manifest(output, fetch=fetch, expected_repository=repository) == []
+
+
+@pytest.mark.parametrize("repository", ["attacker/brigade", "escoffier-labs/brigade-hub", ""])
+def test_generator_refuses_to_record_an_unaccepted_repository_and_writes_nothing(
+    generator_module, tmp_path, monkeypatch, repository
+):
+    monkeypatch.setenv("GITHUB_REPOSITORY", repository)
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    _write_inventory(assets)
+    output = tmp_path / "manifest.json"
+    checksums = tmp_path / "checksums.txt"
+
+    with pytest.raises(ValueError, match="must be one of"):
+        generator_module.generate_manifest(
+            tag="v1.2.3", commit="a" * 40, assets_dir=assets, output=output, checksums_output=checksums
+        )
+    assert not output.exists() and not checksums.exists()
+
+
+def test_generator_explicit_repository_overrides_the_environment(generator_module, tmp_path):
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    _write_inventory(assets)
+    manifest = generator_module.generate_manifest(
+        tag="v1.2.3",
+        commit="a" * 40,
+        assets_dir=assets,
+        output=tmp_path / "manifest.json",
+        checksums_output=tmp_path / "checksums.txt",
+        repository="escoffier-labs/brigadestack",
+    )
+
+    assert {c["source"]["repository"] for c in manifest["components"].values()} == {"escoffier-labs/brigadestack"}

@@ -99,7 +99,7 @@ def test_publish_workflow_builds_the_complete_native_matrix_then_attests_and_rel
     assert "attestations: write" in text
     assert "artifact-metadata: write" in text
     assert "gh attestation verify" in text
-    assert "--signer-workflow escoffier-labs/brigade/.github/workflows/publish.yml" in text
+    assert '--signer-workflow "$GITHUB_REPOSITORY/.github/workflows/publish.yml"' in text
     assert "component-manifest-v1.json" in text
     assert "checksums.txt" in text
     assert "brigade-cli==${VERSION}" in text
@@ -654,9 +654,11 @@ def test_npm_revalidation_is_read_only_and_pins_two_source_identities():
         "duplicate-name",
         "symlink",
         "extra-file",
+        "other-accepted-repository",
     ],
 )
-def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_path, mutation):
+@pytest.mark.parametrize("repository", ["escoffier-labs/brigade", "escoffier-labs/brigadestack"])
+def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_path, mutation, repository):
     import hashlib
     import json
     import os
@@ -664,7 +666,7 @@ def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_p
     import zipfile
 
     workflow = _load_workflow_yaml(ROOT / ".github/workflows/npm-registry-revalidate.yml")
-    env = {**os.environ, **workflow["env"], "RUNNER_TEMP": str(tmp_path)}
+    env = {**os.environ, **workflow["env"], "RUNNER_TEMP": str(tmp_path), "GITHUB_REPOSITORY": repository}
     proof = tmp_path / "npm-revalidation"
     proof.mkdir()
     archive = proof / "original-archives.zip"
@@ -712,8 +714,8 @@ def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_p
         "head_sha": env["PACKAGING_SHA"],
         "event": "workflow_dispatch",
         "path": ".github/workflows/npm-publish.yml",
-        "repository": {"id": 123, "full_name": "escoffier-labs/brigade"},
-        "head_repository": {"id": 123, "full_name": "escoffier-labs/brigade"},
+        "repository": {"id": 123, "full_name": repository},
+        "head_repository": {"id": 123, "full_name": repository},
     }
     if mutation == "artifact-id":
         metadata["id"] += 1
@@ -721,6 +723,10 @@ def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_p
         metadata["workflow_run"]["id"] += 1
     elif mutation == "repository":
         run["repository"]["full_name"] = "someone/brigade"
+    elif mutation == "other-accepted-repository":
+        # The run reports the other accepted name, not the repository this workflow runs in.
+        other = "escoffier-labs/brigadestack" if repository == "escoffier-labs/brigade" else "escoffier-labs/brigade"
+        run["repository"]["full_name"] = run["head_repository"]["full_name"] = other
     elif mutation == "source":
         metadata["workflow_run"]["head_sha"] = "b" * 40
     elif mutation == "expired":
@@ -748,9 +754,11 @@ def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_p
 
 
 @pytest.mark.parametrize(
-    "mutation", [None, "harness-head", "payload-head", "dirty", "provenance", "malformed-sha", "non-main"]
+    "mutation",
+    [None, "harness-head", "payload-head", "dirty", "provenance", "malformed-sha", "non-main", "third-repository"],
 )
-def test_npm_revalidation_checks_real_clean_checkout_identities(tmp_path, mutation):
+@pytest.mark.parametrize("repository", ["escoffier-labs/brigade", "escoffier-labs/brigadestack"])
+def test_npm_revalidation_checks_real_clean_checkout_identities(tmp_path, mutation, repository):
     import json
     import os
 
@@ -786,19 +794,20 @@ def test_npm_revalidation_checks_real_clean_checkout_identities(tmp_path, mutati
         "GITHUB_WORKSPACE": str(tmp_path),
         "PACKAGING_SHA": heads["payload-source"],
         "GITHUB_SHA": heads["validation-harness"],
-        "GITHUB_REPOSITORY": "escoffier-labs/brigade",
+        "GITHUB_REPOSITORY": repository,
         "GITHUB_REF": "refs/heads/main",
-        "GITHUB_WORKFLOW_REF": "escoffier-labs/brigade/.github/workflows/npm-registry-revalidate.yml@refs/heads/main",
+        "GITHUB_WORKFLOW_REF": f"{repository}/.github/workflows/npm-registry-revalidate.yml@refs/heads/main",
     }
+    if mutation == "third-repository":
+        env["GITHUB_REPOSITORY"] = "someone/brigade"
+        env["GITHUB_WORKFLOW_REF"] = "someone/brigade/.github/workflows/npm-registry-revalidate.yml@refs/heads/main"
     if mutation == "harness-head":
         env["GITHUB_SHA"] = "a" * 40
     elif mutation == "payload-head":
         env["PACKAGING_SHA"] = "a" * 40
     elif mutation == "non-main":
         env["GITHUB_REF"] = "refs/heads/other"
-        env["GITHUB_WORKFLOW_REF"] = (
-            "escoffier-labs/brigade/.github/workflows/npm-registry-revalidate.yml@refs/heads/other"
-        )
+        env["GITHUB_WORKFLOW_REF"] = f"{repository}/.github/workflows/npm-registry-revalidate.yml@refs/heads/other"
     elif mutation == "malformed-sha":
         env["GITHUB_SHA"] = "invalid"
     elif mutation == "dirty":

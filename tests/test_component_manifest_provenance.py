@@ -13,11 +13,23 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = "escoffier-labs/brigade"
+RENAMED_REPOSITORY = "escoffier-labs/brigadestack"
 TAG = "v1.2.3"
 BASE = f"https://github.com/{REPOSITORY}/releases/download/{TAG}/"
 API = f"https://api.github.com/repos/{REPOSITORY}/releases/tags/{TAG}"
 REF_API = f"https://api.github.com/repos/{REPOSITORY}/git/ref/tags/{TAG}"
 TAG_API = f"https://api.github.com/repos/{REPOSITORY}/git/tags/"
+
+
+def _urls(repository: str) -> tuple[str, str, str, str]:
+    return (
+        f"https://github.com/{repository}/releases/download/{TAG}/",
+        f"https://api.github.com/repos/{repository}/releases/tags/{TAG}",
+        f"https://api.github.com/repos/{repository}/git/ref/tags/{TAG}",
+        f"https://api.github.com/repos/{repository}/git/tags/",
+    )
+
+
 COMPONENTS = (
     "agent-notify",
     "brigade-code-graph",
@@ -49,7 +61,8 @@ def _asset_name(component: str, platform: str) -> str:
     return f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else "")
 
 
-def _manifest() -> dict:
+def _manifest(repository: str = REPOSITORY) -> dict:
+    base = _urls(repository)[0]
     components = {}
     for component in COMPONENTS:
         assets = {}
@@ -60,11 +73,11 @@ def _manifest() -> dict:
                 "asset_name": name,
                 "byte_size": len(body),
                 "sha256": hashlib.sha256(body).hexdigest(),
-                "download_url": BASE + name,
+                "download_url": base + name,
             }
         components[component] = {
             "component_revision": "a" * 40,
-            "source": {"repository": REPOSITORY, "release_tag": TAG},
+            "source": {"repository": repository, "release_tag": TAG},
             "executable": component,
             "assets": assets,
         }
@@ -77,7 +90,8 @@ def _manifest() -> dict:
     }
 
 
-def _release(manifest: dict) -> tuple[dict, str, str]:
+def _release(manifest: dict, repository: str = REPOSITORY) -> tuple[dict, str, str]:
+    base = _urls(repository)[0]
     native = {
         asset["asset_name"]: asset
         for component in manifest["components"].values()
@@ -97,7 +111,7 @@ def _release(manifest: dict) -> tuple[dict, str, str]:
             "name": name,
             "size": asset["byte_size"],
             "digest": f"sha256:{asset['sha256']}",
-            "browser_download_url": BASE + name,
+            "browser_download_url": base + name,
         }
         for name, asset in sorted(native.items())
     ]
@@ -107,33 +121,36 @@ def _release(manifest: dict) -> tuple[dict, str, str]:
                 "name": "component-manifest-v1.json",
                 "size": len(manifest_body.encode()),
                 "digest": f"sha256:{manifest_digest}",
-                "browser_download_url": BASE + "component-manifest-v1.json",
+                "browser_download_url": base + "component-manifest-v1.json",
             },
             {
                 "name": "checksums.txt",
                 "size": len(checksums.encode()),
                 "digest": f"sha256:{hashlib.sha256(checksums.encode()).hexdigest()}",
-                "browser_download_url": BASE + "checksums.txt",
+                "browser_download_url": base + "checksums.txt",
             },
         ]
     )
     return {"tag_name": TAG, "target_commitish": "main", "assets": assets}, checksums, manifest_body
 
 
-def _fetcher(release: dict, checksums: str, manifest_body: str, *, tag_ref=None, tag_objects=None):
+def _fetcher(
+    release: dict, checksums: str, manifest_body: str, *, tag_ref=None, tag_objects=None, repository: str = REPOSITORY
+):
+    base, api, ref_api, tag_api = _urls(repository)
     tag_ref = tag_ref or {"ref": f"refs/tags/{TAG}", "object": {"type": "commit", "sha": "a" * 40}}
     tag_objects = tag_objects or {}
 
     def fetch(url: str) -> tuple[int, str]:
-        if url == API:
+        if url == api:
             return 200, json.dumps(release)
-        if url == REF_API:
+        if url == ref_api:
             return 200, json.dumps(tag_ref)
-        if url.startswith(TAG_API):
-            return 200, json.dumps(tag_objects[url.removeprefix(TAG_API)])
-        if url == BASE + "checksums.txt":
+        if url.startswith(tag_api):
+            return 200, json.dumps(tag_objects[url.removeprefix(tag_api)])
+        if url == base + "checksums.txt":
             return 200, checksums
-        if url == BASE + "component-manifest-v1.json":
+        if url == base + "component-manifest-v1.json":
             return 200, manifest_body
         raise AssertionError(f"unexpected fetch URL: {url}")
 
@@ -432,3 +449,111 @@ def test_verifier_rejects_invalid_additive_membership_and_checksums(tmp_path, de
         else "assets"
     )
     assert any(expected in error for error in errors), errors
+
+
+# The repository is renamed after 0.32.0: a release verifies under the name its manifest
+# records, and only the two known names are ever accepted (#2816).
+
+
+def _write(tmp_path, manifest: dict, body: str | None = None):
+    path = tmp_path / "manifest.json"
+    path.write_text(body if body is not None else json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    return path
+
+
+@pytest.mark.parametrize("repository", [REPOSITORY, RENAMED_REPOSITORY])
+def test_verifier_accepts_a_release_recorded_under_either_accepted_repository(tmp_path, repository):
+    manifest = _manifest(repository)
+    release, checksums, body = _release(manifest, repository)
+    path = _write(tmp_path, manifest, body)
+
+    fetch = _fetcher(release, checksums, body, repository=repository)
+
+    assert _module().verify_manifest(path, fetch=fetch) == []
+    assert _module().verify_manifest(path, fetch=fetch, expected_repository=repository) == []
+
+
+def test_verifier_rejects_a_third_repository_before_any_network_lookup(tmp_path):
+    manifest = _manifest("attacker/brigade")
+    path = _write(tmp_path, manifest)
+
+    def no_network(url: str) -> tuple[int, str]:
+        raise AssertionError(f"must not look up {url}")
+
+    errors = _module().verify_manifest(path, fetch=no_network)
+
+    assert errors
+    assert all("attacker/brigade" not in error or "must be one of" in error for error in errors)
+    assert any(f"{REPOSITORY}, {RENAMED_REPOSITORY}" in error for error in errors)
+
+
+def test_verifier_rejects_a_manifest_that_mixes_the_two_accepted_names(tmp_path):
+    manifest = _manifest()
+    manifest["components"]["sessionfind"]["source"]["repository"] = RENAMED_REPOSITORY
+    path = _write(tmp_path, manifest)
+
+    def no_network(url: str) -> tuple[int, str]:
+        raise AssertionError(f"must not look up {url}")
+
+    errors = _module().verify_manifest(path, fetch=no_network)
+
+    assert any("does not match" in error for error in errors)
+
+
+def test_verifier_rejects_a_manifest_recording_a_different_repository_than_the_one_expected(tmp_path):
+    manifest = _manifest(REPOSITORY)
+    path = _write(tmp_path, manifest)
+
+    def no_network(url: str) -> tuple[int, str]:
+        raise AssertionError(f"must not look up {url}")
+
+    errors = _module().verify_manifest(path, fetch=no_network, expected_repository=RENAMED_REPOSITORY)
+
+    assert errors == [f"component manifest records {REPOSITORY}, expected {RENAMED_REPOSITORY}"]
+
+
+def test_verifier_rejects_an_expected_repository_outside_the_two_accepted_names(tmp_path):
+    manifest = _manifest(REPOSITORY)
+    path = _write(tmp_path, manifest)
+
+    errors = _module().verify_manifest(path, fetch=lambda url: (404, ""), expected_repository="attacker/brigade")
+
+    assert any("attacker/brigade" in error and "not one of" in error for error in errors)
+
+
+def test_verifier_does_not_accept_release_urls_of_the_other_repository(tmp_path):
+    # Component sources name the new repository but the asset URLs still point at the old one.
+    manifest = _manifest(RENAMED_REPOSITORY)
+    for component in manifest["components"].values():
+        for asset in component["assets"].values():
+            asset["download_url"] = asset["download_url"].replace(RENAMED_REPOSITORY, REPOSITORY)
+    release, checksums, body = _release(manifest, RENAMED_REPOSITORY)
+    path = _write(tmp_path, manifest, body)
+
+    errors = _module().verify_manifest(path, fetch=_fetcher(release, checksums, body, repository=RENAMED_REPOSITORY))
+
+    assert any("immutable Brigade release URL" in error for error in errors)
+
+
+@pytest.mark.parametrize("repository", [REPOSITORY, RENAMED_REPOSITORY])
+def test_print_repository_reports_the_recorded_repository_without_network(tmp_path, capsys, repository):
+    path = _write(tmp_path, _manifest(repository))
+
+    assert _module().main(["--manifest", str(path), "--print-repository"]) == 0
+    assert capsys.readouterr().out == repository + "\n"
+
+
+@pytest.mark.parametrize("defect", ["third", "mixed", "missing"])
+def test_print_repository_fails_closed_for_an_untrusted_manifest(tmp_path, capsys, defect):
+    manifest = _manifest()
+    if defect == "third":
+        for component in manifest["components"].values():
+            component["source"]["repository"] = "attacker/brigade"
+    elif defect == "mixed":
+        manifest["components"]["sessionfind"]["source"]["repository"] = RENAMED_REPOSITORY
+    else:
+        del manifest["components"]["sessionfind"]["source"]
+    path = _write(tmp_path, manifest)
+
+    assert _module().main(["--manifest", str(path), "--print-repository"]) == 1
+    assert capsys.readouterr().out == ""

@@ -2863,9 +2863,9 @@ def test_windows_canonical_acceptance_runtime(tmp_path, engine, case):
         "$keys = @('GITHUB_TOKEN','GH_TOKEN','ACTIONS_ID_TOKEN_REQUEST_TOKEN','ACTIONS_RUNTIME_TOKEN')\n"
         "foreach ($key in $keys) { [Environment]::SetEnvironmentVariable($key, 'fixture-only', 'Process') }\n"
         + function
-        + "\nfunction Invoke-CanonicalAttestationVerifier { param($GhExe, $Subject, $Revision, $Version)\n"
-        "$args = @('attestation','verify',$Subject,'--repo','escoffier-labs/brigade','--signer-workflow',"
-        "'escoffier-labs/brigade/.github/workflows/publish.yml','--source-digest',$Revision,'--source-ref',\"refs/tags/v$Version\")\n"
+        + "\nfunction Invoke-CanonicalAttestationVerifier { param($GhExe, $Subject, $Revision, $Version, $Repository)\n"
+        "$args = @('attestation','verify',$Subject,'--repo',$Repository,'--signer-workflow',"
+        "\"$Repository/.github/workflows/publish.yml\",'--source-digest',$Revision,'--source-ref',\"refs/tags/v$Version\")\n"
         "if ($args[0] -ne 'attestation' -or $args[1] -ne 'verify') { throw 'wrong command' }\n"
         "if (-not [IO.Path]::IsPathRooted($args[2])) { throw 'relative subject' }\n"
         "foreach ($pair in @(@('--source-digest', ('a' * 40)), @('--source-ref', 'refs/tags/v1.2.3'), "

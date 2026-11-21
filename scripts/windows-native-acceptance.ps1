@@ -870,7 +870,16 @@ function Assert-ReleaseManifestAndAssets {
         [string]$PythonExe = "python"
     )
     $tag = "v$Version"
-    $base = "https://github.com/escoffier-labs/brigade/releases/download/$tag"
+    # The repository is renamed after 0.32.0 publishes. Exactly these two names are accepted,
+    # never another repository. The workflow's own repository wins when it is one of them.
+    # Keep in step with scripts/published-artifact-acceptance.py (and the copy in
+    # Invoke-VerifiedCanonicalSmoke, which tests extract on their own).
+    $acceptedRepositories = @("escoffier-labs/brigade", "escoffier-labs/brigadestack")
+    $repository = $acceptedRepositories[0]
+    if ($env:GITHUB_REPOSITORY -and @($acceptedRepositories | Where-Object { $_ -ceq $env:GITHUB_REPOSITORY }).Count -eq 1) {
+        $repository = $env:GITHUB_REPOSITORY
+    }
+    $base = "https://github.com/$repository/releases/download/$tag"
     $manifestPath = Join-Path $Destination "component-manifest-v1.json"
     $checksumsPath = Join-Path $Destination "checksums.txt"
     New-Item -ItemType Directory -Force -Path $Destination | Out-Null
@@ -913,8 +922,8 @@ json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'), object_pairs_hook=uniq
     $expected = @{}
     foreach ($componentId in $legacyIds) {
         $component = $manifest.components.$componentId
-        if (-not $component -or $component.source.repository -cne "escoffier-labs/brigade" -or $component.source.release_tag -cne $tag) {
-            throw "release manifest component $componentId does not point to escoffier-labs/brigade@$tag"
+        if (-not $component -or $component.source.repository -cne $repository -or $component.source.release_tag -cne $tag) {
+            throw "release manifest component $componentId does not point to $repository@$tag"
         }
         if (@($component.assets.PSObject.Properties).Count -ne 5) { throw "release manifest has invalid platform matrix" }
         foreach ($property in $component.assets.PSObject.Properties) {
@@ -932,8 +941,8 @@ json.loads(Path(sys.argv[1]).read_text(encoding='utf-8'), object_pairs_hook=uniq
     }
     $hub = $manifest.components."brigade-hub"
     if ($hub) {
-        if ($hub.source.repository -cne "escoffier-labs/brigade" -or $hub.source.release_tag -cne $tag) {
-            throw "release manifest component brigade-hub does not point to escoffier-labs/brigade@$tag"
+        if ($hub.source.repository -cne $repository -or $hub.source.release_tag -cne $tag) {
+            throw "release manifest component brigade-hub does not point to $repository@$tag"
         }
         if (@($hub.assets.PSObject.Properties).Count -ne 2) { throw "release manifest has invalid brigade-hub platform matrix" }
         foreach ($platform in $hubPlatforms) {
@@ -993,11 +1002,11 @@ function Invoke-CanonicalComponentSmoke {
 }
 
 function Invoke-CanonicalAttestationVerifier {
-    param([string]$GhExe, [string]$Subject, [string]$Revision, [string]$Version)
+    param([string]$GhExe, [string]$Subject, [string]$Revision, [string]$Version, [string]$Repository)
     if (-not $GhExe -or -not [IO.Path]::IsPathRooted($GhExe) -or -not (Test-Path -LiteralPath $GhExe -PathType Leaf)) {
         throw "canonical attestation verification failed: verifier unavailable"
     }
-    $arguments = @("attestation", "verify", $Subject, "--repo", "escoffier-labs/brigade", "--signer-workflow", "escoffier-labs/brigade/.github/workflows/publish.yml", "--source-digest", $Revision, "--source-ref", "refs/tags/v$Version")
+    $arguments = @("attestation", "verify", $Subject, "--repo", $Repository, "--signer-workflow", "$Repository/.github/workflows/publish.yml", "--source-digest", $Revision, "--source-ref", "refs/tags/v$Version")
     # Quote for Windows CreateProcess/CommandLineToArgvW, without a shell.
     $quoted = foreach ($argument in $arguments) {
         $escaped = [regex]::Replace($argument, '(\\*)"', '$1$1\"')
@@ -1042,8 +1051,17 @@ function Invoke-VerifiedCanonicalSmoke {
     }
     $manifestPath = [IO.Path]::GetFullPath((Join-Path $ReleaseDirectory "component-manifest-v1.json"))
     $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+    # Attestations are signed under the repository name the release was built in, which
+    # the manifest records, so --repo and the signer workflow both follow the manifest.
+    $acceptedRepositories = @("escoffier-labs/brigade", "escoffier-labs/brigadestack")
+    $repository = $null
     $revision = $null
     foreach ($id in @("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")) {
+        $recorded = [string]$manifest.components.$id.source.repository
+        if (@($acceptedRepositories | Where-Object { $_ -ceq $recorded }).Count -ne 1 -or ($repository -and $repository -cne $recorded)) {
+            throw "release manifest must record exactly one of $($acceptedRepositories -join ', ') for every component"
+        }
+        $repository = $recorded
         $current = $manifest.components.$id.component_revision
         if ($current -isnot [string] -or $current -cnotmatch '\A[0-9a-f]{40}\z' -or ($revision -and $revision -cne $current)) {
             throw "primary manifest must contain one valid source commit for all components"
@@ -1052,7 +1070,7 @@ function Invoke-VerifiedCanonicalSmoke {
     }
     # Verify exact local bytes, including the manifest that supplies the source.
     foreach ($path in @($manifestPath) + @($paths)) {
-        $exitCode = Invoke-CanonicalAttestationVerifier -GhExe $GhExe -Subject $path -Revision $revision -Version $Version
+        $exitCode = Invoke-CanonicalAttestationVerifier -GhExe $GhExe -Subject $path -Revision $revision -Version $Version -Repository $repository
         if ($exitCode -ne 0) { throw "canonical attestation verification failed (exit $exitCode)" }
     }
     $saved = @{}

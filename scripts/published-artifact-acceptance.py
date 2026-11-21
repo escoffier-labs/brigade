@@ -31,6 +31,12 @@ COMPONENT_PLATFORMS = {"brigade-hub": ("linux-amd64", "linux-arm64")}
 CANONICAL_IDS = ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 REPOSITORY = "escoffier-labs/brigade"
+RENAMED_REPOSITORY = "escoffier-labs/brigadestack"
+# The repository is renamed after 0.32.0 publishes. Exactly these two names are accepted,
+# never another repository: a release records the repository its workflow ran in and its
+# attestations are signed under that name, so verification uses the repository the manifest
+# records. Keep in step with src/brigade/update_cmd.py (tests/test_repository_rename_names.py).
+ACCEPTED_REPOSITORIES = (REPOSITORY, RENAMED_REPOSITORY)
 GITHUB_API_HOST = "api.github.com"
 PYPI_PROJECT_URL = "https://pypi.org/pypi/brigadestack/json"
 PYPI_AVAILABILITY_TIMEOUT_SECONDS = 6 * 60
@@ -86,8 +92,31 @@ def fetch_bytes(url: str) -> bytes:
         return response.read()
 
 
+def release_repository() -> str:
+    """The repository whose release is verified: the workflow's own, when it is an accepted name."""
+    current = os.environ.get("GITHUB_REPOSITORY", "")
+    return current if current in ACCEPTED_REPOSITORIES else REPOSITORY
+
+
+def manifest_repository(manifest: Any) -> str:
+    """The one accepted repository every component of a release manifest records."""
+    components = manifest.get("components") if isinstance(manifest, dict) else None
+    if not isinstance(components, dict):
+        raise AcceptanceError("release manifest has no components object")
+    recorded = set()
+    for component in COMPONENT_IDS:
+        record = components.get(component)
+        source = record.get("source") if isinstance(record, dict) else None
+        recorded.add(source.get("repository") if isinstance(source, dict) else None)
+    if len(recorded) != 1 or not recorded <= set(ACCEPTED_REPOSITORIES):
+        raise AcceptanceError(
+            f"release manifest must record exactly one of {', '.join(ACCEPTED_REPOSITORIES)} for every component"
+        )
+    return next(iter(recorded))
+
+
 def _github_release_tag_url(tag: str) -> str:
-    return f"https://{GITHUB_API_HOST}/repos/{REPOSITORY}/releases/tags/{tag}"
+    return f"https://{GITHUB_API_HOST}/repos/{release_repository()}/releases/tags/{tag}"
 
 
 def _is_allowed_github_api_url(url: str) -> bool:
@@ -153,9 +182,10 @@ def wait_for_github_release_tag(
     an otherwise healthy publish.
     """
     tag = f"v{version}"
+    repository = release_repository()
     url = _github_release_tag_url(tag)
     backoff = initial_backoff_seconds
-    detail = f"GitHub release lookup for {REPOSITORY}@{tag} failed"
+    detail = f"GitHub release lookup for {repository}@{tag} failed"
     for attempt in range(max_attempts):
         status, payload = fetch(url)
         if status == 200:
@@ -165,14 +195,14 @@ def wait_for_github_release_tag(
                 raise AcceptanceError("GitHub release must be a published non-prerelease")
             return payload
         if not _is_transient_github_http_status(status):
-            raise AcceptanceError(f"GitHub release lookup failed for {REPOSITORY}@{tag}: HTTP {status}")
-        detail = f"GitHub release lookup for {REPOSITORY}@{tag} returned HTTP {status}"
+            raise AcceptanceError(f"GitHub release lookup failed for {repository}@{tag}: HTTP {status}")
+        detail = f"GitHub release lookup for {repository}@{tag} returned HTTP {status}"
         if attempt + 1 >= max_attempts:
             break
         sleep(min(backoff, max_backoff_seconds))
         backoff = min(backoff * 2, max_backoff_seconds)
     raise AcceptanceError(
-        f"GitHub release lookup for {REPOSITORY}@{tag} was not available after {max_attempts} attempts: {detail}"
+        f"GitHub release lookup for {repository}@{tag} was not available after {max_attempts} attempts: {detail}"
     )
 
 
@@ -193,7 +223,7 @@ def _sha256_path(path: Path) -> str:
 
 
 def _release_url(version: str, filename: str) -> str:
-    return f"https://github.com/{REPOSITORY}/releases/download/v{version}/{filename}"
+    return f"https://github.com/{release_repository()}/releases/download/v{version}/{filename}"
 
 
 def _parse_checksums(text: str) -> dict[str, str]:
@@ -249,8 +279,12 @@ def verify_release_assets(
         if not isinstance(record, dict):
             raise AcceptanceError(f"release component manifest entry {component!r} is invalid")
         source = record.get("source")
-        if not isinstance(source, dict) or source.get("repository") != REPOSITORY or source.get("release_tag") != tag:
-            raise AcceptanceError(f"release component {component!r} does not point to {REPOSITORY}@{tag}")
+        if (
+            not isinstance(source, dict)
+            or source.get("repository") != release_repository()
+            or source.get("release_tag") != tag
+        ):
+            raise AcceptanceError(f"release component {component!r} does not point to {release_repository()}@{tag}")
         component_assets = record.get("assets")
         if not isinstance(component_assets, dict) or set(component_assets) != set(platforms):
             raise AcceptanceError(f"release component {component!r} does not publish the full platform matrix")
@@ -841,6 +875,9 @@ def smoke_verified_canonical_release(
         raise AcceptanceError("primary manifest must contain one valid source commit for all components")
     # Bind the manifest itself as well as the aliases to signed source identity.
     # A checksum map alone is not provenance, and releases can be mutable.
+    # The attestation is signed under the repository name the release was built in, which
+    # the manifest records, so --repo and the signer workflow both follow the manifest.
+    repository = manifest_repository(manifest)
     for path in [manifest_path, *paths.values()]:
         run_checked(
             [
@@ -849,9 +886,9 @@ def smoke_verified_canonical_release(
                 "verify",
                 path,
                 "--repo",
-                REPOSITORY,
+                repository,
                 "--signer-workflow",
-                f"{REPOSITORY}/.github/workflows/publish.yml",
+                f"{repository}/.github/workflows/publish.yml",
                 "--source-digest",
                 revisions[0],
                 "--source-ref",

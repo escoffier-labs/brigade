@@ -14,7 +14,7 @@ concurrency:
 
 jobs:
   refresh:
-    if: github.repository == 'escoffier-labs/brigade' && github.ref == 'refs/heads/main'
+    if: (github.repository == 'escoffier-labs/brigade' || github.repository == 'escoffier-labs/brigadestack') && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     timeout-minutes: 5
     permissions:

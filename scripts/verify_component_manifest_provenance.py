@@ -19,6 +19,12 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_MANIFEST = ROOT / "src/brigade/templates/components/manifest-v1.json"
 REPOSITORY = "escoffier-labs/brigade"
+RENAMED_REPOSITORY = "escoffier-labs/brigadestack"
+# The repository is renamed after 0.32.0 publishes. A release records the repository its
+# workflow ran in, and its attestations are signed under that same name, so exactly these
+# two names are accepted and never any other repository. Keep in step with
+# src/brigade/update_cmd.py (tests/test_repository_rename_names.py checks the pair).
+ACCEPTED_REPOSITORIES = (REPOSITORY, RENAMED_REPOSITORY)
 COMPONENT_IDS = (
     "agent-notify",
     "brigade-code-graph",
@@ -70,16 +76,40 @@ def _expected_asset_name(component: str, platform: str) -> str:
     return f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else "")
 
 
-def _release_url(tag: str, filename: str) -> str:
-    return f"https://github.com/{REPOSITORY}/releases/download/{tag}/{filename}"
+def _release_url(repository: str, tag: str, filename: str) -> str:
+    return f"https://github.com/{repository}/releases/download/{tag}/{filename}"
 
 
-def _tag_ref_url(tag: str) -> str:
-    return f"https://api.github.com/repos/{REPOSITORY}/git/ref/tags/{tag}"
+def _tag_ref_url(repository: str, tag: str) -> str:
+    return f"https://api.github.com/repos/{repository}/git/ref/tags/{tag}"
 
 
-def _tag_object_url(sha: str) -> str:
-    return f"https://api.github.com/repos/{REPOSITORY}/git/tags/{sha}"
+def _tag_object_url(repository: str, sha: str) -> str:
+    return f"https://api.github.com/repos/{repository}/git/tags/{sha}"
+
+
+def recorded_repository(components: dict[str, Any]) -> tuple[str | None, list[str]]:
+    """Return the one accepted repository every component records, plus any errors.
+
+    A manifest that names a third repository, or names the two accepted repositories on
+    different components, has no trustworthy repository and yields None.
+    """
+    allowed = ", ".join(ACCEPTED_REPOSITORIES)
+    repository: str | None = None
+    errors: list[str] = []
+    for component in COMPONENT_IDS:
+        value = components.get(component)
+        if not isinstance(value, dict):
+            continue
+        source = value.get("source")
+        recorded = source.get("repository") if isinstance(source, dict) else None
+        if recorded not in ACCEPTED_REPOSITORIES:
+            errors.append(f"component {component!r} source.repository must be one of {allowed}")
+        elif repository is None:
+            repository = recorded
+        elif recorded != repository:
+            errors.append(f"component {component!r} source.repository {recorded!r} does not match {repository!r}")
+    return (repository if not errors else None), errors
 
 
 def _fetch_json(fetch: FetchFn, url: str, *, label: str) -> dict[str, Any]:
@@ -106,8 +136,8 @@ def _tag_target(payload: dict[str, Any], *, label: str) -> tuple[str, str]:
     return object_type, sha
 
 
-def resolve_tag_commit(tag: str, *, fetch: FetchFn) -> str:
-    ref = _fetch_json(fetch, _tag_ref_url(tag), label="tag ref")
+def resolve_tag_commit(tag: str, *, fetch: FetchFn, repository: str = REPOSITORY) -> str:
+    ref = _fetch_json(fetch, _tag_ref_url(repository, tag), label="tag ref")
     if ref.get("ref") != f"refs/tags/{tag}":
         raise ValueError(f"GitHub tag ref did not report exact tag refs/tags/{tag}")
     object_type, sha = _tag_target(ref, label="tag ref")
@@ -119,7 +149,7 @@ def resolve_tag_commit(tag: str, *, fetch: FetchFn) -> str:
         if depth >= MAX_TAG_DEREFERENCE_DEPTH:
             raise ValueError("GitHub tag dereference exceeded the maximum depth")
         seen.add(sha)
-        annotated = _fetch_json(fetch, _tag_object_url(sha), label="tag object")
+        annotated = _fetch_json(fetch, _tag_object_url(repository, sha), label="tag object")
         if annotated.get("tag") != tag:
             raise ValueError(f"GitHub tag object did not report exact tag {tag}")
         object_type, sha = _tag_target(annotated, label="tag object")
@@ -132,7 +162,9 @@ def _github_asset_digest(asset: dict[str, Any]) -> re.Match[str] | None:
     return _DIGEST.fullmatch(digest) if isinstance(digest, str) else None
 
 
-def verify_manifest(manifest_path: Path, *, fetch: FetchFn = default_fetch) -> list[str]:
+def verify_manifest(
+    manifest_path: Path, *, fetch: FetchFn = default_fetch, expected_repository: str | None = None
+) -> list[str]:
     try:
         raw_text = manifest_path.read_text()
         manifest = json.loads(raw_text)
@@ -148,6 +180,21 @@ def verify_manifest(manifest_path: Path, *, fetch: FetchFn = default_fetch) -> l
     if set(components) != set(COMPONENT_IDS):
         errors.append("component manifest must contain exactly " + ", ".join(COMPONENT_IDS))
 
+    repository, repository_errors = recorded_repository(components)
+    if repository is not None and expected_repository is not None and repository != expected_repository:
+        repository_errors.append(f"component manifest records {repository}, expected {expected_repository}")
+    if expected_repository is not None and expected_repository not in ACCEPTED_REPOSITORIES:
+        repository_errors.append(
+            f"expected repository {expected_repository!r} is not one of {', '.join(ACCEPTED_REPOSITORIES)}"
+        )
+    if repository is None or repository_errors:
+        # Do not look up releases, tags or assets under a repository the manifest cannot vouch for.
+        return [
+            *errors,
+            *repository_errors,
+            *([] if repository_errors else ["component manifest records no repository"]),
+        ]
+
     tag: str | None = None
     expected_native: dict[str, dict[str, Any]] = {}
     for component in COMPONENT_IDS:
@@ -156,8 +203,6 @@ def verify_manifest(manifest_path: Path, *, fetch: FetchFn = default_fetch) -> l
             errors.append(f"component {component!r} must be an object")
             continue
         source = value.get("source")
-        if not isinstance(source, dict) or source.get("repository") != REPOSITORY:
-            errors.append(f"component {component!r} source.repository must be {REPOSITORY}")
         release_tag = source.get("release_tag") if isinstance(source, dict) else None
         if not isinstance(release_tag, str) or not release_tag:
             errors.append(f"component {component!r} source.release_tag must be set")
@@ -188,7 +233,7 @@ def verify_manifest(manifest_path: Path, *, fetch: FetchFn = default_fetch) -> l
                 errors.append(f"component {component!r} asset {name!r} byte_size must be positive")
             if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
                 errors.append(f"component {component!r} asset {name!r} sha256 must be lowercase SHA-256")
-            if not isinstance(url, str) or url != _release_url(release_tag, name):
+            if not isinstance(url, str) or url != _release_url(repository, release_tag, name):
                 errors.append(f"component {component!r} asset {name!r} must use its immutable Brigade release URL")
             if name in expected_native:
                 errors.append(f"component manifest lists duplicate native asset {name!r}")
@@ -197,19 +242,19 @@ def verify_manifest(manifest_path: Path, *, fetch: FetchFn = default_fetch) -> l
 
     if tag is None:
         return errors
-    api_url = f"https://api.github.com/repos/{REPOSITORY}/releases/tags/{tag}"
+    api_url = f"https://api.github.com/repos/{repository}/releases/tags/{tag}"
     status, body = fetch(api_url)
     if status != 200:
-        return [*errors, f"GitHub release lookup failed for {REPOSITORY}@{tag}: HTTP {status}"]
+        return [*errors, f"GitHub release lookup failed for {repository}@{tag}: HTTP {status}"]
     try:
         release = json.loads(body)
     except json.JSONDecodeError:
-        return [*errors, f"GitHub release lookup returned invalid JSON for {REPOSITORY}@{tag}"]
+        return [*errors, f"GitHub release lookup returned invalid JSON for {repository}@{tag}"]
     if not isinstance(release, dict) or release.get("tag_name") != tag:
         errors.append(f"GitHub release must report tag_name {tag!r}")
         return errors
     try:
-        target_commit = resolve_tag_commit(tag, fetch=fetch)
+        target_commit = resolve_tag_commit(tag, fetch=fetch, repository=repository)
     except ValueError as exc:
         errors.append(str(exc))
         target_commit = None
@@ -243,7 +288,7 @@ def verify_manifest(manifest_path: Path, *, fetch: FetchFn = default_fetch) -> l
         size = asset.get("size")
         if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
             errors.append(f"release asset {name!r} size must be a positive integer")
-        if asset.get("browser_download_url") != _release_url(tag, name):
+        if asset.get("browser_download_url") != _release_url(repository, tag, name):
             errors.append(f"release asset {name!r} must use the immutable Brigade release URL")
         if _github_asset_digest(asset) is None:
             errors.append(f"release asset {name!r} is missing a valid GitHub SHA-256 digest")
@@ -273,12 +318,12 @@ def verify_manifest(manifest_path: Path, *, fetch: FetchFn = default_fetch) -> l
     if manifest_asset is None or checksums_asset is None:
         return errors
     for name, asset in (("component-manifest-v1.json", manifest_asset), ("checksums.txt", checksums_asset)):
-        if asset.get("browser_download_url") != _release_url(tag, name):
+        if asset.get("browser_download_url") != _release_url(repository, tag, name):
             errors.append(f"release asset {name!r} must use the immutable Brigade release URL")
         if _github_asset_digest(asset) is None:
             errors.append(f"release asset {name!r} is missing a valid GitHub SHA-256 digest")
 
-    manifest_status, release_manifest = fetch(_release_url(tag, "component-manifest-v1.json"))
+    manifest_status, release_manifest = fetch(_release_url(repository, tag, "component-manifest-v1.json"))
     if manifest_status != 200:
         errors.append(f"release-page component-manifest-v1.json fetch failed: HTTP {manifest_status}")
     elif release_manifest != raw_text:
@@ -288,7 +333,7 @@ def verify_manifest(manifest_path: Path, *, fetch: FetchFn = default_fetch) -> l
     ):
         errors.append("release-page component-manifest-v1.json digest does not match its release asset")
 
-    checksums_status, checksums_text = fetch(_release_url(tag, "checksums.txt"))
+    checksums_status, checksums_text = fetch(_release_url(repository, tag, "checksums.txt"))
     if checksums_status != 200:
         errors.append(f"checksums.txt fetch failed: HTTP {checksums_status}")
         return errors
@@ -320,8 +365,30 @@ def verify_manifest(manifest_path: Path, *, fetch: FetchFn = default_fetch) -> l
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--manifest", type=Path, default=DEFAULT_MANIFEST)
+    parser.add_argument(
+        "--expected-repository",
+        help="require the manifest to record this repository (one of the two accepted names)",
+    )
+    parser.add_argument(
+        "--print-repository",
+        action="store_true",
+        help="print the one accepted repository the manifest records and exit without any network lookup",
+    )
     args = parser.parse_args(argv)
-    errors = verify_manifest(args.manifest.resolve())
+    if args.print_repository:
+        try:
+            components = json.loads(args.manifest.read_text()).get("components")
+        except (OSError, json.JSONDecodeError, AttributeError) as exc:
+            print(f"component manifest provenance: could not read manifest ({exc})", file=sys.stderr)
+            return 1
+        repository, errors = recorded_repository(components if isinstance(components, dict) else {})
+        for error in errors:
+            print(f"component manifest provenance: {error}", file=sys.stderr)
+        if repository is None:
+            return 1
+        print(repository)
+        return 0
+    errors = verify_manifest(args.manifest.resolve(), expected_repository=args.expected_repository)
     for error in errors:
         print(f"component manifest provenance: {error}", file=sys.stderr)
     return 1 if errors else 0

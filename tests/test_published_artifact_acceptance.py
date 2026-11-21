@@ -18,6 +18,12 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts" / "published-artifact-acceptance.py"
 
 
+@pytest.fixture(autouse=True)
+def _no_workflow_repository(monkeypatch):
+    # Release lookups follow GITHUB_REPOSITORY when it is an accepted name; keep the suite off the runner's value.
+    monkeypatch.delenv("GITHUB_REPOSITORY", raising=False)
+
+
 @pytest.fixture()
 def acceptance_module():
     spec = importlib.util.spec_from_file_location("published_artifact_acceptance", SCRIPT)
@@ -1110,8 +1116,8 @@ def test_smoke_import_and_search_rejects_an_empty_new_only_export(acceptance_mod
         )
 
 
-def _release_fixture(*, additive=True, hub=False):
-    base = "https://github.com/escoffier-labs/brigade/releases/download/v1.2.3/"
+def _release_fixture(*, additive=True, hub=False, repository="escoffier-labs/brigade"):
+    base = f"https://github.com/{repository}/releases/download/v1.2.3/"
     legacy = ("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")
     aliases = ("graphtrail", "graphtrail-mcp", "miseledger")
     platforms = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
@@ -1130,7 +1136,7 @@ def _release_fixture(*, additive=True, hub=False):
             }
         if component in legacy:
             components[component] = {
-                "source": {"repository": "escoffier-labs/brigade", "release_tag": "v1.2.3"},
+                "source": {"repository": repository, "release_tag": "v1.2.3"},
                 "assets": assets,
             }
     if hub:
@@ -1146,7 +1152,7 @@ def _release_fixture(*, additive=True, hub=False):
                 "download_url": base + name,
             }
         components["brigade-hub"] = {
-            "source": {"repository": "escoffier-labs/brigade", "release_tag": "v1.2.3"},
+            "source": {"repository": repository, "release_tag": "v1.2.3"},
             "assets": assets,
         }
     bodies["component-manifest-v1.json"] = json.dumps({"components": components}).encode()
@@ -1154,9 +1160,9 @@ def _release_fixture(*, additive=True, hub=False):
     return base, bodies, checksums
 
 
-def _verify_fixture(module, tmp_path, bodies, checksums):
+def _verify_fixture(module, tmp_path, bodies, checksums, repository="escoffier-labs/brigade"):
     checksum_text = "".join(f"{digest}  {name}\n" for name, digest in sorted(checksums.items())).encode()
-    base = "https://github.com/escoffier-labs/brigade/releases/download/v1.2.3/"
+    base = f"https://github.com/{repository}/releases/download/v1.2.3/"
 
     def fetch(url):
         assert url.startswith(base)
@@ -1413,3 +1419,152 @@ def test_acceptance_canonical_wiring_fails_closed(acceptance_module, tmp_path, m
             < next(i for i, (cmd, _) in enumerate(calls) if cmd in native)
             for argv in attestations
         )
+
+
+# The repository is renamed after 0.32.0 (#2816). A release verifies under the repository its
+# manifest records, exactly two names are accepted, and the attestation is checked under the
+# same name the manifest records.
+
+OLD_REPOSITORY = "escoffier-labs/brigade"
+NEW_REPOSITORY = "escoffier-labs/brigadestack"
+
+
+@pytest.mark.parametrize("repository", [OLD_REPOSITORY, NEW_REPOSITORY])
+def test_release_assets_verify_under_either_accepted_repository(acceptance_module, tmp_path, monkeypatch, repository):
+    monkeypatch.setenv("GITHUB_REPOSITORY", repository)
+    _, bodies, checksums = _release_fixture(repository=repository)
+
+    result = _verify_fixture(acceptance_module, tmp_path, bodies, checksums, repository)
+
+    assert set(result) == {"manifest", "native_paths"}
+    assert acceptance_module.manifest_repository(result["manifest"]) == repository
+
+
+def test_release_assets_default_to_the_pre_rename_repository_outside_actions(acceptance_module, tmp_path):
+    _, bodies, checksums = _release_fixture()
+
+    _verify_fixture(acceptance_module, tmp_path, bodies, checksums)
+
+
+@pytest.mark.parametrize("workflow_repository", [OLD_REPOSITORY, NEW_REPOSITORY, ""])
+def test_release_assets_reject_a_third_repository_in_the_manifest(
+    acceptance_module, tmp_path, monkeypatch, workflow_repository
+):
+    monkeypatch.setenv("GITHUB_REPOSITORY", workflow_repository)
+    third = "attacker/brigade"
+    _, bodies, checksums = _release_fixture(repository=third)
+    fetched = []
+
+    def fetch(url):
+        fetched.append(url)
+        name = url.rsplit("/", 1)[1]
+        return (
+            b"".join(f"{d}  {n}\n".encode() for n, d in checksums.items()) if name == "checksums.txt" else bodies[name]
+        )
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="does not point to"):
+        acceptance_module.verify_release_assets("1.2.3", tmp_path, fetch_bytes=fetch)
+    assert all(url.startswith(f"https://github.com/{workflow_repository or OLD_REPOSITORY}/") for url in fetched)
+
+
+def test_release_assets_reject_a_manifest_naming_the_other_accepted_repository(
+    acceptance_module, tmp_path, monkeypatch
+):
+    # The workflow ran in the old repository, so a manifest that claims the new one is not its release.
+    monkeypatch.setenv("GITHUB_REPOSITORY", OLD_REPOSITORY)
+    _, bodies, checksums = _release_fixture(repository=OLD_REPOSITORY)
+    manifest = json.loads(bodies["component-manifest-v1.json"])
+    for component in manifest["components"].values():
+        component["source"]["repository"] = NEW_REPOSITORY
+    bodies["component-manifest-v1.json"] = json.dumps(manifest).encode()
+    checksums["component-manifest-v1.json"] = hashlib.sha256(bodies["component-manifest-v1.json"]).hexdigest()
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="does not point to"):
+        _verify_fixture(acceptance_module, tmp_path, bodies, checksums, OLD_REPOSITORY)
+
+
+def _materialized_release(module, tmp_path, monkeypatch, *, manifest_repository, mutate=None):
+    """Write a verified-looking cached release whose manifest records manifest_repository."""
+    monkeypatch.setenv("GITHUB_REPOSITORY", OLD_REPOSITORY)
+    _, bodies, checksums = _release_fixture(repository=OLD_REPOSITORY)
+    _verify_fixture(module, tmp_path, bodies, checksums, OLD_REPOSITORY)
+    release_dir = tmp_path / "release-assets"
+    path = release_dir / "component-manifest-v1.json"
+    manifest = json.loads(path.read_text())
+    for component in manifest["components"].values():
+        component["component_revision"] = "a" * 40
+        component["source"]["repository"] = manifest_repository
+    if mutate:
+        mutate(manifest)
+    path.write_text(json.dumps(manifest))
+    monkeypatch.setattr(module, "host_platform_key", lambda: "linux-amd64")
+    monkeypatch.setattr(module, "smoke_canonical_components", lambda *a, **kw: None)
+    for name in ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence"):
+        (release_dir / f"{name}-linux-amd64").write_bytes(b"x")
+    return release_dir
+
+
+def _signing_runner(signed_by, calls):
+    """A gh stand-in: an attestation verifies only when --repo and the signer workflow name signed_by."""
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        repo = argv[argv.index("--repo") + 1]
+        signer = argv[argv.index("--signer-workflow") + 1]
+        ok = repo == signed_by and signer == f"{signed_by}/.github/workflows/publish.yml"
+        return subprocess.CompletedProcess(argv, 0 if ok else 1, "", "" if ok else "no matching attestation")
+
+    return runner
+
+
+@pytest.mark.parametrize("repository", [OLD_REPOSITORY, NEW_REPOSITORY])
+def test_attestation_uses_the_repository_the_manifest_records(acceptance_module, tmp_path, monkeypatch, repository):
+    release_dir = _materialized_release(acceptance_module, tmp_path, monkeypatch, manifest_repository=repository)
+    calls = []
+
+    acceptance_module.smoke_verified_canonical_release(
+        release_dir, "1.2.3", runner=_signing_runner(repository, calls), env={}
+    )
+
+    assert len(calls) == 4
+    assert {argv[argv.index("--repo") + 1] for argv in calls} == {repository}
+    assert {argv[argv.index("--signer-workflow") + 1] for argv in calls} == {
+        f"{repository}/.github/workflows/publish.yml"
+    }
+
+
+@pytest.mark.parametrize(("recorded", "signed"), [(OLD_REPOSITORY, NEW_REPOSITORY), (NEW_REPOSITORY, OLD_REPOSITORY)])
+def test_attestation_signed_by_the_other_repository_is_rejected(
+    acceptance_module, tmp_path, monkeypatch, recorded, signed
+):
+    release_dir = _materialized_release(acceptance_module, tmp_path, monkeypatch, manifest_repository=recorded)
+    calls = []
+
+    with pytest.raises(acceptance_module.AcceptanceError):
+        acceptance_module.smoke_verified_canonical_release(
+            release_dir, "1.2.3", runner=_signing_runner(signed, calls), env={}
+        )
+    assert {argv[argv.index("--repo") + 1] for argv in calls} == {recorded}
+
+
+@pytest.mark.parametrize("defect", ["third", "mixed"])
+def test_attestation_is_never_attempted_for_an_unaccepted_or_mixed_manifest_repository(
+    acceptance_module, tmp_path, monkeypatch, defect
+):
+    def mixed(manifest):
+        manifest["components"]["sessionfind"]["source"]["repository"] = NEW_REPOSITORY
+
+    release_dir = _materialized_release(
+        acceptance_module,
+        tmp_path,
+        monkeypatch,
+        manifest_repository="attacker/brigade" if defect == "third" else OLD_REPOSITORY,
+        mutate=mixed if defect == "mixed" else None,
+    )
+    calls = []
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="exactly one of"):
+        acceptance_module.smoke_verified_canonical_release(
+            release_dir, "1.2.3", runner=_signing_runner(OLD_REPOSITORY, calls), env={}
+        )
+    assert calls == []
