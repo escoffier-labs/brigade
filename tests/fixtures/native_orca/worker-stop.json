@@ -1,0 +1,15 @@
+{
+  "orca_version": "1.4.268",
+  "source": "src/shared/orchestration/workers/orchestration-worker-stop-receipt.ts",
+  "payload": {
+    "ok": true,
+    "result": {
+      "dispatchId": "ctx_000000000003",
+      "state": "stopped",
+      "alreadySettled": false,
+      "processAction": "closed_agent_terminal",
+      "helpers": [],
+      "mutation": {"requestId": "FIXTURE_REQUEST_KEY", "replayed": false}
+    }
+  }
+}

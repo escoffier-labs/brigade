@@ -90,6 +90,7 @@ class Roster:
 
     task_role_instructions: dict[str, str] = field(default_factory=dict)
     worker_instructions: str = field(default="", repr=False)
+    orca_targets: dict[str, dict[str, object]] = field(default_factory=dict)
 
     def find_role(self, role: str) -> Agent | None:
         return next((a for a in self.agents.values() if a.role == role), None)
@@ -395,6 +396,25 @@ def resolve_roster_path(target: Path, explicit: Path | None = None) -> Path:
     return resolve_roster(target, explicit).path
 
 
+def _native_targets(data: dict, key: str) -> dict[str, dict[str, object]]:
+    raw_targets = data.get(key, {})
+    if raw_targets is None:
+        raw_targets = {}
+    if not isinstance(raw_targets, dict):
+        raise ValueError(f"[{key}] must be a TOML table")
+    targets: dict[str, dict[str, object]] = {}
+    for seat_name, target_config in raw_targets.items():
+        if not isinstance(target_config, dict):
+            raise ValueError(f"{key}.{seat_name} must be a TOML table")
+        seat = _as_str(seat_name, f"{key} seat name")
+        if "max_live" in target_config:
+            max_live = target_config["max_live"]
+            if type(max_live) is not int or max_live < 1:
+                raise ValueError(f"{key}.{seat}.max_live must be a positive integer")
+        targets[seat] = dict(target_config)
+    return targets
+
+
 def load_roster(path: Path, *, resolution: RosterResolution | None = None, text: str | None = None) -> Roster:
     path = path.expanduser().resolve()
     if text is None and not path.exists():
@@ -450,21 +470,8 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None, text:
         raise ValueError("limits.allow_models must be a list of strings")
     allow_models = tuple(raw_allow_models)
 
-    raw_targets = data.get("t3_targets", {})
-    if raw_targets is None:
-        raw_targets = {}
-    if not isinstance(raw_targets, dict):
-        raise ValueError("[t3_targets] must be a TOML table")
-    t3_targets: dict[str, dict[str, object]] = {}
-    for seat_name, target_config in raw_targets.items():
-        if not isinstance(target_config, dict):
-            raise ValueError(f"t3_targets.{seat_name} must be a TOML table")
-        seat = _as_str(seat_name, "t3_targets seat name")
-        if "max_live" in target_config:
-            max_live = target_config["max_live"]
-            if type(max_live) is not int or max_live < 1:
-                raise ValueError(f"t3_targets.{seat}.max_live must be a positive integer")
-        t3_targets[seat] = dict(target_config)
+    t3_targets = _native_targets(data, "t3_targets")
+    orca_targets = _native_targets(data, "orca_targets")
 
     parsed_agents: dict[str, Agent] = {}
     for name, raw_agent in raw_agents.items():
@@ -537,7 +544,9 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None, text:
                     codex_cloud.validate_selector_token(cli[len("codex-cloud:") :])
                 except codex_cloud.CodexCloudConfigError as exc:
                     raise ValueError(f"agents.{agent_name}.cli is invalid: {exc}") from exc
-            if not agent_adapters.is_known(cli):
+            # Muse can be selected by a declared native seat without a headless adapter.
+            native_muse = cli == "muse" and orca_targets.get(agent_name, {}).get("agent") == cli
+            if not agent_adapters.is_known(cli) and not native_muse:
                 raise ValueError(f"agents.{agent_name}.cli is unknown: {cli!r}")
             if not _allowed(cli, allow_models):
                 raise ValueError(f"agents.{agent_name}.cli is not allowed by limits.allow_models: {cli!r}")
@@ -671,6 +680,7 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None, text:
         codex_transport=codex_transport,
         resolution=resolution,
         t3_targets=t3_targets,
+        orca_targets=orca_targets,
     )
 
 

@@ -1,0 +1,14 @@
+{
+  "orca_version": "1.4.268",
+  "source": "src/main/runtime/orchestration/db/worker-dispatch/failed-start-circuit-breaker.test.ts",
+  "payload": {
+    "id": "rpc-example",
+    "ok": false,
+    "_meta": {"runtimeId": "runtime-example"},
+    "error": {
+      "code": "task_not_startable",
+      "message": "Synthetic circuit breaker refusal",
+      "data": {"taskId": "task_000000000002", "status": "failed", "retryOf": "ctx_000000000005", "failureCount": 3}
+    }
+  }
+}

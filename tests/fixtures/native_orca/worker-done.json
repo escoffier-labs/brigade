@@ -1,0 +1,19 @@
+{
+  "orca_version": "1.4.268",
+  "source": "src/cli/orchestration/messages/message-send-handler.ts",
+  "payload": {
+    "id": "rpc-example",
+    "ok": true,
+    "_meta": {"runtimeId": "runtime-example"},
+    "result": {
+      "message": {
+        "id": "msg_000000000004",
+        "run_id": "run_000000000001",
+        "type": "worker_done",
+        "payload": "{\"taskId\":\"task_000000000002\",\"dispatchId\":\"ctx_000000000003\",\"outcome\":\"succeeded\"}",
+        "body": "synthetic worker text"
+      },
+      "lifecycle": {"action": "completed", "taskId": "task_000000000002", "dispatchId": "ctx_000000000003"}
+    }
+  }
+}

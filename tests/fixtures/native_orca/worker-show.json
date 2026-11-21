@@ -1,0 +1,16 @@
+{
+  "orca_version": "1.4.268",
+  "source": "src/cli/orchestration/workers/worker-view-results.ts",
+  "payload": {
+    "id": "rpc-example",
+    "ok": true,
+    "_meta": {"runtimeId": "runtime-example"},
+    "result": {
+      "dispatch": {"id": "ctx_000000000003", "taskId": "task_000000000002", "runId": "run_000000000001", "status": "dispatched"},
+      "worker": {"dispatchId": "ctx_000000000003", "state": "ready", "stage": "context_ready", "agentTerminalHandle": null},
+      "projection": {"host": {"id": "local"}, "stage": {"activity": "working"}, "liveness": {"verdict": "live", "source": "agent_status", "observedAt": 0}, "nextAction": {"argv": []}},
+      "observation": {"agentWait": null, "exactWorker": true, "status": "live"},
+      "coordinatedFrom": null
+    }
+  }
+}
