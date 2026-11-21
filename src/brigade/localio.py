@@ -21,6 +21,7 @@ from typing import Any
 
 TREE_FINGERPRINT_EVIDENCE_PATHS = (
     ".brigade/work/verify-runs",
+    ".brigade/work/verify-required",
     "memory/outcome/records.jsonl",
     "memory/outcome/.records.lock",
     ".brigade/work/miseledger-export-cursor.json",

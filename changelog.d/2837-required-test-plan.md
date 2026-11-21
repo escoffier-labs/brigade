@@ -1,0 +1,1 @@
+- Add `brigade work verify required` to plan focused local tests from a base-pinned repository configuration, while leaving broad changes to required CI.

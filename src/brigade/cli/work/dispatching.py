@@ -173,6 +173,10 @@ def _dispatch_impl(args) -> int:
     if args.work_command == "sweep-review":
         return work_cmd.sweep_review(target=args.target, sweep_id=args.sweep_id, json_output=args.json)
     if args.work_command == "verify":
+        if args.verify_command == "required":
+            from ...work_cmd.verify_required import required
+
+            return required(target=args.target, base=args.base, json_output=args.json)
         if args.verify_command == "plan":
             has_manifest = bool(args.verify_manifest_id)
             has_command = bool(args.verify_commands)
