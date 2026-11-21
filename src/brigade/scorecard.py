@@ -44,6 +44,7 @@ class ReceiptAudit:
     verifier_cost_s: float | None
     reused: bool
     evidence_unit_key: tuple[Any, ...] | None
+    attestation: str = "local"
 
 
 @dataclass
@@ -324,6 +325,7 @@ def _audit_receipt(
         verifier_cost_s=_receipt_duration_seconds(receipt),
         reused=reused,
         evidence_unit_key=unit_key,
+        attestation=projection.attestation,
     )
 
 
@@ -448,6 +450,8 @@ def _build_subject_scorecard(
     helped = sum(1 for audit in deduped if audit.effectiveness == 1)
     hurt = sum(1 for audit in deduped if audit.effectiveness == -1)
     trials = helped + hurt
+    local_trials = sum(1 for audit in deduped if audit.effectiveness in {1, -1} and audit.attestation == "local")
+    attested_trials = sum(1 for audit in deduped if audit.effectiveness in {1, -1} and audit.attestation == "attested")
     wilson = outcome_core.wilson_lower_bound(helped, trials)
 
     receipt_durations = [audit.verifier_cost_s for audit in deduped if audit.verifier_cost_s is not None]
@@ -496,6 +500,8 @@ def _build_subject_scorecard(
                 "hurt": hurt,
                 "wilson": wilson,
                 "trials": trials,
+                "local_trials": local_trials,
+                "attested_trials": attested_trials,
             },
             "verifier_cost": verifier_cost,
             "retry_stability": _retry_stability_metrics(stability_audits),

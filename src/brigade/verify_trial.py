@@ -44,6 +44,10 @@ class TrialProjection:
     reason: str
     attributed: bool
     infrastructure_excluded: bool = False
+    # Every trial today is proven by local session state the scored agent can write,
+    # so its ownership proof is local. A future trial with an independent proof may
+    # carry "attested" here. That design is parked on #2591, so no registry exists.
+    attestation: str = "local"
 
 
 def classify_verify_failure(status: object, exit_code: object) -> tuple[str, str]:

@@ -51,6 +51,8 @@ def _ranking_panel(payload: dict) -> str:
         "Score",
         "Helped",
         "Hurt",
+        "Local trials",
+        "Attested trials",
         "Capability score",
         "Capability helped",
         "Capability hurt",
@@ -65,6 +67,8 @@ def _ranking_panel(payload: dict) -> str:
                 html.esc(_fmt(entry.get("score"))),
                 html.esc(_fmt(entry.get("helped"))),
                 html.esc(_fmt(entry.get("hurt"))),
+                html.esc(_fmt(entry.get("local_trials", 0))),
+                html.esc(_fmt(entry.get("attested_trials", 0))),
                 html.esc(_fmt(entry.get("capability_score"))),
                 html.esc(_fmt(entry.get("capability_helped"))),
                 html.esc(_fmt(entry.get("capability_hurt"))),
@@ -99,6 +103,7 @@ def _ratchet_panel(raw: object) -> str:
     generated_at = str(ratchet.get("generated_at") or "-")
     stamp = f"generated_at {generated_at} ({_age_label(ratchet.get('generated_at'))})"
     mode = outcome_ratchet_report.mode_label(ratchet.get("apply"))
+    local, attested = outcome_ratchet_report.reported_trial_counts(summary)
     strip = (
         f"{stamp}; mode={mode}; decisions {summary.get('decisions', '-')}, "
         f"regression holds {summary.get('regression_holds', '-')}, "
@@ -107,6 +112,7 @@ def _ratchet_panel(raw: object) -> str:
         + (f" (stale {summary['stale_physical_actions']})" if summary.get("stale_physical_actions") else "")
         + f"; inbox proposals {_proposal_label(summary)}; "
         f"ineligibility_rate {_fmt(ratchet.get('ineligibility_rate'))}"
+        f", trials local {local} attested {attested} (from report file)"
     )
     leading = ratchet.get("leading_ineligibility_reason")
     if leading:
@@ -123,18 +129,31 @@ def _ratchet_panel(raw: object) -> str:
             title, f"<p>{html.esc(strip)}</p><p>{html.esc('No regression holds or rollbacks in the last run.')}</p>"
         )
 
-    headers = ["Artifact", "Prior state", "Reason code", "Reason", "Helped", "Hurt"]
-    body = [
-        [
-            html.esc(row.get("artifact_id", "-")),
-            html.esc(row.get("prior_state", "-")),
-            html.esc(row.get("reason_code", "-")),
-            html.esc(row.get("reason", "-")),
-            html.esc(_fmt(row.get("helped"))),
-            html.esc(_fmt(row.get("hurt"))),
-        ]
-        for row in rows
+    headers = [
+        "Artifact",
+        "Prior state",
+        "Reason code",
+        "Reason",
+        "Helped",
+        "Hurt",
+        "Reported local trials",
+        "Reported attested trials",
     ]
+    body = []
+    for row in rows:
+        row_local, row_attested = outcome_ratchet_report.reported_trial_counts(row)
+        body.append(
+            [
+                html.esc(row.get("artifact_id", "-")),
+                html.esc(row.get("prior_state", "-")),
+                html.esc(row.get("reason_code", "-")),
+                html.esc(row.get("reason", "-")),
+                html.esc(_fmt(row.get("helped"))),
+                html.esc(_fmt(row.get("hurt"))),
+                html.esc(row_local),
+                html.esc(row_attested),
+            ]
+        )
     escaped_headers = [html.esc(header) for header in headers]
     return html.panel(title, f"<p>{html.esc(strip)}</p>" + html.table(escaped_headers, body))
 

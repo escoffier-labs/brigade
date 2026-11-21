@@ -268,6 +268,8 @@ def test_build_scorecard_projects_all_dimensions(scoreable_target):
     assert card.dimensions["effectiveness"]["helped"] == 2
     assert card.dimensions["effectiveness"]["hurt"] == 0
     assert card.dimensions["effectiveness"]["trials"] == 2
+    assert card.dimensions["effectiveness"]["local_trials"] == 2
+    assert card.dimensions["effectiveness"]["attested_trials"] == 0
     assert card.dimensions["verifier_cost"]["median_s"] == 16.0
     assert card.dimensions["verifier_cost"]["receipt_median_s"] == 16.0
     assert card.dimensions["verifier_cost"]["receipt_samples"] == 2

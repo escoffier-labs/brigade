@@ -828,7 +828,7 @@ def test_rank_and_reconcile_count_verify_and_run_receipt_graph_deltas_identicall
     assert outcome_cmd.rank(target=tmp_path, json_output=False) == 0
     expected = (
         f"outcome rank: {tmp_path.resolve()}\n"
-        f"- skill-x score={outcome.wilson_lower_bound(2, 2):.3f} helped=2 hurt=0 trials=2 "
+        f"- skill-x score={outcome.wilson_lower_bound(2, 2):.3f} helped=2 hurt=0 trials=2 local=2 attested=0 "
         "graph: 1 changing / 1 no-op\n"
     )
     assert capsys.readouterr().out == expected

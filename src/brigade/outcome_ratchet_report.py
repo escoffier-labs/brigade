@@ -129,11 +129,16 @@ def build_report(
     """Build the versioned report payload from reconcile decision items."""
     counts: Counter[str] = Counter()
     regressions: list[dict[str, Any]] = []
+    local_trials_total = 0
+    attested_trials_total = 0
     for item in items:
         decision = item.decision
         action = str(decision.action)
         counts[action] += 1
         code = getattr(decision, "code", None)
+        local_trials, attested_trials = _decision_attestation_counts(item)
+        local_trials_total += local_trials
+        attested_trials_total += attested_trials
         if code not in _REGRESSION_CODES:
             continue
         helped, hurt = _decision_counts(item)
@@ -145,6 +150,8 @@ def build_report(
                 "reason": str(decision.reason),
                 "helped": helped,
                 "hurt": hurt,
+                "local_trials": local_trials,
+                "attested_trials": attested_trials,
             }
         )
     audit = _receipt_audit(target)
@@ -165,6 +172,8 @@ def build_report(
             "regression_hold_ids": hold_ids[:_BRIEF_MAX_IDS],
             "pending_physical_actions": sum(len(action.commands) for action in recent.values()),
             "stale_physical_actions": pending_set.stale_actions,
+            "local_trials": local_trials_total,
+            "attested_trials": attested_trials_total,
         },
         "pending_physical": _pending_rows(recent),
         "stale_physical": _pending_rows(stale),
@@ -242,6 +251,20 @@ def load_report(target: Path) -> dict[str, Any]:
     return payload
 
 
+def reported_trial_counts(raw: Mapping[str, Any]) -> tuple[str, str]:
+    """Render trial counts read from a report file as reported values, never as trusted ones.
+
+    The report lives in the target workspace and the scored agent can write it, so a
+    reader must not mistake these numbers for a recomputed or independent attestation.
+    """
+
+    def label(key: str) -> str:
+        value = raw.get(key)
+        return str(value) if isinstance(value, int) and not isinstance(value, bool) else "not recorded"
+
+    return label("local_trials"), label("attested_trials")
+
+
 def proposal_counts(summary: Mapping[str, Any]) -> dict[str, int] | None:
     """Return the persisted inbox proposal counts, or None when the run did not file proposals."""
     raw = summary.get("outcome_proposals")
@@ -291,6 +314,19 @@ def brief_payload(report: Mapping[str, Any]) -> dict[str, Any]:
         "ineligibility_rate": report.get("ineligibility_rate"),
         "leading_reason": report.get("leading_ineligibility_reason"),
     }
+
+
+def _decision_attestation_counts(item: Any) -> tuple[int, int]:
+    """Return (local, attested) trial counts from the scorecard that decided an item."""
+    card = getattr(item, "scorecard", None)
+    dimensions = getattr(card, "dimensions", None)
+    effectiveness = dimensions.get("effectiveness") if isinstance(dimensions, dict) else None
+    if not isinstance(effectiveness, dict):
+        return 0, 0
+    return (
+        int(effectiveness.get("local_trials", 0) or 0),
+        int(effectiveness.get("attested_trials", 0) or 0),
+    )
 
 
 def _decision_counts(item: Any) -> tuple[int, int]:

@@ -2365,6 +2365,18 @@ def _capability_human_suffix(cohorts: core.CapabilityCohorts) -> str:
     )
 
 
+def _scorecard_attestation_counts(scorecard_entry: Any) -> tuple[int, int]:
+    """Return (local, attested) trial counts from a scorecard's effectiveness dimension (#2779)."""
+    dimensions = getattr(scorecard_entry, "dimensions", None)
+    effectiveness = dimensions.get("effectiveness") if isinstance(dimensions, dict) else None
+    if not isinstance(effectiveness, dict):
+        return 0, 0
+    return (
+        int(effectiveness.get("local_trials", 0) or 0),
+        int(effectiveness.get("attested_trials", 0) or 0),
+    )
+
+
 def rank(
     *,
     target: Path,
@@ -2495,6 +2507,9 @@ def rank(
             entry["policy_version"] = scorecard_mod.SCORECARD_POLICY_VERSION
             entry["dimensions"] = scorecard_entry.dimensions
             entry["utility_guardrails"] = scorecard_entry.utility_guardrails
+            local_trials, attested_trials = _scorecard_attestation_counts(scorecard_entry)
+            entry["local_trials"] = local_trials
+            entry["attested_trials"] = attested_trials
             if scorecard_entry.ineligible_summary:
                 entry["ineligible_summary"] = scorecard_entry.ineligible_summary
         ranking_payload.append(entry)
@@ -2525,6 +2540,9 @@ def rank(
             "dimensions": scorecard_entry.dimensions,
             "utility_guardrails": scorecard_entry.utility_guardrails,
         }
+        local_trials, attested_trials = _scorecard_attestation_counts(scorecard_entry)
+        entry["local_trials"] = local_trials
+        entry["attested_trials"] = attested_trials
         if scorecard_entry.ineligible_summary:
             entry["ineligible_summary"] = scorecard_entry.ineligible_summary
         ranking_payload.append(entry)
@@ -2565,7 +2583,11 @@ def rank(
         scorecard_entry = scorecards_by_artifact.get(artifact_id)
         trials_tail = ""
         if scorecard_entry is not None:
-            trials_tail = f" trials={int(scorecard_entry.dimensions.get('effectiveness', {}).get('trials', 0))}"
+            local_trials, attested_trials = _scorecard_attestation_counts(scorecard_entry)
+            trials_tail = (
+                f" trials={int(scorecard_entry.dimensions.get('effectiveness', {}).get('trials', 0))}"
+                f" local={local_trials} attested={attested_trials}"
+            )
         print(
             f"- {artifact_id} score={current.score:.3f} helped={current.helped} "
             f"hurt={current.hurt}{trials_tail}{recency_tail}{fingerprint_tail}{capability_tail}{graph_tail}{brief_tail}"

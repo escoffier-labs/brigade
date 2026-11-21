@@ -95,6 +95,8 @@ def test_write_and_load_round_trip(tmp_path):
         "regression_hold_ids": ["skill-a"],
         "pending_physical_actions": 0,
         "stale_physical_actions": 0,
+        "local_trials": 0,
+        "attested_trials": 0,
     }
     assert loaded["decisions_by_action"] == {"hold": 1, "install": 1, "rollback": 1}
     assert [(row["artifact_id"], row["reason_code"]) for row in loaded["regressions"]] == [
@@ -222,6 +224,8 @@ def test_reconcile_report_flag_writes_report_and_keeps_dry_run(tmp_path, monkeyp
         "regression_hold_ids": ["skill-regressed"],
         "pending_physical_actions": 0,
         "stale_physical_actions": 0,
+        "local_trials": 0,
+        "attested_trials": 0,
     }
     assert report["regressions"][0]["artifact_id"] == "skill-regressed"
     assert not outcome_cmd._status_path(tmp_path).exists()
@@ -454,6 +458,8 @@ def test_cli_reconcile_report_flag_writes_advisory_file(tmp_path, capsys):
         "regression_hold_ids": [],
         "pending_physical_actions": 0,
         "stale_physical_actions": 0,
+        "local_trials": 0,
+        "attested_trials": 0,
     }
 
 
@@ -522,3 +528,56 @@ def test_the_size_cap_drops_the_stale_list_before_any_regression_row():
     assert fitted["stale_physical"] == [] and fitted["stale_physical_truncated"] is True
     assert fitted["regressions"] == [{"artifact_id": "r"}]
     assert fitted["summary"]["stale_physical_actions"] == 20
+
+
+def test_report_local_trials_match_the_scorecard_trial_count(tmp_path, monkeypatch):
+    card = scorecard_mod.SubjectScorecard(
+        subject=scorecard_mod.SubjectRef("skill", "skill-count", "fingerprint"),
+        dimensions={"effectiveness": {"helped": 2, "hurt": 1, "trials": 3, "local_trials": 3, "attested_trials": 0}},
+        utility_guardrails={},
+    )
+    item = _Item(
+        decision=outcome.Decision(
+            "skill-count",
+            "hold",
+            "candidate",
+            "withheld: verified regression present",
+            code=outcome.REGRESSION_HOLD,
+        ),
+        prior_status="candidate",
+        scorecard=card,
+    )
+
+    report = report_mod.build_report([item], apply=False, generated_at=NOW, target=tmp_path)
+
+    assert report["summary"]["local_trials"] == 3
+    assert report["summary"]["local_trials"] >= 1
+    assert report["summary"]["attested_trials"] == 0
+    assert report["regressions"][0]["local_trials"] == 3
+
+    monkeypatch.setattr(report_mod, "_decision_attestation_counts", lambda _item: (0, 0))
+    zero = report_mod.build_report([item], apply=False, generated_at=NOW, target=tmp_path)
+    assert zero["summary"]["local_trials"] == 0
+    assert zero["summary"]["local_trials"] != report["summary"]["local_trials"]
+
+
+def test_ratchet_text_labels_trial_counts_as_reported_file_values(tmp_path, capsys):
+    path = report_mod.report_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "version": report_mod.REPORT_VERSION,
+        "generated_at": NOW.isoformat(),
+        "apply": False,
+        "summary": {"decisions": 1, "local_trials": 3, "attested_trials": 9},
+        "regressions": [],
+    }
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert cli.main(["outcome", "ratchet", "--target", str(tmp_path)]) == 0
+    assert "local=3 attested=9 (from report file)" in capsys.readouterr().out
+
+    payload["summary"] = {"decisions": 1}
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert cli.main(["outcome", "ratchet", "--target", str(tmp_path)]) == 0
+    assert "local=not recorded attested=not recorded (from report file)" in capsys.readouterr().out

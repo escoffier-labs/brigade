@@ -27,6 +27,8 @@ def test_render_displays_ranking_rows_with_cohort_and_recency_columns():
                 "capability_score": 0.6789,
                 "capability_helped": 9,
                 "capability_hurt": 2,
+                "local_trials": 7,
+                "attested_trials": 2,
                 "stale_records": 1,
                 "legacy_records": 4,
             },
@@ -38,6 +40,8 @@ def test_render_displays_ranking_rows_with_cohort_and_recency_columns():
                 "capability_score": 0.25,
                 "capability_helped": 1,
                 "capability_hurt": 3,
+                "local_trials": 1,
+                "attested_trials": 0,
                 "stale_records": 0,
                 "legacy_records": 0,
             },
@@ -55,13 +59,15 @@ def test_render_displays_ranking_rows_with_cohort_and_recency_columns():
         "Capability score",
         "Capability helped",
         "Capability hurt",
+        "Local trials",
+        "Attested trials",
         "Stale records",
         "Legacy records",
     ):
         assert header in fragment
     assert "example-skill-one" in fragment
     assert "example-skill-two" in fragment
-    for value in ("0.457", "12", "3", "0.679", "9", "2", "1", "4"):
+    for value in ("0.457", "12", "3", "0.679", "9", "2", "7", "1", "4"):
         assert f">{value}<" in fragment
     assert "0.100" in fragment
     assert "0.250" in fragment
@@ -306,3 +312,31 @@ def test_render_ratchet_panel_shows_the_inbox_proposal_counts():
 
     plain = outcome_rank.render({"ranking": [], "ratchet": {**base, "summary": {"decisions": 3}}}, "unused")
     assert "inbox proposals not requested" in plain
+
+
+def test_render_ratchet_panel_labels_report_file_trial_counts():
+    payload = {
+        "ranking": [],
+        "ratchet": {
+            "version": 1,
+            "generated_at": "2026-11-17T07:30:00+00:00",
+            "apply": False,
+            "summary": {"decisions": 1, "local_trials": 3, "attested_trials": 9},
+            "regressions": [
+                {"artifact_id": "skill-a", "helped": 1, "hurt": 2, "local_trials": 3, "attested_trials": 9}
+            ],
+        },
+    }
+
+    fragment = outcome_rank.render(payload, "unused")
+
+    assert "trials local 3 attested 9 (from report file)" in fragment
+    assert "Reported local trials" in fragment
+    assert "Reported attested trials" in fragment
+
+    payload["ratchet"]["summary"] = {"decisions": 1}
+    payload["ratchet"]["regressions"] = [{"artifact_id": "skill-a"}]
+    fragment = outcome_rank.render(payload, "unused")
+
+    assert "local not recorded attested not recorded (from report file)" in fragment
+    assert ">not recorded<" in fragment
