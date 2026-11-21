@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import hashlib
 import json
 import os
@@ -452,3 +453,71 @@ def test_intent_after_attempt_preparation_is_honored_at_the_claim_in_a_live_batc
     assert (launched(site, "a"), launched(site, "b"), launched(site, "c")) == (0, 1, 1)
     assert result["tasks"]["a"]["status"] == "cancelled"
     assert [event for event in facts(site.run_dir(), "task.launch-claimed") if event.payload["task_id"] == "a"] == []
+
+
+def test_partial_multi_task_submission_reports_the_written_requests(run_site, capsys, monkeypatch):
+    run_dir, _workspace = run_site
+    real_submit = inbox.submit
+
+    def fail_on_b(run_dir_arg, kind, task_id, **kwargs):
+        if task_id == "b":
+            raise inbox.TaskInboxError("inbox-unavailable", "the task inbox could not be written")
+        return real_submit(run_dir_arg, kind, task_id, **kwargs)
+
+    monkeypatch.setattr(inbox, "submit", fail_on_b)
+    rc, payload = cancel(run_dir, capsys, "a", "b")
+
+    assert rc == 2
+    assert payload["refusal"]["code"] == "inbox-unavailable"
+    assert row(payload, "a")["outcome"] == "recorded"
+    assert row(payload, "b")["outcome"] == "not-recorded"
+    assert [event.payload["task_id"] for event in facts(run_dir, "task.cancel-requested")] == ["a"]
+
+
+def test_queued_request_is_always_reported_as_possibly_running(held_run, capsys):
+    run_dir, _workspace = held_run
+    rc, payload = cancel(run_dir, capsys, "a")
+
+    assert rc == 0
+    assert row(payload, "a")["outcome"] == "queued"
+    assert row(payload, "a")["live_termination"] == "live-termination-unavailable"
+
+
+@posix_only
+def test_publish_without_hard_links_renames_a_complete_file_and_a_crash_leaves_no_request(held_run, monkeypatch):
+    # Simulate a filesystem with no hard links (the Windows fallback path): the
+    # link fails and only the check right after it sees a non-POSIX platform.
+    run_dir, _workspace = held_run
+    real_replace = inbox.dirfd.replace_children
+    real_posix = inbox.dirfd.posix_available
+    state = {"link_failed": False}
+    renamed: list[bool] = []
+
+    def no_links(parent, source, destination):
+        state["link_failed"] = True
+        raise OSError(errno.EPERM, "hard links unavailable")
+
+    def no_replace_rename(parent, source, destination, *, replace=True):
+        state["link_failed"] = False
+        renamed.append(replace)
+        real_replace(parent, source, destination, replace=replace)
+
+    monkeypatch.setattr(inbox.dirfd, "link_child", no_links)
+    monkeypatch.setattr(inbox.dirfd, "posix_available", lambda: real_posix() and not state["link_failed"])
+    monkeypatch.setattr(inbox.dirfd, "replace_children", no_replace_rename)
+
+    real_write = inbox._write_all
+
+    def crash(descriptor, data):
+        raise OSError("crash during write")
+
+    monkeypatch.setattr(inbox, "_write_all", crash)
+    with pytest.raises(OSError):
+        inbox.submit(run_dir, "cancel", "a", reason="operator")
+    # A write that dies leaves no final-name request behind, so a retry is not blocked.
+    assert [name for name in inbox_names(run_dir) if not name.startswith(".")] == []
+
+    monkeypatch.setattr(inbox, "_write_all", real_write)
+    assert inbox.submit(run_dir, "cancel", "a", reason="operator") == "created"
+    assert renamed == [False]
+    assert [request.task_id for request in inbox.pending(run_dir).requests] == ["a"]

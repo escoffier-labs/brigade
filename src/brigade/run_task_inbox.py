@@ -60,7 +60,9 @@ OUTCOME_RECORDED = "recorded"
 OUTCOME_QUEUED = "queued"
 OUTCOME_ALREADY_TERMINAL = "already-terminal"
 OUTCOME_UNKNOWN_TASK = "unknown-task"
-REFUSAL_OUTCOMES = frozenset({OUTCOME_ALREADY_TERMINAL, OUTCOME_UNKNOWN_TASK})
+# A request that could not be written, or was not attempted after one failed.
+OUTCOME_NOT_RECORDED = "not-recorded"
+REFUSAL_OUTCOMES = frozenset({OUTCOME_ALREADY_TERMINAL, OUTCOME_UNKNOWN_TASK, OUTCOME_NOT_RECORDED})
 LIVE_TERMINATION_UNAVAILABLE = "live-termination-unavailable"
 
 ERROR_CODES = frozenset(
@@ -191,23 +193,6 @@ def _write_all(descriptor: int, data: bytes) -> None:
         view = view[written:]
 
 
-def _exclusive_create(descriptor: int, name: str, data: bytes) -> bool:
-    """Publish under the final name only if it does not exist yet."""
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-    if dirfd.posix_available():
-        flags = dirfd.file_flags(flags)
-    try:
-        created = dirfd.open_child_file(descriptor, name, flags, 0o600)
-    except FileExistsError:
-        return False
-    try:
-        _write_all(created, data)
-        os.fsync(created)
-    finally:
-        os.close(created)
-    return True
-
-
 def _publish(descriptor: int, name: str, data: bytes) -> bool:
     """Publish a complete request atomically; never overwrite an existing one."""
     temporary = f".tmp-{os.getpid()}-{uuid4().hex}"
@@ -233,9 +218,19 @@ def _publish(descriptor: int, name: str, data: bytes) -> bool:
                 return False
             if dirfd.posix_available():
                 raise
-            # Hard links are unavailable on some Windows filesystems. The
-            # exclusive create is the equivalent no-overwrite publication.
-            return _exclusive_create(descriptor, name, data)
+            # Hard links are unavailable on some Windows filesystems. Publish
+            # the complete, synced temporary file with a no-replace rename, so
+            # a crash never leaves a partial request under the final name.
+            try:
+                dirfd.replace_children(descriptor, temporary, name, replace=False)
+            except FileExistsError:
+                return False
+            except OSError as rename_exc:
+                if rename_exc.errno == errno.EEXIST:
+                    return False
+                raise
+            _fsync_directory(descriptor)
+            return True
         else:
             return True
     finally:
@@ -468,11 +463,6 @@ def _ordered(task_ids: Sequence[str]) -> tuple[str, ...]:
     return tuple(task_ids)
 
 
-def _may_have_launched(state: run_tasks.TaskResult) -> bool:
-    """True when the worker may exist, so this release cannot stop it."""
-    return state.status != "queued" or state.handle.attempt_id is not None
-
-
 def cancel(
     run_dir: Path,
     task_ids: Sequence[str],
@@ -515,8 +505,22 @@ def cancel(
     # The request is durable before any attempt to take the run lock, so a
     # live batch can read it between its launches even when this process never
     # becomes the owner.
+    # A failure part way through still reports the requests already written:
+    # they are durable and will be honored, so they must not vanish from the
+    # answer behind a bare refusal.
+    failure: TaskInboxError | None = None
+    committed: list[run_tasks.TaskResult] = []
     for state in submitted:
-        submit(run_dir, KIND_CANCEL, state.handle.spec.task_id, reason=reason)
+        if failure is None:
+            try:
+                submit(run_dir, KIND_CANCEL, state.handle.spec.task_id, reason=reason)
+            except TaskInboxError as exc:
+                failure = exc
+            else:
+                committed.append(state)
+                continue
+        rows[state.handle.spec.task_id]["outcome"] = OUTCOME_NOT_RECORDED
+    submitted = committed
 
     drained: dict[str, str] | None = None
     if submitted:
@@ -536,9 +540,11 @@ def cancel(
     for state in submitted:
         row = rows[state.handle.spec.task_id]
         if drained is None:
+            # A live batch may claim the task after the state above was read,
+            # so a request this process could not journal is reported as
+            # possibly running, never as safely stopped before launch.
             row["outcome"] = OUTCOME_QUEUED
-            if _may_have_launched(state):
-                row["live_termination"] = LIVE_TERMINATION_UNAVAILABLE
+            row["live_termination"] = LIVE_TERMINATION_UNAVAILABLE
             continue
         outcome = drained.get(state.handle.spec.task_id)
         if outcome in {"recorded", "already-requested"}:
@@ -552,7 +558,7 @@ def cancel(
         "run_id": run_dir.name,
         "reason": reason,
         "tasks": [rows[task_id] for task_id in ordered],
-        "refusal": None,
+        "refusal": None if failure is None else {"code": failure.code, "detail": failure.detail},
     }
 
 
@@ -572,9 +578,11 @@ def refusal_payload(
 def render(payload: dict[str, Any]) -> str:
     """Human output: what was recorded, or what could not be."""
     refusal = payload.get("refusal")
-    if refusal is not None:
+    if refusal is not None and not payload["tasks"]:
         return f"error: {refusal['code']}: {refusal['detail']}"
     lines = [f"run: {payload['run_id']}"]
+    if refusal is not None:
+        lines.append(f"error: {refusal['code']}: {refusal['detail']}")
     live = []
     for row in payload["tasks"]:
         detail = f"task {row['task_id']}: {row['outcome']}"

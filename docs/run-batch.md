@@ -776,9 +776,10 @@ as `prerequisite-cancelled`, journals nothing for it, and leaves it `queued`.
 Tasks that do not depend on the cancelled one still run.
 
 An unknown task reports `unknown-task`, and a terminal task reports
-`already-terminal`. Neither writes anything. A request whose task is in flight is
-still reported as `queued`, plus `live-termination-unavailable` in JSON and human
-output.
+`already-terminal`. Neither writes anything. A `queued` request always carries
+`live-termination-unavailable` in JSON and human output: the live batch may claim
+the task after the command read its state, so the command never reports a queued
+task as stopped before launch.
 
 This slice records intent only. It does not terminate a running worker, start
 watchers or change any process registry: a task that has already launched keeps
@@ -798,7 +799,10 @@ failure while it holds the lock itself is a refusal with exit 2.
 
 JSON output uses `brigade.runs_tasks_cancel.v1`, with `run_id`, `reason`, a
 `tasks` list of `{task_id, outcome, reason, live_termination}`, and `refusal`.
-Closed outcomes are `recorded`, `queued`, `already-terminal` and `unknown-task`.
+Closed outcomes are `recorded`, `queued`, `already-terminal`, `unknown-task` and
+`not-recorded`. When writing one request fails, the requests already written stay
+in the answer, the failed task and any after it report `not-recorded`, and
+`refusal` names the failure.
 Exit 2 means at least one task was not recorded.
 
 See [kinds of delegated work](execution-model.md#kinds-of-delegated-work) for how
