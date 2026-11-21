@@ -100,12 +100,13 @@ Observed: helper exit 3, `"status": "failed"`, and a receipt written anyway at
   green receipt as a fed loop.
 - Passing receipts are reused when the tree fingerprint is unchanged, so a
   second identical run can return the earlier `run_id`. That is correct
-  behavior, not a stale result. `--no-reuse` forces execution - but never pass
-  it to the repo's full `./scripts/verify` gate.
+  behavior, not a stale result. `--no-reuse` forces execution. Agents do not
+  run the repo's full `./scripts/verify` gate at all unless the operator asks
+  for a local CI reproduction.
 - Status 75 from the full gate means every verification slot is occupied: the
-  slots for the Git common directory, or the slots under
-  `BRIGADE_VERIFY_LOCK_PATH` when that override is set. Do not retry it with a bigger timeout; run
-  `./scripts/verify-focused` or wait.
+  per-user slots on this host, or the slots under `BRIGADE_VERIFY_LOCK_PATH`
+  when that override is set. Do not retry it with a bigger timeout. Run
+  `./scripts/verify-focused` and let required CI cover the suite.
 - The receipt captures a code-graph delta by shelling out to the `brigade-code-graph`
   binary. On a host without it, `code_graph_delta` comes back
   `{"ok": false, "status": "unavailable", ...}` and the run still completes -

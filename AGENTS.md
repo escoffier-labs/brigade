@@ -27,9 +27,10 @@ Required `ci-gate` on the exact head commit supplies the suite and coverage
 evidence. After pushing, wait for `ci-gate` on the head SHA. A local receipt is
 not evidence that the suite passed. Do not run `./scripts/verify` as part of
 normal work, before a PR or merge, inside a review lane, or on `main` to compare
-failures. It exists only to reproduce CI locally when the operator asks; see
-[Reproducing CI locally](CONTRIBUTING.md#reproducing-ci-locally). Status 75 means
-another full gate holds the slot; do not retry it.
+failures. It runs only when the operator asks to reproduce CI locally (see
+[Reproducing CI locally](CONTRIBUTING.md#reproducing-ci-locally)) or during a
+release cut (`RELEASE.md`). Status 75 means another full gate holds the slot. Do
+not retry it.
 
 CI-only jobs still cover work that is slower, platform-oriented, or depends on
 extra checkout/install context: `content-guard`, `repo-metadata`,
@@ -51,8 +52,8 @@ Format: trigger, then the rule, then what to do instead.
   supplies suite and coverage evidence; after pushing, wait for it on the head
   SHA. A local receipt is not suite evidence. Do not run `./scripts/verify` in
   normal work, before a PR or merge, inside a review lane, or on `main` to compare
-  failures. Run it only to reproduce CI when the operator asks, as documented in
-  CONTRIBUTING.md.
+  failures. Run it only when the operator asks to reproduce CI, as documented in
+  CONTRIBUTING.md, or during a release cut.
   If the focused gate cannot run, report the exact command and error.
 - A test fails after your change: never weaken, skip, or delete the test to
   make it pass. Fix the code. If you believe the test itself is wrong, say so

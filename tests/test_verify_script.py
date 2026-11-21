@@ -164,7 +164,8 @@ def test_verify_full_gate_does_not_invoke_external_flock(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="fcntl is POSIX")
-def test_verify_full_gate_keeps_lock_after_execvpe_into_verify(tmp_path, monkeypatch):
+@pytest.mark.parametrize("topology", ["clone", "worktree"])
+def test_verify_full_gate_keeps_lock_after_execvpe_into_verify(tmp_path, monkeypatch, topology):
     # Stale inherited state must not bypass admission or split the host lock.
     monkeypatch.setenv("BRIGADE_VERIFY_LOCK_HELD", "1")
     monkeypatch.delenv("BRIGADE_VERIFY_LOCK_PATH", raising=False)
@@ -191,7 +192,11 @@ def test_verify_full_gate_keeps_lock_after_execvpe_into_verify(tmp_path, monkeyp
         check=True,
     )
     other = tmp_path / "other"
-    subprocess.run(["git", "-C", str(checkout), "worktree", "add", "-q", "--detach", str(other)], check=True)
+    # A separate clone has its own Git directory. Both topologies must share the host pool.
+    if topology == "clone":
+        subprocess.run(["git", "clone", "-q", str(checkout), str(other)], check=True)
+    else:
+        subprocess.run(["git", "-C", str(checkout), "worktree", "add", "-q", "--detach", str(other)], check=True)
     holder_root = tmp_path / "holder"
     second_root = tmp_path / "second"
     holder_root.mkdir()

@@ -190,10 +190,24 @@ CI locally. Run it through Brigade:
 brigade work verify run --target . --command "./scripts/verify" --timeout 3600 --capture brigade-work
 ```
 
-The gate allows one full run per user on a host. Status 75 means another full
-gate holds the slot; do not retry. `BRIGADE_VERIFY_SHARDS` sets the shard count;
-the default is half the CPU count, rounded down, with a minimum of one and a
-maximum of four.
+By default the gate allows one full run per user on a host. Status 75 means
+another full gate holds the slot. Do not retry it with a larger timeout. Set
+`BRIGADE_VERIFY_WAIT=<seconds>` to wait for the slot, and `BRIGADE_VERIFY_SLOTS`
+to change how many runs the host admits. `BRIGADE_VERIFY_SHARDS` sets the shard
+count. The default is half the CPU count, rounded down, with a minimum of one
+and a maximum of four.
+
+Brigade reuses the latest passing receipt when the tree and the command are
+unchanged, so the command above can finish without running anything. Reuse does
+not look at dependencies or the environment. When those are what you are
+reproducing, add `--no-reuse`.
+
+The local gate is not identical to CI. CI runs each shard with four pytest
+workers, and the merge queue also runs Python 3.11. The local gate runs one
+pytest process per shard on one interpreter, without the Windows jobs. A failure
+that needs parallel workers, Python 3.11 or Windows may not reproduce.
+
+A release is the other time the full gate runs locally. See `RELEASE.md`.
 
 To smoke-test an install end-to-end the same way CI does:
 
