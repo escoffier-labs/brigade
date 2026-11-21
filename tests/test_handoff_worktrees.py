@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -890,6 +891,191 @@ def test_removal_deletes_the_held_tree_and_prunes_registration(tmp_path: Path):
     assert not admin.exists()
 
 
+# Round 14 (PR #2821 review): removal touches one registration, the admin
+# identity comes from the opened descriptor, and swaps around the tracked
+# query fail closed.
+
+
+@requires_dirfd
+def test_removal_leaves_an_unrelated_missing_worktree_registered(tmp_path: Path):
+    """Removal must not run a global prune. A worktree whose directory is
+    missing, such as one on an unmounted drive, keeps its registration."""
+    main, linked = _repo_with_worktree(tmp_path)
+    other = tmp_path / "other"
+    _git(main, "worktree", "add", "-q", "--detach", str(other))
+    other_admin = main / ".git" / "worktrees" / other.name
+    shutil.rmtree(other)
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert not linked.exists()
+    assert other_admin.is_dir()
+    assert str(other) in _git(main, "worktree", "list")
+
+
+@requires_dirfd
+def test_locked_worktree_is_kept_without_force(tmp_path: Path, capsys):
+    main, linked = _repo_with_worktree(tmp_path)
+    _git(main, "worktree", "lock", str(linked))
+
+    runguard.remove_worktree(main, linked)
+
+    err = capsys.readouterr().err
+    assert linked.exists()
+    assert (main / ".git" / "worktrees" / linked.name).is_dir()
+    assert "worktree-locked" in err
+
+
+@requires_dirfd
+def test_locked_worktree_is_removed_with_force(tmp_path: Path):
+    main, linked = _repo_with_worktree(tmp_path)
+    _git(main, "worktree", "lock", str(linked))
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert not linked.exists()
+    assert not (main / ".git" / "worktrees" / linked.name).exists()
+
+
+@requires_dirfd
+def test_admin_dir_identity_comes_from_the_held_descriptor(tmp_path: Path, monkeypatch):
+    """No path stat of the admin dir feeds the identity check. A swap before
+    the first touch therefore cannot make the check compare a decoy with
+    itself, because the identity is the opened descriptor."""
+    main, linked = _repo_with_worktree(tmp_path)
+    pending = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-real.md", "real handoff")
+    git_dir = handoff_worktrees._git_path(linked, "--git-dir")
+    assert git_dir is not None
+    real_stat = os.stat
+    touched: list[object] = []
+
+    def stat(path, *args, **kwargs):
+        if Path(path) == git_dir:
+            touched.append(path)
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(handoff_worktrees.os, "stat", stat)
+    # Replacing os.stat drops it from os.supports_dir_fd, which the descriptor
+    # capability probe reads. This test runs only where that probe is true.
+    monkeypatch.setattr(dirfd, "posix_available", lambda: True)
+    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+
+    assert touched == []
+    assert [r.state for r in results] == ["delivered"]
+    assert not pending.exists()
+
+
+@requires_dirfd
+def test_admin_dir_swapped_before_verification_keeps_everything(tmp_path: Path, monkeypatch, capsys):
+    main, linked = _repo_with_worktree(tmp_path)
+    pending = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-real.md", "real handoff")
+    git_dir = handoff_worktrees._git_path(linked, "--git-dir")
+    assert git_dir is not None
+    real_chain = handoff_worktrees.dirfd.open_directory_chain
+    state: dict = {}
+
+    def open_chain(path, **kwargs):
+        if Path(path) == git_dir and "decoy" not in state:
+            state["decoy"] = git_dir.with_name(git_dir.name + "-real")
+            git_dir.rename(state["decoy"])
+            git_dir.mkdir()
+            (git_dir / "decoy.txt").write_text("decoy\n")
+        return real_chain(path, **kwargs)
+
+    monkeypatch.setattr(handoff_worktrees.dirfd, "open_directory_chain", open_chain)
+    runguard.remove_worktree(main, linked, force=True)
+
+    err = capsys.readouterr().err
+    assert linked.exists()
+    assert pending.is_file()
+    assert (git_dir / "decoy.txt").read_text() == "decoy\n"
+    assert "inbox-scan-failed" in err
+
+
+@requires_dirfd
+def test_nul_byte_in_admin_backlink_fails_closed(tmp_path: Path, capsys):
+    main, linked = _repo_with_worktree(tmp_path)
+    pending = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-real.md", "real handoff")
+    admin = main / ".git" / "worktrees" / linked.name
+    (admin / "gitdir").write_bytes(b"\x00\n")
+
+    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert [r.state for r in results] == ["failed"]
+    assert pending.is_file()
+    assert linked.exists()
+    assert "inbox-scan-failed" in capsys.readouterr().err
+
+
+@requires_dirfd
+def test_inbox_swapped_during_tracking_query_keeps_worktree(tmp_path: Path, monkeypatch, capsys):
+    main, linked = _repo_with_worktree(tmp_path)
+    inbox = linked / ".claude" / "memory-handoffs"
+    pending = _handoff(inbox, "2026-11-08-0900-real.md", "real handoff")
+    real_tracked = handoff_worktrees._tracked
+    state: dict = {}
+
+    def tracked(path):
+        if "decoy" not in state:
+            state["decoy"] = linked / ".claude-decoy"
+            (linked / ".claude").rename(state["decoy"])
+            (linked / ".claude" / "memory-handoffs").mkdir(parents=True)
+        return real_tracked(path)
+
+    monkeypatch.setattr(handoff_worktrees, "_tracked", tracked)
+    runguard.remove_worktree(main, linked, force=True)
+
+    err = capsys.readouterr().err
+    assert "inbox-moved" in err
+    assert linked.exists()
+    assert (state["decoy"] / "memory-handoffs" / pending.name).is_file()
+
+
+@requires_dirfd
+def test_parent_directory_is_flushed_before_the_identity_check(tmp_path: Path, monkeypatch):
+    main, linked = _repo_with_worktree(tmp_path)
+    from brigade import worktree_removal
+
+    order: list[str] = []
+    real_stat_child = worktree_removal.dirfd.stat_child
+    real_remove = worktree_removal.dirfd.remove_tree_child
+
+    def stat_child(parent, name, **kwargs):
+        order.append("stat")
+        return real_stat_child(parent, name, **kwargs)
+
+    def remove_tree_child(parent, name):
+        order.append("remove")
+        return real_remove(parent, name)
+
+    monkeypatch.setattr(worktree_removal.dirfd, "fsync_directory", lambda fd: order.append("fsync"))
+    monkeypatch.setattr(worktree_removal.dirfd, "stat_child", stat_child)
+    monkeypatch.setattr(worktree_removal.dirfd, "remove_tree_child", remove_tree_child)
+    runguard.remove_worktree(main, linked, force=True)
+
+    at = order.index("remove")
+    assert order[at - 2 : at] == ["fsync", "stat"]
+
+
+@requires_dirfd
+def test_restore_never_replaces_a_new_entry(tmp_path: Path):
+    from brigade import worktree_removal
+
+    parent = tmp_path / "parent"
+    (parent / "private").mkdir(parents=True)
+    (parent / "private" / "decoy.txt").write_text("decoy\n")
+    (parent / "name").mkdir()
+    fd = dirfd.open_directory_chain(parent, writable=True)
+    try:
+        worktree_removal._restore(fd, "private", "name")
+    finally:
+        os.close(fd)
+
+    assert list((parent / "name").iterdir()) == []
+    assert (parent / "private" / "decoy.txt").read_text() == "decoy\n"
+
+
 # Codex 4507863008: embedded repositories keep the worktree.
 
 
@@ -1288,7 +1474,7 @@ def test_rename_noreplace_never_replaces(tmp_path: Path):
             handoff_worktrees._rename_noreplace(fd, "a.md", "b.md")
         handoff_worktrees._rename_noreplace(fd, "a.md", "c.md")
         if os.uname().sysname == "Linux":
-            assert handoff_worktrees._renameat2_noreplace(fd, "c.md", "d.md")
+            assert dirfd._renameat2_noreplace(fd, "c.md", fd, "d.md")
     finally:
         os.close(fd)
     assert (tmp_path / "b.md").read_text() == "b"
@@ -1565,7 +1751,7 @@ def test_final_check_deadline_keeps_the_claim(tmp_path: Path, monkeypatch):
 @pytest.mark.skipif(os.name == "nt", reason="exercises the POSIX link fallback")
 def test_link_fallback_never_overwrites_a_racing_file(tmp_path: Path, monkeypatch):
     (tmp_path / "a.md").write_text("claimed")
-    monkeypatch.setattr(handoff_worktrees, "_renameat2_noreplace", lambda *args: False)
+    monkeypatch.setattr(dirfd, "_renameat2_noreplace", lambda *args: False)
     real_link, real_rename = os.link, os.rename
 
     def plant(destination, dir_fd):
@@ -1598,7 +1784,7 @@ def test_link_fallback_never_overwrites_a_racing_file(tmp_path: Path, monkeypatc
 @pytest.mark.skipif(os.name == "nt", reason="exercises the POSIX link fallback")
 def test_link_fallback_moves_the_source(tmp_path: Path, monkeypatch):
     (tmp_path / "a.md").write_text("claimed")
-    monkeypatch.setattr(handoff_worktrees, "_renameat2_noreplace", lambda *args: False)
+    monkeypatch.setattr(dirfd, "_renameat2_noreplace", lambda *args: False)
     fd = os.open(tmp_path, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
     try:
         handoff_worktrees._rename_noreplace(fd, "a.md", "b.md")

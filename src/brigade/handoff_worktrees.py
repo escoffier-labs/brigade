@@ -41,7 +41,6 @@ rescue guards against accidental loss, not that.
 
 from __future__ import annotations
 
-import ctypes
 import errno
 import hashlib
 import os
@@ -93,7 +92,6 @@ _CLAIM_PREFIX = ".brigade-claim-"
 # unresolved handoff that must keep its worktree until an operator acts.
 _OVERSIZE_PREFIX = ".late-oversize-"
 _CLAIM_SUFFIX = ".md.claimed"
-_RENAME_NOREPLACE = 1
 # A `.git` file holds one `gitdir:` line. Its read is bounded separately
 # from the handoff size cap.
 _GIT_MARKER_BYTES = 64 * 1024
@@ -619,15 +617,15 @@ def _verified_git_dir(worktree: Path, root_fd: int) -> tuple[Path, int] | None:
     `.git` is read without following links from the held root. In a main
     checkout it must be the common git dir itself. In a linked worktree it
     must be a regular file whose `gitdir:` names the admin dir, and the admin
-    dir's `gitdir` backlink, read through the opened admin dir, must name this
-    very `.git` file. Anything else (a symlinked marker pointing at another
-    worktree, for example) is refused.
+    dir's `gitdir` entry, read through the opened admin dir, must name this
+    very `.git` file by identity. Anything else (a symlinked marker pointing
+    at another worktree, for example) is refused.
 
-    The admin dir is opened here and returned held. The descriptor's
-    `fstat()` identity must match the directory the marker named before it
-    was opened, and the backlink is read through that descriptor, so a rename
-    that swaps a replacement into the path cannot pin a later git call to it.
-    The caller closes the descriptor.
+    The admin dir is opened first and its identity comes from that descriptor
+    rather than from a path stat, so a rename that swaps a replacement into
+    the path cannot make the check compare the replacement with itself. A
+    relative `gitdir:` is walked from the held worktree root, not joined to a
+    path. The caller closes the descriptor.
     """
     git_dir = _git_path(worktree, "--git-dir")
     common = git_common_dir(worktree)
@@ -635,51 +633,99 @@ def _verified_git_dir(worktree: Path, root_fd: int) -> tuple[Path, int] | None:
         return None
     try:
         marker = dirfd.stat_child(root_fd, ".git")
-        if git_dir == common:
-            if not stat.S_ISDIR(marker.st_mode):
-                return None
-            # The marker is the admin dir itself.
-            target = marker
-        else:
-            if git_dir.parent != common / "worktrees" or not stat.S_ISREG(marker.st_mode):
-                return None
-            target = os.stat(git_dir)
-            fd = dirfd.open_child_file(root_fd, ".git", _read_flags())
-            try:
-                opened = os.fstat(fd)
-                if _identity(opened) != _identity(marker) or opened.st_size > _GIT_MARKER_BYTES:
-                    return None
-                data = os.read(fd, _GIT_MARKER_BYTES + 1)
-            finally:
-                os.close(fd)
-            text = data.decode("utf-8").strip()
-            if not text.startswith("gitdir:"):
-                return None
-            named = Path(text[len("gitdir:") :].strip())
-            named = named if named.is_absolute() else worktree / named
-            if _identity(os.stat(named)) != _identity(target):
-                return None
-        admin_fd = dirfd.open_directory_chain(git_dir, writable=False)
-    except (OSError, UnicodeDecodeError):
+    except OSError:
+        return None
+    if git_dir == common:
+        if not stat.S_ISDIR(marker.st_mode):
+            return None
+        # In a main checkout the marker is the admin dir itself.
+        admin_fd = _open_admin_dir(root_fd, git_dir)
+        if admin_fd is None:
+            return None
+        if _identity(os.fstat(admin_fd)) != _identity(marker):
+            os.close(admin_fd)
+            return None
+        return git_dir, admin_fd
+    if git_dir.parent != common / "worktrees" or not stat.S_ISREG(marker.st_mode):
         return None
     try:
-        if _identity(os.fstat(admin_fd)) != _identity(target):
-            raise OSError("admin dir changed during verification")
-        if git_dir != common:
+        marker_fd = dirfd.open_child_file(root_fd, ".git", _read_flags())
+        try:
+            opened = os.fstat(marker_fd)
+            if _identity(opened) != _identity(marker) or opened.st_size > _GIT_MARKER_BYTES:
+                return None
+            data = os.read(marker_fd, _GIT_MARKER_BYTES + 1)
+        finally:
+            os.close(marker_fd)
+        text = data.decode("utf-8").strip()
+        if not text.startswith("gitdir:"):
+            return None
+        named = Path(text[len("gitdir:") :].strip())
+        admin_fd = _open_admin_dir(root_fd, named)
+        if admin_fd is None:
+            return None
+        try:
             backlink = _admin_backlink(admin_fd)
             if backlink is None:
                 raise OSError("admin backlink unreadable")
-            linked = os.lstat(backlink)
-            if not stat.S_ISREG(linked.st_mode) or _identity(linked) != _identity(marker):
+            linked_fd = _open_backlink(admin_fd, backlink)
+            try:
+                linked = os.fstat(linked_fd)
+            finally:
+                os.close(linked_fd)
+            if not stat.S_ISREG(linked.st_mode) or _identity(linked) != _identity(opened):
                 raise OSError("admin backlink mismatch")
-    except OSError:
-        os.close(admin_fd)
+        except (OSError, ValueError):
+            os.close(admin_fd)
+            return None
+    except (OSError, ValueError, UnicodeDecodeError):
         return None
     return git_dir, admin_fd
 
 
 def _identity(info: os.stat_result) -> tuple[int, int]:
     return info.st_dev, info.st_ino
+
+
+def _open_admin_dir(root_fd: int, named: Path) -> int | None:
+    """Open the admin dir a `.git` marker names, never following a final link.
+
+    An absolute target is walked from the filesystem anchor. A relative one is
+    walked from the held worktree root, so it cannot be redirected by a path
+    that no longer names that root.
+    """
+    try:
+        if named.is_absolute():
+            return dirfd.open_directory_chain(named, writable=False)
+        return _open_relative_directory(root_fd, named)
+    except (OSError, ValueError):
+        return None
+
+
+def _open_relative_directory(parent_fd: int, rel: Path) -> int:
+    """Walk `rel` from a held directory without following any component."""
+    fd = os.dup(parent_fd)
+    try:
+        for part in rel.parts:
+            if part in ("", "."):
+                continue
+            if part == "..":
+                child = os.open("..", dirfd.directory_flags() | getattr(os, "O_PATH", 0), dir_fd=fd)
+            else:
+                child = dirfd.open_child_directory(fd, part, writable=False)
+            os.close(fd)
+            fd = child
+        return fd
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _open_backlink(admin_fd: int, backlink: Path) -> int:
+    """Open the backlink target read from a held admin dir, never a link."""
+    if backlink.is_absolute():
+        return os.open(backlink, _read_flags())
+    return os.open(backlink, _read_flags(), dir_fd=admin_fd)
 
 
 def _admin_backlink(admin_fd: int) -> Path | None:
@@ -693,9 +739,11 @@ def _admin_backlink(admin_fd: int) -> Path | None:
         finally:
             os.close(fd)
         text = data.decode("utf-8").strip()
-    except (OSError, UnicodeDecodeError):
+    except (OSError, ValueError, UnicodeDecodeError):
         return None
-    return Path(text) if text else None
+    if not text or "\0" in text:
+        return None
+    return Path(text)
 
 
 def _proc_fd_paths() -> bool:
@@ -884,45 +932,9 @@ class _Dest:
             os.close(self.root_fd)
 
 
-def _renameat2_noreplace(parent: int, source: str, destination: str) -> bool:
-    """Linux renameat2(RENAME_NOREPLACE). False when the call is unavailable."""
-    if not sys.platform.startswith("linux"):
-        return False
-    try:
-        function = ctypes.CDLL(None, use_errno=True).renameat2
-    except (OSError, AttributeError):
-        return False
-    function.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
-    function.restype = ctypes.c_int
-    if function(parent, os.fsencode(source), parent, os.fsencode(destination), _RENAME_NOREPLACE) == 0:
-        return True
-    code = ctypes.get_errno()
-    if code in (errno.ENOSYS, errno.EINVAL):
-        return False
-    raise OSError(code, os.strerror(code), destination)
-
-
 def _rename_noreplace(parent: int, source: str, destination: str) -> None:
-    """Atomically rename one child of a held directory without replacing.
-
-    Linux uses renameat2(RENAME_NOREPLACE) and Windows a no-replace handle
-    rename. Other POSIX systems link the source to `destination`, which fails
-    if anything exists there, then unlink the source name only while it is
-    still the linked object, so a file a writer put back is left pending.
-    """
-    if os.name == "posix":
-        if _renameat2_noreplace(parent, source, destination):
-            return
-        os.link(source, destination, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
-        linked = dirfd.stat_child(parent, destination)
-        try:
-            current = dirfd.stat_child(parent, source)
-        except FileNotFoundError:
-            return
-        if (current.st_dev, current.st_ino) == (linked.st_dev, linked.st_ino):
-            os.unlink(source, dir_fd=parent)
-        return
-    dirfd.replace_children(parent, source, destination, replace=False)
+    """Atomically rename one child of a held directory without replacing."""
+    dirfd.rename_child_noreplace(parent, source, parent, destination)
 
 
 def _restore_claim(src_fd: int, claim: str, name: str) -> bool:
@@ -1163,6 +1175,26 @@ def _rescue_one(
             )
 
 
+def _still_same_inbox(root_fd: int, parts: tuple[str, ...], src_fd: int) -> bool:
+    """The held inbox still sits where `parts` reaches it under the held root.
+
+    The tracked query runs git by path, so a swap of the inbox directory would
+    otherwise let it answer for a different tree.
+    """
+    try:
+        current = _walk(root_fd, parts)
+    except (OSError, ValueError):
+        return False
+    if current is None:
+        return False
+    try:
+        return _identity(os.fstat(current)) == _identity(os.fstat(src_fd))
+    except OSError:
+        return False
+    finally:
+        os.close(current)
+
+
 def _rescue_inbox(worktree: Path, root_fd: int, rel: str, dest: _Dest) -> list[Rescue]:
     label = str(worktree / rel)
     try:
@@ -1195,9 +1227,13 @@ def _rescue_inbox(worktree: Path, root_fd: int, rel: str, dest: _Dest) -> list[R
         candidates = sorted(n for n in names if _is_candidate(n))
         if not candidates:
             return []
+        if not _still_same_inbox(root_fd, parts, src_fd):
+            return [Rescue(label, "failed", reason="inbox-moved")]
         tracked = _tracked(worktree.joinpath(*parts))
         if tracked is None:
             return [Rescue(label, "failed", reason="tracking-unverifiable")]
+        if not _still_same_inbox(root_fd, parts, src_fd):
+            return [Rescue(label, "failed", reason="inbox-moved")]
         try:
             dest.inbox(dest_parts)
         except OSError:

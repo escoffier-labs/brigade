@@ -16,6 +16,7 @@ links.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import uuid
 from pathlib import Path
@@ -28,6 +29,7 @@ MOVED_REASON = "worktree-moved"
 UNRENAMABLE_REASON = "worktree-unrenamable"
 UNREMOVABLE_REASON = "worktree-removal-failed"
 UNVERIFIED_REASON = "worktree-unverified"
+LOCKED_REASON = "worktree-locked"
 _PRIVATE_PREFIX = ".brigade-remove-"
 
 
@@ -93,8 +95,9 @@ def remove_held(root: Path, worktree_path: Path, held: list[int], *, force: bool
     first, so the removal acts on the object the descriptor proves rather than
     on whatever the public path holds at that instant. Returns False, after
     restoring the public name, when the identity differs or the removal fails,
-    and prints the fixed reason. ``force`` only reaches the path-based
-    fallback, because Git's own refusal handling is what it selects.
+    and prints the fixed reason. A locked worktree is refused unless ``force``
+    was requested, the same as `git worktree remove` without ``--force``.
+    ``force`` also reaches the path-based fallback.
     """
     candidate = worktree_path.expanduser()
     # Resolve ancestors but never the final component: a swap that leaves a
@@ -109,6 +112,9 @@ def remove_held(root: Path, worktree_path: Path, held: list[int], *, force: bool
         # path-based order: `git worktree remove`, then the rmtree fallback.
         _remove_by_path(root, worktree_path.expanduser().resolve(), force=force)
         return True
+    if not force and _locked(root, worktree_path):
+        _keep(worktree_path, LOCKED_REASON)
+        return False
     try:
         parent_fd = dirfd.open_directory_chain(parent_path, writable=True)
     except OSError:
@@ -122,6 +128,14 @@ def remove_held(root: Path, worktree_path: Path, held: list[int], *, force: bool
             _keep(worktree_path, UNRENAMABLE_REASON)
             return False
         try:
+            # Durability first, so nothing slow runs between the identity
+            # check and the removal.
+            dirfd.fsync_directory(parent_fd)
+        except OSError:
+            _restore(parent_fd, private, name)
+            _keep(worktree_path, UNREMOVABLE_REASON)
+            return False
+        try:
             moved, verified = dirfd.stat_child(parent_fd, private), os.fstat(held[0])
         except OSError:
             moved, verified = None, None
@@ -130,7 +144,6 @@ def remove_held(root: Path, worktree_path: Path, held: list[int], *, force: bool
             _keep(worktree_path, MOVED_REASON)
             return False
         try:
-            dirfd.fsync_directory(parent_fd)
             dirfd.remove_tree_child(parent_fd, private)
         except OSError:
             _restore(parent_fd, private, name)
@@ -142,8 +155,33 @@ def remove_held(root: Path, worktree_path: Path, held: list[int], *, force: bool
             pass  # the tree is gone, so only entry durability is lost
     finally:
         os.close(parent_fd)
-    _prune(root)
+    _unregister(root, parent_path / name, force=force)
     return True
+
+
+def _locked(root: Path, worktree_path: Path) -> bool:
+    """Whether Git records this worktree as locked.
+
+    Read from `git worktree list` so ``git worktree lock`` reason text and the
+    admin dir layout stay Git's business. An unregistered path is not locked,
+    because there is no lock to respect.
+    """
+    result = proc.run(["git", "worktree", "list", "--porcelain"], cwd=root, timeout=120.0)
+    if result.code != 0:
+        return False
+    target = _identity_key(worktree_path)
+    for record in result.stdout.split("\n\n"):
+        lines = record.splitlines()
+        if not lines or not lines[0].startswith("worktree "):
+            continue
+        if _identity_key(Path(lines[0][len("worktree ") :])) != target:
+            continue
+        return any(line == "locked" or line.startswith("locked ") for line in lines[1:])
+    return False
+
+
+def _identity_key(path: Path) -> str:
+    return os.path.normcase(os.path.realpath(path))
 
 
 def _identity(info: os.stat_result) -> tuple[int, int]:
@@ -156,9 +194,13 @@ def _close(fds: list[int]) -> None:
 
 
 def _restore(parent_fd: int, private: str, name: str) -> None:
-    """Put a refused decoy back under the public name, best effort."""
+    """Put a refused decoy back under the public name, never replacing an entry.
+
+    A rename that would replace a new entry at the public name is refused, so
+    the decoy stays under the private name for an operator.
+    """
     try:
-        dirfd.rename_child(parent_fd, private, parent_fd, name)
+        dirfd.rename_child_noreplace(parent_fd, private, parent_fd, name)
     except OSError:
         pass
 
@@ -177,8 +219,43 @@ def _remove_by_path(root: Path, worktree_path: Path, *, force: bool) -> None:
         remove_worktree_directory(root, worktree_path)
 
 
-def _prune(root: Path) -> None:
-    """Clear the Git registration of a worktree whose directory is gone."""
-    result = proc.run(["git", "worktree", "prune", "--expire", "now"], cwd=root, timeout=120.0)
-    if result.code != 0:
-        raise OSError(f"failed to prune Git worktree registration: {result.stderr.strip()}")
+def _unregister(root: Path, worktree_path: Path, *, force: bool) -> None:
+    """Remove this one worktree's registration after its directory is gone.
+
+    `git worktree remove` on the vacated path drops exactly this entry. A
+    global `git worktree prune` would also drop unrelated entries whose
+    directory is merely absent, such as one on an unmounted drive, so it is
+    never run here. If Git still refuses, only this worktree's admin dir is
+    removed, and only after its `gitdir` entry names this very `.git` file.
+    """
+    args = ["worktree", "remove", "--force"] + (["--force"] if force else [])
+    result = proc.run(["git", *args, str(worktree_path)], cwd=root, timeout=120.0)
+    if result.code == 0:
+        return
+    admin = _own_admin_dir(root, worktree_path)
+    if admin is None:
+        print(
+            f"brigade: worktree registration not cleared for {worktree_path}: {result.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return
+    shutil.rmtree(admin, ignore_errors=True)
+
+
+def _own_admin_dir(root: Path, worktree_path: Path) -> Path | None:
+    """This worktree's admin dir, only when its backlink names this `.git`."""
+    result = proc.run(
+        ["git", "rev-parse", "--path-format=absolute", "--git-common-dir"],
+        cwd=root,
+        timeout=120.0,
+    )
+    if result.code != 0 or not result.stdout.strip():
+        return None
+    admin = Path(result.stdout.strip()).resolve() / "worktrees" / worktree_path.name
+    try:
+        backlink = Path((admin / "gitdir").read_text(encoding="utf-8").strip())
+    except (OSError, UnicodeDecodeError):
+        return None
+    if backlink != worktree_path / ".git":
+        return None
+    return admin
