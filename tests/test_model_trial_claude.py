@@ -557,20 +557,20 @@ def test_an_arm_mcp_server_leaves_no_update_refresh_in_its_home(tmp_path):
     env = build_env(ENVIRON, arm)
     config = model_trial_claude.mcp_config("passing-verify", target, FIXTURES / "baseline", arm / "state")
     server = config["mcpServers"]["brigade-paired"]
+    # A dead proxy makes any refresh child fail its request at once, so a leak cannot linger.
+    dead_proxy = {name: "http://127.0.0.1:9" for name in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy")}
     subprocess.run(
         [server["command"], *server["args"]],
-        env={**env, **server["env"]},
+        env={**env, **server["env"], **dead_proxy},
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         timeout=60,
         check=True,
     )
-    cache = arm / "home" / ".cache" / "brigade" / "update-notify.json"
-    deadline = time.monotonic() + 20
-    while not cache.exists() and time.monotonic() < deadline:
-        time.sleep(0.05)
-    assert not cache.exists(), "the arm's MCP server spawned an update refresh into its home"
+    cache = arm / "home" / ".cache" / "brigade"
+    assert not (cache / "update-notify.claim").exists(), "the arm's MCP server claimed an update refresh"
+    assert not (cache / "update-notify.json").exists(), "the arm's MCP server spawned an update refresh"
 
 
 def test_argv_builder_effort_is_optional():
