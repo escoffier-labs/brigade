@@ -120,13 +120,16 @@ def _ratchet_panel(raw: object) -> str:
     if ratchet.get("truncated"):
         strip += f"; {ratchet.get('regressions_omitted', 0)} regression row(s) omitted by the size cap"
 
+    drift_html = _drift_html(ratchet.get("skill_drift"))
     regressions = ratchet.get("regressions")
     if not isinstance(regressions, list):
         regressions = []
     rows = [row for row in regressions if isinstance(row, dict)]
     if not rows:
         return html.panel(
-            title, f"<p>{html.esc(strip)}</p><p>{html.esc('No regression holds or rollbacks in the last run.')}</p>"
+            title,
+            f"<p>{html.esc(strip)}</p><p>{html.esc('No regression holds or rollbacks in the last run.')}</p>"
+            + drift_html,
         )
 
     headers = [
@@ -155,7 +158,30 @@ def _ratchet_panel(raw: object) -> str:
             ]
         )
     escaped_headers = [html.esc(header) for header in headers]
-    return html.panel(title, f"<p>{html.esc(strip)}</p>" + html.table(escaped_headers, body))
+    return html.panel(title, f"<p>{html.esc(strip)}</p>" + html.table(escaped_headers, body) + drift_html)
+
+
+def _drift_html(raw: object) -> str:
+    """Render the scheduled installed-skill drift result: counts, then every flagged copy with its path."""
+    drift = outcome_ratchet_report.drift_payload(raw)
+    if drift is None:
+        return f"<p>{html.esc('Skill drift: no scheduled check recorded yet.')}</p>"
+    counts = drift["counts"]
+    generated_at = str(drift.get("generated_at") or "-")
+    strip = (
+        f"Skill drift: generated_at {generated_at} ({_age_label(drift.get('generated_at'))}); "
+        f"current {counts['current']}, refreshed {counts['refreshed']}, flagged {counts['flagged']}"
+    )
+    if not drift["flagged"]:
+        return f"<p>{html.esc(strip)}</p>"
+    body = [
+        [html.esc(row["skill_id"]), html.esc(row["harness"]), html.esc(row["path"]), html.esc(row["reason"])]
+        for row in drift["flagged"]
+    ]
+    if drift["flagged_omitted"]:
+        strip += f"; {drift['flagged_omitted']} flagged row(s) not listed"
+    headers = [html.esc(header) for header in ("Skill", "Harness", "Path", "Reason")]
+    return f"<p>{html.esc(strip)}</p>" + html.table(headers, body)
 
 
 def _age_label(generated_at: object) -> str:

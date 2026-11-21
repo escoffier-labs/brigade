@@ -51,6 +51,10 @@
       {
         "sha256": "f7ca3f9660c085016bb14238d3da55169438646ae204122c3a82db0b5b00892d",
         "tag": null
+      },
+      {
+        "sha256": "91b21a684bfd7df02a0bf378437aca5fc3ef5880761815456ec060812b3ed6b1",
+        "tag": null
       }
     ],
     "runbook:.brigade/runbooks/run-patrol.json": [

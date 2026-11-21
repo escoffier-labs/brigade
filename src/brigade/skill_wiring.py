@@ -81,6 +81,7 @@ REFRESHED = "refreshed"
 RACED = "changed-during-refresh"
 EDITED = "edited"
 PRISTINE_STALE = "pristine-stale"
+REFRESHABLE = "refreshable"  # classify_copy only: a past-release text `place` would replace
 SYMLINKED = "symlinked"
 BLOCKED = "not-a-regular-file"
 
@@ -92,6 +93,22 @@ def _sha256(data: bytes) -> str:
 def normalize_newlines(data: bytes) -> bytes:
     """Return ``data`` with CRLF folded to LF, the form SKILL.md text is compared in."""
     return data.replace(b"\r\n", b"\n")
+
+
+def classify_copy(skill_id: str, installed: bytes, current: bytes) -> str:
+    """Read-only verdict on an installed SKILL.md against the bundled text: what ``place`` would do.
+
+    Returns ``IDENTICAL`` (newline-folded equal), ``REFRESHABLE`` (a text a past
+    release shipped, so ``place`` would refresh it) or ``EDITED`` (anything else,
+    which ``place`` keeps). The pristine rule is the one ``SkillWirer._pristine_check``
+    applies: both the installed and the bundled text must be recorded release texts.
+    """
+    if normalize_newlines(installed) == normalize_newlines(current):
+        return IDENTICAL
+    known = shipped_history.digests(shipped_history.skill_key(skill_id))
+    if shipped_history.skill_digest(current) in known and shipped_history.skill_digest(installed) in known:
+        return REFRESHABLE
+    return EDITED
 
 
 def _read_regular(fd: int) -> bytes | None:

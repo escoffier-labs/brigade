@@ -261,6 +261,15 @@ def _dispatch_ratchet(args) -> int:
     proposals = outcome_ratchet_report.proposal_counts(summary)
     if proposals is not None:
         print("outcome_proposals: " + " ".join(f"{key}={value}" for key, value in proposals.items()))
+    drift = outcome_ratchet_report.drift_payload(report.get("skill_drift"))
+    if drift is not None:
+        counts = drift["counts"]
+        print(
+            f"skill_drift: generated_at={drift['generated_at']} mode={drift['mode']} current={counts['current']} "
+            f"refreshed={counts['refreshed']} flagged={counts['flagged']}"
+        )
+        for row in drift["flagged"]:
+            print(f"  flagged: {row['skill_id']} [{row['harness']}] {row['path']}: {row['reason']}")
     print(f"pending_physical_actions: {summary.get('pending_physical_actions') or 0}")
     if summary.get("stale_physical_actions"):
         print(f"stale_physical_actions: {summary['stale_physical_actions']} (status older than the pending window)")

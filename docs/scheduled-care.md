@@ -510,6 +510,35 @@ brigade outcome reconcile --apply --target .
 
 See [Outcome scoring](outcome-scoring.md#weekly-ratchet-report) for the fields.
 
+### Installed skill drift check
+
+The same runbook ends with a third step, `skill-drift`, which runs `brigade skills fleet drift --target . --refresh --report`. It replaces the manual `brigade skills fleet status` run: nobody has to remember to look for stale installed copies. I put it in the weekly ratchet runbook and not in `daily-care-pass` because the ratchet already owns the report the brief and dashboard read, and a weekly cadence is enough for copies that only change on a Brigade upgrade. The step runs after `reconcile`, so its result is written into the report that `reconcile --report` just produced.
+
+The step reuses the existing drift rules and adds no comparator of its own. `skills fleet status` discovers every installed copy and judges the ones with an install receipt. A bundled skill that init wired without a receipt is judged by the shipped-release history that backs the pristine refresh (`templates/shipped-file-history.json`).
+
+| Installed copy | Result |
+| --- | --- |
+| Matches the bundled text | `current` |
+| Byte-identical to a text a past release shipped (newlines folded), or a receipt-known bundled copy that was never edited | Refreshed automatically: `refreshed` |
+| Locally edited, or differs from every past release, or stale from a source other than the Brigade bundle | `flagged`, left exactly as it is, never overwritten |
+| A link, a path outside the workspace, a missing copy, or a copy with no receipt for a skill Brigade does not bundle | `skipped`, not compared |
+
+A refresh uses the same atomic, link-refusing publish as `brigade init`, or `brigade skills install --force` with its local-edit guard, and it re-reads the copy right before the write. Only harnesses that already hold a copy are touched, so an uninstalled harness never gets a new skill from this step. Run it by hand with `brigade skills fleet drift --target .` for a check that writes nothing, add `--refresh` to apply the refreshes and `--report` to store the result.
+
+The result goes into the same `ratchet-report.json` under `skill_drift`, with the counts (`current`, `refreshed`, `flagged`) and each flagged skill with its harness, path and reason. Three places show it with no command:
+
+- `brigade work brief` prints a `skill_drift:` line next to `outcome_ratchet:`, for example `skill_drift: generated_at=... mode=refresh current=5 refreshed=2 flagged=1 (brigade-work[codex] .codex/skills/brigade-work)`. It lists up to five flagged copies and ends `+N more` for the rest.
+- The Center dashboard outcomes view adds the counts and a table of flagged copies under the ratchet report.
+- `brigade outcome ratchet --target .` prints the counts and each flagged copy.
+
+A later `reconcile --report` run keeps the last `skill_drift` block, and its own `generated_at` shows how old it is.
+
+An existing install picks up the new step when `brigade care install` runs again. An untouched copy of an earlier shipped `weekly-outcome-ratchet.json` is replaced with the current text, and a customized runbook is kept and reported as `kept (drifted)`. For a customized runbook, add the step by hand:
+
+```json
+{"id": "skill-drift", "run": "brigade skills fleet drift --target . --refresh --report"}
+```
+
 ### How to check it ran
 
 ```bash

@@ -31,6 +31,7 @@ DEFAULT_BRIEF_SECTION_TIMEOUT_SECONDS = 5.0
 DEFAULT_BRIEF_BUDGET_SECONDS = 20.0
 BRIEF_SECTION_TIMEOUT_ENV = "BRIGADE_WORK_BRIEF_SECTION_TIMEOUT"
 BRIEF_BUDGET_ENV = "BRIGADE_WORK_BRIEF_BUDGET"
+_DRIFT_BRIEF_ROWS = 5
 
 
 class _UnavailableSection(dict):
@@ -930,6 +931,39 @@ def _brief_section_failed(payload: dict[str, Any], label: str) -> bool:
     )
 
 
+def _skill_drift_line(ratchet: object) -> str:
+    """Return the brief summary of the last scheduled installed-skill drift check, flagged copies named."""
+    report = ratchet if isinstance(ratchet, dict) else {}
+    raw_drift = report.get("skill_drift") if report.get("present") else None
+    if not isinstance(raw_drift, dict):
+        return (
+            "skill_drift: no report yet "
+            "(the weekly ratchet runbook runs `brigade skills fleet drift --refresh --report`)"
+        )
+    drift: dict[str, Any] = raw_drift
+    raw_counts = drift.get("counts")
+    counts: dict[str, Any] = raw_counts if isinstance(raw_counts, dict) else {}
+    line = (
+        f"skill_drift: generated_at={brief_values.name(drift.get('generated_at'))} "
+        f"mode={brief_values.name(drift.get('mode') or 'check')} "
+        f"current={brief_values.name(counts.get('current', 0))} "
+        f"refreshed={brief_values.name(counts.get('refreshed', 0))} "
+        f"flagged={brief_values.name(counts.get('flagged', 0))}"
+    )
+    if counts.get("refreshable"):
+        line += f" refreshable={brief_values.name(counts['refreshable'])}"
+    rows = [row for row in drift.get("flagged") or [] if isinstance(row, dict)]
+    if rows:
+        listed = ", ".join(
+            f"{brief_values.name(row.get('skill_id'))}[{brief_values.name(row.get('harness'))}] "
+            f"{brief_values.text(row.get('path'))}"
+            for row in rows[:_DRIFT_BRIEF_ROWS]
+        )
+        hidden = int(counts.get("flagged") or 0) - min(len(rows), _DRIFT_BRIEF_ROWS)
+        line += f" ({listed}" + (f" +{hidden} more" if hidden > 0 else "") + ")"
+    return line
+
+
 def _outcome_proposals_line(ratchet: object) -> str:
     """Return the one-line brief summary of inbox proposals filed by the last ratchet run."""
     report = ratchet if isinstance(ratchet, dict) else {}
@@ -1168,6 +1202,7 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
     if isinstance(ratchet, dict):
         print(_outcome_ratchet_line(ratchet))
         print(_outcome_proposals_line(ratchet))
+        print(_skill_drift_line(ratchet))
     elif _brief_section_failed(payload, "outcome-ratchet"):
         print("outcome_ratchet: unavailable (section timed out or failed)")
 

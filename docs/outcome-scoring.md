@@ -253,6 +253,8 @@ brigade outcome ratchet --target . --json
 
 Two counts read differently from `reconcile --json`. The report's `decisions` counts every artifact the run evaluated, including `no change` and `cooldown active` holds, while the reconcile JSON lists only changes and reported holds. A candidate inside its cooldown window reports `cooldown active` even when it has verified hurt, so a zero `regression_holds` count does not by itself mean no regressions. When a write is skipped (an unwritable or symlinked path, or a report still over the cap), reconcile prints a warning and the previous report stays in place. Its `generated_at` shows how old it is.
 
+The report also carries a `skill_drift` block written by the scheduled `brigade skills fleet drift --refresh --report` step that follows `reconcile` in the weekly runbook (see [scheduled care](scheduled-care.md#installed-skill-drift-check)): `generated_at`, `mode` (`refresh` or `check`), `counts` of `current`, `refreshed`, `refreshable`, `flagged` and `skipped` installed skill copies, a `flagged` list capped at 20 rows of `{skill_id, harness, path, reason}`, and `flagged_omitted` for rows the cap dropped. A copy byte-identical to a released version is refreshed. Every other drifted or locally edited copy is only flagged. A later `reconcile --report` keeps the last `skill_drift` block.
+
 `reason_code` comes from the decision itself (`regression_hold` or `regression_rollback`), never from reason prose, so rewording a reason cannot silently recategorize a decision.
 
 The report is advisory:
@@ -264,6 +266,7 @@ The report is advisory:
 Three surfaces read it, all read-only:
 
 - `brigade work brief` prints one bounded line: `outcome_ratchet: generated_at=... mode=dry-run regression_holds=4 (a, b, c, d) ineligibility_rate=1.0 leading=unattributed`, or `outcome_ratchet: no report yet`. The mode comes from the report's `apply` flag, so a dry-run rollback row never reads as a completed rollback. When the hold count exceeds the listed ids the line ends `+N more`.
+- `brigade work brief` also prints one `skill_drift:` line with the current, refreshed and flagged counts and the flagged skills with their paths, or `skill_drift: no report yet`.
 - `brigade outcome ratchet` prints the file with the same `mode=` stamp and row counts, or `report: none` when the ratchet has not run with `--report`.
 - The Center dashboard outcomes view adds a panel below the ranking with the report age, mode, summary counts, ineligibility rate and the regression rows. A report older than seven days is labeled stale.
 

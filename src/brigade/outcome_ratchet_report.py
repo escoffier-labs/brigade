@@ -37,6 +37,10 @@ _BRIEF_MAX_IDS = 6
 _PENDING_MAX_ARTIFACTS = 20
 _PENDING_MAX_COMMANDS = 8
 _PROPOSAL_KEYS = ("filed", "existing", "flagged", "skipped")
+DRIFT_MAX_ROWS = 20
+_DRIFT_FIELD_MAX = 240
+_DRIFT_COUNT_KEYS = ("current", "refreshed", "refreshable", "flagged", "skipped")
+_DRIFT_ROW_KEYS = ("skill_id", "harness", "path", "reason")
 
 
 def report_path(target: Path) -> Path:
@@ -106,6 +110,15 @@ def _write_report(
     report = build_report(
         items, apply=apply, generated_at=generated_at, target=target, pending=pending, proposal_counts=proposal_counts
     )
+    # The drift check runs as its own runbook step and stores its result here. A later
+    # reconcile run rewrites the file, so keep the last drift result rather than drop it.
+    previous_drift = drift_payload(load_report(target).get("skill_drift"))
+    if previous_drift is not None:
+        report["skill_drift"] = previous_drift
+    return _store(path, report)
+
+
+def _store(path: Path, report: Mapping[str, Any]) -> Path | None:
     encoded = _encode(report)
     if len(encoded) > REPORT_MAX_BYTES:
         print(
@@ -115,6 +128,66 @@ def _write_report(
         return None
     localio.write_text_atomic(path, encoded.decode("utf-8"))
     return path
+
+
+def merge_skill_drift(target: Path, drift: Mapping[str, Any]) -> Path | None:
+    """Store the scheduled skill drift result in the ratchet report and return its path.
+
+    The report is read, given a ``skill_drift`` block and written back whole. With no
+    readable report yet, an empty reconcile summary stands in for it, so the brief and the
+    dashboard show the drift result before the first ratchet run. Skipped with a warning
+    on a symlinked or unwritable path, exactly like ``write_report``.
+    """
+    try:
+        path = report_path(target)
+        if _has_symlinked_component(path, path.parents[len(REPORT_RELATIVE_PATH.parts) - 1]):
+            print(f"warning: skill drift not recorded: symlinked report path refused: {path}", file=sys.stderr)
+            return None
+        report = load_report(target)
+        if not report:
+            report = build_report(
+                [], apply=False, generated_at=localio.utc_now(), target=target, pending=None, proposal_counts=None
+            )
+        bounded = drift_payload(drift)
+        if bounded is None:
+            return None
+        return _store(path, {**report, "skill_drift": bounded})
+    except OSError as exc:
+        print(f"warning: skill drift not recorded: {exc}", file=sys.stderr)
+        return None
+
+
+def _count(value: object) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+
+def drift_payload(raw: object) -> dict[str, Any] | None:
+    """Reduce a drift result, or a ``skill_drift`` block read from the report file, to bounded known fields.
+
+    Returns None when ``raw`` is not a mapping with a ``counts`` mapping. Counts become
+    non-negative integers and the flagged list keeps at most ``DRIFT_MAX_ROWS`` rows of
+    four short strings each, so a tampered report file cannot grow or reshape the output.
+    """
+    if not isinstance(raw, Mapping) or not isinstance(raw.get("counts"), Mapping):
+        return None
+    counts_raw = raw["counts"]
+    rows: list[dict[str, str]] = []
+    flagged_raw = raw.get("flagged")
+    for row in flagged_raw if isinstance(flagged_raw, list) else []:
+        if isinstance(row, Mapping) and len(rows) < DRIFT_MAX_ROWS:
+            rows.append({key: str(row.get(key) or "")[:_DRIFT_FIELD_MAX] for key in _DRIFT_ROW_KEYS})
+    counts = {key: _count(counts_raw.get(key)) for key in _DRIFT_COUNT_KEYS}
+    dropped = _count(raw.get("flagged_omitted"))
+    # Whatever the flagged count says that the list does not show was omitted.
+    dropped = max(dropped, counts["flagged"] - len(rows))
+    return {
+        "version": 1,
+        "generated_at": str(raw.get("generated_at") or "")[:64] or None,
+        "mode": "refresh" if raw.get("mode") == "refresh" else "check",
+        "counts": counts,
+        "flagged": rows,
+        "flagged_omitted": dropped,
+    }
 
 
 def build_report(
@@ -313,6 +386,7 @@ def brief_payload(report: Mapping[str, Any]) -> dict[str, Any]:
         "regression_hold_ids": ids[:_BRIEF_MAX_IDS],
         "ineligibility_rate": report.get("ineligibility_rate"),
         "leading_reason": report.get("leading_ineligibility_reason"),
+        "skill_drift": drift_payload(report.get("skill_drift")),
     }
 
 
