@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 from pathlib import Path
 
 from brigade import verify_manifest
@@ -55,6 +57,12 @@ def test_every_workspace_verify_manifest_resolves_by_id_and_path():
 
 
 def test_resolve_manifest_accepts_tracked_workspace_source_path(scoreable_target):
+    assert (
+        subprocess.run(
+            ["git", "remote"], cwd=scoreable_target, check=True, text=True, capture_output=True
+        ).stdout.strip()
+        == ""
+    )
     _write_patch_manifest(scoreable_target, manifest_id="local-patch")
     rel = f"{_WORKSPACE_MANIFESTS_REL.as_posix()}/local-patch.json"
     manifest, error = verify_manifest.resolve_manifest(scoreable_target, rel)
@@ -62,6 +70,49 @@ def test_resolve_manifest_accepts_tracked_workspace_source_path(scoreable_target
     assert manifest is not None
     assert manifest.manifest_id == "local-patch"
     assert manifest.subject_path == "skills/brigade-work/SKILL.md"
+    assert manifest.manifest_worktree_modified is False
+    assert manifest.manifest_base_commit is not None
+
+
+def _set_origin_default(target: Path, branch: str, commit: str) -> None:
+    subprocess.run(["git", "update-ref", f"refs/remotes/origin/{branch}", commit], cwd=target, check=True)
+    subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD", f"refs/remotes/origin/{branch}"],
+        cwd=target,
+        check=True,
+    )
+
+
+def test_resolve_manifest_uses_non_main_origin_default_branch(scoreable_target):
+    payload = _write_patch_manifest(scoreable_target, manifest_id="default-branch")
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=scoreable_target, check=True, text=True, capture_output=True
+    ).stdout.strip()
+    _set_origin_default(scoreable_target, "stable", base)
+    payload["checks"][0]["command"] = f'{sys.executable} -c "raise SystemExit(9)"'
+    verify_manifest.write_workspace_manifest(scoreable_target, payload)
+
+    manifest, error = verify_manifest.resolve_manifest(scoreable_target, "default-branch")
+
+    assert error is None
+    assert manifest is not None
+    assert manifest.manifest_base_commit == base
+    assert manifest.manifest_worktree_modified is True
+    assert "print('ok')" in str(manifest.checks[0].command)
+
+
+def test_resolve_manifest_refuses_manifest_absent_from_default_branch(scoreable_target):
+    default_commit = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=scoreable_target, check=True, text=True, capture_output=True
+    ).stdout.strip()
+    _set_origin_default(scoreable_target, "stable", default_commit)
+    _write_patch_manifest(scoreable_target, manifest_id="branch-only")
+
+    manifest, error = verify_manifest.resolve_manifest(scoreable_target, "branch-only")
+
+    assert manifest is None
+    assert error is not None
+    assert "new manifest can be used once it is on the default branch" in error
 
 
 def test_resolve_manifest_rejects_untracked_workspace_source_path(scoreable_target):

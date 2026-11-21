@@ -9,7 +9,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
-from . import localio, outcome_cmd, runguard, verification_contract
+from . import localio, outcome_cmd, runguard, verification_contract, verify_manifest_git
 from .router import PATHS
 
 VERIFY_MANIFEST_SCHEMA = "brigade.verify_manifest.v1"
@@ -54,6 +54,9 @@ class VerifyManifest:
     path: Path | None = None
     consequential: bool = False
     verification_contract: dict[str, Any] | None = None
+    manifest_worktree_modified: bool | None = None
+    manifest_base_commit: str | None = None
+    manifest_base_payload_sha256: str | None = None
 
     @property
     def planned_commands(self) -> list[str | list[str]]:
@@ -322,7 +325,12 @@ def validate_manifest_payload(payload: dict[str, Any]) -> list[str]:
     return errors
 
 
-def manifest_from_payload(payload: dict[str, Any], *, path: Path | None = None) -> VerifyManifest:
+def manifest_from_payload(
+    payload: dict[str, Any],
+    *,
+    path: Path | None = None,
+    base: verify_manifest_git.BaseManifestPayload | None = None,
+) -> VerifyManifest:
     errors = validate_manifest_payload(payload)
     if errors:
         raise ValueError("; ".join(errors))
@@ -378,6 +386,9 @@ def manifest_from_payload(payload: dict[str, Any], *, path: Path | None = None) 
         path=path,
         consequential=bool(payload.get("consequential", False)),
         verification_contract=contract_payload,
+        manifest_worktree_modified=base.worktree_modified if base else None,
+        manifest_base_commit=base.commit if base else None,
+        manifest_base_payload_sha256=base.payload_sha256 if base else None,
     )
 
 
@@ -407,7 +418,12 @@ def _discover_manifest_files(target: Path, *, tracked_only: bool = False) -> lis
 def registered_manifest_ids(target: Path) -> list[str]:
     ids: list[str] = []
     for path in _discover_manifest_files(target, tracked_only=True):
-        payload = _load_manifest_file(path)
+        base = None if _is_builtin_manifest(path) else verify_manifest_git.load_base_manifest(target, path)
+        payload = (
+            _load_manifest_file(path)
+            if base is None and _is_builtin_manifest(path)
+            else (base.payload if base else None)
+        )
         if not isinstance(payload, dict):
             continue
         manifest_id = payload.get("manifest_id")
@@ -452,10 +468,14 @@ def _load_tracked_workspace_manifest(
             manifest_label = named
     if not _is_git_tracked(target, path):
         return None, f"verify manifest not tracked: {manifest_label}"
-    if not isinstance(payload, dict):
-        return None, f"verify manifest not found: {selector}"
+    base = verify_manifest_git.load_base_manifest(target, path)
+    if base is None:
+        return None, (
+            f"verify manifest is not on the default branch yet: {manifest_label}; "
+            "a new manifest can be used once it is on the default branch"
+        )
     try:
-        return manifest_from_payload(payload, path=path), None
+        return manifest_from_payload(base.payload, path=path, base=base), None
     except ValueError as exc:
         return None, str(exc)
 
@@ -466,7 +486,9 @@ def resolve_manifest(target: Path, manifest_id: str) -> tuple[VerifyManifest | N
     matches: list[VerifyManifest] = []
     untracked_workspace_match = False
     for path in _discover_manifest_files(target):
-        payload = _load_manifest_file(path)
+        working_payload = _load_manifest_file(path)
+        base = None if _is_builtin_manifest(path) else verify_manifest_git.load_base_manifest(target, path)
+        payload = working_payload if _is_builtin_manifest(path) else (base.payload if base else working_payload)
         if not isinstance(payload, dict):
             continue
         if str(payload.get("manifest_id") or "") != selector:
@@ -474,8 +496,13 @@ def resolve_manifest(target: Path, manifest_id: str) -> tuple[VerifyManifest | N
         if not _is_builtin_manifest(path) and not _is_git_tracked(target, path):
             untracked_workspace_match = True
             continue
+        if not _is_builtin_manifest(path) and base is None:
+            return None, (
+                f"verify manifest is not on the default branch yet: {selector}; "
+                "a new manifest can be used once it is on the default branch"
+            )
         try:
-            matches.append(manifest_from_payload(payload, path=path))
+            matches.append(manifest_from_payload(payload, path=path, base=base))
         except ValueError as exc:
             return None, str(exc)
     if matches:
@@ -531,11 +558,11 @@ def manifests_matching_paths(target: Path, paths: Sequence[str]) -> list[VerifyM
     matches: list[VerifyManifest] = []
     seen: set[str] = set()
     for path in _discover_workspace_manifest_files(target, tracked_only=True):
-        payload = _load_manifest_file(path)
-        if not isinstance(payload, dict):
+        base = verify_manifest_git.load_base_manifest(target, path)
+        if base is None:
             continue
         try:
-            manifest = manifest_from_payload(payload, path=path)
+            manifest = manifest_from_payload(base.payload, path=path, base=base)
         except ValueError:
             continue
         if manifest.manifest_id in seen:
@@ -593,6 +620,8 @@ def manifest_source_path(target: Path, manifest: VerifyManifest) -> str | None:
 
 
 def manifest_payload_sha256(manifest: VerifyManifest) -> str | None:
+    if manifest.manifest_base_payload_sha256 is not None:
+        return manifest.manifest_base_payload_sha256
     if manifest.path is None or not manifest.path.is_file():
         return None
     return f"sha256:{localio.file_sha256(manifest.path)}"
@@ -606,6 +635,12 @@ def build_manifest_binding(target: Path, manifest: VerifyManifest) -> dict[str, 
         "manifest_id": manifest.manifest_id,
         "payload_sha256": payload_sha256,
     }
+    if manifest.manifest_worktree_modified is not None:
+        binding["manifest_worktree_modified"] = manifest.manifest_worktree_modified
+    if manifest.manifest_base_commit is not None:
+        binding["base_commit"] = manifest.manifest_base_commit
+    if manifest.manifest_base_payload_sha256 is not None:
+        binding["base_payload_sha256"] = manifest.manifest_base_payload_sha256
     source_path = manifest_source_path(target, manifest)
     if source_path:
         binding["source_path"] = source_path

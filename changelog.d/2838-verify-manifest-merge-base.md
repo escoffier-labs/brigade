@@ -1,0 +1,1 @@
+- Load tracked workspace verify manifests from the default branch merge base and stamp receipts when the working copy differs.
