@@ -465,14 +465,16 @@ def remove_directory_contents(descriptor: int, *, depth: int = 0) -> None:
     The descriptor is the object, not the name, so a rename that swaps
     another tree into the path cannot redirect the deletion. Each child is
     bound to the identity taken when it was enumerated: a directory is opened
-    no-follow and its descriptor must match, a child on another device is
-    refused so a mount crossing cannot be walked, and the name is re-checked
-    with no-follow immediately before its ``rmdir``. Anything that cannot be
-    opened as a plain directory is unlinked as a single entry.
+    no-follow and its descriptor must match, a child on another device or on
+    another Linux mount is refused so a mount crossing cannot be walked, and
+    the name is re-checked with no-follow immediately before its ``rmdir``.
+    Anything that cannot be opened as a plain directory is unlinked as a
+    single entry.
     """
     if depth > MAX_REMOVE_DEPTH:
         raise OSError(errno.ELOOP, "directory tree is too deep to remove")
     device = os.fstat(descriptor).st_dev
+    root_mount = mount_id(descriptor) if mount_ids_required() else None
     os.lseek(descriptor, 0, os.SEEK_SET)
     for name in [entry.name for entry in os.scandir(descriptor)]:
         enumerated = stat_child(descriptor, name)
@@ -486,6 +488,8 @@ def remove_directory_contents(descriptor: int, *, depth: int = 0) -> None:
             opened = os.fstat(child)
             if (opened.st_dev, opened.st_ino) != (enumerated.st_dev, enumerated.st_ino):
                 raise DirectoryIdentityError(errno.EAGAIN, "child changed after enumeration", name)
+            if root_mount is not None and mount_id(child) != root_mount:
+                raise DirectoryIdentityError(errno.EXDEV, "child is on another mount", name)
             remove_directory_contents(child, depth=depth + 1)
         finally:
             os.close(child)

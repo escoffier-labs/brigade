@@ -267,15 +267,23 @@ def _lock_state(root: Path, worktree_path: Path) -> bool | None:
     """Whether Git records this worktree as locked, or None when unknown.
 
     Read from `git worktree list` so ``git worktree lock`` reason text and the
-    admin dir layout stay Git's business. A failed command, OSError, or
-    unparseable output cannot verify the lock and returns None, which the
-    caller treats as a refusal rather than as unlocked.
+    admin dir layout stay Git's business. A failed command, OSError, capped
+    or undecodable output, or a record without its head cannot verify the
+    lock and returns None, which the caller treats as a refusal rather than
+    as unlocked.
     """
     try:
         result = proc.run(["git", "worktree", "list", "--porcelain"], cwd=root, timeout=120.0)
     except OSError:
         return None
     if result.code != 0:
+        return None
+    if (
+        result.output_limit_exceeded
+        or result.stream_limit_exceeded
+        or result.stdout_decode_error is not None
+        or result.stderr_decode_error is not None
+    ):
         return None
     target = _identity_key(worktree_path)
     for record in result.stdout.split("\n\n"):
@@ -284,6 +292,8 @@ def _lock_state(root: Path, worktree_path: Path) -> bool | None:
             continue
         if _identity_key(Path(lines[0][len("worktree ") :])) != target:
             continue
+        if not any(line.startswith("HEAD ") or line == "bare" for line in lines[1:]):
+            return None
         return any(line == "locked" or line.startswith("locked ") for line in lines[1:])
     return None
 

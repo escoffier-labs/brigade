@@ -694,3 +694,47 @@ def test_remove_directory_contents_refuses_a_device_crossing(tmp_path: Path, mon
         os.close(descriptor)
 
     assert (root / "child" / "kept.txt").read_text(encoding="utf-8") == "kept"
+
+
+@pytest.mark.skipif(not dirfd.posix_available(), reason="POSIX dir_fd plus O_NOFOLLOW required")
+def test_remove_directory_contents_refuses_a_bind_mount(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "root"
+    (root / "child").mkdir(parents=True)
+    (root / "child" / "kept.txt").write_text("kept", encoding="utf-8")
+    monkeypatch.setattr(dirfd, "mount_ids_required", lambda: True)
+    seen: list[int] = []
+
+    def mount_id(fd: int) -> int:
+        seen.append(fd)
+        return 1 if len(seen) == 1 else 2
+
+    monkeypatch.setattr(dirfd, "mount_id", mount_id)
+    descriptor = dirfd.open_directory_chain(root, writable=True)
+    try:
+        with pytest.raises(OSError):
+            dirfd.remove_directory_contents(descriptor)
+    finally:
+        os.close(descriptor)
+
+    assert (root / "child" / "kept.txt").read_text(encoding="utf-8") == "kept"
+
+
+@pytest.mark.skipif(not dirfd.posix_available(), reason="POSIX dir_fd plus O_NOFOLLOW required")
+def test_remove_directory_contents_refuses_an_unreadable_mount_id(tmp_path: Path, monkeypatch) -> None:
+    root = tmp_path / "root"
+    (root / "child").mkdir(parents=True)
+    (root / "child" / "kept.txt").write_text("kept", encoding="utf-8")
+    monkeypatch.setattr(dirfd, "mount_ids_required", lambda: True)
+
+    def mount_id(fd: int) -> int:
+        raise dirfd.unavailable("mount identities")
+
+    monkeypatch.setattr(dirfd, "mount_id", mount_id)
+    descriptor = dirfd.open_directory_chain(root, writable=True)
+    try:
+        with pytest.raises(OSError):
+            dirfd.remove_directory_contents(descriptor)
+    finally:
+        os.close(descriptor)
+
+    assert (root / "child" / "kept.txt").read_text(encoding="utf-8") == "kept"

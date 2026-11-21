@@ -809,9 +809,11 @@ def _pinned_git(worktree: Path, git_dir: Path, args: list[str], *, root_fd: int,
     if _proc_fd_paths():
         work, admin = f"/proc/self/fd/{root_fd}", f"/proc/self/fd/{admin_fd}"
         cwd, fds = Path(work), (root_fd, admin_fd)
-    else:
+    elif os.name == "nt":
         work, admin = str(worktree), str(git_dir)
         cwd, fds = worktree, ()
+    else:
+        raise OSError("git pinning is unavailable")
     raw = _bounded_git_output(
         cwd,
         [
@@ -1314,8 +1316,6 @@ def _rescue_inbox(worktree: Path, root_fd: int, admin_fd: int, git_dir: Path, re
         candidates = sorted(n for n in names if _is_candidate(n))
         if not candidates:
             return []
-        if os.name != "nt" and not _proc_fd_paths():
-            return [Rescue(label, "failed", reason="worktree-unverified")]
         tracked = _tracked_for_inbox(worktree, git_dir, root_fd, admin_fd, parts, src_fd)
         if tracked is None:
             return [Rescue(label, "failed", reason="tracking-unverifiable")]
@@ -1373,6 +1373,10 @@ def rescue_pending_handoffs(
         return [Rescue(str(worktree), "failed", reason="worktree-unresolvable")]
     if dest_root is not None and dest_root.resolve() == resolved:
         return []
+    if os.name != "nt" and not _proc_fd_paths():
+        # No Git query runs by path in the rescue flow. Without pinning a
+        # swap could hide an inbox and its handoffs with it.
+        return [Rescue(str(worktree), "failed", reason="worktree-unverified")]
     try:
         root_fd = dirfd.open_directory_chain(resolved, writable=False)
     except OSError:

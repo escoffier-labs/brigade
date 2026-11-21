@@ -784,24 +784,18 @@ def test_tree_swapped_in_before_listing_cannot_redirect_git(tmp_path: Path, monk
     assert (linked / "decoy.txt").read_text() == "decoy\n"
 
 
-def test_path_based_listing_post_check_keeps_worktree_on_swap(tmp_path: Path, monkeypatch):
+def test_pinned_git_refuses_without_pinning_outside_windows(tmp_path: Path, monkeypatch):
     main, linked = _repo_with_worktree(tmp_path)
-    _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-real.md", "real handoff")
-    monkeypatch.setattr(handoff_worktrees, "_proc_fd_paths", lambda: False, raising=False)
-    real_bounded = handoff_worktrees._bounded_git_output
-    state: dict = {}
-
-    def bounded(cwd, args, *rest, **kwargs):
-        if "real" not in state and "ls-files" in args:
-            state["real"] = _swap_in_decoy(linked)
-        return real_bounded(cwd, args, *rest, **kwargs)
-
-    monkeypatch.setattr(handoff_worktrees, "_bounded_git_output", bounded)
-    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
-
-    assert [(r.state, r.reason) for r in results] == [("failed", "inbox-scan-failed")]
-    assert (state["real"] / ".claude" / "memory-handoffs" / "2026-11-08-0900-real.md").is_file()
-    assert (linked / "decoy.txt").read_text() == "decoy\n"
+    git_dir = handoff_worktrees._git_path(linked, "--git-dir")
+    assert git_dir is not None
+    root_fd = dirfd.open_directory_chain(linked, writable=False)
+    monkeypatch.setattr(handoff_worktrees, "_proc_fd_paths", lambda: False)
+    try:
+        with pytest.raises(OSError):
+            handoff_worktrees._pinned_git(linked, git_dir, ["ls-files"], root_fd=root_fd, admin_fd=root_fd)
+    finally:
+        os.close(root_fd)
+    assert linked.is_dir()
 
 
 # Round 13 (issue #2403): the admin dir and the removal path are held by
@@ -2134,6 +2128,82 @@ def test_pinning_lost_before_the_tracked_query_refuses_removal(tmp_path: Path, m
     main, linked = _repo_with_worktree(tmp_path)
     pending = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-real.md", "real handoff")
     monkeypatch.setattr(handoff_worktrees, "_proc_fd_paths", lambda: False)
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    err = capsys.readouterr().err
+    assert "worktree-unverified" in err
+    assert linked.exists()
+    assert pending.is_file()
+
+
+# Round 16 (PR #2821 review): incomplete lock listings refuse, and a lost pin
+# refuses before any Git query runs.
+
+
+@requires_dirfd
+def test_truncated_worktree_list_refuses_removal(tmp_path: Path, monkeypatch, capsys):
+    main, linked = _repo_with_worktree(tmp_path)
+    from brigade import worktree_removal
+
+    real_run = worktree_removal.proc.run
+
+    def run(argv: list[str], **kwargs: object) -> object:
+        if argv[:3] == ["git", "worktree", "list"]:
+            return worktree_removal.proc.Result(
+                0,
+                f"worktree {linked}\nHEAD 0123456\n",
+                "",
+                output_limit_exceeded=True,
+            )
+        return real_run(argv, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(worktree_removal.proc, "run", run)
+    runguard.remove_worktree(main, linked, force=True)
+
+    err = capsys.readouterr().err
+    assert "worktree-unverified" in err
+    assert linked.exists()
+
+
+@requires_dirfd
+def test_worktree_list_record_without_head_refuses_removal(tmp_path: Path, monkeypatch, capsys):
+    main, linked = _repo_with_worktree(tmp_path)
+    from brigade import worktree_removal
+
+    real_run = worktree_removal.proc.run
+
+    def run(argv: list[str], **kwargs: object) -> object:
+        if argv[:3] == ["git", "worktree", "list"]:
+            return worktree_removal.proc.Result(0, f"worktree {linked}\nbranch refs/heads/main\n\n", "")
+        return real_run(argv, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(worktree_removal.proc, "run", run)
+    runguard.remove_worktree(main, linked, force=True)
+
+    err = capsys.readouterr().err
+    assert "worktree-unverified" in err
+    assert linked.exists()
+
+
+@requires_dirfd
+def test_pinning_unavailable_refuses_before_any_git_query(tmp_path: Path, monkeypatch, capsys):
+    main, linked = _repo_with_worktree(tmp_path)
+    pending = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-real.md", "real handoff")
+    calls: list[tuple[object, ...]] = []
+    real_git = handoff_worktrees._git
+
+    def git(*args: object, **kwargs: object) -> str | None:
+        calls.append(args)
+        return real_git(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(handoff_worktrees, "_git", git)
+    monkeypatch.setattr(handoff_worktrees, "_proc_fd_paths", lambda: False)
+    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+
+    assert calls == []
+    assert [(r.state, r.reason) for r in results] == [("failed", "worktree-unverified")]
+    assert pending.is_file()
 
     runguard.remove_worktree(main, linked, force=True)
 
