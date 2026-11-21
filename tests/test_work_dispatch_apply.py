@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import time
@@ -721,6 +722,56 @@ def test_resume_cancellation_waits_for_adopted_child(apply_target, capsys, monke
     _apply(apply_target, capsys, expected=130)
     assert not runguard._pid_is_active(intent["pid"])
     assert _intents(apply_target)[0]["state"] == "canceled"
+
+
+@requires_dispatch_apply
+def test_windows_adopted_cancel_refuses_an_unverifiable_pid(tmp_path, monkeypatch):
+    """#1744: Windows has no creation token for an adopted pid, so never taskkill it."""
+    from types import SimpleNamespace
+
+    from brigade.work_cmd import dispatch_apply as apply, dispatch_state as store
+
+    # A namespace keeps pathlib on the real os.name while the Windows branch runs.
+    monkeypatch.setattr(apply, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(store, "child_alive", lambda row: True)
+    monkeypatch.setattr(
+        apply.proc,
+        "run",
+        lambda *args, **kwargs: pytest.fail("taskkill must not target an unverifiable adopted pid"),
+    )
+    row = {"run_dir": str(tmp_path), "pid": 4242}
+
+    with pytest.raises(ValueError, match="adopted-child-unverifiable"):
+        apply.Apply(tmp_path)._cancel_adopted(row)
+
+
+@requires_dispatch_apply
+@requires_process_groups
+def test_posix_adopted_cancel_still_signals_the_verified_group(tmp_path, monkeypatch):
+    """#1744: POSIX keeps the existing verified process-group cancellation."""
+    from types import SimpleNamespace
+
+    from brigade.work_cmd import dispatch_apply as apply, dispatch_state as store
+
+    alive = {"value": True}
+    monkeypatch.setattr(store, "child_alive", lambda row: alive["value"])
+    monkeypatch.setattr(apply.proc, "process_group_id", lambda pid: pid)
+    signals = []
+
+    def killpg(pid, sig):
+        signals.append((pid, sig))
+        alive["value"] = False
+
+    monkeypatch.setattr(
+        apply,
+        "os",
+        SimpleNamespace(name="posix", killpg=killpg, waitpid=lambda pid, options: (pid, 0)),
+    )
+    row = {"run_dir": str(tmp_path), "pid": 4242}
+
+    apply.Apply(tmp_path)._cancel_adopted(row)
+
+    assert signals == [(4242, signal.SIGTERM), (4242, signal.SIGKILL)]
 
 
 @requires_dispatch_apply

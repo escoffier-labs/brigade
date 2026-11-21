@@ -14,12 +14,23 @@ import sys
 import threading
 import time
 from collections import deque
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, List, Optional
 
 from .proc_group import drain_supported, observe_leader_exit, wait_for_group
+from .proc_windows_job import (
+    INCOMPLETE_GROUP_EXIT_CODE as _INCOMPLETE_GROUP_EXIT_CODE,
+    JobObject as OwnedJob,
+    _resume_windows_main_thread as _resume_windows_main_thread,
+    abort_windows_launch as _abort_windows_launch,
+    bind_suspended_windows_child as _bind_suspended_windows_child,
+    create_windows_child_job as _create_windows_child_job,
+    register_owned_child,
+    terminate_windows_child as _terminate_windows_child,
+    terminate_windows_process_tree as _terminate_windows_process_tree,
+)
 
 _STREAM_ENCODING = "utf-8"
 MAX_CAPTURE_BYTES = 1_048_576
@@ -46,9 +57,6 @@ _TIMED_OUT_DRAIN_SECONDS = 0.5
 # Bound for a supervised run's descendants to finish after the direct child
 # exits before the owned group is reaped (see group_drain_seconds in run()).
 GROUP_DRAIN_SECONDS = 5.0
-# Forced nonzero exit for a terminated post-exit process group: the direct
-# child's zero must never stand once its output pipes were cut off mid-stream.
-_INCOMPLETE_GROUP_EXIT_CODE = 125
 
 
 def check_cancellation(process_registry: ProcessRegistry | None) -> None:
@@ -68,6 +76,14 @@ class ProcessCancelledError(RuntimeError):
     """A canceled non-claim registry refused a new worker launch."""
 
 
+@dataclass(frozen=True)
+class RegisteredChild:
+    """One registered child: its Brigade seat and the job that owns its tree."""
+
+    seat: str | None = None
+    job: OwnedJob | None = None
+
+
 class ProcessRegistry:
     """Own cancellable subprocess groups for one worker dispatch."""
 
@@ -83,7 +99,7 @@ class ProcessRegistry:
         self._check_cancellation = check_cancellation
         self._lock = threading.Lock()
         self._cancel_gate = threading.Lock()
-        self._processes: dict[subprocess.Popen[bytes], str | None] = {}
+        self._processes: dict[subprocess.Popen[bytes], RegisteredChild] = {}
         self._cancel_outcomes: dict[subprocess.Popen[bytes], ProcessCancelOutcome] = {}
         self._cancellation_group_count = 0
         self._canceled = False
@@ -115,44 +131,65 @@ class ProcessRegistry:
             for process, outcome in observed.items():
                 if outcome.result == "still_active" and process.poll() is not None:
                     observed[process] = ProcessCancelOutcome(outcome.seat, "interrupted")
-            for process, seat in self._processes.items():
+            for process, registered in self._processes.items():
                 if process not in observed:
                     observed[process] = ProcessCancelOutcome(
-                        seat, "interrupted" if process.poll() is not None else "still_active"
+                        registered.seat, "interrupted" if process.poll() is not None else "still_active"
                     )
             return tuple(observed.values())
 
-    def _cancel_processes(self, processes: tuple[tuple[subprocess.Popen[bytes], str | None], ...]) -> None:
+    def _cancel_processes(self, processes: tuple[tuple[subprocess.Popen[bytes], RegisteredChild], ...]) -> None:
         if not processes:
             return
+        jobs = {process: registered.job for process, registered in processes if registered.job is not None}
         try:
             _terminate_processes(
-                tuple(process for process, _seat in processes),
+                tuple(process for process, _registered in processes),
                 terminate_grace=self._terminate_grace,
                 kill_grace=self._kill_grace,
+                jobs=jobs,
             )
             outcomes = tuple(
-                (process, ProcessCancelOutcome(seat, "interrupted" if process.poll() is not None else "still_active"))
-                for process, seat in processes
+                (
+                    process,
+                    ProcessCancelOutcome(
+                        registered.seat, "interrupted" if process.poll() is not None else "still_active"
+                    ),
+                )
+                for process, registered in processes
             )
         except Exception:
-            outcomes = tuple((process, ProcessCancelOutcome(seat, "error")) for process, seat in processes)
+            outcomes = tuple(
+                (process, ProcessCancelOutcome(registered.seat, "error")) for process, registered in processes
+            )
         with self._lock:
             for process, outcome in outcomes:
                 previous = self._cancel_outcomes.get(process)
                 if previous is None or previous.result != "error":
                     self._cancel_outcomes[process] = outcome
 
-    def register(self, process: subprocess.Popen[bytes], *, seat: str | None = None) -> None:
+    def register(
+        self,
+        process: subprocess.Popen[bytes],
+        *,
+        seat: str | None = None,
+        job: OwnedJob | None = None,
+    ) -> None:
+        """Track one child, keeping the owned job that contains its Windows tree."""
+        registered = RegisteredChild(seat, job)
         with self._lock:
-            self._processes[process] = seat
+            self._processes[process] = registered
             canceled = self._canceled
         if canceled:
             with self._cancel_gate:
                 with self._lock:
                     pending = process not in self._cancel_outcomes
                 if pending:
-                    self._cancel_processes(((process, seat),))
+                    self._cancel_processes(((process, registered),))
+
+    def register_with_job(self, process: subprocess.Popen[bytes], job: OwnedJob) -> None:
+        """Register a child together with the job object that owns its tree."""
+        self.register(process, job=job)
 
     def unregister(self, process: subprocess.Popen[bytes]) -> None:
         with self._lock:
@@ -166,8 +203,8 @@ class ProcessRegistry:
             with self._lock:
                 self._canceled = True
                 processes = tuple(
-                    (process, seat)
-                    for process, seat in self._processes.items()
+                    (process, registered)
+                    for process, registered in self._processes.items()
                     if process not in self._cancel_outcomes
                     or (self._cancel_outcomes[process].result != "interrupted" and process.poll() is None)
                 )
@@ -176,10 +213,14 @@ class ProcessRegistry:
             return self.cancellation_outcomes
 
     def terminate(self, process: subprocess.Popen[bytes]) -> None:
+        with self._lock:
+            registered = self._processes.get(process)
+        jobs = {process: registered.job} if registered is not None and registered.job is not None else {}
         _terminate_processes(
             (process,),
             terminate_grace=self._terminate_grace,
             kill_grace=self._kill_grace,
+            jobs=jobs,
         )
 
 
@@ -206,6 +247,9 @@ class _SeatProcessRegistry:
 
     def register(self, process: subprocess.Popen[bytes]) -> None:
         self._parent.register(process, seat=self._seat)
+
+    def register_with_job(self, process: subprocess.Popen[bytes], job: OwnedJob) -> None:
+        self._parent.register(process, seat=self._seat, job=job)
 
     def unregister(self, process: subprocess.Popen[bytes]) -> None:
         self._parent.unregister(process)
@@ -246,10 +290,7 @@ def process_group_id(pid: int) -> int | None:
         return None
 
 
-_JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
-_JOB_OBJECT_EXTENDED_LIMIT_CLASS = 9
 _WINDOWS_CREATE_SUSPENDED = 0x00000004
-_THREAD_SUSPEND_RESUME = 0x0002
 _WINDOWS_DETACHED_PROCESS = 0x00000008
 _WINDOWS_CREATE_BREAKAWAY_FROM_JOB = 0x01000000
 # CreateProcess refuses CREATE_BREAKAWAY_FROM_JOB with ERROR_ACCESS_DENIED when
@@ -265,232 +306,18 @@ class DetachedLaunchError(RuntimeError):
     """A requested durable detach cannot be guaranteed on this platform."""
 
 
-class _WindowsChildJob:
-    """Owned kill-on-close job object binding one launched child process tree."""
-
-    def __init__(self, kernel32: Any, handle: int) -> None:
-        self._kernel32 = kernel32
-        self._handle = handle
-
-    def assign(self, process_handle: int) -> bool:
-        """Bind the direct child so every descendant joins the owned tree."""
-        return bool(self._kernel32.AssignProcessToJobObject(self._handle, process_handle))
-
-    def resume(self, pid: int) -> bool:
-        """Resume a CREATE_SUSPENDED child's main thread once it is job-assigned."""
-        return _resume_windows_main_thread(self._kernel32, pid)
-
-    def terminate(self) -> bool:
-        """Terminate every process in the owned tree, including escaped descendants."""
-        return bool(self._kernel32.TerminateJobObject(self._handle, _INCOMPLETE_GROUP_EXIT_CODE))
-
-    def close(self) -> None:
-        """Release the kill-on-close handle once the tree is reaped."""
-        self._kernel32.CloseHandle(self._handle)
+def create_owned_windows_job() -> OwnedJob | None:
+    """Create the kill-on-close job object that contains one Windows child tree."""
+    return _create_windows_child_job()
 
 
-class _WindowsJobLaunchFailure(RuntimeError):
-    """Typed failure to create or bind the owned job object around one launch."""
-
-
-def _create_windows_child_job() -> _WindowsChildJob | None:
-    """Create a kill-on-close job object on Windows; return None when unavailable."""
-    if os.name != "nt":
-        return None
-    try:
-        import ctypes
-
-        loader_factory = getattr(ctypes, "WinDLL", None)
-        if loader_factory is None:
-            return None
-        kernel32 = loader_factory("kernel32", use_last_error=True)
-        handle = kernel32.CreateJobObjectW(None, None)
-        if not handle:
-            return None
-
-        class _IoCounters(ctypes.Structure):
-            _fields_ = [
-                (name, ctypes.c_uint64)
-                for name in (
-                    "ReadOperationCount",
-                    "WriteOperationCount",
-                    "OtherOperationCount",
-                    "ReadTransferCount",
-                    "WriteTransferCount",
-                    "OtherTransferCount",
-                )
-            ]
-
-        class _BasicLimitInformation(ctypes.Structure):
-            _fields_ = [
-                ("PerProcessUserTimeLimit", ctypes.c_int64),
-                ("PerJobUserTimeLimit", ctypes.c_int64),
-                ("LimitFlags", ctypes.c_uint32),
-                ("MinimumWorkingSetSize", ctypes.c_size_t),
-                ("MaximumWorkingSetSize", ctypes.c_size_t),
-                ("ActiveProcessLimit", ctypes.c_uint32),
-                ("Affinity", ctypes.c_size_t),
-                ("PriorityClass", ctypes.c_uint32),
-                ("SchedulingClass", ctypes.c_uint32),
-            ]
-
-        class _ExtendedLimitInformation(ctypes.Structure):
-            _fields_ = [
-                ("BasicLimitInformation", _BasicLimitInformation),
-                ("IoInfo", _IoCounters),
-                ("ProcessMemoryLimit", ctypes.c_size_t),
-                ("JobMemoryLimit", ctypes.c_size_t),
-                ("PeakProcessMemoryUsed", ctypes.c_size_t),
-                ("PeakJobMemoryUsed", ctypes.c_size_t),
-            ]
-
-        limits = _ExtendedLimitInformation()
-        limits.BasicLimitInformation.LimitFlags = _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
-        if not kernel32.SetInformationJobObject(
-            handle,
-            _JOB_OBJECT_EXTENDED_LIMIT_CLASS,
-            ctypes.byref(limits),
-            ctypes.sizeof(limits),
-        ):
-            kernel32.CloseHandle(handle)
-            return None
-        return _WindowsChildJob(kernel32, handle)
-    except Exception:
-        return None
-
-
-def _resume_windows_main_thread(kernel32: Any, pid: int) -> bool:
-    """Resume the suspended main thread of ``pid``; False when it cannot be resumed.
-
-    A CREATE_SUSPENDED child stays frozen until its first thread is resumed,
-    so the job assignment in ``run`` closes the grandchild-spawn window. The
-    thread handle is resolved through the tool-help snapshot because Popen
-    closes its own main-thread handle immediately after CreateProcess.
-    """
-    import ctypes
-
-    snapshot_factory = getattr(kernel32, "CreateToolhelp32Snapshot", None)
-    open_thread = getattr(kernel32, "OpenThread", None)
-    resume_thread = getattr(kernel32, "ResumeThread", None)
-    if snapshot_factory is None or open_thread is None or resume_thread is None:
-        return False
-    try:
-        th32cs_snapthread = 0x00000004
-        snapshot_factory.restype = ctypes.c_void_p
-        snapshot = snapshot_factory(th32cs_snapthread, 0)
-        invalid_handle = ctypes.c_void_p(-1).value
-        if snapshot is None or snapshot == invalid_handle:
-            return False
-
-        class _ThreadEntry(ctypes.Structure):
-            _fields_ = [
-                ("dwSize", ctypes.c_uint32),
-                ("cntUsage", ctypes.c_uint32),
-                ("th32ThreadID", ctypes.c_uint32),
-                ("th32OwnerProcessID", ctypes.c_uint32),
-                ("tpBasePri", ctypes.c_long),
-                ("tpDeltaPri", ctypes.c_long),
-                ("dwFlags", ctypes.c_uint32),
-            ]
-
-        entry = _ThreadEntry()
-        entry.dwSize = ctypes.sizeof(entry)
-        thread_id: int | None = None
-        if kernel32.Thread32First(snapshot, ctypes.byref(entry)):
-            while True:
-                if entry.th32OwnerProcessID == pid:
-                    thread_id = int(entry.th32ThreadID)
-                    break
-                if not kernel32.Thread32Next(snapshot, ctypes.byref(entry)):
-                    break
-        if thread_id is None:
-            return False
-        thread = open_thread(_THREAD_SUSPEND_RESUME, False, thread_id)
-        if not thread:
-            return False
-        try:
-            # ResumeThread returns the previous suspend count; loop until the
-            # count reaches zero instead of assuming one suspend. A return of
-            # 0xFFFFFFFF is (DWORD)-1, i.e. failure: report it so the caller
-            # terminates the still-suspended child rather than leaving it
-            # frozen on its job assignment until timeout.
-            for _ in range(32):
-                previous = resume_thread(thread)
-                if previous == 0xFFFFFFFF:
-                    return False
-                if previous == 0:
-                    break
-        finally:
-            kernel32.CloseHandle(thread)
-        return True
-    except Exception:
-        return False
-    finally:
-        try:
-            kernel32.CloseHandle(snapshot)
-        except Exception:
-            pass
-
-
-def _bind_suspended_windows_child(
-    job: _WindowsChildJob,
+def bind_owned_windows_child(
+    job: OwnedJob,
     process: subprocess.Popen[bytes],
     argv: List[str],
 ) -> str | None:
-    """Assign the still-suspended child to the pre-created job and resume it.
-
-    Returns ``None`` on success. On failure the suspended child never ran any
-    user code: terminate it directly, release the job handle, and return the
-    typed launch-failure message instead of silently falling back to taskkill.
-    """
-    process_handle = getattr(process, "_handle", None)
-    assigned = isinstance(process_handle, int) and job.assign(process_handle)
-    reason: str | None = None
-    if not assigned:
-        reason = "owned job object assignment failed"
-    elif not job.resume(process.pid):
-        reason = "suspended child could not be resumed"
-    if reason is None:
-        return None
-    try:
-        process.kill()
-    except OSError:
-        pass
-    try:
-        process.wait(timeout=_TIMED_OUT_DRAIN_SECONDS)
-    except (OSError, subprocess.TimeoutExpired):
-        pass
-    try:
-        job.close()
-    except Exception:
-        pass
-    command = ntpath.basename(argv[0]) if argv else "command"
-    return f"command launch failed: {command} ({reason}); suspended child terminated"
-
-
-def _terminate_windows_process_tree(process: subprocess.Popen[bytes], *, timeout: float) -> None:
-    try:
-        subprocess.run(
-            ["taskkill", "/PID", str(process.pid), "/T", "/F"],
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            timeout=max(timeout, 0.1),
-        )
-    except (OSError, subprocess.TimeoutExpired, KeyboardInterrupt):
-        pass
-    try:
-        alive = process.poll() is None
-    except KeyboardInterrupt:
-        alive = True
-    except OSError:
-        alive = False
-    if alive:
-        try:
-            process.kill()
-        except (OSError, KeyboardInterrupt):
-            pass
+    """Assign a suspended Windows child to its owned job, then resume it."""
+    return _bind_suspended_windows_child(job, process, argv)
 
 
 def _wait_for_processes(processes: tuple[subprocess.Popen[bytes], ...], timeout: float) -> None:
@@ -507,14 +334,21 @@ def _terminate_processes(
     *,
     terminate_grace: float,
     kill_grace: float,
+    jobs: Mapping[subprocess.Popen[bytes], OwnedJob] | None = None,
 ) -> None:
     if not processes:
         return
     if os.name == "nt":
         timeout = terminate_grace + kill_grace
+        owned = jobs or {}
         for process in processes:
             try:
-                _terminate_windows_process_tree(process, timeout=timeout)
+                _terminate_windows_child(
+                    process,
+                    timeout=timeout,
+                    job=owned.get(process),
+                    taskkill=_terminate_windows_process_tree,
+                )
             except KeyboardInterrupt:
                 try:
                     process.kill()
@@ -825,6 +659,11 @@ def process_group_kwargs() -> dict[str, Any]:
     return _process_group_kwargs()
 
 
+def suspended_process_group_kwargs() -> dict[str, Any]:
+    """Launcher kwargs that start a Windows child frozen for job assignment."""
+    return _process_group_kwargs(suspend=True)
+
+
 def detached_launch_kwargs(*, job_breakaway: bool = True) -> dict[str, Any]:
     """Launcher kwargs for a child that must outlive its parent's session.
 
@@ -995,7 +834,7 @@ class _BoundedCollector:
 def _stop_child(
     process: subprocess.Popen[bytes],
     process_registry: ProcessRegistry | None,
-    child_job: _WindowsChildJob | None = None,
+    child_job: OwnedJob | None = None,
 ) -> None:
     if child_job is not None and child_job.terminate():
         # The job owns the whole tree; give the pipes a beat to drain closed.
@@ -1062,7 +901,7 @@ def _join_started_threads_after_exception(threads: list[threading.Thread], timeo
 def _cleanup_launch_exception(
     process: subprocess.Popen[bytes],
     process_registry: ProcessRegistry | None,
-    child_job: _WindowsChildJob | None,
+    child_job: OwnedJob | None,
     started_threads: list[threading.Thread],
 ) -> None:
     """Best-effort bounded cleanup while preserving a launch setup exception."""
@@ -1080,7 +919,7 @@ def _cleanup_launch_exception(
 def _release_launch_resources(
     process: subprocess.Popen[bytes],
     process_registry: ProcessRegistry | None,
-    child_job: _WindowsChildJob | None,
+    child_job: OwnedJob | None,
     registration_attempted: bool,
 ) -> BaseException | None:
     """Release launcher-owned resources without letting one release skip another."""
@@ -1091,16 +930,16 @@ def _release_launch_resources(
         if cleanup_exception is None:
             cleanup_exception = exc
 
+    if registration_attempted and process_registry is not None:
+        try:
+            process_registry.unregister(process)
+        except BaseException as exc:
+            record_cleanup_exception(exc)
     if child_job is not None:
         try:
             child_job.close()
         except Exception:
             pass
-        except BaseException as exc:
-            record_cleanup_exception(exc)
-    if registration_attempted and process_registry is not None:
-        try:
-            process_registry.unregister(process)
         except BaseException as exc:
             record_cleanup_exception(exc)
     for stream_name in ("stdout", "stderr", "stdin"):
@@ -1121,7 +960,7 @@ def _collect_process_output(
     timeout: float,
     stdin: bytes | None,
     process_registry: ProcessRegistry | None,
-    child_job: _WindowsChildJob | None = None,
+    child_job: OwnedJob | None = None,
     supervise_group: bool = False,
     group_drain_seconds: float = 0.0,
     started_threads: list[threading.Thread] | None = None,
@@ -1744,7 +1583,8 @@ def _launch_and_collect(
 ) -> Result:
     _check_launch_allowed(process_registry)
     windows_launch = os.name == "nt"
-    child_job: _WindowsChildJob | None = None
+    child_job: OwnedJob | None = None
+    process: subprocess.Popen[bytes] | None = None
     started_threads: list[threading.Thread] = []
     if windows_launch:
         # The job must exist before the child can run a single instruction.
@@ -1770,25 +1610,33 @@ def _launch_and_collect(
             shell=False,
             **popen_kwargs,
         )
-    except OSError as exc:
-        code, message = _launch_failure(args, exc)
         if child_job is not None:
-            try:
-                child_job.close()
-            except Exception:
-                pass
+            bind_error = _bind_suspended_windows_child(child_job, process, args)
+            if bind_error is not None:
+                # The binder killed the suspended child and closed its job.
+                process = None
+                return Result(code=126, stdout="", stderr=bind_error)
+    except OSError as exc:
+        _abort_windows_launch(process, child_job)
+        code, message = _launch_failure(args, exc)
         return Result(code=code, stdout="", stderr=message)
-
-    if child_job is not None:
-        bind_error = _bind_suspended_windows_child(child_job, process, args)
-        if bind_error is not None:
-            return Result(code=126, stdout="", stderr=bind_error)
+    except BaseException:
+        # A ValueError, TypeError, or interrupt after the job existed must not
+        # leak the handle or leave a suspended child behind.
+        _abort_windows_launch(process, child_job)
+        raise
+    assert process is not None
     registration_attempted = False
     primary_exception = False
     try:
         if process_registry is not None:
             registration_attempted = True
-            process_registry.register(process)
+            if child_job is None:
+                process_registry.register(process)
+            else:
+                # The registry keeps the job handle so cancellation never has
+                # to resolve a pid that Windows may have recycled (#1744).
+                register_owned_child(process_registry, process, child_job)
             _check_launch_allowed(process_registry)
         return _collect_process_output(
             process,

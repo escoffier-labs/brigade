@@ -514,9 +514,15 @@ class Apply:
         if type(pid) is not int or pid <= 0 or not store.child_alive(row):
             return
         if os.name == "nt":
-            result = proc.run(["taskkill", "/PID", str(pid), "/T", "/F"], timeout=5)
-            if result.code != 0 and store.child_alive(row):
-                raise ValueError("could not cancel adopted dispatch child")
+            # #1744: Windows has no creation token for an adopted child, so a
+            # stored pid cannot prove the process still belongs to Brigade.
+            # taskkill /T on a recycled pid would kill an unrelated tree. Hold
+            # the claim and leave the child for an operator. A supervisor-held
+            # job object that outlives a dispatcher restart is the full fix.
+            raise ValueError(
+                "adopted-child-unverifiable: no owned job or verified process handle for this adopted "
+                "dispatch child, so the claim is retained; recover the child by hand"
+            )
         elif proc.process_group_id(pid) == pid:
             try:
                 os.killpg(pid, signal.SIGTERM)

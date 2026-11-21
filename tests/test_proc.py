@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import proc
+from brigade import proc, proc_windows_job
 from tests._child_publish import PUBLISH_SOURCE, process_is_running, process_state, wait_for_text
 
 
@@ -580,7 +580,9 @@ def test_windows_registry_cancellation_targets_owned_descendant_tree(monkeypatch
     assert process.killed is False
 
 
-def test_windows_registry_targets_tree_after_group_leader_exits(monkeypatch):
+def test_windows_exited_group_leader_is_never_taskkilled(monkeypatch, caplog):
+    """#1744: an exited leader's pid may be recycled, so it is never passed to taskkill."""
+
     class ExitedProcess:
         pid = 4242
 
@@ -590,17 +592,496 @@ def test_windows_registry_targets_tree_after_group_leader_exits(monkeypatch):
         def kill(self):
             pytest.fail("an exited group leader must not be killed directly")
 
-    calls = []
     monkeypatch.setattr(proc.os, "name", "nt")
     monkeypatch.setattr(
         proc.subprocess,
         "run",
-        lambda args, **kwargs: calls.append((args, kwargs)) or subprocess.CompletedProcess(args, 0),
+        lambda *args, **kwargs: pytest.fail("taskkill must never target an exited leader"),
     )
 
-    proc._terminate_processes((ExitedProcess(),), terminate_grace=0, kill_grace=0)
+    with caplog.at_level("WARNING"):
+        proc._terminate_processes((ExitedProcess(),), terminate_grace=0, kill_grace=0)
 
-    assert calls[0][0] == ["taskkill", "/PID", "4242", "/T", "/F"]
+    assert any("4242" in record.getMessage() and "exited" in record.getMessage() for record in caplog.records), (
+        "the skipped taskkill must be logged"
+    )
+
+
+def test_windows_registry_cancel_terminates_owned_job_after_leader_exit(monkeypatch):
+    """#1744: a registered job handle kills the whole tree without a pid lookup."""
+
+    class ExitedProcess:
+        pid = 4242
+
+        def poll(self):
+            return 0
+
+        def kill(self):
+            pytest.fail("an exited leader has no live process handle to kill")
+
+    events = []
+
+    class FakeJob:
+        def terminate(self):
+            events.append("job-terminate")
+            return True
+
+        def close(self):
+            events.append("job-close")
+
+    monkeypatch.setattr(proc.os, "name", "nt")
+    monkeypatch.setattr(
+        proc.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("taskkill must never target an exited leader"),
+    )
+
+    registry = proc.ProcessRegistry(terminate_grace=0, kill_grace=0)
+    registry.register(ExitedProcess(), job=FakeJob())
+
+    outcomes = registry.cancel()
+
+    assert events == ["job-terminate"]
+    assert [outcome.result for outcome in outcomes] == ["interrupted"]
+
+
+def test_windows_registry_terminate_uses_the_registered_job(monkeypatch):
+    """#1744: an explicit terminate of a registered child goes through its job too."""
+
+    class LiveProcess:
+        pid = 4242
+
+        def poll(self):
+            return None
+
+        def kill(self):
+            pytest.fail("the owned job owns the tree, not this process handle")
+
+    events = []
+
+    class FakeJob:
+        def terminate(self):
+            events.append("job-terminate")
+            return True
+
+    monkeypatch.setattr(proc.os, "name", "nt")
+    monkeypatch.setattr(
+        proc.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("taskkill must not run for a job-owned child"),
+    )
+
+    registry = proc.ProcessRegistry(terminate_grace=0, kill_grace=0)
+    process = LiveProcess()
+    registry.register(process, job=FakeJob())
+
+    registry.terminate(process)
+
+    assert events == ["job-terminate"]
+
+
+def test_windows_registry_cancel_after_cancel_terminates_a_late_registered_job(monkeypatch):
+    """#1744: a launch racing cancellation still dies by its job handle, not a pid."""
+
+    class LiveProcess:
+        pid = 4242
+
+        def poll(self):
+            return None
+
+    events = []
+
+    class FakeJob:
+        def terminate(self):
+            events.append("job-terminate")
+            return True
+
+    monkeypatch.setattr(proc.os, "name", "nt")
+    monkeypatch.setattr(proc.subprocess, "run", lambda *args, **kwargs: pytest.fail("taskkill must not run"))
+
+    registry = proc.ProcessRegistry(terminate_grace=0, kill_grace=0)
+    registry.cancel()
+    registry.register(LiveProcess(), job=FakeJob())
+
+    assert events == ["job-terminate"]
+
+
+def test_windows_registry_skips_exited_leader_without_job(monkeypatch, caplog):
+    """#1744: without an owned job, an exited leader is skipped and the skip is logged."""
+
+    class ExitedProcess:
+        pid = 4242
+
+        def poll(self):
+            return 0
+
+        def kill(self):
+            pytest.fail("an exited leader has no live process handle to kill")
+
+    monkeypatch.setattr(proc.os, "name", "nt")
+    monkeypatch.setattr(
+        proc.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("taskkill must never target an exited leader"),
+    )
+
+    registry = proc.ProcessRegistry(terminate_grace=0, kill_grace=0)
+    registry.register(ExitedProcess())
+
+    with caplog.at_level("WARNING"):
+        outcomes = registry.cancel()
+
+    assert [outcome.result for outcome in outcomes] == ["interrupted"]
+    assert any("4242" in record.getMessage() and "exited" in record.getMessage() for record in caplog.records), (
+        "the skipped taskkill must be logged"
+    )
+
+
+def test_windows_registry_keeps_taskkill_fallback_for_live_leader_without_job(monkeypatch):
+    """#1744: a live leader still has its pid, so the taskkill tree fallback stays."""
+
+    class LiveProcess:
+        pid = 4242
+
+        def __init__(self):
+            self.alive = True
+
+        def poll(self):
+            return None if self.alive else 0
+
+        def kill(self):
+            self.alive = False
+
+    process = LiveProcess()
+    calls = []
+
+    def fake_run(args, **kwargs):
+        calls.append(args)
+        process.alive = False
+        return subprocess.CompletedProcess(args, 0)
+
+    monkeypatch.setattr(proc.os, "name", "nt")
+    monkeypatch.setattr(proc.subprocess, "run", fake_run)
+
+    registry = proc.ProcessRegistry(terminate_grace=0, kill_grace=0)
+    registry.register(process)
+
+    registry.cancel()
+
+    assert calls == [["taskkill", "/PID", "4242", "/T", "/F"]]
+
+
+def test_windows_interrupted_poll_never_reaches_taskkill(monkeypatch):
+    """#1744 review: an interrupted poll leaves identity unproven, so no taskkill."""
+
+    class InterruptedProcess:
+        pid = 4242
+
+        def __init__(self):
+            self.killed = False
+
+        def poll(self):
+            raise KeyboardInterrupt
+
+        def kill(self):
+            self.killed = True
+
+    process = InterruptedProcess()
+    monkeypatch.setattr(proc.os, "name", "nt")
+    monkeypatch.setattr(
+        proc.subprocess,
+        "run",
+        lambda *args, **kwargs: pytest.fail("taskkill must never run when poll was interrupted"),
+    )
+
+    proc._terminate_processes((process,), terminate_grace=0, kill_grace=0)
+
+    assert process.killed is True
+
+
+class _FakeJobKernel32:
+    """Minimal kernel32 surface for OwnedWindowsJob handle ownership tests."""
+
+    def __init__(self):
+        self.calls = []
+
+    def AssignProcessToJobObject(self, handle, process_handle):
+        self.calls.append(("assign", handle, process_handle))
+        return 1
+
+    def TerminateJobObject(self, handle, exit_code):
+        self.calls.append(("terminate", handle, exit_code))
+        return 1
+
+    def CloseHandle(self, handle):
+        self.calls.append(("close", handle))
+
+
+def test_owned_windows_job_delegates_assign_and_terminate_before_close():
+    kernel = _FakeJobKernel32()
+    job = proc_windows_job.OwnedWindowsJob(kernel, 99)
+
+    assert job.assign(777) is True
+    assert job.terminate() is True
+
+    assert kernel.calls == [
+        ("assign", 99, 777),
+        ("terminate", 99, proc_windows_job.INCOMPLETE_GROUP_EXIT_CODE),
+    ]
+
+
+def test_owned_windows_job_after_close_is_a_noop():
+    kernel = _FakeJobKernel32()
+    job = proc_windows_job.OwnedWindowsJob(kernel, 99)
+
+    job.close()
+    job.close()
+
+    assert job.assign(777) is False
+    assert job.resume(4242) is False
+    assert job.terminate() is False
+    assert kernel.calls == [("close", 99)]
+
+
+def test_owned_windows_job_terminate_waits_out_an_in_flight_close():
+    """Closing already killed the tree, so a racing terminate must not touch the handle."""
+    close_entered = threading.Event()
+    release_close = threading.Event()
+
+    class SlowCloseKernel(_FakeJobKernel32):
+        def CloseHandle(self, handle):
+            super().CloseHandle(handle)
+            close_entered.set()
+            assert release_close.wait(timeout=5)
+
+    kernel = SlowCloseKernel()
+    job = proc_windows_job.OwnedWindowsJob(kernel, 99)
+    closer = threading.Thread(target=job.close)
+    closer.start()
+    assert close_entered.wait(timeout=5)
+
+    terminator = threading.Thread(target=job.terminate)
+    terminator.start()
+    terminator.join(timeout=0.2)
+    assert terminator.is_alive(), "terminate must wait for the in-flight close"
+
+    release_close.set()
+    closer.join(timeout=5)
+    terminator.join(timeout=5)
+
+    assert not terminator.is_alive()
+    assert kernel.calls == [("close", 99)]
+
+
+def test_windows_run_closes_job_when_popen_rejects_arguments(monkeypatch):
+    """#1744 review: a non-OSError launch failure must not leak the owned job."""
+
+    class FakeJob:
+        def __init__(self):
+            self.closed = False
+
+        def assign(self, process_handle):
+            return True
+
+        def resume(self, pid):
+            return True
+
+        def terminate(self):
+            return True
+
+        def close(self):
+            self.closed = True
+
+    job = FakeJob()
+    monkeypatch.setattr(proc.os, "name", "nt")
+    monkeypatch.setattr(proc, "_create_windows_child_job", lambda: job)
+    monkeypatch.setattr(
+        proc.subprocess,
+        "Popen",
+        lambda *args, **kwargs: (_ for _ in ()).throw(ValueError("invalid environment")),
+    )
+
+    with pytest.raises(ValueError, match="invalid environment"):
+        proc.run(["worker.exe"])
+
+    assert job.closed is True
+
+
+def test_windows_run_kills_suspended_child_when_binding_is_interrupted(monkeypatch):
+    """#1744 review: an interrupt during job binding must not strand a suspended child."""
+    events = []
+
+    class FakeJob:
+        def __init__(self):
+            self.closed = False
+
+        def assign(self, process_handle):
+            return True
+
+        def resume(self, pid):
+            return True
+
+        def terminate(self):
+            return True
+
+        def close(self):
+            self.closed = True
+
+    class StubProcess:
+        pid = 555
+        _handle = 424242
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            events.append("kill")
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            events.append(("wait", timeout))
+            return self.returncode
+
+    job = FakeJob()
+    stub = StubProcess()
+    monkeypatch.setattr(proc.os, "name", "nt")
+    monkeypatch.setattr(proc, "_create_windows_child_job", lambda: job)
+    monkeypatch.setattr(proc.subprocess, "Popen", lambda *args, **kwargs: stub)
+    monkeypatch.setattr(
+        proc,
+        "_bind_suspended_windows_child",
+        lambda *args, **kwargs: (_ for _ in ()).throw(KeyboardInterrupt()),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        proc.run(["worker.exe"])
+
+    assert events[0] == "kill"
+    assert job.closed is True
+
+
+def test_windows_run_registers_its_owned_job_with_the_registry(monkeypatch):
+    """#1744: run() hands the job handle to the registry instead of dropping it."""
+
+    observed = {}
+
+    class FakeJob:
+        def assign(self, process_handle):
+            return True
+
+        def resume(self, pid):
+            return True
+
+        def terminate(self):
+            return True
+
+        def close(self):
+            pass
+
+    class StubProcess:
+        pid = 555
+        returncode = 0
+        _handle = 424242
+        stdout = None
+        stderr = None
+        stdin = None
+
+        def poll(self):
+            return 0
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    class RecordingRegistry(proc.ProcessRegistry):
+        def register(self, process, *, seat=None, job=None):
+            observed["job"] = job
+            super().register(process, seat=seat, job=job)
+
+    job = FakeJob()
+    monkeypatch.setattr(proc.os, "name", "nt")
+    monkeypatch.setattr(proc.subprocess, "Popen", lambda *args, **kwargs: StubProcess())
+    monkeypatch.setattr(proc, "_create_windows_child_job", lambda: job)
+    monkeypatch.setattr(proc, "_terminate_windows_process_tree", lambda *args, **kwargs: None)
+
+    result = proc.run(["worker.exe"], process_registry=RecordingRegistry())
+
+    assert result.code == 0
+    assert observed["job"] is job
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows job objects")
+def test_windows_job_reaps_live_descendant_after_leader_exit(tmp_path, monkeypatch):
+    """#1744: a descendant that outlives its leader is reaped through the owned job only."""
+    heartbeat = tmp_path / "descendant-heartbeat.txt"
+    descendant = tmp_path / "descendant.py"
+    descendant.write_text(
+        "import time\n"
+        "from pathlib import Path\n"
+        f"path = Path({str(heartbeat)!r})\n"
+        "for _ in range(3000):\n"
+        "    with path.open('a', encoding='utf-8') as handle:\n"
+        "        handle.write('tick\\n')\n"
+        "        handle.flush()\n"
+        "    time.sleep(0.02)\n",
+        encoding="utf-8",
+    )
+    leader = tmp_path / "leader.py"
+    leader.write_text(
+        f"import subprocess, sys, time\nsubprocess.Popen([sys.executable, {str(descendant)!r}])\ntime.sleep(0.5)\n",
+        encoding="utf-8",
+    )
+
+    def forbid_taskkill(*args, **kwargs):
+        raise AssertionError(f"taskkill must not run: {args!r}")
+
+    monkeypatch.setattr(subprocess, "run", forbid_taskkill)
+
+    job = proc.create_owned_windows_job()
+    assert job is not None
+    creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200) | proc._WINDOWS_CREATE_SUSPENDED
+    process = subprocess.Popen(
+        [sys.executable, str(leader)],
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        creationflags=creationflags,
+    )
+    registry = proc.ProcessRegistry(terminate_grace=0.5, kill_grace=0.5)
+    try:
+        assert proc.bind_owned_windows_child(job, process, [sys.executable, str(leader)]) is None
+        registry.register(process, job=job)
+
+        deadline = time.monotonic() + 10
+        while not heartbeat.is_file() or heartbeat.stat().st_size == 0:
+            assert time.monotonic() < deadline, "the descendant never started"
+            time.sleep(0.05)
+
+        process.wait(timeout=10)
+        assert process.poll() is not None
+
+        before = heartbeat.stat().st_size
+        time.sleep(0.5)
+        assert heartbeat.stat().st_size > before, "the descendant did not outlive its leader"
+
+        registry.cancel()
+
+        deadline = time.monotonic() + 10
+        stable_since = time.monotonic()
+        last_size = heartbeat.stat().st_size
+        while time.monotonic() < deadline:
+            time.sleep(0.2)
+            size = heartbeat.stat().st_size
+            if size != last_size:
+                last_size = size
+                stable_since = time.monotonic()
+            elif time.monotonic() - stable_since > 1.0:
+                break
+        else:
+            pytest.fail("the descendant kept writing after job cancellation")
+    finally:
+        registry.unregister(process)
+        job.close()
 
 
 def test_registered_timeout_never_uses_unbounded_output_drain(monkeypatch, tmp_path):
@@ -1404,6 +1885,8 @@ def _fake_windows_kernel32(resume_results, *, open_thread_handle="granted"):
                 "openthread": open_thread,
                 "resumethread": resume_thread,
                 "closehandle": close_handle,
+                "assignprocesstojobobject": lambda handle, process_handle: 1,
+                "terminatejobobject": lambda handle, exit_code: 1,
             }
             fn = table.get(name.lower())
             if fn is not None:
@@ -1434,6 +1917,67 @@ def test_windows_resume_reports_false_when_openthread_fails():
     assert proc._resume_windows_main_thread(kernel32, 555) is False
     assert calls["resume"] == []
     assert calls["closed"] == [424242], "only the tool-help snapshot handle should be closed"
+
+
+def test_windows_bind_fails_and_kills_child_when_resume_returns_invalid_dword():
+    """#1744 review: the declared DWORD ResumeThread result keeps (DWORD)-1 a bind failure."""
+    kernel32, calls, thread_handle = _fake_windows_kernel32([0xFFFFFFFF])
+    job = proc_windows_job.OwnedWindowsJob(kernel32, 99)
+    killed = []
+
+    class StubProcess:
+        pid = 555
+        _handle = 424242
+        returncode = None
+
+        def poll(self):
+            return self.returncode
+
+        def kill(self):
+            killed.append(True)
+            self.returncode = -9
+
+        def wait(self, timeout=None):
+            return self.returncode
+
+    message = proc._bind_suspended_windows_child(job, StubProcess(), ["worker.exe"])
+
+    assert message is not None and "could not be resumed" in message
+    assert killed == [True]
+    assert calls["resume"] == [0xFFFFFFFF]
+    assert calls["closed"].count(thread_handle) == 1
+    assert 99 in calls["closed"]
+
+
+def test_windows_resume_fails_closed_when_the_snapshot_call_raises():
+    """#1744 review: a failed snapshot fails closed without closing an unbound handle."""
+    from types import SimpleNamespace
+
+    class _Func:
+        def __init__(self, fn):
+            self._fn = fn
+            self.restype = None
+            self.argtypes = None
+
+        def __call__(self, *args):
+            return self._fn(*args)
+
+    def snapshot_failure(*args):
+        raise OSError("snapshot failed")
+
+    def forbidden(*args):
+        raise AssertionError("no Win32 call is safe after a failed snapshot")
+
+    kernel32 = SimpleNamespace(
+        CreateToolhelp32Snapshot=_Func(snapshot_failure),
+        Thread32First=_Func(forbidden),
+        Thread32Next=_Func(forbidden),
+        OpenThread=_Func(forbidden),
+        ResumeThread=_Func(forbidden),
+        CloseHandle=_Func(forbidden),
+    )
+
+    assert proc._resume_windows_main_thread(kernel32, 555) is False
 
 
 def test_windows_bind_terminates_suspended_child_when_resume_fails(monkeypatch):

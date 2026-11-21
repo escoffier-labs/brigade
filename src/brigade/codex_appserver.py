@@ -118,6 +118,16 @@ class TurnResult:
     output_cap_bytes: int = 0
 
 
+def _close_job(job: proc_mod.OwnedJob | None) -> None:
+    """Release an owned job handle, tolerating a concurrent or repeated close."""
+    if job is None:
+        return
+    try:
+        job.close()
+    except Exception:
+        pass
+
+
 class AppServer:
     """One `codex app-server` child; thread-safe for concurrent CodexThread turns."""
 
@@ -133,6 +143,7 @@ class AppServer:
         self._process_registry = process_registry or proc_mod.ProcessRegistry()
         self._env = env
         self._proc: subprocess.Popen | None = None
+        self._owned_job: proc_mod.OwnedJob | None = None
         self._write_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._next_id = 0
@@ -157,15 +168,16 @@ class AppServer:
         self.close()
 
     def start(self) -> None:
+        # #1744: the app-server child launches through the same owned job path
+        # as proc.run, so cancellation kills its tree without a pid lookup.
+        windows_job = proc_mod.create_owned_windows_job() if os.name == "nt" else None
+        if os.name == "nt" and windows_job is None:
+            raise AppServerError(f"failed to spawn {self._argv[0]}: owned process-tree job object is unavailable")
         process_group_kwargs: dict[str, Any] = {}
         if os.name == "posix":
             process_group_kwargs["start_new_session"] = True
         elif os.name == "nt":
-            process_group_kwargs["creationflags"] = getattr(
-                subprocess,
-                "CREATE_NEW_PROCESS_GROUP",
-                0x00000200,
-            )
+            process_group_kwargs.update(proc_mod.suspended_process_group_kwargs())
         try:
             child_env = None
             if self._env is not None:
@@ -181,9 +193,30 @@ class AppServer:
                 env=child_env,
                 **process_group_kwargs,
             )
-            self._process_registry.register(cast("subprocess.Popen[bytes]", self._proc))
+            if windows_job is None:
+                self._process_registry.register(cast("subprocess.Popen[bytes]", self._proc))
+            else:
+                bind_error = proc_mod.bind_owned_windows_child(windows_job, self._proc, self._argv)
+                if bind_error is not None:
+                    # The binder killed the suspended child and closed the job,
+                    # so release it here instead of terminating an unregistered
+                    # child by pid while unwinding.
+                    self._proc = None
+                    raise AppServerError(bind_error)
+                self._owned_job = windows_job
+                proc_mod.register_owned_child(
+                    self._process_registry,
+                    cast("subprocess.Popen[bytes]", self._proc),
+                    windows_job,
+                )
         except OSError as exc:
+            _close_job(windows_job)
             raise AppServerError(f"failed to spawn {self._argv[0]}: {exc}") from exc
+        except BaseException:
+            if windows_job is not None and self._owned_job is None:
+                _close_job(windows_job)
+            self.close()
+            raise
         try:
             threading.Thread(target=self._read_loop, daemon=True).start()
             self.request(
@@ -199,11 +232,19 @@ class AppServer:
         proc = self._proc
         self._proc = None
         if proc is None:
+            self._close_owned_job()
             return
         try:
             self._process_registry.terminate(cast("subprocess.Popen[bytes]", proc))
         finally:
             self._process_registry.unregister(cast("subprocess.Popen[bytes]", proc))
+            self._close_owned_job()
+
+    def _close_owned_job(self) -> None:
+        """Release the owned job after its tree is reaped, tolerating double close."""
+        job = self._owned_job
+        self._owned_job = None
+        _close_job(job)
 
     def request(self, method: str, params: dict, timeout: float = _REQUEST_TIMEOUT) -> dict:
         with self._state_lock:

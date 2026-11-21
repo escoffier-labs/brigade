@@ -1,0 +1,1 @@
+- Windows cancellation now terminates registered children through their owned job objects instead of a recycled pid, and an exited leader is never passed to taskkill. An adopted dispatch child on Windows has no verifiable identity, so cancellation now refuses it with a retained claim instead of taskkilling a possibly recycled pid.
