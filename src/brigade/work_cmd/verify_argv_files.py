@@ -81,6 +81,11 @@ def reusable_receipt(
         or latest.get("status") != "completed"
         or latest.get("tree_fingerprint") != fingerprint
         or latest.get("planned_commands") != planned_display
+        or len(latest.get("commands", [])) != len(planned_display)
+        or any(
+            not isinstance(record, dict) or record.get("status") != "completed" or record.get("exit_code") != 0
+            for record in latest.get("commands", [])
+        )
     ):
         return False
     hashes = argv_file_hashes(target, commands)

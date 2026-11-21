@@ -3010,11 +3010,11 @@ def test_verify_receipt_clean_tree_empty_patch(tmp_target, monkeypatch, capsys):
     assert receipt["changes_patch_sha256"] == EMPTY_PATCH_SHA256
 
 
-def test_verify_receipt_schema_version_two(tmp_target, monkeypatch, capsys):
+def test_verify_receipt_schema_version_three(tmp_target, monkeypatch, capsys):
     _init_verify_target_with_head(tmp_target)
     assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch) == 0
     receipt = json.loads(capsys.readouterr().out)
-    assert receipt["schema_version"] == 2
+    assert receipt["schema_version"] == 3
 
 
 def test_verify_show_old_format_receipt_without_identity_fields(tmp_target, capsys):
@@ -3077,7 +3077,7 @@ def test_verify_reused_receipt_captures_identity_binding(tmp_target, monkeypatch
     assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch) == 0
     reused = json.loads(capsys.readouterr().out)
     assert reused.get("reused_from")
-    assert reused["schema_version"] == 2
+    assert reused["schema_version"] == 3
     assert reused["baseline_commit"]
     assert reused["tree_fingerprint"]
     assert reused["changes_patch_sha256"] == EMPTY_PATCH_SHA256
@@ -3101,7 +3101,7 @@ def test_verify_receipt_identity_patch_collection_failure_is_explicit(tmp_target
     monkeypatch.setattr(runguard, "collect_changes_patch", fail_patch_collection)
     assert _run_verify_with_graphtrail_disabled(tmp_target, monkeypatch, reuse=False) == 0
     receipt = json.loads(capsys.readouterr().out)
-    assert receipt["schema_version"] == 2
+    assert receipt["schema_version"] == 3
     assert receipt["baseline_commit"] is None
     assert receipt["tree_fingerprint"] is None
     assert receipt["changes_patch_sha256"] is None
