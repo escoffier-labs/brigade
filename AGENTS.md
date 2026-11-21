@@ -177,7 +177,7 @@ See AGENTS.md Definition of Done and CONTRIBUTING.md. Day-to-day:
 ```bash
 target="$(mktemp -d)"
 git init -q -b main "$target"
-python -m brigade init --target "$target" --depth workspace --harnesses claude,codex
+python -m brigade init --target "$target" --depth workspace --harnesses claude,codex --no-care
 python -m brigade doctor --target "$target"
 ```
 

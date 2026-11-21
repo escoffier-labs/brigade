@@ -247,7 +247,7 @@ To smoke-test an install end-to-end the same way CI does:
 ```bash
 target="$(mktemp -d)"
 git init -q -b main "$target"
-python -m brigade init --target "$target" --depth workspace --harnesses claude,codex,openclaw
+python -m brigade init --target "$target" --depth workspace --harnesses claude,codex,openclaw --no-care
 python -m brigade doctor --target "$target"
 ```
 
