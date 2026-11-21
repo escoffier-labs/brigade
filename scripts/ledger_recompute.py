@@ -11,9 +11,10 @@ Actions API, and must match byte for byte. It may touch only the ledger file and
 restored skill bundle.
 
 A push to main is checked again. The ledger at ``after`` is verified against the ledger
-at ``before`` with the same rules. A push that leaves the ledger alone passes, and so
-does the first push that introduces the ledger, because there is no earlier ledger to
-build on.
+at ``before`` with the same rules. A push that leaves the ledger alone passes. A push
+that introduces the first ledger is verified as a first ledger whenever the tree at
+``before`` already carries this script. Only the push that introduces the script itself
+passes unchecked, because nothing could have checked it yet.
 
 Environment: GITHUB_EVENT_NAME, GITHUB_EVENT_PATH, GITHUB_REPOSITORY, GITHUB_REF_NAME and
 GH_TOKEN (read access to Actions and pull requests).
@@ -35,6 +36,7 @@ from brigade import ci_attestation, outcome_ledger as ledger  # noqa: E402
 from brigade.outcome_ledger_actions import EvidenceError  # noqa: E402
 from brigade.outcome_ledger_git import GitError, Repo, is_sha  # noqa: E402
 
+SCRIPT_PATH = "scripts/ledger_recompute.py"
 QUEUE_REF = re.compile(r"^refs/heads/gh-readonly-queue/[^/]+/pr-(\d+)-[0-9a-f]{40}$")
 
 
@@ -141,8 +143,30 @@ def _check_push(args: argparse.Namespace) -> int:
         say(f"cannot read the event or the checkout: {type(exc).__name__}")
         return 1
     if before_raw is None:
-        say("push to main: no ledger before it, so this is the first ledger and nothing builds on it yet")
-        return 0
+        try:
+            script_before = repo.show(before, SCRIPT_PATH)
+        except GitError as exc:
+            say(f"cannot read the checkout: {type(exc).__name__}")
+            return 1
+        if script_before is None:
+            say("push to main: the tree before it has no recompute script, so nothing could check this push")
+            return 0
+        if after_raw is None:
+            say("the outcome ledger is untouched")
+            return 0
+        # The script was already on main, so a first ledger is checked like any other change.
+        return _run_verify(
+            repo,
+            ci_attestation.default_gh_api,
+            slug,
+            "push",
+            payload,
+            raw=after_raw,
+            main_raw=None,
+            main_sha=before,
+            head_sha=after,
+            landed=True,
+        )
     if after_raw is None:
         say(f"{ledger.LEDGER_PATH} was removed by this push")
         return 1

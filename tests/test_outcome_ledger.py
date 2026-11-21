@@ -16,7 +16,7 @@ from typing import Any
 import pytest
 
 from brigade import outcome as outcome_core, outcome_ledger as L, outcome_ledger_actions as A, shipped_history
-from brigade.outcome_ledger_git import GitError, Repo, bundle_fingerprint
+from brigade.outcome_ledger_git import Repo, bundle_fingerprint
 
 ROOT = Path(__file__).resolve().parents[1]
 SLUG = "example-org/example-repo"
@@ -65,6 +65,7 @@ class FakeGh:
             "head_sha": sha,
             "repository": {"id": REPO_ID},
             "head_repository": {"id": REPO_ID},
+            "status": "completed",
             "run_attempt": len(attempts),
             "_jobs": {},
         }
@@ -345,21 +346,54 @@ def test_a_failed_attempt_counts_as_hurt_even_when_a_later_attempt_passes():
     assert [job["attempt"] for job in found["jobs"]] == [1, 2]
 
 
-def test_an_attempt_finished_after_the_cutoff_is_ignored():
+def test_an_attempt_finished_after_the_cutoff_leaves_the_verdict_pending():
+    """A later attempt can still turn the verdict, so nothing is recorded until it is visible."""
     gh = FakeGh()
     gh.attest(SHA, [("success", "2026-11-23T00:10:00Z")], [("failure", "2026-11-25T00:10:00Z")])
-    found = trial(gh)
-    assert found is not None and found["outcome"] == "helped" and len(found["jobs"]) == 1
+    assert trial(gh) is None
     gh = FakeGh()
     gh.attest(SHA, [("success", "2026-11-25T00:10:00Z")])
     assert trial(gh) is None
 
 
-@pytest.mark.parametrize("conclusion", ["cancelled", "skipped", "neutral", "action_required"])
-def test_cancelled_and_skipped_jobs_count_for_nothing(conclusion):
+@pytest.mark.parametrize(
+    ("conclusion", "reason"),
+    [
+        ("failure", "failure"),
+        ("timed_out", "timed_out"),
+        ("cancelled", "cancelled"),
+        ("skipped", "skipped"),
+        ("neutral", "neutral"),
+        ("stale", "stale"),
+        ("action_required", "action_required"),
+        ("startup_failure", "startup_failure"),
+        ("a_conclusion_github_adds_later", "other"),
+    ],
+)
+def test_every_conclusion_but_success_is_hurt_with_its_own_reason(conclusion, reason):
     gh = FakeGh()
     gh.attest(SHA, [(conclusion, "2026-11-22T00:10:00Z")])
-    assert trial(gh) is None
+    found = trial(gh)
+    assert found is not None and (found["outcome"], found["reason"]) == ("hurt", reason)
+
+
+def test_only_success_is_helped_and_a_helped_row_has_the_same_keys_as_a_hurt_one():
+    gh = FakeGh()
+    gh.passed(SHA)
+    helped = trial(gh)
+    gh = FakeGh()
+    gh.failed(SHA)
+    hurt = trial(gh)
+    assert helped is not None and hurt is not None
+    assert helped["outcome"] == "helped" and helped["reason"] is None
+    assert set(helped) == set(hurt) == {"sha", "outcome", "reason", "jobs"}
+
+
+def test_a_cancelled_attempt_next_to_a_passing_one_still_hurts():
+    gh = FakeGh()
+    gh.attest(SHA, [("cancelled", "2026-11-22T00:10:00Z")], [("success", "2026-11-22T00:20:00Z")])
+    found = trial(gh)
+    assert found is not None and (found["outcome"], found["reason"]) == ("hurt", "cancelled")
 
 
 def test_a_timed_out_job_is_a_hurt_trial_like_a_failure():
@@ -372,10 +406,6 @@ def test_a_timed_out_job_is_a_hurt_trial_like_a_failure():
     gh.attest(SHA, [("timed_out", "2026-11-22T00:10:00Z")], [("success", "2026-11-22T00:20:00Z")])
     found = trial(gh)
     assert found is not None and found["outcome"] == "hurt"
-    gh = FakeGh()
-    gh.attest(SHA, [("cancelled", "2026-11-22T00:10:00Z")], [("success", "2026-11-22T00:20:00Z")])
-    found = trial(gh)
-    assert found is not None and found["outcome"] == "helped"
 
 
 def test_an_unfinished_job_is_not_a_trial():
@@ -759,19 +789,6 @@ def test_failing_to_read_evidence_fails_closed(world, promoted):
     assert errors and any("could not finish" in error for error in errors)
 
 
-def test_the_tracked_genesis_ledger_is_well_formed():
-    raw = (ROOT / L.LEDGER_PATH).read_bytes()
-    ledger = L.parse_ledger(raw)
-    assert L.canonical_bytes(ledger) == raw
-    assert ledger["prev_ledger_sha256"] == L.GENESIS_PREV
-    subject = ledger["subjects"]["skill:note"]
-    assert subject["manifest_id"] == "skill-note" and subject["trials"] == []
-    history = shipped_history.load(ROOT / L.SHIPPED_HISTORY_PATH)
-    released = {entry.sha256 for entry in history["skill:note"] if entry.tag}
-    for row in subject["approved"]:
-        assert row["basis"] == "release" and row["skill_md_sha256"] in released
-
-
 @pytest.mark.parametrize(
     "raw",
     [b"", b"[]", b'{"schema": "other"}', b'{"schema": "brigade.outcome_ledger.v1", "schema": "x"}'],
@@ -782,17 +799,5 @@ def test_parse_rejects_malformed_ledgers(raw):
 
 
 def test_module_sizes_stay_under_the_limit():
-    for name in ("outcome_ledger", "outcome_ledger_actions", "outcome_ledger_git"):
+    for name in ("outcome_ledger", "outcome_ledger_actions", "outcome_ledger_git", "outcome_ledger_trials"):
         assert len((ROOT / f"src/brigade/{name}.py").read_text().splitlines()) < 2000
-
-
-def test_the_genesis_approved_entry_matches_git_history_when_its_commit_is_available():
-    ledger = L.parse_ledger((ROOT / L.LEDGER_PATH).read_bytes())
-    row = ledger["subjects"]["skill:note"]["approved"][0]
-    repo = Repo(ROOT)
-    try:
-        files = repo.snapshot(row["commit"], SKILL_DIR)
-    except GitError:
-        pytest.skip("the genesis commit is not in this checkout (shallow clone)")
-    assert bundle_fingerprint(files) == row["fingerprint"]
-    assert shipped_history.skill_digest(files["SKILL.md"]) == row["skill_md_sha256"]

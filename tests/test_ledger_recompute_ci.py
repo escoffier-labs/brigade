@@ -99,6 +99,67 @@ def test_ledger_recompute_passes_while_trusted_main_has_no_recompute_logic(tmp_p
     assert "nothing to recompute against" in result.stdout
 
 
+def _bootstrap_step_result(tmp_path: Path, *, main_files: dict[str, str], proposal_files: dict[str, str]):
+    """Run the workflow step against a main without the script, and a proposal that adds ``proposal_files``."""
+    origin = tmp_path / "origin"
+    origin.mkdir()
+    git(origin, "init", "-q", "-b", "main")
+    for name, text in {"README.md": "x\n", **main_files}.items():
+        (origin / name).parent.mkdir(parents=True, exist_ok=True)
+        (origin / name).write_text(text)
+    git(origin, "add", ".")
+    git(origin, "commit", "-qm", "base")
+    work = tmp_path / "work"
+    git(tmp_path, "clone", "-q", str(origin), str(work))
+    git(work, "switch", "-qc", "change")
+    for name, text in proposal_files.items():
+        (work / name).parent.mkdir(parents=True, exist_ok=True)
+        (work / name).write_text(text)
+    git(work, "add", ".")
+    git(work, "commit", "-qm", "change")
+    step = _workflow_step_section(CI, "ledger-recompute", "Recompute the outcome ledger from trusted main")
+    env = {**os.environ, "RUNNER_TEMP": str(tmp_path), "GITHUB_WORKSPACE": str(work)}
+    return subprocess.run(
+        _workflow_bash_command(run_text(step), "-e"), cwd=work, env=env, capture_output=True, text=True
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="workflow shell steps run on Ubuntu")
+def test_the_bootstrap_pass_lets_the_change_that_introduces_the_script_through_when_it_carries_no_ledger(tmp_path):
+    result = _bootstrap_step_result(
+        tmp_path, main_files={}, proposal_files={"scripts/ledger_recompute.py": "# new\n", "docs/a.md": "x\n"}
+    )
+    assert result.returncode == 0, result.stderr
+    assert "nothing to recompute against" in result.stdout
+
+
+@pytest.mark.skipif(os.name == "nt", reason="workflow shell steps run on Ubuntu")
+def test_the_bootstrap_pass_never_waves_through_a_proposal_that_carries_a_ledger(tmp_path):
+    result = _bootstrap_step_result(
+        tmp_path,
+        main_files={},
+        proposal_files={"scripts/ledger_recompute.py": "# new\n", "outcome-ledger/skills.json": "{}\n"},
+    )
+    assert result.returncode != 0
+    assert "carries an outcome ledger" in result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="workflow shell steps run on Ubuntu")
+def test_a_ledger_alone_cannot_use_the_bootstrap_pass_after_the_script_was_removed_from_main(tmp_path):
+    result = _bootstrap_step_result(tmp_path, main_files={}, proposal_files={"outcome-ledger/skills.json": "{}\n"})
+    assert result.returncode != 0
+    assert "carries an outcome ledger" in result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="workflow shell steps run on Ubuntu")
+def test_a_ledger_on_trusted_main_without_the_script_is_a_removed_check(tmp_path):
+    result = _bootstrap_step_result(
+        tmp_path, main_files={"outcome-ledger/skills.json": "{}\n"}, proposal_files={"docs/a.md": "x\n"}
+    )
+    assert result.returncode != 0
+    assert "check was removed" in result.stderr
+
+
 def git(cwd: Path, *args: str) -> str:
     env = {**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_SYSTEM": os.devnull}
     done = subprocess.run(
@@ -347,19 +408,128 @@ def test_a_push_that_leaves_the_ledger_alone_passes(recompute_repo, tmp_path):
     assert result.returncode == 0 and "ledger is untouched" in result.stdout, result.stdout
 
 
+def first_ledger_push(repo: Path, *, with_script: bool) -> tuple[str, str]:
+    """before: a main with no ledger, and the recompute script when ``with_script``. after: ``{}`` as the first ledger."""
+    git(repo, "switch", "-q", "main")
+    git(repo, "rm", "-q", "outcome-ledger/skills.json")
+    if with_script:
+        (repo / "scripts").mkdir(exist_ok=True)
+        (repo / "scripts/ledger_recompute.py").write_text("# trusted\n")
+        git(repo, "add", ".")
+    git(repo, "commit", "-qm", "no ledger")
+    before = git(repo, "rev-parse", "HEAD")
+    (repo / "outcome-ledger").mkdir(exist_ok=True)
+    (repo / "outcome-ledger/skills.json").write_text("{}\n")
+    git(repo, "add", ".")
+    git(repo, "commit", "-qm", "first ledger")
+    return before, git(repo, "rev-parse", "HEAD")
+
+
 @SCRIPT_RUNS_ON_UBUNTU
-def test_a_push_that_introduces_the_first_ledger_passes_because_nothing_builds_on_it(recompute_repo, tmp_path):
-    git(recompute_repo, "switch", "-q", "main")
-    git(recompute_repo, "rm", "-q", "outcome-ledger/skills.json")
-    git(recompute_repo, "commit", "-qm", "no ledger")
-    before = git(recompute_repo, "rev-parse", "HEAD")
-    (recompute_repo / "outcome-ledger").mkdir(exist_ok=True)
-    (recompute_repo / "outcome-ledger/skills.json").write_text("{}\n")
-    git(recompute_repo, "add", ".")
-    git(recompute_repo, "commit", "-qm", "first ledger")
-    after = git(recompute_repo, "rev-parse", "HEAD")
+def test_the_push_that_introduces_the_script_passes_because_nothing_could_check_it(recompute_repo, tmp_path):
+    before, after = first_ledger_push(recompute_repo, with_script=False)
     result = run_recompute(recompute_repo, tmp_path, "push", payload=push_event(recompute_repo, before, after))
-    assert result.returncode == 0 and "first ledger" in result.stdout, result.stdout
+    assert result.returncode == 0 and "nothing could check" in result.stdout, result.stdout
+
+
+@SCRIPT_RUNS_ON_UBUNTU
+def test_a_first_ledger_pushed_after_the_script_is_on_main_is_not_waved_through(recompute_repo, tmp_path):
+    before, after = first_ledger_push(recompute_repo, with_script=True)
+    result = run_recompute(recompute_repo, tmp_path, "push", payload=push_event(recompute_repo, before, after))
+    assert result.returncode == 1, result.stdout
+    assert "nothing could check" not in result.stdout
+
+
+class RecomputeRun:
+    """The script's push check run in this process, with the Actions API and the clock replaced."""
+
+    def __init__(self, world, monkeypatch, tmp_path, capsys) -> None:
+        from tests.test_outcome_ledger import NOW, SLUG
+
+        self.world, self.capsys, self.monkeypatch, self.tmp_path = world, capsys, monkeypatch, tmp_path
+        self.module = load_script()
+        real_verify = self.module.ledger.verify_ledger
+        monkeypatch.setattr(
+            self.module.ledger, "verify_ledger", lambda ev, **kwargs: real_verify(ev, **{**kwargs, "now": NOW})
+        )
+        monkeypatch.setattr(
+            self.module.ci_attestation,
+            "default_gh_api",
+            lambda endpoint: [] if "/commits/" in endpoint else world.gh(endpoint),
+        )
+        monkeypatch.setenv("GITHUB_REPOSITORY", SLUG)
+
+    def push(self, before: str, after: str) -> tuple[int, str]:
+        import argparse
+
+        event = self.tmp_path / "push.json"
+        event.write_text(json.dumps({"before": before, "after": after}))
+        self.monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+        args = argparse.Namespace(repo=str(self.world.root))
+        code = self.module._check_push(args)
+        return code, self.capsys.readouterr().out
+
+
+@pytest.fixture()
+def recompute_run(tmp_path, monkeypatch, capsys):
+    from tests.test_outcome_ledger import World
+
+    world = World(tmp_path / "world")
+    return RecomputeRun(world, monkeypatch, tmp_path, capsys)
+
+
+def genesis_push(run: RecomputeRun, ledger_bytes: bytes | None = None) -> tuple[str, str]:
+    """main gets the recompute script, then a first ledger. Returns (before, after) for the second push."""
+    from tests.test_outcome_ledger import T
+
+    world = run.world
+    world.commit({"scripts/ledger_recompute.py": "# trusted\n"}, T % (21, "00:01:00Z"), branch="main")
+    before = world.git("rev-parse", "HEAD")
+    raw = ledger_bytes or world.build(
+        prev_raw=None, covers=world.c0, approved=(world.approved_row(world.c0),), cutoff=T % (21, "00:00:00Z")
+    )
+    after = world.commit({"outcome-ledger/skills.json": raw.decode()}, T % (21, "00:05:00Z"), branch="main")
+    return before, after
+
+
+def test_a_correct_first_ledger_is_accepted_once_the_script_is_on_main(recompute_run):
+    before, after = genesis_push(recompute_run)
+    code, out = recompute_run.push(before, after)
+    assert code == 0 and "matches the recomputed ledger" in out, out
+
+
+def test_an_empty_object_is_not_accepted_as_the_first_ledger_once_the_script_is_on_main(recompute_run):
+    before, after = genesis_push(recompute_run, b"{}\n")
+    code, out = recompute_run.push(before, after)
+    assert code == 1 and "schema must be" in out, out
+
+
+def test_a_hand_made_promoted_first_ledger_is_rejected_once_the_script_is_on_main(recompute_run):
+    from brigade import outcome_ledger as L
+    from tests.test_outcome_ledger import T
+
+    world = recompute_run.world
+    honest = world.build(
+        prev_raw=None, covers=world.c0, approved=(world.approved_row(world.c0),), cutoff=T % (21, "00:00:00Z")
+    )
+    forged = json.loads(honest)
+    subject = forged["subjects"]["skill:note"]
+    subject["status"], subject["band"] = "promoted", "promoted"
+    subject["decision"] = {**subject["decision"], "action": "install", "code": "attested"}
+    before, after = genesis_push(recompute_run, L.canonical_bytes(forged))
+    code, out = recompute_run.push(before, after)
+    assert code == 1 and "differs from the recomputed ledger" in out, out
+
+
+def test_a_push_without_a_ledger_on_either_side_passes_once_the_script_is_on_main(recompute_run):
+    from tests.test_outcome_ledger import T
+
+    world = recompute_run.world
+    world.commit({"scripts/ledger_recompute.py": "# trusted\n"}, T % (21, "00:01:00Z"), branch="main")
+    before = world.git("rev-parse", "HEAD")
+    after = world.commit({"README.md": "changed\n"}, T % (21, "00:05:00Z"), branch="main")
+    code, out = recompute_run.push(before, after)
+    assert code == 0 and "untouched" in out, out
 
 
 @SCRIPT_RUNS_ON_UBUNTU

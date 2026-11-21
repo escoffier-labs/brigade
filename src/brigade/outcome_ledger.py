@@ -14,6 +14,9 @@ functions read, and adds the two ledger rules they do not know about:
 - New skill text that was never approved cannot be promoted. It waits for owner approval.
 - A regression restores the last approved text. Restoring is a rollback, not a hold.
 
+A commit that needs an attest verdict and has none counts against the text, so deleting or
+cancelling a run never helps. See ``outcome_ledger_trials``.
+
 Trial evidence is append only. A ledger keeps the trials of the previous ledger for every
 commit it already covered, and reads the Actions API only for newer commits. Runs and jobs
 expire with Actions retention, so rebuilding old trials from the API would let a failure
@@ -34,21 +37,14 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import outcome as outcome_core, scorecard, shipped_history, verify_manifest
-from .outcome_ledger_actions import (
-    GhApi,
-    has_completed_verdict,
-    owner_review_ok,
-    parse_time,
-    push_tip_evidence,
-    verdict_pending,
-)
+from .outcome_ledger_actions import GhApi, has_completed_verdict, owner_review_ok, parse_time
 from .outcome_ledger_git import Repo, bundle_fingerprint, is_sha
+from .outcome_ledger_trials import MANIFESTS_DIR, TrialPlan, plan_trials
 
 SCHEMA = "brigade.outcome_ledger.v1"
 LEDGER_PATH = "outcome-ledger/skills.json"
 LEDGER_DIR = "outcome-ledger/"
 GENESIS_PREV = "0" * 64
-MANIFESTS_DIR = "verify/manifests"
 SHIPPED_HISTORY_PATH = "src/brigade/templates/shipped-file-history.json"
 # Visibility control, not an access wall: see outcome_ledger_actions.
 OWNER_LOGINS = ("solomonneas",)
@@ -331,6 +327,34 @@ def _seed_for(prev: Mapping[str, Any] | None, key: str, pin: str) -> tuple[list[
     return [dict(row) for row in rows or [] if isinstance(row, dict)], prev["covers"]["main_sha"]
 
 
+def _plan(
+    ev: Evidence,
+    definition: SubjectDef,
+    pin: str,
+    covers: str,
+    ref: dt.datetime,
+    seed_tip: str | None,
+) -> TrialPlan:
+    chain = ev.repo.first_parent(definition.since_commit, covers)
+    if seed_tip is not None:
+        if seed_tip in chain:
+            chain = chain[chain.index(seed_tip) + 1 :]
+        else:
+            chain = [sha for sha in chain if not ev.repo.is_ancestor(sha, seed_tip)]
+    directory = skill_dir(definition.subject_path)
+    return plan_trials(
+        ev.gh,
+        ev.slug,
+        ev.repo_id,
+        ev.repo,
+        manifest_id=definition.manifest_id,
+        pin=pin,
+        chain=chain,
+        ref=ref,
+        fingerprint_at=lambda sha: _snapshot_fingerprint(ev.repo, sha, directory),
+    )
+
+
 def collect_trials(
     ev: Evidence,
     definition: SubjectDef,
@@ -345,28 +369,12 @@ def collect_trials(
 
     ``seed`` holds the trials already recorded for commits up to ``seed_tip``. Only newer
     commits are asked about. A trial belongs to the tip of a push, because ``outcome-attest``
-    runs once per push and its job carries the head of the whole push range. A hurt verdict
-    on a tip that did not itself touch the manifest scope is still a trial for that tip.
+    runs once per push and its job carries the head of the whole push range. A verdict that is
+    still pending at ``cutoff`` records nothing here, and the completeness check rejects a
+    ledger that skipped it.
     """
-    directory = skill_dir(definition.subject_path)
-    trials = [dict(row) for row in seed]
-    chain = ev.repo.first_parent(definition.since_commit, covers)
-    if seed_tip is not None:
-        if seed_tip in chain:
-            chain = chain[chain.index(seed_tip) + 1 :]
-        else:
-            chain = [sha for sha in chain if not ev.repo.is_ancestor(sha, seed_tip)]
-    for sha in chain:
-        _is_tip, trial = push_tip_evidence(ev.gh, ev.slug, ev.repo_id, definition.manifest_id, sha, cutoff)
-        if trial is None:
-            continue
-        at_commit = ev.repo.show(sha, f"{MANIFESTS_DIR}/{definition.manifest_id}.json")
-        if at_commit is None or sha256_hex(at_commit) != pin:
-            continue
-        fingerprint = _snapshot_fingerprint(ev.repo, sha, directory)
-        if fingerprint is not None:
-            trials.append({"fingerprint": fingerprint, **trial})
-    return trials
+    plan = _plan(ev, definition, pin, covers, cutoff, seed_tip)
+    return [dict(row) for row in seed] + [dict(row) for row in plan.trials]
 
 
 def build_ledger(
@@ -669,21 +677,18 @@ def _completeness_errors(
     errors: list[str] = []
     for key, definition in definitions.items():
         body = expected["subjects"][key]
-        recorded = {row["sha"]: row["outcome"] for row in body["trials"]}
-        seed, seed_tip = _seed_for(prev, key, body["manifest_sha256"])
-        current = collect_trials(ev, definition, body["manifest_sha256"], covers, now, seed=seed, seed_tip=seed_tip)
-        for row in current:
-            if recorded.get(row["sha"]) != row["outcome"]:
+        recorded = {row["sha"]: (row["outcome"], row.get("reason")) for row in body["trials"]}
+        _seed, seed_tip = _seed_for(prev, key, body["manifest_sha256"])
+        plan = _plan(ev, definition, body["manifest_sha256"], covers, now, seed_tip)
+        for row in plan.trials:
+            if recorded.get(row["sha"]) != (row["outcome"], row["reason"]):
+                reason = f" ({row['reason']})" if row["reason"] else ""
                 errors.append(
-                    f"{key}: ledger is stale, commit {row['sha'][:12]} has a {row['outcome']} attest verdict "
+                    f"{key}: ledger is stale, commit {row['sha'][:12]} has a {row['outcome']}{reason} attest verdict "
                     "the ledger does not record"
                 )
-        chain = ev.repo.first_parent(definition.since_commit, covers)
-        if seed_tip is not None:
-            chain = [sha for sha in chain if not ev.repo.is_ancestor(sha, seed_tip)]
-        for sha in chain:
-            if verdict_pending(ev.gh, ev.slug, ev.repo_id, definition.manifest_id, sha):
-                errors.append(f"{key}: ledger is stale, commit {sha[:12]} has an attest verdict still running")
+        for note in plan.pending:
+            errors.append(f"{key}: ledger is stale, commit {note.sha[:12]} {note.why}")
     return errors
 
 

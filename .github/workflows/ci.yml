@@ -1321,10 +1321,15 @@ jobs:
           git fetch --no-tags --no-recurse-submodules origin '+refs/heads/main:refs/ci-trusted/main'
           trusted=$(git rev-parse --verify 'refs/ci-trusted/main^{commit}')
           if ! git cat-file -e "$trusted:scripts/ledger_recompute.py" 2>/dev/null; then
-            # The bootstrap pass is only for the change that introduces the logic. Once main
-            # carries a ledger, a missing script is a removed check, never a reason to pass.
+            # The bootstrap pass is only for the change that introduces the logic, and that
+            # change carries no ledger. A ledger on trusted main or in the proposal means the
+            # check was removed or the ledger is trying to land unchecked, so this fails.
             if git cat-file -e "$trusted:outcome-ledger/skills.json" 2>/dev/null; then
               echo "Trusted main has an outcome ledger but no scripts/ledger_recompute.py. The check was removed, so this fails." >&2
+              exit 1
+            fi
+            if [ -n "$(git ls-tree -r --name-only HEAD -- outcome-ledger/)" ]; then
+              echo "The proposal carries an outcome ledger while trusted main has no scripts/ledger_recompute.py. Nothing can check it, so this fails." >&2
               exit 1
             fi
             echo "Trusted main has no ledger recompute logic yet, so there is nothing to recompute against."
