@@ -240,11 +240,13 @@ def _print_skill_drift(report: dict) -> None:
     if drift is not None:
         counts = drift["counts"]
         print(
-            f"skill_drift: generated_at={drift['generated_at']} mode={drift['mode']} current={counts['current']} "
-            f"refreshed={counts['refreshed']} flagged={counts['flagged']}"
+            f"skill_drift: generated_at={drift['generated_at']} current={counts['current']} "
+            f"refreshable={counts['refreshable']} flagged={counts['flagged']}"
         )
         for row in drift["flagged"]:
             print(f"  flagged: {row['skill_id']} [{row['harness']}] {row['path']}: {row['reason']}")
+        for row in drift["refreshable"]:
+            print(f"  refreshable: {row['skill_id']} [{row['harness']}] {row['path']}: run `{row['command']}`")
 
 
 def _dispatch_ratchet(args) -> int:

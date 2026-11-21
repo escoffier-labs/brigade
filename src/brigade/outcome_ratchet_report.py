@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import stat
 import sys
 from collections import Counter
@@ -37,10 +38,13 @@ _BRIEF_MAX_IDS = 6
 _PENDING_MAX_ARTIFACTS = 20
 _PENDING_MAX_COMMANDS = 8
 _PROPOSAL_KEYS = ("filed", "existing", "flagged", "skipped")
+DRIFT_VERSION = 1
 DRIFT_MAX_ROWS = 20
 _DRIFT_FIELD_MAX = 240
-_DRIFT_COUNT_KEYS = ("current", "refreshed", "refreshable", "flagged", "skipped")
+_DRIFT_COUNT_KEYS = ("current", "refreshable", "flagged", "skipped")
 _DRIFT_ROW_KEYS = ("skill_id", "harness", "path", "reason")
+_DRIFT_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+_DRIVE_PREFIX = re.compile(r"[A-Za-z]:")
 
 
 def report_path(target: Path) -> Path:
@@ -176,32 +180,75 @@ def _count(value: object) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
 
 
+def is_workspace_relative_path(value: object) -> bool:
+    """True for a normalized workspace-relative POSIX path, the only form a drift row may show.
+
+    Rejects absolute and drive-prefixed paths, backslashes, control characters, empty, ``.`` and
+    ``..`` segments, so a hand-written report cannot make a surface print a home directory.
+    """
+    if not isinstance(value, str) or not value or len(value) > _DRIFT_FIELD_MAX:
+        return False
+    if value.startswith("/") or "\\" in value or _DRIVE_PREFIX.match(value):
+        return False
+    if any(ord(char) < 32 or ord(char) == 127 for char in value):
+        return False
+    return all(part not in {"", ".", ".."} for part in value.split("/"))
+
+
+def refresh_command(skill_id: str, harness: str) -> str:
+    """The operator command that refreshes one installed copy, run from the workspace root."""
+    return f"brigade skills install bundled:{skill_id} --workspace . --target {harness} --force"
+
+
+def _drift_rows(raw: object, *, refreshable: bool) -> tuple[list[dict[str, str]], int]:
+    """Bounded rows from a report block, and how many it held that were not kept.
+
+    A row is kept only when its path is a workspace-relative POSIX path. A refreshable row
+    also needs token-safe ids, and its command is rebuilt from them, never read from the file.
+    """
+    rows: list[dict[str, str]] = []
+    seen = 0
+    for row in raw if isinstance(raw, list) else []:
+        if not isinstance(row, Mapping):
+            continue
+        seen += 1
+        if len(rows) >= DRIFT_MAX_ROWS or not is_workspace_relative_path(row.get("path")):
+            continue
+        item = {key: str(row.get(key) or "")[:_DRIFT_FIELD_MAX] for key in _DRIFT_ROW_KEYS}
+        if refreshable:
+            if not (_DRIFT_TOKEN.fullmatch(item["skill_id"]) and _DRIFT_TOKEN.fullmatch(item["harness"])):
+                continue
+            item.pop("reason")
+            item["command"] = refresh_command(item["skill_id"], item["harness"])
+        rows.append(item)
+    return rows, seen - len(rows)
+
+
 def drift_payload(raw: object) -> dict[str, Any] | None:
     """Reduce a drift result, or a ``skill_drift`` block read from the report file, to bounded known fields.
 
     Returns None when ``raw`` is not a mapping with a ``counts`` mapping. Counts become
-    non-negative integers and the flagged list keeps at most ``DRIFT_MAX_ROWS`` rows of
-    four short strings each, so a tampered report file cannot grow or reshape the output.
+    non-negative integers. Each row list keeps at most ``DRIFT_MAX_ROWS`` rows of short strings,
+    and a row whose path is not a normalized workspace-relative POSIX path is dropped while the
+    counts stay. A tampered report file cannot grow, reshape or point the output at a home path.
     """
     if not isinstance(raw, Mapping) or not isinstance(raw.get("counts"), Mapping):
         return None
     counts_raw = raw["counts"]
-    rows: list[dict[str, str]] = []
-    flagged_raw = raw.get("flagged")
-    for row in flagged_raw if isinstance(flagged_raw, list) else []:
-        if isinstance(row, Mapping) and len(rows) < DRIFT_MAX_ROWS:
-            rows.append({key: str(row.get(key) or "")[:_DRIFT_FIELD_MAX] for key in _DRIFT_ROW_KEYS})
     counts = {key: _count(counts_raw.get(key)) for key in _DRIFT_COUNT_KEYS}
-    dropped = _count(raw.get("flagged_omitted"))
-    # Whatever the flagged count says that the list does not show was omitted.
-    dropped = max(dropped, counts["flagged"] - len(rows))
+    flagged, flagged_dropped = _drift_rows(raw.get("flagged"), refreshable=False)
+    refreshable, refreshable_dropped = _drift_rows(raw.get("refreshable"), refreshable=True)
+    # Whatever the counts say that the list does not show was omitted.
     return {
-        "version": 1,
+        "version": DRIFT_VERSION,
         "generated_at": str(raw.get("generated_at") or "")[:64] or None,
-        "mode": "refresh" if raw.get("mode") == "refresh" else "check",
         "counts": counts,
-        "flagged": rows,
-        "flagged_omitted": dropped,
+        "flagged": flagged,
+        "flagged_omitted": max(_count(raw.get("flagged_omitted")), flagged_dropped, counts["flagged"] - len(flagged)),
+        "refreshable": refreshable,
+        "refreshable_omitted": max(
+            _count(raw.get("refreshable_omitted")), refreshable_dropped, counts["refreshable"] - len(refreshable)
+        ),
     }
 
 
@@ -508,13 +555,15 @@ def _fit(report: dict[str, Any]) -> dict[str, Any]:
         if _fits(report):
             return report
     drift = drift_payload(report.get("skill_drift"))
-    if drift is not None and drift["flagged"]:
+    if drift is not None and (drift["flagged"] or drift["refreshable"]):
         report = {
             **report,
             "skill_drift": {
                 **drift,
                 "flagged": [],
                 "flagged_omitted": max(drift["flagged_omitted"], len(drift["flagged"])),
+                "refreshable": [],
+                "refreshable_omitted": max(drift["refreshable_omitted"], len(drift["refreshable"])),
             },
         }
     return report

@@ -931,37 +931,48 @@ def _brief_section_failed(payload: dict[str, Any], label: str) -> bool:
     )
 
 
+def _drift_brief_rows(raw: object, hidden: int) -> str:
+    """Up to ``_DRIFT_BRIEF_ROWS`` rows as ``id[harness] path``. A row without a safe relative path is dropped."""
+    rows = [
+        row
+        for row in (raw if isinstance(raw, list) else [])
+        if isinstance(row, dict) and outcome_ratchet_report.is_workspace_relative_path(row.get("path"))
+    ]
+    listed = ", ".join(
+        f"{brief_values.name(row.get('skill_id'))}[{brief_values.name(row.get('harness'))}] "
+        f"{brief_values.text(row.get('path'))}"
+        for row in rows[:_DRIFT_BRIEF_ROWS]
+    )
+    more = hidden - min(len(rows), _DRIFT_BRIEF_ROWS)
+    return listed + (f" +{more} more" if more > 0 else "")
+
+
 def _skill_drift_line(ratchet: object) -> str:
-    """Return the brief summary of the last scheduled installed-skill drift check, flagged copies named."""
+    """Return the brief summary of the last read-only installed-skill drift check, copies named."""
     report = ratchet if isinstance(ratchet, dict) else {}
     # The drift result is read even when the ratchet itself has not run yet.
     raw_drift = report.get("skill_drift")
     if not isinstance(raw_drift, dict):
         return (
-            "skill_drift: no report yet "
-            "(the weekly ratchet runbook runs `brigade skills fleet drift --refresh --report`)"
+            "skill_drift: no report yet (the weekly ratchet runbook runs `brigade skills fleet drift --report`, "
+            "which writes no skill copy)"
         )
     drift: dict[str, Any] = raw_drift
     raw_counts = drift.get("counts")
     counts: dict[str, Any] = raw_counts if isinstance(raw_counts, dict) else {}
     line = (
         f"skill_drift: generated_at={brief_values.name(drift.get('generated_at'))} "
-        f"mode={brief_values.name(drift.get('mode') or 'check')} "
         f"current={brief_values.name(counts.get('current', 0))} "
-        f"refreshed={brief_values.name(counts.get('refreshed', 0))} "
+        f"refreshable={brief_values.name(counts.get('refreshable', 0))} "
         f"flagged={brief_values.name(counts.get('flagged', 0))}"
     )
-    if counts.get("refreshable"):
-        line += f" refreshable={brief_values.name(counts['refreshable'])}"
-    rows = [row for row in drift.get("flagged") or [] if isinstance(row, dict)]
-    if rows:
-        listed = ", ".join(
-            f"{brief_values.name(row.get('skill_id'))}[{brief_values.name(row.get('harness'))}] "
-            f"{brief_values.text(row.get('path'))}"
-            for row in rows[:_DRIFT_BRIEF_ROWS]
-        )
-        hidden = int(counts.get("flagged") or 0) - min(len(rows), _DRIFT_BRIEF_ROWS)
-        line += f" ({listed}" + (f" +{hidden} more" if hidden > 0 else "") + ")"
+    groups = []
+    for key in ("flagged", "refreshable"):
+        listed = _drift_brief_rows(drift.get(key), int(counts.get(key) or 0))
+        if listed:
+            groups.append(f"{key}: {listed}")
+    if groups:
+        line += " (" + "; ".join(groups) + ")"
     return line
 
 

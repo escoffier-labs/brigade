@@ -1,6 +1,6 @@
 {
   "id": "weekly-outcome-ratchet",
-  "description": "Weekly outcome rank and reconcile (dry-run by default), then the installed skill drift check (refreshes copies identical to a past release, flags every other drifted copy). Run from the repo or workspace root: brigade runbook run --approved .brigade/memory-care/runbooks/weekly-outcome-ratchet.json",
+  "description": "Weekly outcome rank and reconcile (dry-run by default), then the read-only installed skill drift check (lists copies safe to refresh and flags every other drifted copy, writes no skill copy). Run from the repo or workspace root: brigade runbook run --approved .brigade/memory-care/runbooks/weekly-outcome-ratchet.json",
   "allowed_commands": [
     "brigade"
   ],
@@ -15,7 +15,7 @@
     },
     {
       "id": "skill-drift",
-      "run": "brigade skills fleet drift --target . --refresh --report"
+      "run": "brigade skills fleet drift --target . --report"
     }
   ]
 }

@@ -138,20 +138,15 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_skills_fleet_status.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_fleet_drift = skills_fleet_sub.add_parser(
         "drift",
-        help="Scheduled drift check: refresh copies identical to a past release, flag every other drifted copy.",
+        help="Scheduled read-only drift check: list copies safe to refresh and flag every other drifted copy.",
     )
     p_skills_fleet_drift.add_argument(
         "--target", "-t", type=Path, default=Path("."), help="Workspace skill fleet to check."
     )
     p_skills_fleet_drift.add_argument(
-        "--refresh",
-        action="store_true",
-        help="Replace copies byte-identical to a past release. Without it nothing is written.",
-    )
-    p_skills_fleet_drift.add_argument(
         "--report",
         action="store_true",
-        help="Store the result in the advisory ratchet report the brief and dashboard read.",
+        help="Store the result in the advisory ratchet report the brief and dashboard read. The only write.",
     )
     p_skills_fleet_drift.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_skills_uninstall = skills_sub.add_parser("uninstall", help="Remove an installed skill from one or all harnesses.")
@@ -300,7 +295,7 @@ def register(sub: argparse._SubParsersAction) -> None:
 def _dispatch_fleet_drift(args) -> int:
     from .. import outcome_ratchet_report, skill_drift
 
-    result = skill_drift.run(args.target, refresh=args.refresh)
+    result = skill_drift.run(args.target)
     if args.report:
         outcome_ratchet_report.merge_skill_drift(args.target, result)
     skill_drift.print_result(result, json_output=args.json)

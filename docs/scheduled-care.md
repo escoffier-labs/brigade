@@ -512,36 +512,39 @@ See [Outcome scoring](outcome-scoring.md#weekly-ratchet-report) for the fields.
 
 ### Installed skill drift check
 
-The same runbook ends with a third step, `skill-drift`, which runs `brigade skills fleet drift --target . --refresh --report`. It replaces the manual `brigade skills fleet status` run: nobody has to remember to look for stale installed copies. I put it in the weekly ratchet runbook and not in `daily-care-pass` because the ratchet already owns the report the brief and dashboard read, and a weekly cadence is enough for copies that only change on a Brigade upgrade. The step runs after `reconcile`, so its result is written into the report that `reconcile --report` just produced.
+The same runbook ends with a third step, `skill-drift`, which runs `brigade skills fleet drift --target . --report`. It replaces the manual `brigade skills fleet status` run: nobody has to remember to look for stale installed copies. I put it in the weekly ratchet runbook and not in `daily-care-pass` because the ratchet already owns the report the brief and dashboard read, and a weekly cadence is enough for copies that only change on a Brigade upgrade. The step runs after `reconcile`, so its result is written into the report that `reconcile --report` just produced.
+
+The step is read-only. It flags and lists copies and never writes one. It does not call `skills install`, `brigade init`, the skill placer, or anything that replaces, quarantines or deletes a file under a skill directory. The only file it writes is `ratchet-report.json`, and only with `--report`. Unattended refresh is deferred on purpose: a receipt under the workspace is a workspace-writable file, so it cannot prove who wrote it and cannot authorize replacing a skill directory. Refresh stays with `brigade init` and `brigade skills install`, run by an operator.
 
 The step reuses the existing drift rules and adds no comparator of its own. `skills fleet status` discovers every installed copy and judges the ones with an install receipt. A bundled skill that init wired without a receipt is judged by the shipped-release history that backs the pristine refresh (`templates/shipped-file-history.json`).
 
 | Installed copy | Result |
 | --- | --- |
 | Matches the bundled text | `current` |
-| Byte-identical to a text a past release shipped (newlines folded) | Refreshed automatically: `refreshed` |
-| A receipt-known bundled copy that is stale, when its receipt proves it was never edited and its `SKILL.md` is a recorded release text | Refreshed automatically: `refreshed` |
-| Locally edited, or differs from every past release, or stale from a source other than the Brigade bundle, or stale with a receipt that cannot prove it was never edited (an older receipt, or a nested `skill.json` it cannot vouch for) | `flagged`, left exactly as it is, never overwritten |
-| A link, a missing copy, a copy with no receipt for a skill Brigade does not bundle, or any copy outside the workspace | `skipped`, not compared |
+| Byte-identical to a text a past release shipped (newlines folded), with or without a receipt | `refreshable`, listed with the command to run |
+| A receipt-known bundled copy that is stale, when its receipt proves it was never edited and its `SKILL.md` is a recorded release text | `refreshable`, listed with the command to run |
+| Locally edited, differs from every past release, stale from a source other than the Brigade bundle, stale with a receipt that cannot prove it was never edited, or unknown or receiptless and not a recorded release | `flagged` |
+| A symlinked copy or `SKILL.md`, a `SKILL.md` with more than one hard link, a missing copy, or a copy that cannot be read as a plain file | `flagged` |
+| Any copy outside the workspace | `skipped`, not inspected |
 
-Hermes copies live under `$HERMES_HOME`, outside the workspace, so they count as outside the workspace. This step never refreshes them and never prints their absolute path. Every path in the report, the brief and the dashboard is relative to the workspace.
+Hermes copies live under `$HERMES_HOME`, outside the workspace, so they count as outside the workspace. This step never inspects them and never prints their absolute path. Every path in the report, the brief and the dashboard is a normalized workspace-relative POSIX path. A report row with an absolute, drive-prefixed, backslash or `.` and `..` path is dropped on read, so a hand-written report cannot make a surface print a home directory. The counts stay complete when a row is dropped.
 
 An edited copy is flagged now and nothing more. Filing a skills inbox proposal for it is a later slice of #2590, so no proposal is filed today.
 
-A refresh uses the same atomic, link-refusing publish as `brigade init`, or `brigade skills install --force` with its local-edit guard, and it re-reads the copy right before the write. An install counts as a refresh only when its result says it wrote the copy. A skipped target, such as a copy that turned into a link, is flagged instead. A copy whose `SKILL.md` vanished is skipped and is never re-created. Only harnesses that already hold a copy are touched, so an uninstalled harness never gets a new skill from this step. Run it by hand with `brigade skills fleet drift --target .` for a check that writes nothing, add `--refresh` to apply the refreshes and `--report` to store the result.
+A `refreshable` row carries the exact command to run from the workspace root, for example `brigade skills install bundled:brigade-work --workspace . --target claude --force`. That command is the existing refresh path, with its local-edit guard, and `brigade init` refreshes a wired copy the same way. Run the check by hand with `brigade skills fleet drift --target .`, and add `--report` to store the result.
 
-The result goes into the same `ratchet-report.json` under `skill_drift`, with the counts (`current`, `refreshed`, `flagged`) and each flagged skill with its harness, path and reason. Three places show it with no command:
+The result goes into the same `ratchet-report.json` under `skill_drift`, with the counts (`current`, `refreshable`, `flagged`, `skipped`) and the flagged and refreshable copies with their harness and path. Three places show it with no command:
 
-- `brigade work brief` prints a `skill_drift:` line next to `outcome_ratchet:`, for example `skill_drift: generated_at=... mode=refresh current=5 refreshed=2 flagged=1 (brigade-work[codex] .codex/skills/brigade-work)`. It lists up to five flagged copies and ends `+N more` for the rest.
-- The Center dashboard outcomes view adds the counts and a table of flagged copies under the ratchet report.
-- `brigade outcome ratchet --target .` prints the counts and each flagged copy.
+- `brigade work brief` prints a `skill_drift:` line next to `outcome_ratchet:`, for example `skill_drift: generated_at=... current=5 refreshable=1 flagged=1 (flagged: brigade-work[codex] .codex/skills/brigade-work; refreshable: brigade-work[claude] .claude/skills/brigade-work)`. It lists up to five copies per group and ends `+N more` for the rest.
+- The Center dashboard outcomes view adds the counts and tables of flagged and refreshable copies under the ratchet report.
+- `brigade outcome ratchet --target .` prints the counts, each flagged copy and each refreshable copy with its command.
 
 A later `reconcile --report` run keeps the last `skill_drift` block, and its own `generated_at` shows how old it is. With no ratchet report on disk yet, the step stores only the drift block, and the brief and the dashboard still say the ratchet report is absent while they show the drift result. A report file that cannot be read is never replaced, and the step warns instead. The report stays under its 64 KiB cap with the drift block counted, so a large report loses regression rows first and then the listed drift rows, and the counts stay complete.
 
 An existing install picks up the new step when `brigade care install` runs again. An untouched copy of an earlier shipped `weekly-outcome-ratchet.json` is replaced with the current text, and a customized runbook is kept and reported as `kept (drifted)`. For a customized runbook, add the step by hand:
 
 ```json
-{"id": "skill-drift", "run": "brigade skills fleet drift --target . --refresh --report"}
+{"id": "skill-drift", "run": "brigade skills fleet drift --target . --report"}
 ```
 
 ### How to check it ran
