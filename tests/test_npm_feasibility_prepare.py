@@ -321,6 +321,8 @@ def test_stable_payload_audit_binds_tag_inventory_and_only_release_manifest(tmp_
         "blank-versions-invalid-string",
         "blank-versions-invalid-semver",
         "malformed-integrity",
+        "reused-name-id",
+        "unaccepted-name",
     ],
 )
 def test_registry_publisher_reconciles_immutable_archives_before_launcher(tmp_path, state):
@@ -435,6 +437,9 @@ else:
             "npm_execpath": str(cli),
             "NODE_OPTIONS": "--require=" + str(SOURCE.parent / "fixtures/publisher-provenance-preload.cjs"),
             "GITHUB_SHA": "" if state == "missing-sha" else "b" * 40 if state == "sha-mismatch" else "a" * 40,
+            # A reused repository name carries another ID, and only the two Brigade names are accepted.
+            "GITHUB_REPOSITORY": "someone-else/brigade" if state == "unaccepted-name" else "escoffier-labs/brigade",
+            "GITHUB_REPOSITORY_ID": "999" if state == "reused-name-id" else "1238165856",
         },
         capture_output=True,
         text=True,
@@ -504,6 +509,9 @@ else:
         assert packages[0]["name"] in result.stderr
     if state in {"sha-mismatch", "missing-sha"}:
         assert not calls, "source SHA must fail before any registry read"
+    if state in {"reused-name-id", "unaccepted-name"}:
+        assert not calls, "the repository identity must fail before any registry read"
+        assert "repository" in result.stderr.lower()
 
 
 @pytest.mark.parametrize(

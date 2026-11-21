@@ -44,7 +44,7 @@ else:
 """.replace("VERSION", repr(VERSION)).replace("NAME", repr(NAME))
 
 
-def run(tmp_path, state):
+def run(tmp_path, state, *, repository="escoffier-labs/brigadestack", repository_id="1238165856"):
     data = b"compat tarball bytes"
     (tmp_path / "compat.tgz").write_bytes(data)
     (tmp_path / "integrity.json").write_text(
@@ -80,7 +80,8 @@ def run(tmp_path, state):
             "npm_execpath": str(cli),
             "NODE_OPTIONS": "--require=" + str(FEASIBILITY / "fixtures/compat-provenance-preload.cjs"),
             "GITHUB_SHA": "a" * 40,
-            "GITHUB_REPOSITORY": "example-org/example-repo",
+            "GITHUB_REPOSITORY": repository,
+            "GITHUB_REPOSITORY_ID": repository_id,
         },
         capture_output=True,
         text=True,
@@ -142,3 +143,26 @@ def test_latest_tag_must_reach_the_version(tmp_path):
     result, _, _ = run(tmp_path, "latest-never")
     assert result.returncode == 1
     assert "dist-tags.latest did not reach" in result.stderr
+
+
+@pytest.mark.parametrize("repository", ["escoffier-labs/brigade", "escoffier-labs/brigadestack"])
+def test_either_brigade_name_publishes_under_the_repository_id(tmp_path, repository):
+    result, publications, _ = run(tmp_path, "absent", repository=repository)
+    assert result.returncode == 0, result.stderr
+    assert len(publications) == 1
+
+
+@pytest.mark.parametrize(
+    ("repository", "repository_id", "message"),
+    [
+        # A new repository that reuses the old name after the rename carries another ID.
+        ("escoffier-labs/brigade", "999", "repository ID"),
+        ("escoffier-labs/brigadestack", "", "repository ID"),
+        ("someone-else/brigade", "1238165856", "accepted Brigade repository name"),
+    ],
+)
+def test_a_foreign_repository_never_reaches_the_registry(tmp_path, repository, repository_id, message):
+    result, publications, calls = run(tmp_path, "absent", repository=repository, repository_id=repository_id)
+    assert result.returncode == 1
+    assert message in result.stderr
+    assert calls == [] and publications == []

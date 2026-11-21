@@ -26,6 +26,8 @@ defaults:
 
 jobs:
   build:
+    # A name is only a label: a new repository that reuses the old name after the rename must not publish.
+    if: github.repository_id == '1238165856'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
@@ -187,6 +189,7 @@ jobs:
 
   publish:
     needs: [build, acceptance]
+    if: github.repository_id == '1238165856'
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     environment: npm
@@ -324,6 +327,7 @@ jobs:
   # existing npm trust entry, so renaming this file or the npm environment breaks it.
   publish-compat:
     needs: [build, registry-acceptance]
+    if: github.repository_id == '1238165856'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment: npm

@@ -10,7 +10,7 @@ require.cache[target].exports={...real,createVerifier:(cli)=>{
     const root=process.env.PUBLISH_FIXTURE;
     assert.equal(sha512,crypto.createHash('sha512').update(fs.readFileSync(path.join(root,'compat.tgz'))).digest('hex'));
     // Identity comes from the workflow environment, never from literals in the publisher.
-    assert.deepEqual(expected,{purl:purl('@escoffier-labs/brigade','0.31.0'),sourceCommit:process.env.GITHUB_SHA,repository:'https://github.com/'+process.env.GITHUB_REPOSITORY,workflow:'.github/workflows/npm-publish.yml',ref:'refs/heads/main',san:'https://github.com/'+process.env.GITHUB_REPOSITORY+'/.github/workflows/npm-publish.yml@refs/heads/main',issuer:'https://token.actions.githubusercontent.com',builder:'https://github.com/actions/runner/github-hosted'});
+    assert.deepEqual(expected,{purl:purl('@escoffier-labs/brigade','0.31.0'),sourceCommit:process.env.GITHUB_SHA,repository:'https://github.com/'+process.env.GITHUB_REPOSITORY,repositoryId:'1238165856',workflow:'.github/workflows/npm-publish.yml',ref:'refs/heads/main',san:'https://github.com/'+process.env.GITHUB_REPOSITORY+'/.github/workflows/npm-publish.yml@refs/heads/main',issuer:'https://token.actions.githubusercontent.com',builder:'https://github.com/actions/runner/github-hosted'});
     assert.equal(url,'https://registry.npmjs.org/-/npm/v1/attestations/@escoffier-labs/brigade@0.31.0');
     fs.appendFileSync(path.join(root,'calls.jsonl'),JSON.stringify(['verify'])+'\n');
     if(process.env.PUBLISH_STATE==='wrong-commit') throw new Error('certificate source commit mismatch');

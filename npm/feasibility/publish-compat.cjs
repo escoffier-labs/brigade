@@ -10,7 +10,7 @@ const path=require('node:path');
 const crypto=require('node:crypto');
 const assert=require('node:assert/strict');
 const {spawnSync}=require('node:child_process');
-const {resolveNpmCli,createVerifier}=require('./provenance.cjs');
+const {resolveNpmCli,createVerifier,publishingIdentity}=require('./provenance.cjs');
 const {readbackDelays}=require('./readback.cjs');
 function option(name) {
   const index=process.argv.indexOf(name);
@@ -23,8 +23,6 @@ const delaysIndex=process.argv.indexOf('--readback-delays-ms');
 const delays=delaysIndex<0?readbackDelays():JSON.parse(process.argv[delaysIndex+1]);
 assert.ok(Array.isArray(delays) && delays.length>0 && delays.every(ms=>Number.isInteger(ms) && ms>=0),'--readback-delays-ms must be a JSON array of non-negative integers');
 assert.match(version,/^\d+\.\d+\.\d+$/);
-assert.match(process.env.GITHUB_SHA || '',/^[a-f0-9]{40}$/,'GITHUB_SHA must identify the publishing commit');
-assert.match(process.env.GITHUB_REPOSITORY || '',/^[\w.-]+\/[\w.-]+$/,'GITHUB_REPOSITORY must name the publishing repository');
 assert.ok(fs.lstatSync(tarball).isFile() && !fs.lstatSync(tarball).isSymbolicLink(),'tarball must be a regular file');
 const bytes=fs.readFileSync(tarball);
 const sha512=crypto.createHash('sha512').update(bytes).digest();
@@ -55,13 +53,8 @@ function state() {
   return 'unknown';
 }
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
-const repository='https://github.com/'+process.env.GITHUB_REPOSITORY;
-const expected={
-  purl:verifier.purl(name,version),sourceCommit:process.env.GITHUB_SHA,repository,
-  workflow:'.github/workflows/npm-publish.yml',ref:'refs/heads/main',
-  san:`${repository}/.github/workflows/npm-publish.yml@refs/heads/main`,
-  issuer:'https://token.actions.githubusercontent.com',builder:'https://github.com/actions/runner/github-hosted',
-};
+// Same policy as publish.cjs: repository name from the workflow, repository ID bound, nothing literal.
+const expected=publishingIdentity(process.env,name,version,verifier);
 async function reconcile(field) {
   for(const delay of delays) {
     if(delay) await pause(delay);

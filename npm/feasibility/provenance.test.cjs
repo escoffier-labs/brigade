@@ -13,7 +13,7 @@ const verifier=createVerifier(resolveNpmCli(),cache);
 const url='https://registry.npmjs.org/-/npm/v1/attestations/sigstore@3.1.0';
 // Supply recorded public registry bytes at the same boundary as production.
 const verifyResponse=(body,digest,policy)=>verifier.verifyRegistry(url,digest,policy,async()=>({status:200,json:async()=>body}));
-const expected={purl:'pkg:npm/sigstore@3.1.0',sourceCommit:'06cd267cbdc2eeaa04294995622db9f6ad2fa7cf',repository:'https://github.com/sigstore/sigstore-js',workflow:'.github/workflows/release.yml',ref:'refs/heads/main',san:'https://github.com/sigstore/sigstore-js/.github/workflows/release.yml@refs/heads/main',issuer:'https://token.actions.githubusercontent.com',builder:'https://github.com/actions/runner/github-hosted'};
+const expected={repositoryId:'495574555',purl:'pkg:npm/sigstore@3.1.0',sourceCommit:'06cd267cbdc2eeaa04294995622db9f6ad2fa7cf',repository:'https://github.com/sigstore/sigstore-js',workflow:'.github/workflows/release.yml',ref:'refs/heads/main',san:'https://github.com/sigstore/sigstore-js/.github/workflows/release.yml@refs/heads/main',issuer:'https://token.actions.githubusercontent.com',builder:'https://github.com/actions/runner/github-hosted'};
 const sha512='669cd60051c816ac85139e9d5ea817fc3903459773fab45c8e8224fd1414e085f4c220afd65f12ed9ad70c770273eb9a7feea8ef0de1da5de0e86606e5328df5';
 const clone=()=>JSON.parse(JSON.stringify(response));
 function bundle(r) {return r.attestations.find(a=>a.predicateType==='https://slsa.dev/provenance/v1').bundle;}
@@ -34,9 +34,30 @@ for(const [name,change] of [
   ['source URI predicate',e=>{e.repository='https://github.com/example/other';}],
   ['builder predicate',e=>{e.builder='https://github.com/actions/runner/self-hosted';}],
   ['purl',e=>{e.purl='pkg:npm/other@3.1.0';}],
+  ['repository ID of a reused name',e=>{e.repositoryId='1238165856';}],
 ]) test('signed bundle rejects wrong '+name,async()=>{
   const e={...expected};change(e);
   await assert.rejects(verifyResponse(response,sha512,e));
+});
+test('a policy without a repository ID is refused before any certificate is trusted',async()=>{
+  for(const missing of [undefined,'','0','abc','12 34']) {
+    const e={...expected,repositoryId:missing};
+    await assert.rejects(verifyResponse(response,sha512,e),/repository ID is required/);
+  }
+});
+test('publishing identity binds the Brigade repository ID and an accepted name',()=>{
+  const {publishingIdentity,REPOSITORY_ID,ACCEPTED_REPOSITORIES}=require('./provenance.cjs');
+  assert.equal(REPOSITORY_ID,'1238165856');
+  const env={GITHUB_REPOSITORY:'escoffier-labs/brigade',GITHUB_REPOSITORY_ID:'1238165856',GITHUB_SHA:'a'.repeat(40)};
+  for(const name of ACCEPTED_REPOSITORIES) {
+    const identity=publishingIdentity({...env,GITHUB_REPOSITORY:name},'brigadestack','0.32.0',verifier);
+    assert.equal(identity.repositoryId,'1238165856');
+    assert.equal(identity.san,`https://github.com/${name}/.github/workflows/npm-publish.yml@refs/heads/main`);
+  }
+  // A reused name carries another ID, and an unknown name is never accepted.
+  assert.throws(()=>publishingIdentity({...env,GITHUB_REPOSITORY_ID:'999'},'brigadestack','0.32.0',verifier),/repository ID/);
+  assert.throws(()=>publishingIdentity({...env,GITHUB_REPOSITORY_ID:undefined},'brigadestack','0.32.0',verifier),/repository ID/);
+  assert.throws(()=>publishingIdentity({...env,GITHUB_REPOSITORY:'other/brigade'},'brigadestack','0.32.0',verifier),/accepted Brigade repository name/);
 });
 test('signed subject rejects a different local archive digest',async()=>{
   await assert.rejects(verifyResponse(response,'0'.repeat(128),expected),/subject/);

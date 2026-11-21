@@ -108,7 +108,8 @@ def test_guard_scan_would_catch_a_name_guard_in_any_form(line):
 
 @pytest.mark.parametrize(
     ("workflow", "count"),
-    [("brigadestack-npm-publish.yml", 2), ("download-metrics.yml", 1)],
+    # npm-publish.yml: the build job and both registry-writing jobs.
+    [("npm-publish.yml", 3), ("download-metrics.yml", 1)],
 )
 def test_publication_guards_compare_the_repository_id(workflow, count):
     text = (WORKFLOWS / workflow).read_text()
@@ -305,3 +306,39 @@ def test_bug_submission_still_reads_back_an_old_name_issue_url(monkeypatch):
     )
 
     assert bug_cmd._submit("gh", {"user": {"title": "t"}}, "body", None) == f"https://github.com/{OLD}/issues/9"
+
+
+# The JavaScript publishers verify registry provenance. They take the repository name from the workflow
+# environment and bind the immutable repository ID, which the signed certificate must carry too.
+FEASIBILITY = ROOT / "npm/feasibility"
+
+
+def test_npm_provenance_policy_uses_the_same_repository_id_as_the_python_gates():
+    text = (FEASIBILITY / "provenance.cjs").read_text()
+    assert f"const REPOSITORY_ID='{REPOSITORY_ID}';" in text
+    assert "const ACCEPTED_REPOSITORIES=['escoffier-labs/brigade','escoffier-labs/brigadestack'];" in text
+    # The certificate's source repository identifier OID is required, never optional.
+    assert "SOURCE_REPOSITORY_ID='1.3.6.1.4.1.57264.1.15'" in text
+    assert "certificateOIDs:{[SOURCE_DIGEST]:der,[SOURCE_REPOSITORY_ID]:idDer}" in text
+    assert "a repository ID is required" in text
+    verifier = _load("verify_component_manifest_provenance.py", "rename_verifier_npm")
+    assert verifier.REPOSITORY_ID == REPOSITORY_ID
+    assert tuple(
+        re.findall(r"'(escoffier-labs/[a-z]+)'", re.search(r"ACCEPTED_REPOSITORIES=\[(.*?)\]", text).group(1))
+    ) == (verifier.ACCEPTED_REPOSITORIES)
+
+
+@pytest.mark.parametrize("script", ["publish.cjs", "publish-compat.cjs"])
+def test_npm_publishers_derive_their_identity_from_the_environment_and_the_repository_id(script):
+    text = (FEASIBILITY / script).read_text()
+    assert "publishingIdentity(process.env," in text
+    assert not _SLUG.search(text), f"{script} names a repository"
+    assert "github.com/escoffier-labs" not in text
+    assert "1238165856" not in text, "reuse REPOSITORY_ID from provenance.cjs"
+
+
+def test_npm_registry_acceptance_requires_the_repository_id_in_provenance():
+    text = (FEASIBILITY / "acceptance.cjs").read_text()
+    assert "const {REPOSITORY_ID}=require('./provenance.cjs');" in text
+    assert "repositoryId:REPOSITORY_ID" in text
+    assert "1238165856" not in text

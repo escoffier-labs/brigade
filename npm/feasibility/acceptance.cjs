@@ -7,6 +7,7 @@ const assert=require('node:assert/strict');
 const zlib=require('node:zlib');
 const {spawn,spawnSync}=require('node:child_process');
 const {performance}=require('node:perf_hooks');
+const {REPOSITORY_ID}=require('./provenance.cjs');
 
 const args=process.argv.slice(2);
 function option(name) { const i=args.indexOf(name); if(i<0 || !args[i+1]) throw new Error(`Required: ${name}`); return path.resolve(args[i+1]); }
@@ -375,7 +376,7 @@ async function main() {
         try {
           if(await verifier.verifyRegistry(url,digest,{
             purl:verifier.purl(artifact.name,runtime.version),sourceCommit:metadata.sourceCommit,
-            repository:'https://github.com/escoffier-labs/brigade',workflow:'.github/workflows/npm-publish.yml',ref:'refs/heads/main',
+            repository:'https://github.com/escoffier-labs/brigade',repositoryId:REPOSITORY_ID,workflow:'.github/workflows/npm-publish.yml',ref:'refs/heads/main',
             san:'https://github.com/escoffier-labs/brigade/.github/workflows/npm-publish.yml@refs/heads/main',
             issuer:'https://token.actions.githubusercontent.com',builder:'https://github.com/actions/runner/github-hosted',
           })) {verified=true;break;}
