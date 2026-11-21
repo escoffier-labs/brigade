@@ -30,6 +30,7 @@ from typing import Any, BinaryIO, Iterator, Mapping, Sequence
 from urllib.parse import unquote
 
 from . import dirfd, proc
+from .proc_group import drain_supported, kill_group_members, wait_for_group
 from .memory_verify_seat import CLAUDE_BUILTIN_AGENTS, CLAUDE_SETTINGS, open_executable
 from .model_trial_paired import (
     INSTRUCTION,
@@ -62,6 +63,9 @@ ANCESTOR_INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md")
 VERSION_TIMEOUT = 30.0
 VERSION_MAX_BYTES = 4096
 EXIT_GRACE = 10.0
+# After the arm's leader exits, give every process it started this long to be gone before the work
+# directory is removed. The same bound the supervised scanner launches use.
+GROUP_DRAIN_SECONDS = proc.GROUP_DRAIN_SECONDS
 # Windows has no tree kill here, so give a grandchild's handles up to about 7 s to be released.
 WINDOWS_REMOVE_ATTEMPTS = 8
 WINDOWS_REMOVE_PAUSE = 0.25
@@ -551,13 +555,30 @@ def _exited(proc: subprocess.Popen[bytes]) -> bool:
         return True
 
 
+def _drain_arm_group(process: subprocess.Popen[bytes]) -> None:
+    """Stop every process the arm started, then wait bounded for its session to be gone.
+
+    Called only while the leader is still unreaped, so its pid remains the group and session id and
+    cannot be recycled. A descendant that moved to its own group with ``setpgid`` keeps that session
+    id, so a group kill alone misses it. Every live member is signalled directly and the session is
+    then awaited. Raises when a member survives SIGKILL: the arm directory must never be removed
+    while something it started can still write in it.
+    """
+    if not drain_supported():
+        return
+    kill_group_members(process.pid, signal.SIGKILL)
+    if wait_for_group(process, GROUP_DRAIN_SECONDS):
+        raise RuntimeError("an arm descendant outlived the process-group drain")
+
+
 def _reap(proc: subprocess.Popen[bytes], timeout: float) -> int:
     """Wait for the child to exit, end its process group, then reap it.
 
     On POSIX the exit is awaited without reaping. An unreaped zombie leader keeps its pid and group id
     reserved, so killing the group then cannot reach another process, and it ends an MCP server child
-    that outlived the CLI before the arm directory is removed. Only then is the leader reaped. Raises
-    ``TimeoutExpired`` when the child is still running after ``timeout``. Windows only waits.
+    that outlived the CLI before the arm directory is removed. The whole group is then drained before
+    the leader is reaped, so removal starts on a quiet tree. Raises ``TimeoutExpired`` when the child
+    is still running after ``timeout``. Windows only waits.
     """
     if os.name != "posix" or proc.returncode is not None:
         return proc.wait(timeout=timeout)
@@ -567,6 +588,7 @@ def _reap(proc: subprocess.Popen[bytes], timeout: float) -> int:
             raise subprocess.TimeoutExpired(proc.args, timeout)
         time.sleep(0.01)
     _kill(proc)
+    _drain_arm_group(proc)
     return proc.wait()
 
 
@@ -749,10 +771,13 @@ def _run_process(
             timed_out.set()
             with expiry:
                 _kill(child)
+                _drain_arm_group(child)
                 code = child.wait()
     finally:
         timer.cancel()
         kill()
+        if child.returncode is None:  # Not reaped by the normal path: a raise skipped ``_reap``.
+            _drain_arm_group(child)
         drainer.join(timeout=EXIT_GRACE)
         for pipe in (child.stdout, child.stderr):
             if pipe is not None:

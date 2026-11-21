@@ -43,8 +43,23 @@ def group_has_live_members(pgid: int) -> bool:
     try:
         entries = os.listdir("/proc")
     except OSError:
+        # The group's fate cannot be observed, so it is treated as alive.
         return True
+    return bool(_members(entries, pgid))
+
+
+def group_member_pids(pgid: int) -> list[int]:
+    """Live (non-zombie) pids in ``pgid``'s group or session, in ``/proc`` order."""
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return []
+    return _members(entries, pgid)
+
+
+def _members(entries: list[str], pgid: int) -> list[int]:
     target = str(pgid).encode()
+    members: list[int] = []
     for entry in entries:
         if not entry.isdigit():
             continue
@@ -55,8 +70,24 @@ def group_has_live_members(pgid: int) -> bool:
         # The process name may contain ")", so the split above uses the last one.
         fields = rest.split()
         if len(fields) > 3 and target in (fields[2], fields[3]) and fields[0] != b"Z":
-            return True
-    return False
+            members.append(int(entry))
+    return members
+
+
+def kill_group_members(pgid: int, sig: int) -> int:
+    """Signal every live member of ``pgid``'s group or session; return how many were signalled.
+
+    A descendant that called ``setpgid`` keeps the leader's session id, so a group kill alone misses
+    it. Signalling its pid directly is the bounded stop for such a survivor.
+    """
+    signalled = 0
+    for pid in group_member_pids(pgid):
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            continue
+        signalled += 1
+    return signalled
 
 
 def wait_for_group(process: subprocess.Popen[bytes], timeout: float) -> bool:

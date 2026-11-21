@@ -3,13 +3,15 @@
 from __future__ import annotations
 
 import os
+import signal
 import subprocess
 import sys
+import time
 
 import pytest
 
 from brigade import proc, proc_group
-from tests._child_publish import PUBLISH_SOURCE, wait_for_text
+from tests._child_publish import PUBLISH_SOURCE, process_is_running, wait_for_text
 
 pytestmark = pytest.mark.skipif(not proc_group.drain_supported(), reason="requires /proc and waitid(WNOWAIT)")
 
@@ -63,6 +65,42 @@ def test_descendant_that_leaves_the_group_still_counts_as_live(tmp_path):
         if escaped is not None:
             try:
                 os.kill(escaped, 9)
+            except OSError:
+                pass
+        _stop(process)
+
+
+def test_kill_group_members_stops_a_descendant_that_left_the_group(tmp_path):
+    """The bounded stop reaches a setpgid descendant that a group kill cannot."""
+    pid_path = tmp_path / "pid"
+    grandchild = PUBLISH_SOURCE + (
+        f"import os, time\nos.setpgid(0, 0)\npublish({str(pid_path)!r}, str(os.getpid()))\ntime.sleep(60)\n"
+    )
+    leader = (
+        "import subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        f"subprocess.Popen([sys.executable, '-c', {grandchild!r}])\n"
+        f"p = Path({str(pid_path)!r})\n"
+        "while not p.exists():\n"
+        "    time.sleep(0.02)\n"
+    )
+    process = subprocess.Popen([sys.executable, "-c", leader], start_new_session=True)
+    escaped = None
+    try:
+        published = wait_for_text(pid_path, timeout=10)
+        assert published is not None
+        escaped = int(published)
+        proc_group.observe_leader_exit(process)  # An unreaped zombie leader is not a live member.
+        assert proc_group.group_member_pids(process.pid) == [escaped]
+        assert proc_group.kill_group_members(process.pid, signal.SIGKILL) == 1
+        deadline = time.monotonic() + 5
+        while process_is_running(escaped) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not process_is_running(escaped)
+    finally:
+        if escaped is not None:
+            try:
+                os.kill(escaped, signal.SIGKILL)
             except OSError:
                 pass
         _stop(process)

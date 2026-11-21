@@ -1,0 +1,1 @@
+- Stop a live paired-trial cell only after every process it started is gone, so the cell removes its work directory on the first try and no leaked descendant keeps writing under it (#2830).

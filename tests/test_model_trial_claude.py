@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -15,6 +16,7 @@ import pytest
 
 from brigade import cli, model_trial_claude, model_trials, proc
 from brigade.memory_verify_seat import CLAUDE_SETTINGS
+from brigade.proc_group import drain_supported
 from brigade.model_trial_claude import (
     ADAPTER_ID,
     ENV_PASSTHROUGH,
@@ -34,6 +36,7 @@ from brigade.model_trial_claude import (
     module_hashes,
 )
 from brigade.model_trial_paired import TOOLS, _pairs, digest
+from tests._child_publish import PUBLISH_SOURCE, process_is_running
 from tests._posix import requires_process_groups
 from tests.paired_live_fake import GOOD_STEPS, make_fake, records, render_script
 
@@ -1090,6 +1093,53 @@ def test_remove_work_dir_retries_only_on_windows_and_only_a_few_times(tmp_path, 
     with pytest.raises(PermissionError):
         model_trial_claude.remove_work_dir(arm, windows=True)
     assert len(calls) == model_trial_claude.WINDOWS_REMOVE_ATTEMPTS
+
+
+@pytest.mark.skipif(not drain_supported(), reason="process-group draining needs /proc")
+def test_a_finished_cell_stops_a_descendant_that_left_its_process_group(tmp_path):
+    """The work dir is only removed after every process the arm started is gone.
+
+    The writer leaves the CLI's process group with setpgid but keeps the session, and keeps writing
+    under the arm's cwd. A group kill alone misses it, so the adapter drains and stops the session.
+    """
+    pid_log = tmp_path / "writers.pid"
+    ready_base = tmp_path / "writer.ready"
+    writer = PUBLISH_SOURCE + (
+        "import os, time\n"
+        "os.setpgid(0, 0)\n"
+        "target = os.path.join(os.getcwd(), 'escaped-writer.log')\n"
+        f"pid_log = {str(pid_log)!r}\n"
+        f"ready = {str(ready_base)!r} + '.' + str(os.getppid())\n"
+        "with open(target, 'w') as handle:\n"
+        "    for index in range(2000):\n"
+        "        handle.write('line %d\\n' % index)\n"
+        "        handle.flush()\n"
+        "        if index == 2:\n"
+        "            with open(pid_log, 'a') as pids:\n"
+        "                pids.write(str(os.getpid()) + '\\n')\n"
+        "        if index == 5:\n"
+        "            publish(ready, 'ready')\n"
+        "        time.sleep(0.05)\n"
+    )
+    exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS, escaped_writer={"code": writer, "ready": str(ready_base)})
+    before = set(Path(tempfile.gettempdir()).glob("brigade-paired-live-*"))
+    leaked = []
+    try:
+        result = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        assert all(a["failure"] is None for a in result["attempts"])
+        pids = [int(line) for line in pid_log.read_text().splitlines() if line.strip()]
+        assert pids, "the escaped writer never published its pid"
+        leaked = [pid for pid in pids if process_is_running(pid)]
+        assert leaked == [], f"arm descendants survived the cell: {leaked}"
+        assert not set(Path(tempfile.gettempdir()).glob("brigade-paired-live-*")) - before
+    finally:
+        for pid in leaked:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        for leftover in set(Path(tempfile.gettempdir()).glob("brigade-paired-live-*")) - before:
+            shutil.rmtree(leftover, ignore_errors=True)
 
 
 def test_kill_sends_nothing_for_a_reaped_child(monkeypatch):
