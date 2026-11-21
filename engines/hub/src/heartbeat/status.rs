@@ -63,27 +63,35 @@ const JOB_LATEST: &str = "SELECT node_id,run_id,repo,seat,harness,state,ts,seque
 /// How long a receipt keeps a run in the active view.
 const ACTIVE_SECONDS: f64 = 1800.0;
 /// A `received_at` that carries a UTC offset compares as local time against a
-/// UTC bound, and an offset may put that local clock up to a day from UTC, so
-/// the candidate scan starts a day before the window. Widening the scan can
-/// only add candidates; `list` applies the exact parsed-age test per row.
+/// UTC bound, so the candidate scan starts a day before the window.
 const ZONE_SLACK_SECONDS: f64 = 86400.0;
-/// The rows the active view ranks: one winning row per candidate partition,
-/// through `events_run_seq` (node, run, sequence) and the Grok Bot partial
-/// index. Terminal winners are returned too; `list` drops them, as the
-/// history ranking always has.
-fn active(tx: &dyn ReadTx, now: f64) -> rusqlite::Result<Vec<Vec<Value>>> {
-    let cutoff = text(&iso(now - ACTIVE_SECONDS - ZONE_SLACK_SECONDS));
-    let mut rows = Vec::new();
-    for candidate in tx.query(NODE_CANDIDATES, std::slice::from_ref(&cutoff))? {
-        rows.extend(tx.query(NODE_LATEST, &candidate)?);
-    }
-    for candidate in tx.query(JOB_CANDIDATES, std::slice::from_ref(&cutoff))? {
-        rows.extend(tx.query(JOB_LATEST, &candidate)?);
-    }
-    // SQLite's ORDER BY node_id, run_id uses BINARY collation, which is a byte
-    // comparison like `str`'s. A run whose history spans both partitions tie-
-    // breaks the way the ranking's partition key does: `grokbot` sorts before
-    // `node:`.
+/// The candidate scan's lower bound, as `YYYY-MM-DD`: the calendar date of
+/// `now - ACTIVE_SECONDS - ZONE_SLACK_SECONDS`.
+///
+/// A date-only string is a prefix of every `received_at` on that date, so it
+/// sorts at or below each of them whatever separator, fraction or offset
+/// follows. That makes it a lower bound for any spelling, which a full
+/// timestamp is not: `2025-12-31 23:40:00-05:00` is newer than
+/// `2025-12-31T04:30:00+00:00` as an instant but sorts below it at byte 10.
+///
+/// The date is safe in both directions. A row is kept only when its latest
+/// receipt is within `ACTIVE_SECONDS` of now, so its local wall clock is at
+/// least `now - ACTIVE_SECONDS - 23:59`, the widest offset the reader accepts
+/// (a zone can be at most 23 hours and 59 minutes from UTC either way). The
+/// bound subtracts a whole day instead, and subtracting more time can only
+/// move the calendar date back, so the bound's date is never later than a
+/// qualifying row's date, and never more than one day earlier. Widening the
+/// scan can only add candidates: `project` applies the exact parsed-age test
+/// per row.
+fn candidate_bound(now: f64) -> Value {
+    text(&iso(now - ACTIVE_SECONDS - ZONE_SLACK_SECONDS)[..10])
+}
+/// The reply's row order: `node_id`, `run_id`, then the ranking's partition
+/// key, where `grokbot` sorts before `node:`. SQLite's BINARY collation is a
+/// byte comparison, like `str`'s, so this is the order the history ranking
+/// produces, with one defined tie-break where its `ORDER BY node_id, run_id`
+/// leaves the two partitions of one run unspecified.
+fn order(rows: &mut [Vec<Value>]) {
     rows.sort_by(|a, b| {
         (string(&a[0]), string(&a[1]), string(&a[4]) != "grokbot").cmp(&(
             string(&b[0]),
@@ -91,6 +99,21 @@ fn active(tx: &dyn ReadTx, now: f64) -> rusqlite::Result<Vec<Vec<Value>>> {
             string(&b[4]) != "grokbot",
         ))
     });
+}
+/// The rows the active view ranks: one winning row per candidate partition,
+/// through `events_run_seq` (node, run, sequence) and the Grok Bot partial
+/// index. Terminal winners are returned too; `list` drops them, as the
+/// history ranking always has.
+fn active(tx: &dyn ReadTx, now: f64) -> rusqlite::Result<Vec<Vec<Value>>> {
+    let cutoff = candidate_bound(now);
+    let mut rows = Vec::new();
+    for candidate in tx.query(NODE_CANDIDATES, std::slice::from_ref(&cutoff))? {
+        rows.extend(tx.query(NODE_LATEST, &candidate)?);
+    }
+    for candidate in tx.query(JOB_CANDIDATES, std::slice::from_ref(&cutoff))? {
+        rows.extend(tx.query(JOB_LATEST, &candidate)?);
+    }
+    order(&mut rows);
     Ok(rows)
 }
 pub(super) fn list(tx: &dyn ReadTx, all: bool, now: f64, stale: i64) -> Result<Option<Reply>> {
@@ -208,6 +231,11 @@ fn project(
     for row in rows {
         let state = string(&row[5]);
         let received = timestamp(string(&row[12]));
+        // An unreadable receipt hands the whole reply to Python when this row
+        // is a candidate winner; a winner outside the candidate window is never
+        // fetched, so its run is skipped natively instead. Neither writer can
+        // store an empty `received_at`: Python's `_utc_now()` and the hub's
+        // `iso()` always emit a full timestamp.
         if received.is_none() {
             return Ok(None);
         }
@@ -349,7 +377,6 @@ fn timestamp(s: &str) -> Option<(f64, bool)> {
         zoned && p < b.len(),
     ))
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,7 +384,9 @@ mod tests {
     use rusqlite::trace::{TraceEvent, TraceEventCodes};
     use std::{path::PathBuf, sync::Mutex};
 
-    const NOW: f64 = 1767225600.0; // 2026-01-01T00:00:00Z
+    /// 2026-01-01T05:00:00Z. The hour matters: it puts the candidate bound's
+    /// date on 2025-12-31, the same date a space-separated receipt below uses.
+    const NOW: f64 = 1767243600.0;
 
     /// A hub-shaped database from the Python schema owner, as every other hub
     /// fixture builds one. `BRIGADE_HUB_PYTHON` must name an interpreter with
@@ -409,14 +438,20 @@ mod tests {
         iso(NOW + offset)
     }
 
-    /// The rows the pre-fix status read ranked, rendered through the same
-    /// projection the active view uses: the parity oracle.
+    /// The rows the pre-fix status read ranked, ordered with the reply's
+    /// tie-break and rendered through the same projection the active view
+    /// uses: the parity oracle.
     fn oracle(db: &rusqlite::Connection, all: bool, now: f64, stale: i64) -> Vec<String> {
+        let mut rows = rows(db, HISTORY);
+        // The history SQL orders only by node_id, run_id, so the two partitions
+        // of one run come back in SQLite's scan order rather than by a rule.
+        order(&mut rows);
         let tx = ReadConnection(db);
-        project(&tx, &rows(db, HISTORY), all, now, stale)
-            .ok()
-            .unwrap()
-            .unwrap()
+        project(&tx, &rows, all, now, stale).ok().unwrap().unwrap()
+    }
+
+    fn seat(value: &str) -> Option<&str> {
+        Some(value)
     }
 
     fn run_ids(reply: &Reply) -> Vec<String> {
@@ -429,18 +464,44 @@ mod tests {
             .collect()
     }
 
-    /// Ties on sequence, a run split across both partitions, blank and hyphen
-    /// seats, terminal and live runs, a UTC-offset receipt, and receipts older
-    /// than the candidate window. The active view must return exactly what the
-    /// history ranking returns after its own filters.
+    /// The bound must sort at or below every live receipt, whatever its
+    /// spelling. A space separator and a negative offset on the bound's date
+    /// are the case a full timestamp bound gets wrong: as an instant this
+    /// receipt is 20 minutes old, but byte 10 sorts it below `...T04:30...`.
+    #[test]
+    fn candidate_bound_covers_every_spelling_on_its_date() {
+        let bound_value = candidate_bound(NOW);
+        let bound = string(&bound_value);
+        assert_eq!(bound, "2025-12-31");
+        for spelling in [
+            "2025-12-31 23:40:00-05:00",
+            "2025-12-31T23:40:00-05:00",
+            "2025-12-31T23:59:59.999999-05:00",
+            "2025-12-31T23:40:00Z",
+            "2026-01-01T04:40:00+00:00",
+        ] {
+            assert!(spelling > bound, "{spelling} sorts below {bound}");
+        }
+        // The tightest qualifying instant, a receipt 30 minutes and 23:59 of
+        // zone behind now, still falls on the bound's date.
+        let tightest = iso(NOW - ACTIVE_SECONDS - 86340.0);
+        assert!(tightest.starts_with(bound), "{tightest} is before {bound}");
+    }
+
+    /// Ties on sequence and digest, a run split across both partitions, blank
+    /// and hyphen seats, sequences that disagree with receipts, every receipt
+    /// spelling, terminal and live runs, and runs older than the candidate
+    /// window. The active view must return exactly what the history ranking
+    /// returns after its own filters.
     #[test]
     fn active_view_matches_the_history_ranking() {
         let (db, _) = database("parity");
         let tx = ReadConnection(&db);
+        // seq ties, resolved by receipt then digest.
         event(
             &db,
             ("node-a", "run-tie", 1, "t0"),
-            Some("seat-a"),
+            seat("seat-a"),
             Some("codex"),
             "run.created",
             &at(-600.0),
@@ -449,7 +510,7 @@ mod tests {
         event(
             &db,
             ("node-a", "run-tie", 2, "aaa"),
-            Some("seat-a"),
+            seat("seat-a"),
             Some("codex"),
             "run.created",
             &at(-500.0),
@@ -458,7 +519,7 @@ mod tests {
         event(
             &db,
             ("node-a", "run-tie", 2, "bbb"),
-            Some("seat-b"),
+            seat("seat-b"),
             Some("codex"),
             "run.progress",
             &at(-400.0),
@@ -468,7 +529,7 @@ mod tests {
         event(
             &db,
             ("node-a", "run-shared", 0, "n0"),
-            Some("seat-history"),
+            seat("seat-history"),
             Some("codex"),
             "run.created",
             &at(-300.0),
@@ -486,7 +547,7 @@ mod tests {
         event(
             &db,
             ("node-a", "run-shared", 1, "g1"),
-            Some("grok-seat"),
+            seat("grok-seat"),
             Some("grokbot"),
             "grokbot.running",
             &at(-200.0),
@@ -514,17 +575,131 @@ mod tests {
         event(
             &db,
             ("node-d", "run-grok", 2, "x2"),
-            Some("seat-g"),
+            seat("seat-g"),
             Some("grokbot"),
             "grokbot.queued",
             &at(-200.0),
             &at(-200.0),
         );
+        // Highest sequence recent keeps the run; highest sequence old drops it.
+        event(
+            &db,
+            ("node-f", "run-seq-new-wins", 1, "n1"),
+            seat("seat-n"),
+            Some("codex"),
+            "run.created",
+            &at(-7200.0),
+            &at(-7200.0),
+        );
+        event(
+            &db,
+            ("node-f", "run-seq-new-wins", 2, "n2"),
+            seat("seat-n"),
+            Some("codex"),
+            "run.progress",
+            &at(-60.0),
+            &at(-60.0),
+        );
+        event(
+            &db,
+            ("node-f", "run-seq-old-wins", 1, "o1"),
+            seat("seat-o"),
+            Some("codex"),
+            "run.created",
+            &at(-60.0),
+            &at(-60.0),
+        );
+        event(
+            &db,
+            ("node-f", "run-seq-old-wins", 2, "o2"),
+            seat("seat-o"),
+            Some("codex"),
+            "run.progress",
+            &at(-7200.0),
+            &at(-7200.0),
+        );
+        // seq and receipt tie, so only the digest decides.
+        event(
+            &db,
+            ("node-g", "run-digest", 3, "aaa"),
+            seat("seat-d"),
+            Some("codex"),
+            "run.progress",
+            &at(-120.0),
+            &at(-120.0),
+        );
+        event(
+            &db,
+            ("node-g", "run-digest", 3, "zzz"),
+            seat("seat-d"),
+            Some("codex"),
+            "run.progress",
+            &at(-120.0),
+            &at(-120.0),
+        );
+        // Every receipt spelling, and two nodes on one non-Grok Bot run_id.
+        event(
+            &db,
+            ("node-g", "run-z", 1, "z1"),
+            seat("seat-z"),
+            Some("codex"),
+            "run.progress",
+            &at(-300.0),
+            &at(-300.0).replace("+00:00", "Z"),
+        );
+        event(
+            &db,
+            ("node-g", "run-frac", 1, "f1"),
+            seat("seat-f"),
+            Some("codex"),
+            "run.progress",
+            &at(-240.0),
+            &at(-240.5),
+        );
+        event(
+            &db,
+            ("node-g", "run-future-receipt", 1, "r1"),
+            seat("seat-r"),
+            Some("codex"),
+            "run.progress",
+            &at(-600.0),
+            &at(600.0),
+        );
+        // The reviewer's case: space separator, -05:00, 20 minutes old, and the
+        // candidate bound's own date. Its string sorts below a full timestamp
+        // bound at byte 10 but above the date bound.
+        event(
+            &db,
+            ("node-b", "run-space", 1, "s0"),
+            seat("seat-s"),
+            Some("codex"),
+            "run.progress",
+            &at(-1200.0),
+            "2025-12-31 23:40:00-05:00",
+        );
+        event(
+            &db,
+            ("node-h", "run-two-nodes", 1, "h1"),
+            seat("seat-h"),
+            Some("codex"),
+            "run.progress",
+            &at(-55.0),
+            &at(-55.0),
+        );
+        event(
+            &db,
+            ("node-i", "run-two-nodes", 1, "i1"),
+            seat("seat-i"),
+            Some("codex"),
+            "run.progress",
+            &at(-50.0),
+            &at(-50.0),
+        );
         // Live, terminal, expired, offset, t3 projections, and a null harness.
         event(
             &db,
             ("node-b", "run-live", 1, "l0"),
-            Some("seat-l"),
+            seat("seat-l"),
             Some("codex"),
             "run.created",
             &at(-100.0),
@@ -542,7 +717,7 @@ mod tests {
         event(
             &db,
             ("node-b", "run-terminal", 1, "c1"),
-            Some("seat-c"),
+            seat("seat-c"),
             Some("codex"),
             "run.completed",
             &at(-80.0),
@@ -550,8 +725,8 @@ mod tests {
         );
         event(
             &db,
-            ("node-b", "run-old", 1, "o1"),
-            Some("seat-o"),
+            ("node-b", "run-old", 1, "y1"),
+            seat("seat-y"),
             Some("codex"),
             "run.progress",
             &at(-20000.0),
@@ -560,8 +735,8 @@ mod tests {
         let local = at(-30.0 - 7200.0).replace("+00:00", "-02:00");
         event(
             &db,
-            ("node-b", "run-offset", 1, "z1"),
-            Some("seat-z"),
+            ("node-b", "run-offset", 1, "q1"),
+            seat("seat-q"),
             Some("codex"),
             "run.progress",
             &at(-30.0),
@@ -570,7 +745,7 @@ mod tests {
         event(
             &db,
             ("node-b", "run-stale-t3", 1, "s1"),
-            Some("seat-s"),
+            seat("seat-s"),
             Some("t3-fleet"),
             "run.progress",
             &at(-1000.0),
@@ -578,8 +753,8 @@ mod tests {
         );
         event(
             &db,
-            ("node-b", "run-future", 1, "f1"),
-            Some("seat-f"),
+            ("node-b", "run-future", 1, "u1"),
+            seat("seat-u"),
             Some("t3-fleet"),
             "run.progress",
             &at(1000.0),
@@ -587,7 +762,7 @@ mod tests {
         );
         event(
             &db,
-            ("node-b", "run-null", 1, "h1"),
+            ("node-b", "run-null", 1, "v1"),
             None,
             None,
             "run.progress",
@@ -597,7 +772,7 @@ mod tests {
         event(
             &db,
             ("node-b", "run-ancient", 1, "a1"),
-            Some("seat-a"),
+            seat("seat-a"),
             Some("codex"),
             "run.progress",
             &at(-200000.0),
@@ -606,7 +781,7 @@ mod tests {
         event(
             &db,
             ("node-e", "run-ancient-grok", 1, "ag"),
-            Some("seat-a"),
+            seat("seat-a"),
             Some("grokbot"),
             "grokbot.queued",
             &at(-200000.0),
@@ -624,6 +799,16 @@ mod tests {
         assert_eq!(reply.status, 200);
         let ids = run_ids(&reply);
         let has = |id: &str| ids.iter().any(|run| run == id);
+        // The space-separated receipt on the bound's date stays.
+        assert!(has("run-space"));
+        // A winner older than the window drops its run even when the run has a
+        // recent lower-sequence event, and the reverse keeps it.
+        assert!(has("run-seq-new-wins"));
+        assert!(!has("run-seq-old-wins"));
+        assert!(has("run-z"));
+        assert!(has("run-frac"));
+        assert!(has("run-future-receipt"));
+        assert_eq!(ids.iter().filter(|id| *id == "run-two-nodes").count(), 2);
         // The offset receipt is live, the ancient runs never become candidates,
         // and terminal, expired, and stale-projected runs stay out.
         assert!(has("run-offset"));
@@ -632,17 +817,12 @@ mod tests {
         assert!(!has("run-terminal"));
         assert!(!has("run-old"));
         assert!(!has("run-stale-t3"));
-        // The grokbot partition outranks the node partition for a shared run.
         assert_eq!(ids.iter().filter(|id| *id == "run-shared").count(), 2);
+
         let body: Json = serde_json::from_str(&reply.body).unwrap();
+        let runs = body["runs"].as_array().unwrap();
         let entry = |id: &str, field: &str| {
-            body["runs"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .find(|run| run["run_id"] == id)
-                .unwrap()[field]
-                .clone()
+            runs.iter().find(|run| run["run_id"] == id).unwrap()[field].clone()
         };
         assert_eq!(
             entry("run-future", "state"),
@@ -650,10 +830,17 @@ mod tests {
         );
         assert_eq!(entry("run-tie", "sequence"), Json::from(2));
         assert_eq!(entry("run-tie", "digest"), Json::String("bbb".into()));
+        assert_eq!(entry("run-digest", "digest"), Json::String("zzz".into()));
+        // The reply is ordered by node_id, run_id, then the ranking's partition
+        // key: a split run lists its Grok Bot row first.
+        let shared: Vec<&str> = runs
+            .iter()
+            .filter(|run| run["run_id"] == "run-shared")
+            .map(|run| run["harness"].as_str().unwrap())
+            .collect();
+        assert_eq!(shared, ["grokbot", "codex"]);
         // Blank and hyphen seats come from the run's own history, as Python does.
-        let seats: Vec<String> = body["runs"]
-            .as_array()
-            .unwrap()
+        let seats: Vec<String> = runs
             .iter()
             .filter_map(|run| run["seat"].as_str().map(str::to_owned))
             .collect();

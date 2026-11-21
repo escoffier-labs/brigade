@@ -4,6 +4,7 @@
 //! them.
 use super::*;
 use brigade_hub::read::{HubPools, ReaderPool};
+use brigade_hub::telemetry::{Stage, StageSlot};
 use sha2::Digest;
 use std::path::{Path, PathBuf};
 use std::sync::{
@@ -322,6 +323,52 @@ async fn native_route_auth_never_waits_on_a_held_handler_pool() {
         refused.is_empty(),
         "route auth read a held handler pool: {refused:#?}"
     );
+}
+
+/// A request the client abandons while a native route's own credential lookup
+/// is still queued keeps that stage. The line exists to name where a request
+/// stalled, and the route's auth read is what the route itself waits on.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn abandoned_route_lookup_keeps_the_credential_lookup_stage() {
+    let fixture = Fixture::new("stage-route-lookup");
+    let mut app = fixture.app();
+    // Skip the front's own lookup so the route's is the read that stalls.
+    app.lookup = None;
+    app.heartbeat = Some(heartbeat::Heartbeat {
+        readers: fixture.readers.clone(),
+        lookups: fixture.lookups.clone(),
+        writer: fixture.writer.clone(),
+        admin: fixture.admin(),
+        clock: None,
+        allow_admin_writes: true,
+        events: false,
+        stale_after: 900,
+    });
+    let depth = fixture.lookups.queue_probe();
+    let held = hold_every(&fixture.lookups, brigade_hub::read::hub_threads());
+    let stage = StageSlot::default();
+    let mut request = Request::builder()
+        .method("GET")
+        .uri("/status")
+        .header("authorization", bearer(NODE_TOKEN))
+        .body(Body::empty())
+        .unwrap();
+    request.extensions_mut().insert(stage.clone());
+    let task = tokio::spawn(handle(State(app.clone()), request));
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    while depth() == 0 {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the route lookup never queued"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    // The client gives up: no reply is ever written, so the stage is the whole
+    // record of where the request was.
+    task.abort();
+    let _ = task.await;
+    assert_eq!(stage.get(), Stage::CredentialLookup);
+    held.release().await;
 }
 
 /// The memory route's credential read is `Store::authenticate`. Its harness

@@ -10,6 +10,7 @@ use axum::{
 use brigade_hub::{
     claims,
     read::ReaderPool,
+    telemetry::{Stage, mark},
     wire::*,
     writer::{self, ReadTx, WriteTx},
 };
@@ -266,9 +267,7 @@ impl Heartbeat {
             deadline: Instant::now() + Duration::from_secs(10),
         };
         // The request line names a write waiting on the shared writer.
-        if let Some(stage) = parts.extensions.get::<brigade_hub::telemetry::StageSlot>() {
-            stage.set(brigade_hub::telemetry::Stage::Writer);
-        }
+        mark(parts, Stage::Writer);
         let result = match self.writer.submit(command, budget).await {
             Ok(rx) => rx.await.unwrap_or(Err(writer::Failure {
                 status: 503,

@@ -354,7 +354,9 @@ pub enum Stage {
     CredentialLookup,
     /// Authenticated, in admission or a native handler.
     Handler,
-    /// Submitted to a native writer and waiting for its commit.
+    /// Waiting on a native write's commit. The routes that share the hub
+    /// writer set it: registration, claims, messages and heartbeat. Memory
+    /// writes go through the memory store's own writer and stay `handler`.
     Writer,
     /// Waiting on, or streaming from, the Python upstream.
     Upstream,
@@ -395,6 +397,12 @@ impl StageSlot {
     }
     pub fn get(&self) -> Stage {
         Stage::from_code(self.0.load(Ordering::Relaxed))
+    }
+}
+/// Set the stage on the slot the front attached to this request, if any.
+pub fn mark(parts: &axum::http::request::Parts, stage: Stage) {
+    if let Some(slot) = parts.extensions.get::<StageSlot>() {
+        slot.set(stage);
     }
 }
 impl RequestLog {

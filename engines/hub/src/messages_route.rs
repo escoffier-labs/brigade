@@ -11,6 +11,7 @@ use brigade_hub::{
     claims::ReadConnection,
     messages::{self, Fail, Listed, Policy, Request, wake::Wake},
     read::ReaderPool,
+    telemetry::{Stage, mark},
     writer,
 };
 use serde_json::{Map, Value as Json};
@@ -206,6 +207,8 @@ impl Messages {
             "send" | "reply" | "ack" | "question_create" | "question_status"
             | "question_desktop" => {
                 let size = body.len();
+                // The request line names a write waiting on the shared writer.
+                mark(parts, Stage::Writer);
                 left(self.write(caller, key, raw, size).await, body)
             }
             _ => Ok(reply(

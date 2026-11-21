@@ -548,7 +548,13 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     };
     let started = std::time::Instant::now();
     let f = family(req.method().as_str(), req.uri().path(), "");
-    let stage = StageSlot::default();
+    // A request that carries its own slot keeps it, so a test can read the
+    // stage an abandoned request reached.
+    let stage = req
+        .extensions()
+        .get::<StageSlot>()
+        .cloned()
+        .unwrap_or_default();
     // Create the log first so a request cancelled during the lookup is still counted.
     let mut log = RequestLog {
         telemetry: app.telemetry.clone(),
@@ -633,6 +639,7 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
                 Ok(bytes) => bytes,
                 Err(_) => {
                     log.status = StatusCode::BAD_GATEWAY.as_u16();
+                    stage.set(Stage::Replying);
                     return upstream_error(StatusCode::BAD_GATEWAY, "upstream-body-error", false);
                 }
             };
@@ -943,6 +950,10 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
     };
     let headers_only = credential.lane != admission::Lane::Credential && length > 256 * 1024;
     let (parts, body) = req.into_parts();
+    // Each native route authenticates its own token again on the lookup pool.
+    // A request that stalls in one of those reads stalled in the lookup, not in
+    // the handler it was about to reach.
+    mark(Stage::CredentialLookup);
     let native = app
         .registration
         .as_ref()
@@ -1001,6 +1012,7 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
         },
         None => None,
     };
+    mark(Stage::Handler);
     let mut budget = if headers_only {
         vec![]
     } else {
