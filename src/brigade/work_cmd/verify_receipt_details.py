@@ -10,7 +10,26 @@ from typing import Any
 from .. import localio
 
 _OUTCOMES = ("passed", "failed", "errors", "skipped", "xfailed", "xpassed", "deselected")
-_PYTEST_COUNT = re.compile(r"(?P<count>\d+)\s+(?P<name>passed|failed|errors?|skipped|xfailed|xpassed|deselected)\b")
+# Outcomes that mean a test was actually run or reported, as opposed to left out.
+_RAN = ("passed", "failed", "errors", "skipped", "xfailed", "xpassed")
+_ITEM = r"\d+ (?:passed|failed|errors?|skipped|xfailed|xpassed|deselected|warnings?|rerun)"
+_DURATION = r" in \d+(?:\.\d+)?s(?: \([^)]*\))?"
+# pytest's terminal summary line, with or without the ``===`` rule that -q drops.
+_SUMMARY = re.compile(rf"^(?:=+ )?(?P<body>{_ITEM}(?:, {_ITEM})*){_DURATION}(?: =+)?$")
+_NO_TESTS = re.compile(rf"^(?:=+ )?no tests ran{_DURATION}(?: =+)?$")
+# The full gate prints one combined line for all shards (scripts/verify_parallel.py).
+_AGGREGATE = re.compile(rf"^Aggregate: (?P<body>{_ITEM}(?:, {_ITEM})*)$")
+_COUNT = re.compile(r"(?P<count>\d+) (?P<name>[a-z]+)")
+
+BUSY_EXIT_CODE = 75
+# The full-gate slot lock prints this line when every slot is taken. Exit 75
+# alone is not enough: any tool may use that code for an ordinary failure.
+BUSY_MARKER = "brigade-verify: busy"
+
+
+def is_busy_exit(exit_code: int | None, stderr: str) -> bool:
+    """Return whether a command reported a busy verification slot."""
+    return exit_code == BUSY_EXIT_CODE and any(line.strip() == BUSY_MARKER for line in stderr.splitlines())
 
 
 def inherited_test_env(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
@@ -24,26 +43,30 @@ def inherited_test_env(environ: Mapping[str, str] | None = None) -> dict[str, An
 
 
 def pytest_outcomes(stdout: str) -> dict[str, int | bool] | None:
-    """Parse pytest's terminal summary from complete captured stdout."""
-    lines = stdout.splitlines()
-    if any("no tests ran" in line.lower() for line in lines):
-        return {**dict.fromkeys(_OUTCOMES, 0), "no_tests_ran": True}
-    counts = dict.fromkeys(_OUTCOMES, 0)
-    found = False
-    for line in reversed(lines):
-        matches = list(_PYTEST_COUNT.finditer(line.lower()))
-        if not matches:
+    """Parse pytest's terminal summary line from complete captured stdout.
+
+    Only a line shaped like the summary counts, read from the end of the
+    output. Other tools print similar phrases ("Found 3 errors in 2 files"),
+    and a test may print "no tests ran" itself.
+    """
+    for raw in reversed(stdout.splitlines()):
+        line = raw.strip()
+        if _NO_TESTS.match(line):
+            return {**dict.fromkeys(_OUTCOMES, 0), "no_tests_ran": True}
+        match = _SUMMARY.match(line) or _AGGREGATE.match(line)
+        if match is None:
             continue
-        found = True
-        for match in matches:
-            name = match.group("name")
-            if name == "error":
-                name = "errors"
-            counts[name] = int(match.group("count"))
-        break
-    if not found:
-        return None
-    return {**counts, "no_tests_ran": sum(counts.values()) == 0}
+        counts = dict.fromkeys(_OUTCOMES, 0)
+        for item in _COUNT.finditer(match.group("body")):
+            name = "errors" if item.group("name") == "error" else item.group("name")
+            if name in counts:
+                counts[name] = int(item.group("count"))
+        return {**counts, "no_tests_ran": sum(counts[name] for name in _RAN) == 0}
+    return None
+
+
+def _passed(record: object) -> bool:
+    return isinstance(record, dict) and record.get("status") == "completed" and record.get("exit_code") == 0
 
 
 def terminal_status(receipt: Mapping[str, Any], rc: int) -> tuple[str, int]:
@@ -52,23 +75,37 @@ def terminal_status(receipt: Mapping[str, Any], rc: int) -> tuple[str, int]:
     planned = receipt.get("planned_commands")
     records = commands if isinstance(commands, list) else []
     expected = planned if isinstance(planned, list) else records
-    complete = len(records) == len(expected) and all(
-        isinstance(record, dict) and record.get("status") == "completed" and record.get("exit_code") == 0
-        for record in records
-    )
-    if complete and rc == 0 and not receipt.get("bookkeeping_error"):
+    # Every planned command has a record and nothing went wrong while recording.
+    recorded = bool(records) and len(records) == len(expected) and not receipt.get("bookkeeping_error")
+    nonpassing = [record for record in records if not _passed(record)]
+    if recorded and not nonpassing and rc == 0:
         return "completed", 0
-    nonpassing = [
-        record
-        for record in records
-        if not (isinstance(record, dict) and record.get("status") == "completed" and record.get("exit_code") == 0)
-    ]
-    if nonpassing and all(isinstance(record, dict) and record.get("status") == "busy" for record in nonpassing):
-        return "busy", 75
-    if rc == 0:
-        rc = 1
+    if recorded and all(isinstance(record, dict) and record.get("status") == "busy" for record in nonpassing):
+        return "busy", BUSY_EXIT_CODE
+    if rc in (0, BUSY_EXIT_CODE):
+        # A real failure must not exit 0, and must not read as a busy slot.
+        codes = [
+            record.get("exit_code")
+            for record in nonpassing
+            if isinstance(record, dict) and record.get("status") != "busy"
+        ]
+        rc = next((code for code in codes if type(code) is int and code not in (0, BUSY_EXIT_CODE)), 1)
     statuses = {record.get("status") for record in records if isinstance(record, dict)}
     return ("failed" if statuses & {"failed", "timed_out"} or receipt.get("bookkeeping_error") else "rejected"), rc
+
+
+def fail_closed_fallback(receipt: dict[str, Any], rc: int) -> int:
+    """Mark a receipt whose finalization raised as failed, whatever it said before."""
+    receipt["bookkeeping_error"] = True
+    if receipt.get("status") in ("running", "completed", "busy"):
+        receipt["status"] = "failed"
+    return 1 if rc in (0, BUSY_EXIT_CODE) else rc
+
+
+def stamp_reused_tree(receipt: dict[str, Any], identity: Mapping[str, Any]) -> None:
+    """Record the tree for a reused receipt. No command ran, so stability was not observed."""
+    receipt["tree_fingerprint_after"] = identity.get("tree_fingerprint")
+    receipt["tree_stable"] = None
 
 
 def stamp_tree_after(target: Any, receipt: dict[str, Any]) -> None:

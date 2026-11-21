@@ -219,7 +219,7 @@ merged, pushed or published. Integration is described in
 | `baseline_commit` | string \| null | yes | Verified Git baseline, or `null` when identity capture is unavailable |
 | `tree_fingerprint` | string \| null | yes | Verified Git tree hash, or `null` with the unavailable identity tuple |
 | `tree_fingerprint_after` | string \| null | no (additive) | Git tree fingerprint captured after a non-canceled run |
-| `tree_stable` | boolean \| null | no (additive) | Whether the before and after fingerprints match, or `null` when either is unavailable |
+| `tree_stable` | boolean \| null | no (additive) | Whether the before and after fingerprints match. `null` when either is unavailable, and on a reused receipt, where no command ran |
 | `tree_fingerprint_head` | string \| null | yes | Fingerprint-time HEAD commit used to reset excluded evidence paths, or `null` with the unavailable identity tuple |
 | `changes_patch_sha256` | string \| null | yes | SHA-256 of `changes.patch`, or `null` with the unavailable identity tuple |
 | `git` | object | no | `{head, branch, dirty_files}` |
@@ -244,7 +244,12 @@ The `busy` status, the three fields marked additive and the command-level
 before them are still valid version 2 receipts, so a reader must treat the
 fields as optional.
 
-Each command object uses `busy` when its process exits 75. Its `test_outcomes`
+Each command object uses `busy` when its process exits 75 and prints the line
+`brigade-verify: busy` on standard error, which the full-gate slot lock does. Exit
+75 without that line is an ordinary failure. A receipt is `busy` only when every
+planned command has a record and the only commands that did not pass are busy.
+
+A command object's `test_outcomes`
 field is either `null` or an object containing integer `passed`, `failed`,
 `errors`, `skipped`, `xfailed`, `xpassed`, and `deselected` counts plus the
 boolean `no_tests_ran`. The parser uses the full captured standard output.

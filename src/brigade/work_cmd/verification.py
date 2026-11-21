@@ -618,8 +618,8 @@ def _safe_finalize_verify_receipt(
                 verify_runtime._verify_interruption_record(),
             )
             rc = verify_runtime._VERIFY_CANCELED_RC
-        elif receipt.get("status") == "running":
-            receipt["status"] = "failed"
+        else:
+            rc = verify_receipt_details.fail_closed_fallback(receipt, rc)
         receipt.setdefault("completed_at", helpers._now().isoformat())
         # Keep a valid digest/signature if fallback did not change the payload.
         # A completed digest must never authenticate a newly canceled receipt.
@@ -1638,7 +1638,7 @@ def _run_verify_commands(
                     command_completed = helpers._now()
                     command_result.update(
                         {
-                            "status": "busy" if exit_code == 75 else status,
+                            "status": "busy" if verify_receipt_details.is_busy_exit(exit_code, stderr) else status,
                             "exit_code": exit_code,
                             "completed_at": command_completed.isoformat(),
                             "duration_seconds": (command_completed - command_started).total_seconds(),
@@ -1733,8 +1733,7 @@ def _write_reused_receipt(
         "inherited_test_env": verify_receipt_details.inherited_test_env(),
     }
     receipt.update(identity)
-    receipt["tree_fingerprint_after"] = identity.get("tree_fingerprint")
-    receipt["tree_stable"] = True if identity.get("tree_fingerprint") is not None else None
+    verify_receipt_details.stamp_reused_tree(receipt, identity)
     state = verify_runtime._ACTIVE_VERIFY_CANCEL.get()
     if state is not None:
         state.owned_receipt = (target, run_dir, receipt, started)

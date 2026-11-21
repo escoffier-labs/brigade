@@ -41,7 +41,7 @@ _RECEIPT_FIELDS = frozenset(
 )
 _SUPPORTED = frozenset({"manifest.json", *(name for name, _, _ in evidence_package.PACKAGE_FILES)})
 _MAX_SOURCE_INVENTORY_ENTRIES = 4096
-_RECEIPT_STATUSES = frozenset({"running", "completed", "failed", "rejected", "canceled"})
+_RECEIPT_STATUSES = frozenset({"running", "completed", "failed", "rejected", "canceled", "busy"})
 
 
 class DerivativeExportError(ValueError):
