@@ -7,6 +7,13 @@ its leader is observed to be alive, because Windows recycles pids as soon as a
 process exits. Without an owned job an exited leader is therefore skipped and
 the skip is logged.
 
+The one remaining pid lookup is a live leader with no owned job: the caller
+polls it and then runs ``taskkill``. That window is bounded, because ``Popen``
+holds the process handle and Windows cannot reuse a pid while a handle to that
+process object is open. Once ``poll`` observes the exit, Windows closes the
+handle, so the pid can be reused. That is why an exited leader is never passed
+to ``taskkill``.
+
 POSIX behavior stays in ``brigade.proc``. That module imports this one and this
 module imports nothing from it, so the two cannot form a cycle.
 """
@@ -269,13 +276,13 @@ def bind_suspended_windows_child(
 def leader_exited(process: subprocess.Popen[bytes]) -> bool:
     """Whether the registered leader is observed to have exited.
 
-    A poll that cannot be answered is treated as exited: an unproven pid must
-    never be handed to ``taskkill``.
+    An OSError is treated as exited, because an unproven pid must never be
+    handed to ``taskkill``. A KeyboardInterrupt is left to propagate: the
+    caller falls back to the owned process handle instead of taskkilling a pid
+    whose state was never observed.
     """
     try:
         return process.poll() is not None
-    except KeyboardInterrupt:
-        return False
     except OSError:
         return True
 
@@ -342,6 +349,34 @@ def terminate_windows_child(
         process.kill()
     except (OSError, KeyboardInterrupt):
         pass
+
+
+def abort_windows_launch(
+    process: subprocess.Popen[bytes] | None,
+    job: JobObject | None,
+) -> None:
+    """Release a launch that failed after its owned job existed.
+
+    Kills any spawned child through its own handle, then closes the job, which
+    also reaps descendants that joined it. Used when Popen or the job binding
+    raises something the launcher does not turn into a ``Result``.
+    """
+
+    if process is not None:
+        # Cleanup must not replace the exception that brought us here.
+        try:
+            process.kill()
+        except BaseException:
+            pass
+        try:
+            process.wait(timeout=_BIND_DRAIN_SECONDS)
+        except BaseException:
+            pass
+    if job is not None:
+        try:
+            job.close()
+        except BaseException:
+            pass
 
 
 def register_owned_child(

@@ -198,6 +198,10 @@ class AppServer:
             else:
                 bind_error = proc_mod.bind_owned_windows_child(windows_job, self._proc, self._argv)
                 if bind_error is not None:
+                    # The binder killed the suspended child and closed the job,
+                    # so release it here instead of terminating an unregistered
+                    # child by pid while unwinding.
+                    self._proc = None
                     raise AppServerError(bind_error)
                 self._owned_job = windows_job
                 proc_mod.register_owned_child(

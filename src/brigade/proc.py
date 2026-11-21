@@ -24,6 +24,7 @@ from .proc_windows_job import (
     INCOMPLETE_GROUP_EXIT_CODE as _INCOMPLETE_GROUP_EXIT_CODE,
     JobObject as OwnedJob,
     _resume_windows_main_thread as _resume_windows_main_thread,
+    abort_windows_launch as _abort_windows_launch,
     bind_suspended_windows_child as _bind_suspended_windows_child,
     create_windows_child_job as _create_windows_child_job,
     register_owned_child,
@@ -1583,6 +1584,7 @@ def _launch_and_collect(
     _check_launch_allowed(process_registry)
     windows_launch = os.name == "nt"
     child_job: OwnedJob | None = None
+    process: subprocess.Popen[bytes] | None = None
     started_threads: list[threading.Thread] = []
     if windows_launch:
         # The job must exist before the child can run a single instruction.
@@ -1608,19 +1610,22 @@ def _launch_and_collect(
             shell=False,
             **popen_kwargs,
         )
-    except OSError as exc:
-        code, message = _launch_failure(args, exc)
         if child_job is not None:
-            try:
-                child_job.close()
-            except Exception:
-                pass
+            bind_error = _bind_suspended_windows_child(child_job, process, args)
+            if bind_error is not None:
+                # The binder killed the suspended child and closed its job.
+                process = None
+                return Result(code=126, stdout="", stderr=bind_error)
+    except OSError as exc:
+        _abort_windows_launch(process, child_job)
+        code, message = _launch_failure(args, exc)
         return Result(code=code, stdout="", stderr=message)
-
-    if child_job is not None:
-        bind_error = _bind_suspended_windows_child(child_job, process, args)
-        if bind_error is not None:
-            return Result(code=126, stdout="", stderr=bind_error)
+    except BaseException:
+        # A ValueError, TypeError, or interrupt after the job existed must not
+        # leak the handle or leave a suspended child behind.
+        _abort_windows_launch(process, child_job)
+        raise
+    assert process is not None
     registration_attempted = False
     primary_exception = False
     try:
