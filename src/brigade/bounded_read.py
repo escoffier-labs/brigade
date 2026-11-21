@@ -54,8 +54,9 @@ def read_regular_file(
 
     `no_follow` refuses a symbolic link at the final path where the platform has
     `O_NOFOLLOW` (Linux and macOS), so a caller that counted a directory entry as
-    a regular file never reads through a link swapped in after that check. Windows
-    has no `O_NOFOLLOW` and cannot create such a race from a directory entry there.
+    a regular file never reads through a link swapped in after that check. Where
+    the flag is absent the regular-file check still applies, but it follows the
+    link first.
     """
     nonblock = getattr(os, "O_NONBLOCK", 0)
     if not nonblock:
