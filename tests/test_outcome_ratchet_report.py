@@ -95,6 +95,8 @@ def test_write_and_load_round_trip(tmp_path):
         "regression_hold_ids": ["skill-a"],
         "pending_physical_actions": 0,
         "stale_physical_actions": 0,
+        "local_trials": 0,
+        "attested_trials": 0,
     }
     assert loaded["decisions_by_action"] == {"hold": 1, "install": 1, "rollback": 1}
     assert [(row["artifact_id"], row["reason_code"]) for row in loaded["regressions"]] == [
@@ -222,6 +224,8 @@ def test_reconcile_report_flag_writes_report_and_keeps_dry_run(tmp_path, monkeyp
         "regression_hold_ids": ["skill-regressed"],
         "pending_physical_actions": 0,
         "stale_physical_actions": 0,
+        "local_trials": 0,
+        "attested_trials": 0,
     }
     assert report["regressions"][0]["artifact_id"] == "skill-regressed"
     assert not outcome_cmd._status_path(tmp_path).exists()
@@ -454,6 +458,8 @@ def test_cli_reconcile_report_flag_writes_advisory_file(tmp_path, capsys):
         "regression_hold_ids": [],
         "pending_physical_actions": 0,
         "stale_physical_actions": 0,
+        "local_trials": 0,
+        "attested_trials": 0,
     }
 
 

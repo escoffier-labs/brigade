@@ -1,0 +1,1 @@
+- Scoreable verify trials now carry a local attestation field, and `outcome rank` and the weekly outcome ratchet report label how many trials are local versus attested. Independently attested trials remain a future capability tracked in #2591.

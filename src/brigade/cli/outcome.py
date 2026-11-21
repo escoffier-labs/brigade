@@ -256,6 +256,7 @@ def _dispatch_ratchet(args) -> int:
         f"regression_holds={summary.get('regression_holds')} "
         f"regression_rollbacks={summary.get('regression_rollbacks')}"
     )
+    print(f"trials: local={summary.get('local_trials') or 0} attested={summary.get('attested_trials') or 0}")
     proposals = outcome_ratchet_report.proposal_counts(summary)
     if proposals is not None:
         print("outcome_proposals: " + " ".join(f"{key}={value}" for key, value in proposals.items()))

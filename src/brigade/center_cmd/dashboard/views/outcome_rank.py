@@ -51,6 +51,8 @@ def _ranking_panel(payload: dict) -> str:
         "Score",
         "Helped",
         "Hurt",
+        "Local trials",
+        "Attested trials",
         "Capability score",
         "Capability helped",
         "Capability hurt",
@@ -65,6 +67,8 @@ def _ranking_panel(payload: dict) -> str:
                 html.esc(_fmt(entry.get("score"))),
                 html.esc(_fmt(entry.get("helped"))),
                 html.esc(_fmt(entry.get("hurt"))),
+                html.esc(_fmt(entry.get("local_trials", 0))),
+                html.esc(_fmt(entry.get("attested_trials", 0))),
                 html.esc(_fmt(entry.get("capability_score"))),
                 html.esc(_fmt(entry.get("capability_helped"))),
                 html.esc(_fmt(entry.get("capability_hurt"))),
@@ -107,6 +111,7 @@ def _ratchet_panel(raw: object) -> str:
         + (f" (stale {summary['stale_physical_actions']})" if summary.get("stale_physical_actions") else "")
         + f"; inbox proposals {_proposal_label(summary)}; "
         f"ineligibility_rate {_fmt(ratchet.get('ineligibility_rate'))}"
+        f", trials local {summary.get('local_trials', 0)} attested {summary.get('attested_trials', 0)}"
     )
     leading = ratchet.get("leading_ineligibility_reason")
     if leading:
@@ -123,7 +128,7 @@ def _ratchet_panel(raw: object) -> str:
             title, f"<p>{html.esc(strip)}</p><p>{html.esc('No regression holds or rollbacks in the last run.')}</p>"
         )
 
-    headers = ["Artifact", "Prior state", "Reason code", "Reason", "Helped", "Hurt"]
+    headers = ["Artifact", "Prior state", "Reason code", "Reason", "Helped", "Hurt", "Local trials", "Attested trials"]
     body = [
         [
             html.esc(row.get("artifact_id", "-")),
@@ -132,6 +137,8 @@ def _ratchet_panel(raw: object) -> str:
             html.esc(row.get("reason", "-")),
             html.esc(_fmt(row.get("helped"))),
             html.esc(_fmt(row.get("hurt"))),
+            html.esc(_fmt(row.get("local_trials", 0))),
+            html.esc(_fmt(row.get("attested_trials", 0))),
         ]
         for row in rows
     ]

@@ -129,11 +129,16 @@ def build_report(
     """Build the versioned report payload from reconcile decision items."""
     counts: Counter[str] = Counter()
     regressions: list[dict[str, Any]] = []
+    local_trials_total = 0
+    attested_trials_total = 0
     for item in items:
         decision = item.decision
         action = str(decision.action)
         counts[action] += 1
         code = getattr(decision, "code", None)
+        local_trials, attested_trials = _decision_attestation_counts(item)
+        local_trials_total += local_trials
+        attested_trials_total += attested_trials
         if code not in _REGRESSION_CODES:
             continue
         helped, hurt = _decision_counts(item)
@@ -145,6 +150,8 @@ def build_report(
                 "reason": str(decision.reason),
                 "helped": helped,
                 "hurt": hurt,
+                "local_trials": local_trials,
+                "attested_trials": attested_trials,
             }
         )
     audit = _receipt_audit(target)
@@ -165,6 +172,8 @@ def build_report(
             "regression_hold_ids": hold_ids[:_BRIEF_MAX_IDS],
             "pending_physical_actions": sum(len(action.commands) for action in recent.values()),
             "stale_physical_actions": pending_set.stale_actions,
+            "local_trials": local_trials_total,
+            "attested_trials": attested_trials_total,
         },
         "pending_physical": _pending_rows(recent),
         "stale_physical": _pending_rows(stale),
@@ -291,6 +300,19 @@ def brief_payload(report: Mapping[str, Any]) -> dict[str, Any]:
         "ineligibility_rate": report.get("ineligibility_rate"),
         "leading_reason": report.get("leading_ineligibility_reason"),
     }
+
+
+def _decision_attestation_counts(item: Any) -> tuple[int, int]:
+    """Return (local, attested) trial counts from the scorecard that decided an item."""
+    card = getattr(item, "scorecard", None)
+    dimensions = getattr(card, "dimensions", None)
+    effectiveness = dimensions.get("effectiveness") if isinstance(dimensions, dict) else None
+    if not isinstance(effectiveness, dict):
+        return 0, 0
+    return (
+        int(effectiveness.get("local_trials", 0) or 0),
+        int(effectiveness.get("attested_trials", 0) or 0),
+    )
 
 
 def _decision_counts(item: Any) -> tuple[int, int]:
