@@ -233,7 +233,8 @@ merged, pushed or published. Integration is described in
 | `subject_binding` | object | no | Verifier-authored scoreable subject metadata (manifest runs only) |
 | `failure_class` | string | no | Receipt-level #474-style failure class when status is not completed |
 | `failure_kind` | string | no | Receipt-level failure kind paired with `failure_class` |
-| `inherited_test_env` | object | no (additive) | Values of inherited `PYTEST_ADDOPTS` and `PYTEST_PLUGINS` when set, plus `pythonpath_set` without exposing `PYTHONPATH` |
+| `inherited_test_env` | object | no (additive) | Values of inherited `PYTEST_ADDOPTS` and `PYTEST_PLUGINS` when set, each cut at 2048 characters, plus `pythonpath_set` without exposing `PYTHONPATH`. The values are stored as given, so they can contain local paths. A reused receipt copies this field from the run it reuses |
+| `bookkeeping_error` | boolean | no (additive) | Present and `true` when writing logs or the receipt raised. Such a receipt is never `completed`, and its `failure_kind` is `receipt_incomplete` |
 | `verification_contract` | object | no | Declared `brigade.verification_contract.v1` when the verify manifest carried one (#500) |
 | `budget_use` | object | no | Observed latency/token use against the declared verification budget (#500). Hard wall-clock / worker-dispatch enforcement is #593 (`run_budget.*` lifecycle events). |
 | `verification` | object | no | Verification outcome stamped separately from model completion (#500) |

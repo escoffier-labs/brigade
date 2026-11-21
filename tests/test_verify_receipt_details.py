@@ -257,3 +257,22 @@ def test_reuse_refuses_missing_empty_or_busy_command_records(tmp_path, monkeypat
 def test_other_readers_know_the_busy_status():
     assert "busy" in evidence_derivative._RECEIPT_STATUSES
     assert control_crosswalk_cosign is not None
+
+
+def test_a_receipt_without_a_planned_list_is_never_completed():
+    receipt = {"commands": [{"status": "completed", "exit_code": 0}]}
+    assert verify_receipt_details.terminal_status(receipt, 0) == ("rejected", 1)
+
+
+def test_inherited_test_env_values_are_bounded():
+    env = verify_receipt_details.inherited_test_env({"PYTEST_ADDOPTS": "x" * 5000})
+    assert len(env["PYTEST_ADDOPTS"]) == 2048
+
+
+def test_a_busy_retry_does_not_clear_an_older_uncaptured_failure(tmp_path, monkeypatch):
+    failed = {"run_id": "one", "status": "failed", "planned_commands": ["gate"]}
+    busy = {"run_id": "two", "status": "busy", "planned_commands": ["gate"]}
+    monkeypatch.setattr(verification, "_verify_receipts", lambda target: [busy, failed])
+    monkeypatch.setattr(verification, "_verify_receipt_has_outcome_capture", lambda target, receipt: False)
+    identity = verification._receipt_planned_commands_identity(failed)
+    assert verification._find_uncaptured_failed_verify_receipt(tmp_path, identity) is failed

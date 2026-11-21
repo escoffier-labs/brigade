@@ -1134,7 +1134,8 @@ def _verify_receipt_has_outcome_capture(target: Path, receipt: dict[str, Any]) -
 
 def _find_uncaptured_failed_verify_receipt(target: Path, planned_identity: list[str]) -> dict[str, Any] | None:
     for receipt in _verify_receipts(target):
-        if _receipt_planned_commands_identity(receipt) != planned_identity:
+        # A busy run did not test anything, so it does not clear an older uncaptured failure.
+        if _receipt_planned_commands_identity(receipt) != planned_identity or receipt.get("status") == "busy":
             continue
         if receipt.get("status") != "failed":
             return None
@@ -1730,7 +1731,7 @@ def _write_reused_receipt(
         "commands": copy.deepcopy(latest.get("commands", [])),
         "planned_commands": planned_display,
         "argv_file_hashes": copy.deepcopy(latest.get("argv_file_hashes", {})),
-        "inherited_test_env": verify_receipt_details.inherited_test_env(),
+        "inherited_test_env": copy.deepcopy(latest.get("inherited_test_env")),
     }
     receipt.update(identity)
     verify_receipt_details.stamp_reused_tree(receipt, identity)

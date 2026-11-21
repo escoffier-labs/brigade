@@ -21,6 +21,7 @@ _NO_TESTS = re.compile(rf"^(?:=+ )?no tests ran{_DURATION}(?: =+)?$")
 _AGGREGATE = re.compile(rf"^Aggregate: (?P<body>{_ITEM}(?:, {_ITEM})*)$")
 _COUNT = re.compile(r"(?P<count>\d+) (?P<name>[a-z]+)")
 
+_ENV_VALUE_LIMIT = 2048
 BUSY_EXIT_CODE = 75
 # The full-gate slot lock prints this line when every slot is taken. Exit 75
 # alone is not enough: any tool may use that code for an ordinary failure.
@@ -38,7 +39,8 @@ def inherited_test_env(environ: Mapping[str, str] | None = None) -> dict[str, An
     result: dict[str, Any] = {"pythonpath_set": "PYTHONPATH" in source}
     for name in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
         if name in source:
-            result[name] = source[name]
+            # Kept verbatim so a reader can see what changed pytest's behavior, but bounded.
+            result[name] = source[name][:_ENV_VALUE_LIMIT]
     return result
 
 
@@ -74,9 +76,14 @@ def terminal_status(receipt: Mapping[str, Any], rc: int) -> tuple[str, int]:
     commands = receipt.get("commands")
     planned = receipt.get("planned_commands")
     records = commands if isinstance(commands, list) else []
-    expected = planned if isinstance(planned, list) else records
     # Every planned command has a record and nothing went wrong while recording.
-    recorded = bool(records) and len(records) == len(expected) and not receipt.get("bookkeeping_error")
+    # A receipt with no planned list cannot show that, so it fails closed.
+    recorded = (
+        isinstance(planned, list)
+        and bool(records)
+        and len(records) == len(planned)
+        and not receipt.get("bookkeeping_error")
+    )
     nonpassing = [record for record in records if not _passed(record)]
     if recorded and not nonpassing and rc == 0:
         return "completed", 0
