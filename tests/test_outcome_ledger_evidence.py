@@ -65,6 +65,25 @@ def test_a_verdict_that_arrives_after_the_cutoff_makes_the_ledger_stale(world, p
     assert any("stale" in error for error in errors), errors
 
 
+@pytest.mark.parametrize("where", ["run", "job"])
+def test_a_ledger_built_while_the_tip_verdict_is_still_running_is_stale(world, promoted, where):
+    tip = world.touch_skill_json(3, T % (23, "06:00:00Z"))
+    run = world.gh.failed(tip, done=T % (23, "06:10:00Z"))
+    job = run["_jobs"][1][0]
+    job["status"] = "in_progress"
+    if where == "run":
+        run["status"] = "in_progress"
+    raw = world.build(prev_raw=promoted["raw"], covers=tip, approved=promoted["approved"], cutoff=T % (23, "06:30:00Z"))
+    assert [row["outcome"] for row in json.loads(raw)["subjects"]["skill:note"]["trials"]] == ["helped", "helped"]
+    world.propose(raw, tip, name="running")
+    errors = world.verify(raw, promoted["raw"], head="running")
+    assert any("still running" in error and tip[:12] in error for error in errors), errors
+    # Once it finishes, the failure is a hurt verdict the ledger lacks, so the same ledger stays rejected.
+    job["status"] = "completed"
+    run["status"] = "completed"
+    assert world.verify(raw, promoted["raw"], head="running")
+
+
 def test_a_ledger_older_than_the_age_limit_is_rejected(world, promoted):
     late = NOW + L.MAX_LEDGER_AGE
     errors = world.verify(promoted["raw"], promoted["genesis"], now=late)

@@ -40,6 +40,7 @@ from .outcome_ledger_actions import (
     owner_review_ok,
     parse_time,
     push_tip_evidence,
+    verdict_pending,
 )
 from .outcome_ledger_git import Repo, bundle_fingerprint, is_sha
 
@@ -677,6 +678,12 @@ def _completeness_errors(
                     f"{key}: ledger is stale, commit {row['sha'][:12]} has a {row['outcome']} attest verdict "
                     "the ledger does not record"
                 )
+        chain = ev.repo.first_parent(definition.since_commit, covers)
+        if seed_tip is not None:
+            chain = [sha for sha in chain if not ev.repo.is_ancestor(sha, seed_tip)]
+        for sha in chain:
+            if verdict_pending(ev.gh, ev.slug, ev.repo_id, definition.manifest_id, sha):
+                errors.append(f"{key}: ledger is stale, commit {sha[:12]} has an attest verdict still running")
     return errors
 
 

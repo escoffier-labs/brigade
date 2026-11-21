@@ -183,6 +183,27 @@ def push_tip_evidence(
     return True, {"sha": sha, "outcome": outcome, "jobs": jobs}
 
 
+def verdict_pending(gh: GhApi, slug: str, repo_id: int, manifest_id: str, sha: str) -> bool:
+    """Whether a trusted attest run on ``sha`` has not finished, or its ``outcome-attest/<manifest>`` job has not.
+
+    A ledger computed while a verdict is still running would freeze the commit out of its
+    evidence once it merges, so a pending verdict makes the ledger stale.
+    """
+    name = f"{ATTEST_JOB_PREFIX}{manifest_id}"
+    for run in trusted_runs(gh, slug, repo_id, sha):
+        if run.get("status", "completed") != "completed":
+            return True
+        attempts = run.get("run_attempt")
+        if not isinstance(attempts, int) or isinstance(attempts, bool) or attempts < 1:
+            raise EvidenceError("run has no readable run_attempt")
+        if attempts > MAX_ATTEMPTS:
+            raise EvidenceError(f"run has {attempts} attempts, more than the {MAX_ATTEMPTS} the ledger reads")
+        jobs = _paged(gh, f"repos/{slug}/actions/runs/{run['id']}/attempts/{attempts}/jobs", "jobs")
+        if any(job.get("name") == name and job.get("status") != "completed" for job in jobs):
+            return True
+    return False
+
+
 def trial_for_commit(
     gh: GhApi,
     slug: str,
