@@ -11,7 +11,6 @@ import os
 import shlex
 import shutil
 import stat
-import sys
 import tempfile
 from collections.abc import Callable
 from contextvars import ContextVar
@@ -23,7 +22,7 @@ from time import monotonic_ns as _monotonic_ns
 from time import sleep as _sleep
 from uuid import uuid4
 
-from . import dirfd, localio, nt_process, proc, receipt_schema, run_dirfd, runguard_release
+from . import dirfd, localio, nt_process, proc, receipt_schema, run_dirfd, runguard_release, worktree_removal
 from .runguard_gate import _recovery_gate_busy_error, _RecoveryGate, _stale_recovery_gate
 
 # Re-exported for tests to call. Patch these on runguard_gate: the gate looks them up there.
@@ -33,7 +32,6 @@ from .runguard_gate import _try_lock_descriptor as _try_lock_descriptor
 from .worktree_lease import (
     brigade_worktree_root as brigade_worktree_root,
     discard_incomplete_worktree as discard_incomplete_worktree,
-    remove_worktree_directory,
     reserved_worktree_lock_dir as reserved_worktree_lock_dir,
     run_lock_parent,
     workspace_for_lock_path,
@@ -1543,48 +1541,17 @@ def remove_worktree(repo: Path, worktree_path: Path, *, force: bool = False) -> 
     if not worktree_path.exists():
         return
     root = git_root(repo)
-    if not _deliver_worktree_handoffs(worktree_path, root):
+    if not worktree_removal.bound_removal_available():
+        worktree_removal.remove_by_path(root, worktree_path, force=force)
         return
-    args = ["worktree", "remove"]
-    if force:
-        args.append("--force")
-    args.append(str(worktree_path))
-    result = _git(root, *args, timeout=120.0)
-    if result.code != 0:
-        remove_worktree_directory(root, worktree_path)
-
-
-def _deliver_worktree_handoffs(worktree_path: Path, root: Path) -> bool:
-    """Move pending Memory Handoffs to the main checkout before removal.
-
-    Returns False when any handoff could not be delivered; the caller then
-    keeps the worktree so the handoff is not deleted with it.
-    """
-    from . import handoff_worktrees
-
+    held = worktree_removal.deliver_handoffs(worktree_path, root)
+    if held is None:
+        return
     try:
-        # Only a main checkout that owns the same common git dir as `root`,
-        # held open from validation through every write.
-        held = handoff_worktrees.open_main_checkout_for(worktree_path, repo=root)
-        try:
-            dest, dest_fd = held if held is not None else (None, None)
-            results = handoff_worktrees.rescue_pending_handoffs(worktree_path, dest, dest_fd=dest_fd)
-        finally:
-            if held is not None:
-                os.close(held[1])
-    except Exception as exc:  # noqa: BLE001 - callers run this from finally blocks
-        print(f"brigade: kept worktree {worktree_path}: handoff rescue error ({type(exc).__name__})", file=sys.stderr)
-        return False
-    failed = [r for r in results if r.state == "failed"]
-    for rescue in failed:
-        print(
-            f"brigade: handoff not delivered [{rescue.reason}] from {handoff_worktrees.safe_path(rescue.source)}"
-            + (f" kept as {handoff_worktrees.safe_path(rescue.dest)}" if rescue.dest else ""),
-            file=sys.stderr,
-        )
-    if failed:
-        print(f"brigade: kept worktree {worktree_path} so {len(failed)} pending handoff(s) survive", file=sys.stderr)
-    return not failed
+        worktree_removal.remove_held(root, held[0], force=force)
+    finally:
+        for handle in held:
+            worktree_removal.close_hold(handle)
 
 
 def is_brigade_created_worktree(path: Path, repo_root: Path) -> bool:
