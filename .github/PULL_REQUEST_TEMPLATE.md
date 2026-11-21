@@ -19,7 +19,7 @@ Closes #
 
 ## Checklist
 
-- [ ] `pytest -q` passes locally
+- [ ] Focused checks for the changed code pass locally (`./scripts/verify-focused <pytest-selector>`). Required CI on the head commit runs the full suite, so do not run it locally
 - [ ] Added or updated tests covering the change
 - [ ] Added a `changelog.d/<pr-number-or-slug>.md` fragment for any user-visible effect (entries describe effects, not commit subjects). Do not edit `CHANGELOG.md`; CI rejects it outside a release commit
 - [ ] No personal details, hostnames, IPs, account names, tokens, or unredacted absolute paths in code, templates, tests, or this PR (the `content-guard` CI job will fail otherwise)

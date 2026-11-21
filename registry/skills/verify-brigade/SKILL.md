@@ -204,8 +204,8 @@ Receipted form — same focused command, recorded as a work-verify receipt
 ```
 
 `--command` and `--argv-json` receipts are audit-only. Do not pass
-`--no-reuse` to the full `./scripts/verify` gate. Do not run
-`./scripts/verify-fast` or the full suite from this skill.
+`--no-reuse` to the full `./scripts/verify` gate. Do not run the full suite as
+routine work; reproduce CI locally only when the operator asks.
 
 ## Evidence
 
