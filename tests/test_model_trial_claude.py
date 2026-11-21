@@ -1296,6 +1296,54 @@ def test_an_unreadable_process_table_fails_the_drain_at_once(monkeypatch):
     assert time.monotonic() - started < 0.3
 
 
+def test_a_stream_error_with_a_failed_drain_keeps_the_work_dir(tmp_path, monkeypatch):
+    exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS)
+    work_dirs = _track_work_dirs(monkeypatch)
+
+    def exploding_feed(self, event):
+        raise ValueError("stream boom")
+
+    def failing_drain(process):
+        raise model_trial_claude.ArmDrainError("drain failed")
+
+    monkeypatch.setattr(model_trial_claude._Observer, "feed", exploding_feed)
+    monkeypatch.setattr(model_trial_claude, "_drain_arm_group", failing_drain)
+    try:
+        with pytest.raises(ValueError, match="stream boom"):
+            execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        assert work_dirs and work_dirs[0].is_dir()  # the primary error still won, and the dir was kept
+    finally:
+        for path in work_dirs:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def test_a_drainer_that_outlives_the_join_keeps_the_work_dir(tmp_path, monkeypatch):
+    exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS)
+    work_dirs = _track_work_dirs(monkeypatch)
+    release = threading.Event()
+
+    class BlockedCapture:
+        overflow = False
+        tail = b""
+
+        def __init__(self, token):
+            pass
+
+        def drain(self, pipe, on_overflow):
+            release.wait(30)
+
+    monkeypatch.setattr(model_trial_claude, "_StderrCapture", BlockedCapture)
+    monkeypatch.setattr(model_trial_claude, "EXIT_GRACE", 0.05)
+    try:
+        result = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        assert _failures(result) == ["process_group_drain_failed"]
+        assert len(work_dirs) == 2 and all(path.is_dir() for path in work_dirs)
+    finally:
+        release.set()
+        for path in work_dirs:
+            shutil.rmtree(path, ignore_errors=True)
+
+
 def test_kill_sends_nothing_for_a_reaped_child(monkeypatch):
     sent = []
     monkeypatch.setattr(model_trial_claude.os, "killpg", lambda *args: sent.append(args), raising=False)

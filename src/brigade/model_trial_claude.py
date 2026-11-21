@@ -781,6 +781,7 @@ def _run_process(
     timer.daemon = True
     timer.start()
     primary: BaseException | None = None
+    cleanup_failed = False
     try:
         assert child.stdin is not None and child.stdout is not None
         try:
@@ -830,23 +831,29 @@ def _run_process(
         timer.cancel()
         kill()
         drain_once()
-        if primary is not None and drain_failure is not None:
-            add_note = getattr(primary, "add_note", None)
-            if callable(add_note):
-                add_note(f"cell process drain also failed: {drain_failure}")
+        cleanup_failed = drain_failure is not None
         try:
             drainer.join(timeout=EXIT_GRACE)
         finally:
+            if drainer.is_alive():
+                cleanup_failed = True
             for pipe in (child.stdout, child.stderr):
                 if pipe is not None:
                     pipe.close()
             try:
                 child.wait(timeout=EXIT_GRACE)
             except (OSError, subprocess.TimeoutExpired):
-                pass
+                cleanup_failed = True
+        if primary is not None and cleanup_failed:
+            # The caller keeps the work dir for a cleanup that did not confirm a quiet arm.
+            primary.arm_cleanup_failed = True  # type: ignore[attr-defined]
+            add_note = getattr(primary, "add_note", None)
+            if callable(add_note):
+                reason = drain_failure or "the drainer or the leader did not finish"
+                add_note(f"cell process cleanup also failed: {reason}")
     if capture.overflow:
         observer.failure = observer.failure or "stderr_too_large"
-    return b"".join(raw), bytes(capture.tail), code, timed_out.is_set(), drain_failure is not None
+    return b"".join(raw), bytes(capture.tail), code, timed_out.is_set(), cleanup_failed
 
 
 def read_capped(path: Path, cap: int) -> bytes:
@@ -1251,6 +1258,10 @@ def _execute(
                 cell=cell, files=packages[cell["arm"]], package_dir=snapshots[cell["arm"]], ctx=ctx, work=work
             )
             keep_work_dir = bool(ran.pop("keep_work_dir", False))
+        except BaseException as exc:
+            # A primary error still wins, but a cleanup that never confirmed a quiet arm keeps the dir.
+            keep_work_dir = bool(getattr(exc, "arm_cleanup_failed", False))
+            raise
         finally:
             if not keep_work_dir:
                 remove_work_dir(work)

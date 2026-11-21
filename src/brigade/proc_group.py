@@ -9,6 +9,7 @@ reserved for the whole wait, so a recycled id can never be probed or signalled
 
 from __future__ import annotations
 
+import errno
 import os
 import signal
 import subprocess
@@ -68,7 +69,11 @@ def _member_records(pgid: int) -> list[tuple[int, int]] | None:
         entries = os.listdir("/proc")
     except OSError:
         return None
-    return _members(entries, pgid)
+    try:
+        return _members(entries, pgid)
+    except OSError:
+        # A member whose stat cannot be read makes the whole group unknown, never empty.
+        return None
 
 
 def _members(entries: list[str], pgid: int) -> list[tuple[int, int]]:
@@ -97,8 +102,10 @@ def _members(entries: list[str], pgid: int) -> list[tuple[int, int]]:
 def _stat_fields(pid: int) -> list[bytes] | None:
     try:
         rest = Path(f"/proc/{pid}/stat").read_bytes().rpartition(b")")[2]
-    except OSError:
-        return None
+    except OSError as exc:
+        if isinstance(exc, (FileNotFoundError, ProcessLookupError)) or exc.errno in (errno.ENOENT, errno.ESRCH):
+            return None
+        raise ProcessGroupUnreadable(f"cannot read the process table for {pid}") from exc
     return rest.split()
 
 

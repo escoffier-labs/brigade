@@ -8,6 +8,7 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -145,6 +146,28 @@ def test_kill_group_members_skips_a_pid_whose_starttime_changed(monkeypatch):
     )
     assert proc_group.kill_group_members(4242, signal.SIGKILL) == 0
     assert sent == []
+
+
+def test_a_stat_read_error_makes_the_group_unreadable(monkeypatch):
+    """Only a vanished process may be skipped. A read error means the group is unknown, not empty."""
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    target = f"/proc/{process.pid}/stat"
+    real_read_bytes = Path.read_bytes
+
+    def read_bytes(self):
+        if str(self) == target:
+            raise PermissionError(errno.EACCES, "denied")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    try:
+        assert proc_group.group_member_pids(process.pid) is None
+        assert proc_group.group_has_live_members(process.pid) is True
+        with pytest.raises(proc_group.ProcessGroupUnreadable):
+            proc_group.kill_group_members(process.pid, signal.SIGKILL)
+    finally:
+        process.kill()
+        process.wait(timeout=10)
 
 
 def test_clean_drain_records_descendants_reaped():
