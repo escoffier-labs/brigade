@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from tests._handoff_origin_fixtures import requires_automatic_filing
+from tests._posix import requires_dirfd
 from brigade import dirfd, handoff_worktrees, ingest as ingest_mod, runguard
 from brigade.claude_hooks import runtime as hook_runtime
 from brigade.install import install_selection
@@ -793,6 +794,100 @@ def test_path_based_listing_post_check_keeps_worktree_on_swap(tmp_path: Path, mo
     assert [(r.state, r.reason) for r in results] == [("failed", "inbox-scan-failed")]
     assert (state["real"] / ".claude" / "memory-handoffs" / "2026-11-08-0900-real.md").is_file()
     assert (linked / "decoy.txt").read_text() == "decoy\n"
+
+
+# Round 13 (issue #2403): the admin dir and the removal path are held by
+# identity, so a rename after verification cannot redirect either.
+
+
+@requires_dirfd
+def test_admin_dir_swapped_during_verification_cannot_pin_git(tmp_path: Path, monkeypatch):
+    """The admin dir is opened by verification and held, so a swap during
+    that open is caught by the held descriptor's identity. On the path-based
+    code the swap landed between verify and open and git was pinned to the
+    decoy."""
+    main, linked = _repo_with_worktree(tmp_path)
+    pending = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-real.md", "real handoff")
+    git_dir = handoff_worktrees._git_path(linked, "--git-dir")
+    assert git_dir is not None
+    real_open = handoff_worktrees.dirfd.open_directory_chain
+    real_pinned = handoff_worktrees._pinned_git
+    state: dict = {}
+    pinned: list[list[str]] = []
+
+    def open_chain(path, **kwargs):
+        if Path(path) == git_dir and "decoy" not in state:
+            state["decoy"] = git_dir.with_name(git_dir.name + "-real")
+            git_dir.rename(state["decoy"])
+            git_dir.mkdir()
+            (git_dir / "decoy.txt").write_text("decoy\n")
+        return real_open(path, **kwargs)
+
+    def record_pin(*args, **kwargs):
+        pinned.append(args[2])
+        return real_pinned(*args, **kwargs)
+
+    monkeypatch.setattr(handoff_worktrees.dirfd, "open_directory_chain", open_chain)
+    monkeypatch.setattr(handoff_worktrees, "_pinned_git", record_pin)
+    results = handoff_worktrees.rescue_pending_handoffs(linked, main)
+
+    assert pinned == []  # git never listed through the swapped-in admin dir
+    assert [(r.state, r.reason) for r in results] == [("failed", "inbox-scan-failed")]
+    assert pending.is_file()
+    assert (git_dir / "decoy.txt").read_text() == "decoy\n"
+    assert (state["decoy"] / "gitdir").is_file()
+
+
+@requires_dirfd
+def test_removal_swap_after_rescue_leaves_decoy_and_real_tree(tmp_path: Path, monkeypatch, capsys):
+    """Removal renames the rescued tree through its held parent before it
+    deletes anything, so a decoy swapped in after the final rescue check is
+    restored and neither tree is removed."""
+    main, linked = _repo_with_worktree(tmp_path)
+    pending = _handoff(linked / ".claude" / "memory-handoffs", "2026-11-08-0900-real.md", "real handoff")
+    real_deliver = runguard._deliver_worktree_handoffs
+    state: dict = {}
+
+    def deliver(worktree_path, root):
+        held = real_deliver(worktree_path, root)
+        if held is not None:
+            state["real"] = _swap_in_decoy(linked)
+        return held
+
+    monkeypatch.setattr(runguard, "_deliver_worktree_handoffs", deliver)
+    runguard.remove_worktree(main, linked, force=True)
+
+    err = capsys.readouterr().err
+    assert "worktree-moved" in err
+    assert (linked / "decoy.txt").read_text() == "decoy\n"
+    assert not list(linked.parent.glob(".brigade-remove-*"))
+    assert (state["real"] / ".git").is_file()
+    assert (main / ".claude" / "memory-handoffs" / pending.name).is_file()
+
+
+@requires_dirfd
+def test_removal_without_a_verified_identity_keeps_the_worktree(tmp_path: Path, monkeypatch, capsys):
+    """Removal refuses when rescue could not hand over the tree identity,
+    instead of falling back to a path-based delete."""
+    main, linked = _repo_with_worktree(tmp_path)
+    monkeypatch.setattr(handoff_worktrees, "rescue_pending_handoffs", lambda *args, **kwargs: [])
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert linked.exists()
+    assert "worktree-unverified" in capsys.readouterr().err
+
+
+@requires_dirfd
+def test_removal_deletes_the_held_tree_and_prunes_registration(tmp_path: Path):
+    main, linked = _repo_with_worktree(tmp_path)
+    admin = main / ".git" / "worktrees" / linked.name
+    assert admin.is_dir()
+
+    runguard.remove_worktree(main, linked, force=True)
+
+    assert not linked.exists()
+    assert not admin.exists()
 
 
 # Codex 4507863008: embedded repositories keep the worktree.
