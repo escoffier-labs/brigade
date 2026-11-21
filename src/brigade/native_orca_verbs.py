@@ -16,7 +16,8 @@ from . import native_orca_enrollment as enrollment
 from . import native_orca_observations as observations
 from . import run_journal, run_tasks
 from .native_child_custody import owned_run
-from .native_child_observations import RESOURCE_EVENT
+from .native_child_host import NativeChildError
+from .native_child_observations import RESOURCE_EVENT, START_UNCONFIRMED
 from .native_orca_host import HOST
 
 CORRELATION_EVENT = "task.native-correlated"
@@ -280,10 +281,19 @@ def _record_start_refusal(task: ClaimedTask, reason: str) -> dict[str, Any]:
 def accepted(*, workspace: Path, run_id: str, task_id: str, payload: object, exit_code: int) -> dict[str, Any]:
     with claimed_task(workspace, run_id, task_id) as task:
         task.require_unheld()
+        resource = journal.latest(task.events, RESOURCE_EVENT, task_id)
         try:
             worker = dispatch.parse_start(task.binding, task.verified.target, payload, exit_code=exit_code)
         except dispatch.DefiniteStartRefusal as exc:
+            if exc.code != "start-failed" and resource is not None and resource.get("reason") == START_UNCONFIRMED:
+                raise journal.refuse(
+                    "start-unknown", "the Task refusal cannot settle an earlier ambiguous worker start"
+                ) from None
             return _record_start_refusal(task, exc.code)
+        except NativeChildError as exc:
+            if exc.code == "start-unknown" and resource is None and task.correlated_worker() is None:
+                task.append(RESOURCE_EVENT, {"reason": START_UNCONFIRMED}, START_UNCONFIRMED)
+            raise
         return _correlate(task, worker, mode="parent-reported", held=None)
 
 

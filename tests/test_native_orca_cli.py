@@ -178,13 +178,27 @@ def test_orca_1_4_269_definite_refusal_frees_capacity_after_ack(coordinator, rea
     assert coordinator.claim("two", SECOND_TASK)["state"] == "claimed"
 
 
-@pytest.mark.parametrize("state", ["start_unknown", "outcome_unknown", "failed-with-residual-worker"])
+@pytest.mark.parametrize(
+    "state",
+    [
+        "start_unknown",
+        "outcome_unknown",
+        "failed-with-residual-worker",
+        "failed-with-resources",
+        "failed-without-resources",
+    ],
+)
 def test_orca_1_4_269_unknown_start_keeps_the_slot(coordinator, state):
     coordinator.limit_one_worker()
     run_id = coordinator.open()
     receipt = coordinator.start()
     if state == "failed-with-residual-worker":
         receipt["result"].update(state="failed", recovery="This start left a worker session open.")
+    elif state == "failed-with-resources":
+        receipt["result"].update(state="failed", residualResources=["synthetic worker resource"])
+    elif state == "failed-without-resources":
+        receipt["result"]["state"] = "failed"
+        del receipt["result"]["residualResources"]
     else:
         receipt["result"]["state"] = state
     coordinator.accept(receipt, 1, error="start-unknown")
@@ -194,12 +208,62 @@ def test_orca_1_4_269_unknown_start_keeps_the_slot(coordinator, state):
     coordinator.invoke("finalize", run_id, error="finalize-live")
 
 
-def test_orca_1_4_269_refusal_for_another_task_keeps_the_slot(coordinator):
+@pytest.mark.parametrize(
+    ("status", "circuit"),
+    [("running", False), ("dispatched", False), (None, False), ("dispatched", True), ("completed", False)],
+)
+def test_orca_1_4_269_not_startable_with_unproven_liveness_keeps_capacity(coordinator, status, circuit):
+    coordinator.limit_one_worker()
+    run_id = coordinator.open()
+    coordinator.start()
+    refusal = _fixture("task-not-startable")
+    data = refusal["error"]["data"]
+    if status is None:
+        del data["status"]
+    else:
+        data["status"] = status
+    if circuit:
+        data.update(retryOf=DISPATCH, failureCount=3)
+    coordinator.accept(refusal, 1, error="start-unknown")
+    assert coordinator.status()["capacity"]["live"] == 1
+    coordinator.invoke("ack", run_id, "one", "--result-id", "a" * 64, error="task-nonterminal")
+    coordinator.claim("two", SECOND_TASK, error="capacity-denied")
+
+
+@pytest.mark.parametrize("status", ["running", "failed"])
+def test_orca_1_4_269_not_startable_after_unknown_start_keeps_capacity(coordinator, status):
+    coordinator.limit_one_worker()
+    run_id = coordinator.open()
+    unknown = coordinator.start()
+    unknown["result"]["state"] = "outcome_unknown"
+    coordinator.accept(unknown, 1, error="start-unknown")
+
+    refusal = _fixture("task-not-startable")
+    refusal["error"]["data"]["status"] = status
+    coordinator.accept(refusal, 1, error="start-unknown")
+    assert coordinator.status()["capacity"]["live"] == 1
+    coordinator.claim("two", SECOND_TASK, error="capacity-denied")
+    coordinator.invoke("finalize", run_id, error="finalize-live")
+
+
+@pytest.mark.parametrize("state", ["ready", "failed"])
+def test_orca_1_4_269_full_start_receipt_requires_run_id(coordinator, state):
+    coordinator.limit_one_worker()
+    coordinator.open()
+    receipt = coordinator.start()
+    receipt["result"]["state"] = state
+    del receipt["result"]["runId"]
+    coordinator.accept(receipt, int(state == "failed"), error="native-mismatch")
+    coordinator.claim("two", SECOND_TASK, error="capacity-denied")
+
+
+@pytest.mark.parametrize(("field", "wrong_value"), [("taskId", SECOND_TASK), ("runId", "run_000000000009")])
+def test_orca_1_4_269_refusal_for_another_identity_keeps_the_slot(coordinator, field, wrong_value):
     coordinator.limit_one_worker()
     coordinator.open()
     coordinator.start()
     refusal = _fixture("task-not-startable")
-    refusal["error"]["data"]["taskId"] = SECOND_TASK
+    refusal["error"]["data"][field] = wrong_value
     coordinator.accept(refusal, 1, error="native-mismatch")
     coordinator.claim("two", SECOND_TASK, error="capacity-denied")
 
@@ -221,6 +285,10 @@ def test_orca_1_4_269_refusal_replay_repairs_an_interrupted_result(coordinator, 
     assert row["start_refusal"] == "start-refused" and row["result_id"] is None
     coordinator.accept(ready, error="task-terminal")
     coordinator.claim("two", SECOND_TASK, error="capacity-denied")
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["orca", "accepted", "--help"])
+    assert exc.value.code == 0
+    assert "matching refusal" in " ".join(coordinator.capsys.readouterr().out.split())
     repaired = coordinator.accept(refusal, 1)
     coordinator.invoke("ack", run_id, "one", "--result-id", repaired["result_id"])
     assert coordinator.status()["capacity"]["live"] == 0

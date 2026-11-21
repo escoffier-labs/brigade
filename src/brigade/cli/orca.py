@@ -42,7 +42,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     claim.add_argument("--orca-task", required=True, help="Existing Orca Task in that Run with the enrolled brief.")
 
     accepted = commands.add_parser(
-        "accepted", help="Record a full worker-start receipt or a definite refusal for the claim."
+        "accepted",
+        help="Record a full worker-start receipt or a definite refusal for the claim.",
+        description=(
+            "If status shows a start refusal without a result ID after an interrupted write, "
+            "re-run accepted with the matching refusal and its exit code."
+        ),
     )
     _run(accepted)
     _receipt(accepted, required=True)

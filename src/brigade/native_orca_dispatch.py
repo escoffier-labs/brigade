@@ -138,6 +138,14 @@ def result_fields(payload: object, *, ok: bool = True) -> Mapping[str, object]:
     return result if isinstance(result, Mapping) else {}
 
 
+# Orca v1.4.269 src/main/runtime/orchestration/db/tasks/task-start-claim.ts
+# rejects any non-ready Task, as does the AppImage's compiled
+# orcad-retained-source-BfK6WWlH.js. Only failed qualifies for a direct
+# refusal. worker-dispatch-settlement.ts separates Task settlement from
+# process exit, so a Task refusal cannot settle a previously ambiguous launch.
+_TASK_STATES_FOR_REFUSAL = frozenset({"failed"})
+
+
 class DefiniteStartRefusal(NativeChildError):
     """A matching refusal that produced no live worker for this claim."""
 
@@ -157,11 +165,13 @@ def parse_start(binding: LaunchBinding, target: NativeTarget, payload: object, *
         and not reply
     ):
         data = error.get("data")
-        if (
-            not isinstance(data, Mapping)
-            or data.get("taskId") != binding.task_id
-            or data.get("runId", binding.run_id) != binding.run_id
-        ):
+        data = data if isinstance(data, Mapping) else {}
+        status = data.get("status")
+        if not isinstance(status, str) or status not in _TASK_STATES_FOR_REFUSAL:
+            raise NativeChildError("start-unknown", "the Orca Task refusal does not establish a failed start")
+        # task-dispatch-refusal.ts always emits taskId, status and unmetDependencies.
+        # The refusal contract adds nextSteps and omits runId in these errors.
+        if data.get("taskId") != binding.task_id or data.get("runId", binding.run_id) != binding.run_id:
             raise NativeChildError("native-mismatch", "the Orca start refusal does not match the retained claim")
         if valid_id(data.get("retryOf"), "ctx") and type(data.get("failureCount")) is int and data["failureCount"] >= 3:
             raise DefiniteStartRefusal(
@@ -188,6 +198,8 @@ def unconfirmed_start(binding: LaunchBinding, target: NativeTarget, payload: obj
 
 def _start_reference(binding: LaunchBinding, target: NativeTarget, reply: Mapping[str, object]) -> WorkerReference:
     key = binding.checked_key()
+    # Full worker-start receipts always carry runId, taskId and dispatchId.
+    # The mutation wrapper supplies requestId and replayed.
     dispatch_id = reply.get("dispatchId")
     mutation = reply.get("mutation")
     launch = reply.get("launch")
