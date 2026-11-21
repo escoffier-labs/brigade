@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import urllib.error
 from pathlib import Path
 from unittest.mock import patch
@@ -1580,10 +1581,6 @@ def _migrate(tmp_path, monkeypatch, channel, runner, *, windows=False, venv_entr
     """Run an update of a brigade-cli pipx app and return (result, paths) with a fake pipx layout."""
     monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
     monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: windows)
-    venv_bin = tmp_path / "venvs" / "brigadestack" / "bin"
-    venv_bin.mkdir(parents=True)
-    for name in venv_entries:
-        (venv_bin / name).write_text("#!/bin/sh\n")
     (tmp_path / "bin").mkdir()
     paths = update_cmd.UpdatePaths(
         data_root=tmp_path / "data",
@@ -1591,6 +1588,10 @@ def _migrate(tmp_path, monkeypatch, channel, runner, *, windows=False, venv_entr
         brigade_executable=tmp_path / "bin" / "brigade",
         pipx_venvs=tmp_path / "venvs",
     )
+    venv_bin = update_cmd._venv_bin_dir(paths)  # bin on POSIX, Scripts on Windows
+    venv_bin.mkdir(parents=True)
+    for name in venv_entries:
+        (venv_bin / name).write_text("#!/bin/sh\n")
     manifest = _manifest()
     http = _Http(_release(manifest), manifest) if channel == "stable" else _PypiHttp(_release(manifest), manifest)
     result = update_cmd.run_update(
@@ -1616,7 +1617,8 @@ def test_update_migrates_a_brigade_cli_install_and_runs_setup_from_the_new_envir
     install = ["pipx", "install", "--force", f"brigadestack=={_version(channel)}"]
     assert commands[:3] == [install, ["pipx", "uninstall", "brigade-cli"], install]
     # Setup runs from the brigadestack environment, not the bin-directory link the removal may have taken.
-    assert commands[3][:2] == [str(tmp_path / "venvs" / "brigadestack" / "bin" / "brigade"), "setup"]
+    expected = update_cmd._venv_bin_dir(paths) / ("brigade.exe" if os.name == "nt" else "brigade")
+    assert commands[3][:2] == [str(expected), "setup"]
     assert str(paths.brigade_executable) not in commands[3]
     assert len(commands) == 4
     assert list((tmp_path / "data").rglob("*state*.json"))
@@ -1641,6 +1643,7 @@ def test_update_records_nothing_when_the_old_app_cannot_be_removed(tmp_path, mon
     assert "then run brigade update again" in err
 
 
+@pytest.mark.skipif(os.name == "nt", reason="pipx copies launchers on Windows, so nothing is relinked there")
 @pytest.mark.parametrize("channel", ["stable", "beta"])
 def test_failed_second_install_relinks_the_launchers_locally_and_records_nothing(
     tmp_path, monkeypatch, capsys, channel
@@ -1659,7 +1662,7 @@ def test_failed_second_install_relinks_the_launchers_locally_and_records_nothing
     for name in entries:
         link = paths.brigade_executable.parent / name
         assert link.is_symlink()
-        assert link.resolve() == (tmp_path / "venvs" / "brigadestack" / "bin" / name).resolve()
+        assert link.resolve() == (update_cmd._venv_bin_dir(paths) / name).resolve()
     assert not list((tmp_path / "bin").glob(".*update-link"))
     err = capsys.readouterr().err
     assert "relinked to the existing brigadestack environment" in err
