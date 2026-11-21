@@ -1,0 +1,44 @@
+{
+  "covers": {
+    "cutoff_at": "2026-11-21T22:13:12Z",
+    "main_sha": "d2bd1c5c21c7b051381d455552ab2259f4fab058"
+  },
+  "policy": {
+    "config_sha256": "0123f241efc5e833980aab81e71f8bea6d64fe8902f8b16c3bc4ea8b2fcc2bb2",
+    "scorecard_policy": "scorecard.v1"
+  },
+  "prev_ledger_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "schema": "brigade.outcome_ledger.v1",
+  "subjects": {
+    "skill:note": {
+      "approved": [
+        {
+          "basis": "release",
+          "commit": "d2bd1c5c21c7b051381d455552ab2259f4fab058",
+          "fingerprint": "394ee1b104916188c8706b6ba719c4b5deafce05b690f87a731096698a30a120",
+          "skill_md_sha256": "457078ef56f4143910ba68729198285e204645d66ababc557e17b80496fe4cb1"
+        }
+      ],
+      "band": "unseen",
+      "current": {
+        "commit": "d2bd1c5c21c7b051381d455552ab2259f4fab058",
+        "fingerprint": "394ee1b104916188c8706b6ba719c4b5deafce05b690f87a731096698a30a120"
+      },
+      "decision": {
+        "action": "hold",
+        "code": null,
+        "decided_at": "2026-11-21T22:13:12Z",
+        "reason": "insufficient verified evidence"
+      },
+      "demoted": [],
+      "last_action_at": null,
+      "manifest_id": "skill-note",
+      "manifest_sha256": "28e3d0939827de26c0cf63a816579b97185399f92ed3b017ffb12f4f4b6af1a0",
+      "restore": null,
+      "since_commit": "d2bd1c5c21c7b051381d455552ab2259f4fab058",
+      "status": "candidate",
+      "subject_path": "src/brigade/templates/skills/note/SKILL.md",
+      "trials": []
+    }
+  }
+}

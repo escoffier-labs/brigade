@@ -92,7 +92,76 @@ The workflow `.github/workflows/outcome-attest.yml` is what produces the results
 
 The host reads those check runs with `gh api`. A trial counts as seen passing when the receipt names a manifest and a head commit, that commit belongs to a merged pull request into `main`, and a completed check run named `outcome-attest/<manifest>` on the merge commit comes from the `github-actions` app on that same commit and concluded `success`. Commit statuses are never read. Any failure to ask GitHub (no `gh`, no network, a rate limit, malformed output) means the trial is not counted and nothing raises into rank. Set `BRIGADE_CI_ATTESTATION=off` to skip the lookup. The repository is taken from the `origin` remote.
 
-Promotion decisions will come from a scheduled GitHub Actions job on `main` that reads the `outcome-attest/*` check runs. That job is a follow-up change. Until it lands, nothing promotes, installs or rolls back on a CI result.
+Promotion decisions come from the [outcome ledger](#outcome-ledger), which reads the Actions API and never these check runs. The scheduled job that writes the ledger is a follow-up change. Until it lands, nothing promotes, installs or rolls back on a CI result.
+
+## Outcome ledger
+
+The outcome ledger is the one place a CI result can change a skill's standing. It is a tracked file, `outcome-ledger/skills.json`, schema `brigade.outcome_ledger.v1`. State on the workspace host cannot authorize an unattended write, so the ledger reaches `main` only through a pull request that passes the normal merge queue. A required check rebuilds it from trusted inputs. A hand-edited ledger does not match the rebuild and fails.
+
+The first subject is the bundled `note` skill (`verify/manifests/skill-note.json`). Its check, `scripts/skill_contract_check.py`, is not part of the pytest suite. Normal CI never runs it on the live skill text, so a worse revision can merge and then fail attestation on the merge commit.
+
+### What the ledger records
+
+| Field | Meaning |
+| --- | --- |
+| `approved` | Texts the ledger accepts, oldest first and append only. Each entry has the bundle `fingerprint`, the `skill_md_sha256`, the `commit` the bytes come from, and a `basis`. |
+| `trials` | One row per main commit that touched the manifest scope and finished a verdict. Each row has the bundle fingerprint at that commit and the CI jobs behind it. |
+| `current`, `status`, `band` | The text on main at `covers.main_sha`, its status (`candidate`, `promoted` or `demoted`) and its band. |
+| `decision`, `restore` | The action the rule chose, and when it is a rollback, the approved text to put back. |
+| `demoted` | Fingerprints that were promoted and then regressed. They never promote again. |
+| `covers` | The main commit and the `cutoff_at` time the ledger reflects. Only jobs finished by the cutoff count. |
+
+The identity of a text is the bundle fingerprint, the same sha256 `SubjectRef.content_fingerprint` carries. The commit is provenance and the place the bytes are recovered from. An approved entry has basis `release` when its `SKILL.md` digest is a tagged text in the shipped file history, or `owner_review` when an owner approved it on a merged pull request.
+
+### Where trials come from
+
+A trial comes from a job of the `outcome-attest` workflow run, read from the Actions API. Check runs and commit statuses are never read. Jobs belong to a workflow run and cannot be created through the checks API, so a forged check run does not become a trial.
+
+A run counts only when GitHub reports all of these: the workflow path `.github/workflows/outcome-attest.yml`, the `push` event, the `main` branch, the commit in question, and the same repository id for the run and its head repository. A run that fails any of them is rejected. The ledger reads the jobs of every attempt. A trial is the job named `outcome-attest/<manifest>`. If any attempt failed, the commit is a hurt trial, so a rerun cannot launder a failure. Cancelled, skipped and timed-out jobs count for nothing.
+
+A trial counts only while the manifest bytes at its commit equal the manifest at the covered commit. Editing a manifest restarts the count under the new manifest.
+
+### The decision rule
+
+The ledger turns trials into a scorecard and calls `scorecard.decide_scorecard` and `scorecard.classify_band` with the default `ReconcileConfig`. It adds no thresholds of its own. With the defaults:
+
+- Two helped trials and no hurt trials on the current text promote it. A single helped trial holds.
+- Promotion needs an approved text. Attested text that was never approved holds as `awaiting_owner`.
+- A hurt trial on promoted approved text demotes it and restores the newest earlier approved text.
+- A hurt trial on text that was never approved restores the newest approved text, even after helped trials.
+- When there is no approved text to restore, the ledger holds and flags it.
+
+A rollback is physical. The ledger pull request restores the whole skill bundle to the approved bytes, and the recompute checks the result byte for byte against git history. The restore commit touches the manifest scope, so the next attest run produces a new trial for the restored text.
+
+### The required check
+
+`ledger-recompute` is a mandatory job inside `ci-gate`. It loads its logic from a copy of main's tree, the way the hub selector does, and runs it with `python3 -I -S`. The pull request's tree supplies the ledger as data only. A change that does not touch `outcome-ledger/` passes at once.
+
+For a change that does, the check requires all of these:
+
+1. `prev_ledger_sha256` equals the hash of the ledger on main, so history stays linear.
+2. `covers.main_sha` is in main's history and no later main commit already has a finished verdict. A stale ledger is rejected and the writer rebuilds it.
+3. The ledger equals the rebuild byte for byte. The rebuild uses only jobs finished by `cutoff_at`.
+4. `approved` is append only. Every entry matches git history at its commit, `release` entries match the shipped file history, and `owner_review` entries have the review described below.
+5. The change touches the ledger file and a restored skill bundle, and nothing else. A ledger pull request that also touches `scripts/`, `src/brigade/outcome_ledger*`, `.github/workflows/` or `verify/manifests/` is rejected.
+
+The bootstrap exception is narrow. While main has no `scripts/ledger_recompute.py`, the job passes with a notice. That is true only for the change that introduces the logic.
+
+### Owner review
+
+An `owner_review` approval is an APPROVED review on the pull request's head commit from a login in the owners list in `outcome_ledger.py`. Describe it accurately as an owner review recorded on a merged pull request in public history. It is a visibility control. Agents on the host work under the owner's GitHub identity, so an approval is forgeable by a same-user agent in the same way a merge already is. The ledger does not claim otherwise, and CODEOWNERS is out of scope here.
+
+### Soak runbook
+
+The soak needs two things inside seven days: one real attested promotion, and one deliberately worse revision that merges, fails attestation and is rolled back. Edits that keep the bundle fingerprint, such as `skill.json`, add trials to the current text. Editing `SKILL.md` changes the text.
+
+1. The merge of the change that adds the ledger is the first trial for `note`, because it touches `scripts/skill_contract_check.py`.
+2. Merge a second change that touches `skill.json` under the manifest scope. That is the second trial, so the writer promotes `note`.
+3. Merge a worse `SKILL.md` that drops a required step. Run `scripts/shipped_file_history.py --write` in the same change, because lint requires the new text to be recorded. The entry has no tag, so it is not a `release` text. Normal CI passes and the attest job fails.
+4. The writer proposes a rollback. The pull request restores the approved bytes and the recompute accepts it.
+5. The attest run on the restore commit passes, and the ledger shows both decisions with their job ids.
+
+The scheduled writer, the approval pull request and the dispatch of CI on the ledger branch are a follow-up change. Until then the ledger is built and checked by hand with the functions in `src/brigade/outcome_ledger.py`.
 
 ## Workflow
 
@@ -350,6 +419,7 @@ This checkout ships patch-backed manifests for the focused suites agents actuall
 | `verify/manifests/run-resume.json` | `tests/test_run_resume.py` | `src/brigade/run_resume.py` |
 | `verify/manifests/verify-manifest.json` | `tests/test_verify_manifest_tracked.py` | `src/brigade/verify_manifest.py` |
 | `verify/manifests/outcome-attribution.json` | `tests/test_outcome_attribution.py` | `src/brigade/outcome_attribution.py` |
+| `verify/manifests/skill-note.json` | `scripts/skill_contract_check.py` (not pytest) | `src/brigade/templates/skills/note/SKILL.md` |
 
 Every `*.json` under `verify/manifests/` must resolve through `verify_manifest.resolve_manifest` by id and by source path. `tests/test_verify_manifest_tracked.py` walks that directory and asserts both lookups.
 

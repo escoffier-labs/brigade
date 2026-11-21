@@ -1,0 +1,2 @@
+- Add the outcome ledger, `outcome-ledger/skills.json`, and a required `ledger-recompute` check inside `ci-gate`. The check rebuilds the ledger from trusted main, the git history of main and the Actions API, and rejects a ledger that differs or that touches anything but the ledger and a restored skill bundle. The bundled `note` skill is the first subject. Nothing writes the ledger automatically yet.
+- Let `ci.yml` run on `workflow_dispatch`. A dispatched run takes full CI, and the lint allowlist base and the changelog guard use the merge base with main.
