@@ -28,7 +28,15 @@ from .inbox_lock import held_file_lock
 
 BUG_EMAIL = "me@solomonneas.dev"  # content-guard: allow pii/email
 REPOSITORY = "escoffier-labs/brigade"
+RENAMED_REPOSITORY = "escoffier-labs/brigadestack"
+# The repository is renamed to RENAMED_REPOSITORY after 0.32.0. REST follows a rename but
+# search and GraphQL do not, so current_repository() asks REST for the current name.
+ACCEPTED_REPOSITORIES = (REPOSITORY, RENAMED_REPOSITORY)
 ISSUES_URL = f"https://github.com/{REPOSITORY}/issues"
+# An issue URL under either accepted name, for reading back what gh returned or recorded.
+_ISSUE_URL = (
+    r"https://github\.com/(?:" + "|".join(re.escape(name) for name in ACCEPTED_REPOSITORIES) + r")/issues/[1-9][0-9]*"
+)
 URL_BUDGET = 6000
 EMAIL_BUDGET = 1800
 BUNDLE_CAP = 60 * 1024
@@ -59,6 +67,19 @@ def gh(*args: str) -> str:
     if result.returncode:
         raise OSError("gh request failed")
     return result.stdout.strip()
+
+
+def current_repository() -> str:
+    """The repository's current full name, one of the two accepted names.
+
+    Falls back to the pre-rename name when the lookup fails or reports anything else, so a
+    redirect to an unexpected repository is never used as a target.
+    """
+    try:
+        name = gh("api", f"repos/{REPOSITORY}", "--jq", ".full_name")
+    except (OSError, subprocess.SubprocessError):
+        return REPOSITORY
+    return name if name in ACCEPTED_REPOSITORIES else REPOSITORY
 
 
 def _normalize_fingerprint(text: str) -> str:
@@ -113,14 +134,14 @@ def render(bundle: dict[str, Any]) -> str:
     )
 
 
-def _search_issues(query: str) -> list[Any]:
+def _search_issues(query: str, repository: str = REPOSITORY) -> list[Any]:
     try:
         raw = json.loads(
-            gh("search", "issues", query, "--repo", REPOSITORY, "--json", "number,title,state,url", "--limit", "10")
+            gh("search", "issues", query, "--repo", repository, "--json", "number,title,state,url", "--limit", "10")
         )
     except (OSError, subprocess.SubprocessError):
         url = "https://api.github.com/search/issues?" + urlencode(
-            {"q": f"repo:{REPOSITORY} is:issue {query}", "per_page": "10"}
+            {"q": f"repo:{repository} is:issue {query}", "per_page": "10"}
         )
         request = Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "brigadestack"})
         with urlopen(request, timeout=10) as response:
@@ -140,8 +161,9 @@ def _duplicates(bundle: dict[str, Any], redactor: Redactor) -> tuple[list[dict[s
         if error.get("exception_type") and error.get("command"):
             queries.append(f"{error['exception_type']} {error['command']}")
         raw = []
+        repository = current_repository()
         for query in queries:
-            raw = _search_issues(query)
+            raw = _search_issues(query, repository)
             if raw:
                 break
         found = []
@@ -153,7 +175,7 @@ def _duplicates(bundle: dict[str, Any], redactor: Redactor) -> tuple[list[dict[s
             found.append(
                 {
                     "number": item["number"],
-                    "url": f"{ISSUES_URL}/{item['number']}",
+                    "url": f"https://github.com/{repository}/issues/{item['number']}",
                     "title": title,
                     "state": "closed" if str(item.get("state")).lower() == "closed" else "open",
                 }
@@ -321,20 +343,21 @@ def _submit(via: str, bundle: dict[str, Any], markdown: str, comment_on: int | N
     with tempfile.TemporaryDirectory(prefix="brigade-bug-") as temporary:
         body = Path(temporary) / "body.md"
         write_text_atomic(body, markdown)
+        repository = current_repository()
         if comment_on is not None:
-            gh("issue", "comment", str(comment_on), "--repo", REPOSITORY, "--body-file", str(body))
-            return f"{ISSUES_URL}/{comment_on}"
+            gh("issue", "comment", str(comment_on), "--repo", repository, "--body-file", str(body))
+            return f"https://github.com/{repository}/issues/{comment_on}"
         raw = gh(
             "issue",
             "create",
             "--repo",
-            REPOSITORY,
+            repository,
             "--title",
             _prose(bundle["user"]["title"]),
             "--body-file",
             str(body),
         )
-        match = re.fullmatch(re.escape(ISSUES_URL) + r"/[1-9][0-9]*", raw)
+        match = re.fullmatch(_ISSUE_URL, raw)
         if match is None:
             raise OSError("gh returned no issue URL, check GitHub before retrying")
         return raw
@@ -404,7 +427,7 @@ def _load_prepared(report_id: str, *, not_security: bool = False) -> tuple[Path,
         raise ReportBlocked("Bug report blocked: prepared bundle digest mismatch, prepare a new preview")
     if receipt.get("status") == "submitted":
         issue_url = str(receipt.get("issue_url", ""))
-        if re.fullmatch(re.escape(ISSUES_URL) + r"/[1-9][0-9]*", issue_url) is None:
+        if re.fullmatch(_ISSUE_URL, issue_url) is None:
             issue_url = "check the local receipt"
         raise ReportBlocked(f"Bug report blocked: already submitted: {issue_url}")
     for rows, keys in (

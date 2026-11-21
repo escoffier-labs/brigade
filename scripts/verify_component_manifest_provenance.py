@@ -72,12 +72,57 @@ def default_fetch(url: str) -> tuple[int, str]:
         return exc.code, exc.read().decode("utf-8", errors="replace")
 
 
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate manifest key {key!r}")
+        result[key] = value
+    return result
+
+
 def _expected_asset_name(component: str, platform: str) -> str:
     return f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else "")
 
 
 def _release_url(repository: str, tag: str, filename: str) -> str:
     return f"https://github.com/{repository}/releases/download/{tag}/{filename}"
+
+
+def read_manifest_repository(manifest_path: Path) -> tuple[str | None, list[str]]:
+    """Offline structural checks, then the one accepted repository the manifest records.
+
+    Used by --print-repository, whose output feeds an attestation verification, so it applies
+    the same structural rules verify_manifest does before it trusts any component's source.
+    """
+    try:
+        manifest = json.loads(manifest_path.read_text(), object_pairs_hook=_unique_json_object)
+    except (OSError, ValueError) as exc:
+        return None, [f"component manifest could not be loaded: {manifest_path} ({exc})"]
+    components = manifest.get("components") if isinstance(manifest, dict) else None
+    if not isinstance(components, dict) or not components:
+        return None, ["component manifest field 'components' must be a non-empty object"]
+    errors: list[str] = []
+    if set(components) != set(COMPONENT_IDS):
+        errors.append("component manifest must contain exactly " + ", ".join(COMPONENT_IDS))
+    for component in COMPONENT_IDS:
+        if component in components and not isinstance(components[component], dict):
+            errors.append(f"component {component!r} must be an object")
+    repository, repository_errors = recorded_repository(components)
+    errors.extend(repository_errors)
+    if repository is None and not errors:
+        errors.append("component manifest records no repository")
+    return (repository if not errors else None), errors
+
+
+def _release_api_urls(tag: str, filename: str) -> set[str]:
+    """The browser_download_url values GitHub's release API may report for one asset.
+
+    After the rename, the API reports a pre-rename release's assets under the new name (and
+    the reverse), so the API value is accepted under either of the two names. The manifest's
+    own asset URLs stay strict to the repository it records.
+    """
+    return {_release_url(repository, tag, filename) for repository in ACCEPTED_REPOSITORIES}
 
 
 def _tag_ref_url(repository: str, tag: str) -> str:
@@ -167,8 +212,8 @@ def verify_manifest(
 ) -> list[str]:
     try:
         raw_text = manifest_path.read_text()
-        manifest = json.loads(raw_text)
-    except (OSError, json.JSONDecodeError) as exc:
+        manifest = json.loads(raw_text, object_pairs_hook=_unique_json_object)
+    except (OSError, ValueError) as exc:
         return [f"component manifest could not be loaded: {manifest_path} ({exc})"]
     if not isinstance(manifest, dict):
         return ["component manifest must be a JSON object"]
@@ -288,7 +333,7 @@ def verify_manifest(
         size = asset.get("size")
         if not isinstance(size, int) or isinstance(size, bool) or size <= 0:
             errors.append(f"release asset {name!r} size must be a positive integer")
-        if asset.get("browser_download_url") != _release_url(repository, tag, name):
+        if asset.get("browser_download_url") not in _release_api_urls(tag, name):
             errors.append(f"release asset {name!r} must use the immutable Brigade release URL")
         if _github_asset_digest(asset) is None:
             errors.append(f"release asset {name!r} is missing a valid GitHub SHA-256 digest")
@@ -307,7 +352,8 @@ def verify_manifest(
             continue
         if asset.get("size") != expected["size"]:
             errors.append(f"release asset {name!r} size does not match manifest")
-        if asset.get("browser_download_url") != expected["url"]:
+        # expected["url"] was already required to be the immutable URL under the recorded repository.
+        if asset.get("browser_download_url") not in _release_api_urls(tag, name):
             errors.append(f"release asset {name!r} URL does not match manifest")
         match = _github_asset_digest(asset)
         if match is None or match.group(1) != expected["sha256"]:
@@ -318,7 +364,7 @@ def verify_manifest(
     if manifest_asset is None or checksums_asset is None:
         return errors
     for name, asset in (("component-manifest-v1.json", manifest_asset), ("checksums.txt", checksums_asset)):
-        if asset.get("browser_download_url") != _release_url(repository, tag, name):
+        if asset.get("browser_download_url") not in _release_api_urls(tag, name):
             errors.append(f"release asset {name!r} must use the immutable Brigade release URL")
         if _github_asset_digest(asset) is None:
             errors.append(f"release asset {name!r} is missing a valid GitHub SHA-256 digest")
@@ -376,12 +422,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
     if args.print_repository:
-        try:
-            components = json.loads(args.manifest.read_text()).get("components")
-        except (OSError, json.JSONDecodeError, AttributeError) as exc:
-            print(f"component manifest provenance: could not read manifest ({exc})", file=sys.stderr)
-            return 1
-        repository, errors = recorded_repository(components if isinstance(components, dict) else {})
+        repository, errors = read_manifest_repository(args.manifest)
         for error in errors:
             print(f"component manifest provenance: {error}", file=sys.stderr)
         if repository is None:

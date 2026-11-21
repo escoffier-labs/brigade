@@ -34,6 +34,9 @@ def report_env(tmp_path, monkeypatch):
         },
     )
     monkeypatch.setattr(bug_cmd, "gh", lambda *args: (_ for _ in ()).throw(OSError("offline")))
+    # Tests that fake `gh` model only search and submit; the rename lookup is covered in
+    # test_repository_rename_names.py, so pin the pre-rename name here.
+    monkeypatch.setattr(bug_cmd, "current_repository", lambda: bug_cmd.REPOSITORY)
     monkeypatch.setattr("brigade.bug_cmd.urlopen", lambda *a, **k: (_ for _ in ()).throw(OSError("offline")))
     monkeypatch.setattr(socket, "create_connection", lambda *a, **k: pytest.fail("network used"))
     target = tmp_path / "workspace"

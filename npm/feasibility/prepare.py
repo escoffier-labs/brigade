@@ -307,9 +307,15 @@ def build_payload(output: Path, runtime: dict, identity: dict, paths: list[str])
     download(pin["url"], wheel, pin["sha256"])
     payload = validate_wheel(wheel, version)
     component = pin["componentManifest"]
-    base = f"https://github.com/escoffier-labs/brigade/releases/download/{tag}/"
     manifest = build / "component-manifest-v1.json"
-    if component["url"] != base + manifest.name or component["checksumsUrl"] != base + "checksums.txt":
+    # The repository is renamed to escoffier-labs/brigadestack after 0.32.0; a release is pinned under the
+    # name it was built in, so accept exactly these two bases and require both URLs to share one of them.
+    bases = [
+        f"https://github.com/{name}/releases/download/{tag}/"
+        for name in ("escoffier-labs/brigade", "escoffier-labs/brigadestack")
+    ]
+    base = next((candidate for candidate in bases if component["url"] == candidate + manifest.name), None)
+    if base is None or component["checksumsUrl"] != base + "checksums.txt":
         raise ValueError("exact release manifest/checksums URLs required")
     download(component["url"], manifest, component["sha256"])
     checksums = download(component["checksumsUrl"], build / "checksums.txt", component["checksumsSha256"])

@@ -298,20 +298,22 @@ def _load_workflow_yaml(path: Path):
         import time
 
         error = ""
+        last_import_error: ImportError | None = None
         for attempt in range(3):
             result = subprocess.run(
                 [sys.executable, "-m", "pip", "install", "pyyaml", "-q"], capture_output=True, text=True
             )
-            error = result.stderr or result.stdout
+            error = (result.stderr or result.stdout).strip() or f"exit code {result.returncode}"
             importlib.invalidate_caches()
             try:
                 import yaml
 
                 break
-            except ImportError:
+            except ImportError as exc:
+                last_import_error = exc
                 time.sleep(2 * (attempt + 1))
         else:
-            raise RuntimeError(f"pyyaml is unavailable and pip install failed: {error}")
+            raise RuntimeError(f"pyyaml is unavailable and pip install failed: {error}") from last_import_error
     return yaml.safe_load(path.read_text())
 
 
@@ -1015,3 +1017,25 @@ def test_acceptance_scripts_accept_the_same_checksum_inventories() -> None:
     assert "if len(checksums) not in (41, 43):" in posix
     assert "if ($checksums.Count -notin @(41, 43)) {" in windows
     assert "$checksums.Count -ne 41" not in windows
+
+
+def test_workflow_yaml_loader_reports_pip_exit_code_and_chains_the_import_error(monkeypatch, tmp_path):
+    import time
+
+    workflow = tmp_path / "workflow.yml"
+    workflow.write_text("name: x\n")
+    monkeypatch.setitem(sys.modules, "yaml", None)  # `import yaml` raises ImportError
+    monkeypatch.setattr(time, "sleep", lambda seconds: None)
+    attempts = []
+
+    def silent_failure(argv, **kwargs):
+        attempts.append(argv)
+        return subprocess.CompletedProcess(argv, 3, "", "")
+
+    monkeypatch.setattr(subprocess, "run", silent_failure)
+
+    with pytest.raises(RuntimeError, match="exit code 3") as raised:
+        _load_workflow_yaml(workflow)
+
+    assert len(attempts) == 3
+    assert isinstance(raised.value.__cause__, ImportError)

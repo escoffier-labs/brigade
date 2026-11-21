@@ -543,17 +543,76 @@ def test_print_repository_reports_the_recorded_repository_without_network(tmp_pa
     assert capsys.readouterr().out == repository + "\n"
 
 
-@pytest.mark.parametrize("defect", ["third", "mixed", "missing"])
+@pytest.mark.parametrize(
+    "defect", ["third", "mixed", "missing", "one-component", "extra-key", "non-dict", "duplicate-key", "empty"]
+)
 def test_print_repository_fails_closed_for_an_untrusted_manifest(tmp_path, capsys, defect):
     manifest = _manifest()
+    body = None
     if defect == "third":
         for component in manifest["components"].values():
             component["source"]["repository"] = "attacker/brigade"
     elif defect == "mixed":
         manifest["components"]["sessionfind"]["source"]["repository"] = RENAMED_REPOSITORY
-    else:
+    elif defect == "missing":
         del manifest["components"]["sessionfind"]["source"]
-    path = _write(tmp_path, manifest)
+    elif defect == "one-component":
+        manifest["components"] = {"sessionfind": manifest["components"]["sessionfind"]}
+    elif defect == "extra-key":
+        manifest["components"]["extra-tool"] = manifest["components"]["sessionfind"]
+    elif defect == "non-dict":
+        manifest["components"]["sessionfind"] = "escoffier-labs/brigade"
+    elif defect == "empty":
+        manifest["components"] = {}
+    elif defect == "duplicate-key":
+        # The second "components" key would silently win under plain json.loads.
+        good = json.dumps(manifest["components"])
+        body = '{"components": ' + good + ', "components": ' + good + "}"
+    path = _write(tmp_path, manifest, body)
 
     assert _module().main(["--manifest", str(path), "--print-repository"]) == 1
-    assert capsys.readouterr().out == ""
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err.startswith("component manifest provenance: ")
+    assert captured.err.strip() != "component manifest provenance:"
+
+
+def test_verifier_rejects_a_manifest_with_a_duplicate_key(tmp_path):
+    manifest = _manifest()
+    good = json.dumps(manifest["components"])
+    path = _write(tmp_path, manifest, '{"components": ' + good + ', "components": ' + good + "}")
+
+    errors = _module().verify_manifest(path, fetch=lambda url: (_ for _ in ()).throw(AssertionError(url)))
+
+    assert any("duplicate manifest key" in error for error in errors)
+
+
+# After the rename, GitHub's release API reports a pre-rename release's assets under the
+# new name (and the reverse). The manifest's own URLs stay strict to the recorded name.
+
+
+def _release_with_api_urls(manifest: dict, repository: str, api_repository: str):
+    release, checksums, body = _release(manifest, repository)
+    for asset in release["assets"]:
+        asset["browser_download_url"] = asset["browser_download_url"].replace(repository, api_repository)
+    return release, checksums, body
+
+
+@pytest.mark.parametrize(("recorded", "reported"), [(REPOSITORY, RENAMED_REPOSITORY), (RENAMED_REPOSITORY, REPOSITORY)])
+def test_verifier_accepts_release_api_urls_under_the_other_accepted_name(tmp_path, recorded, reported):
+    manifest = _manifest(recorded)
+    release, checksums, body = _release_with_api_urls(manifest, recorded, reported)
+    path = _write(tmp_path, manifest, body)
+
+    assert _module().verify_manifest(path, fetch=_fetcher(release, checksums, body, repository=recorded)) == []
+
+
+def test_verifier_rejects_release_api_urls_under_a_third_repository(tmp_path):
+    manifest = _manifest(REPOSITORY)
+    release, checksums, body = _release_with_api_urls(manifest, REPOSITORY, "attacker/brigade")
+    path = _write(tmp_path, manifest, body)
+
+    errors = _module().verify_manifest(path, fetch=_fetcher(release, checksums, body, repository=REPOSITORY))
+
+    assert any("immutable Brigade release URL" in error for error in errors)
+    assert any("URL does not match manifest" in error for error in errors)

@@ -92,22 +92,36 @@ def fetch_bytes(url: str) -> bytes:
         return response.read()
 
 
-def release_repository() -> str:
-    """The repository whose release is verified: the workflow's own, when it is an accepted name."""
+def pinned_repository() -> str:
+    """The workflow's own repository, for runs that pin to it with --pin-workflow-repository."""
     current = os.environ.get("GITHUB_REPOSITORY", "")
-    return current if current in ACCEPTED_REPOSITORIES else REPOSITORY
+    if current not in ACCEPTED_REPOSITORIES:
+        raise AcceptanceError(
+            f"GITHUB_REPOSITORY {current!r} must be one of {', '.join(ACCEPTED_REPOSITORIES)} to pin the release to it"
+        )
+    return current
 
 
 def manifest_repository(manifest: Any) -> str:
-    """The one accepted repository every component of a release manifest records."""
+    """The one accepted repository every component of a release manifest records.
+
+    The release's repository comes from its own manifest, never from the environment: a release
+    built before the rename records the old name and one built after records the new name, and
+    the attestations were signed under that same name.
+    """
     components = manifest.get("components") if isinstance(manifest, dict) else None
     if not isinstance(components, dict):
         raise AcceptanceError("release manifest has no components object")
+    allowed = (*COMPONENT_IDS, *OPTIONAL_IDS)
+    if not set(COMPONENT_IDS) <= set(components) or set(components) - set(allowed):
+        raise AcceptanceError("release component manifest must contain the five default components and no unknown one")
     recorded = set()
-    for component in COMPONENT_IDS:
-        record = components.get(component)
+    for component in components:
+        record = components[component]
         source = record.get("source") if isinstance(record, dict) else None
-        recorded.add(source.get("repository") if isinstance(source, dict) else None)
+        repository = source.get("repository") if isinstance(source, dict) else None
+        # A list or dict here would be unhashable, so only strings are ever collected.
+        recorded.add(repository if isinstance(repository, str) else None)
     if len(recorded) != 1 or not recorded <= set(ACCEPTED_REPOSITORIES):
         raise AcceptanceError(
             f"release manifest must record exactly one of {', '.join(ACCEPTED_REPOSITORIES)} for every component"
@@ -115,8 +129,8 @@ def manifest_repository(manifest: Any) -> str:
     return next(iter(recorded))
 
 
-def _github_release_tag_url(tag: str) -> str:
-    return f"https://{GITHUB_API_HOST}/repos/{release_repository()}/releases/tags/{tag}"
+def _github_release_tag_url(tag: str, repository: str = REPOSITORY) -> str:
+    return f"https://{GITHUB_API_HOST}/repos/{repository}/releases/tags/{tag}"
 
 
 def _is_allowed_github_api_url(url: str) -> bool:
@@ -171,6 +185,7 @@ def wait_for_github_release_tag(
     *,
     fetch: GithubStatusFetcher = _fetch_github_json_once,
     sleep: Callable[[float], None] = time.sleep,
+    repository: str = REPOSITORY,
     max_attempts: int = GITHUB_RELEASE_TAG_MAX_ATTEMPTS,
     initial_backoff_seconds: float = GITHUB_RELEASE_TAG_INITIAL_BACKOFF_SECONDS,
     max_backoff_seconds: float = GITHUB_RELEASE_TAG_MAX_BACKOFF_SECONDS,
@@ -182,8 +197,7 @@ def wait_for_github_release_tag(
     an otherwise healthy publish.
     """
     tag = f"v{version}"
-    repository = release_repository()
-    url = _github_release_tag_url(tag)
+    url = _github_release_tag_url(tag, repository)
     backoff = initial_backoff_seconds
     detail = f"GitHub release lookup for {repository}@{tag} failed"
     for attempt in range(max_attempts):
@@ -222,8 +236,8 @@ def _sha256_path(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _release_url(version: str, filename: str) -> str:
-    return f"https://github.com/{release_repository()}/releases/download/v{version}/{filename}"
+def _release_url(version: str, filename: str, repository: str = REPOSITORY) -> str:
+    return f"https://github.com/{repository}/releases/download/v{version}/{filename}"
 
 
 def _parse_checksums(text: str) -> dict[str, str]:
@@ -253,23 +267,36 @@ def verify_release_assets(
     destination: Path,
     *,
     fetch_bytes: BytesFetcher = fetch_bytes,
+    repositories: Sequence[str] = ACCEPTED_REPOSITORIES,
 ) -> dict[str, Any]:
-    """Fetch the immutable release manifest and verify every native release asset."""
+    """Fetch the immutable release manifest and verify every native release asset.
+
+    The manifest is looked up under each of ``repositories`` in turn. Every later URL uses the
+    repository the manifest records, which must be one of the two accepted names and, when the
+    caller narrows ``repositories`` to one (a pinned run), that one.
+    """
     tag = f"v{version}"
     release_dir = destination / "release-assets"
     release_dir.mkdir(parents=True, exist_ok=True)
-    manifest_url = _release_url(version, "component-manifest-v1.json")
-    try:
-        manifest_bytes = fetch_bytes(manifest_url)
-        manifest = json.loads(manifest_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object)
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise AcceptanceError(f"could not fetch release component manifest: {exc}") from exc
+    failure: Exception | None = None
+    for candidate in repositories:
+        try:
+            manifest_bytes = fetch_bytes(_release_url(version, "component-manifest-v1.json", candidate))
+            manifest = json.loads(manifest_bytes.decode("utf-8"), object_pairs_hook=_unique_json_object)
+            break
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            failure = failure or exc
+    else:
+        raise AcceptanceError(f"could not fetch release component manifest: {failure}") from failure
     if not isinstance(manifest, dict) or not isinstance(manifest.get("components"), dict):
         raise AcceptanceError("release component manifest has no components object")
     components = manifest["components"]
     released = tuple(component for component in (*COMPONENT_IDS, *OPTIONAL_IDS) if component in components)
     if set(components) != set(released) or not set(COMPONENT_IDS) <= set(released):
         raise AcceptanceError("release component manifest must contain the five default components and no unknown one")
+    repository = manifest_repository(manifest)
+    if repository not in repositories:
+        raise AcceptanceError(f"release manifest records {repository}, expected {', '.join(repositories)}")
 
     expected: dict[str, tuple[str, str]] = {}
     native_paths: dict[str, dict[str, Path]] = {component: {} for component in COMPONENT_IDS}
@@ -279,12 +306,8 @@ def verify_release_assets(
         if not isinstance(record, dict):
             raise AcceptanceError(f"release component manifest entry {component!r} is invalid")
         source = record.get("source")
-        if (
-            not isinstance(source, dict)
-            or source.get("repository") != release_repository()
-            or source.get("release_tag") != tag
-        ):
-            raise AcceptanceError(f"release component {component!r} does not point to {release_repository()}@{tag}")
+        if not isinstance(source, dict) or source.get("repository") != repository or source.get("release_tag") != tag:
+            raise AcceptanceError(f"release component {component!r} does not point to {repository}@{tag}")
         component_assets = record.get("assets")
         if not isinstance(component_assets, dict) or set(component_assets) != set(platforms):
             raise AcceptanceError(f"release component {component!r} does not publish the full platform matrix")
@@ -298,7 +321,7 @@ def verify_release_assets(
             expected_name = f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else "")
             if name != expected_name or not isinstance(digest, str) or len(digest) != 64:
                 raise AcceptanceError(f"release component {component!r} asset {platform!r} has invalid metadata")
-            if url != _release_url(version, name):
+            if url != _release_url(version, name, repository):
                 raise AcceptanceError(
                     f"release component {component!r} asset {name!r} does not use its immutable release URL"
                 )
@@ -306,7 +329,7 @@ def verify_release_assets(
                 raise AcceptanceError(f"release component manifest repeats native asset {name!r}")
             expected[name] = (digest, url)
 
-    checksums_url = _release_url(version, "checksums.txt")
+    checksums_url = _release_url(version, "checksums.txt", repository)
     try:
         checksums_bytes = fetch_bytes(checksums_url)
         checksums = _parse_checksums(checksums_bytes.decode("utf-8"))
@@ -320,7 +343,7 @@ def verify_release_assets(
     }
     if set(checksums) == expected_checksum_names | set(canonical_assets):
         for name in canonical_assets:
-            expected[name] = (checksums[name], _release_url(version, name))
+            expected[name] = (checksums[name], _release_url(version, name, repository))
     elif set(checksums) != expected_checksum_names:
         raise AcceptanceError(
             "checksums.txt must cover exactly the manifest's native assets and component-manifest-v1.json"
@@ -905,7 +928,13 @@ def smoke_verified_canonical_release(
     smoke_canonical_components(paths, runner=runner, env=native_env)
 
 
-def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_darwin_amd64: bool = False) -> None:
+def run_acceptance(
+    version: str,
+    *,
+    runner: Runner = subprocess.run,
+    rosetta_darwin_amd64: bool = False,
+    pin_workflow_repository: bool = False,
+) -> None:
     if not version or version.startswith("v"):
         raise AcceptanceError("--brigade-version must be an exact PyPI version without a v prefix")
 
@@ -921,8 +950,17 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_dar
         for directory in (profile, data_home, pipx_home, pipx_bin, root / "xdg-config", root / "xdg-cache"):
             directory.mkdir(parents=True)
         _write_poison_binaries(poison_dir, marker)
-        wait_for_github_release_tag(version)
-        release = verify_release_assets(version, root)
+        # A pinned run (the release workflow's own, fresh release) accepts only GITHUB_REPOSITORY.
+        # Otherwise the release's repository comes from its manifest, tried under each name.
+        repositories = (pinned_repository(),) if pin_workflow_repository else ACCEPTED_REPOSITORIES
+        for index, candidate in enumerate(repositories):
+            try:
+                wait_for_github_release_tag(version, repository=candidate)
+                break
+            except AcceptanceError:
+                if index + 1 == len(repositories):
+                    raise
+        release = verify_release_assets(version, root, repositories=repositories)
         manifest_path = root / "release-assets" / "component-manifest-v1.json"
 
         env = os.environ.copy()
@@ -986,9 +1024,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--brigade-version", required=True)
     parser.add_argument("--rosetta-darwin-amd64", action="store_true")
+    parser.add_argument(
+        "--pin-workflow-repository",
+        action="store_true",
+        help="accept only a release recorded under GITHUB_REPOSITORY (the release workflow's own repository)",
+    )
     args = parser.parse_args(argv)
     try:
-        run_acceptance(args.brigade_version, rosetta_darwin_amd64=args.rosetta_darwin_amd64)
+        run_acceptance(
+            args.brigade_version,
+            rosetta_darwin_amd64=args.rosetta_darwin_amd64,
+            pin_workflow_repository=args.pin_workflow_repository,
+        )
     except AcceptanceError as exc:
         print(f"published artifact acceptance failed: {exc}", file=sys.stderr)
         return 1

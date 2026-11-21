@@ -865,7 +865,7 @@ def test_run_acceptance_proves_go_unavailable_immediately_before_setup_and_smoke
     assert "smoke_managed_components" not in between_smoke
     # The PATH used in run_acceptance is built through build_go_free_path so Go is excluded.
     assert "build_go_free_path(" in run_acceptance_body
-    assert "wait_for_github_release_tag(version)" in run_acceptance_body
+    assert "wait_for_github_release_tag(version, repository=candidate)" in run_acceptance_body
     assert (
         'run_checked(\n                [managed_brigade, "setup", "--manifest", str(manifest_path)],'
         in run_acceptance_body
@@ -1160,17 +1160,19 @@ def _release_fixture(*, additive=True, hub=False, repository="escoffier-labs/bri
     return base, bodies, checksums
 
 
-def _verify_fixture(module, tmp_path, bodies, checksums, repository="escoffier-labs/brigade"):
+def _verify_fixture(module, tmp_path, bodies, checksums, repository="escoffier-labs/brigade", **kwargs):
     checksum_text = "".join(f"{digest}  {name}\n" for name, digest in sorted(checksums.items())).encode()
     base = f"https://github.com/{repository}/releases/download/v1.2.3/"
 
     def fetch(url):
-        assert url.startswith(base)
+        if not url.startswith(base):
+            # The release only exists under its own repository name; any other name 404s.
+            raise urllib.error.HTTPError(url, 404, "not found", {}, None)
         name = url.removeprefix(base)
         assert "/" not in name
         return checksum_text if name == "checksums.txt" else bodies[name]
 
-    return module.verify_release_assets("1.2.3", tmp_path, fetch_bytes=fetch)
+    return module.verify_release_assets("1.2.3", tmp_path, fetch_bytes=fetch, **kwargs)
 
 
 def test_additive_release_hashes_all_forty_binaries_without_changing_legacy_return(acceptance_module, tmp_path):
@@ -1336,12 +1338,13 @@ def test_acceptance_canonical_wiring_fails_closed(acceptance_module, tmp_path, m
     monkeypatch.setattr(module, "host_platform_key", lambda: "linux-amd64")
     verifier = module.verify_release_assets
 
-    def download(version, root):
+    def download(version, root, **kwargs):
         checksum_bytes = "".join(f"{digest}  {name}\n" for name, digest in checksums.items()).encode()
         result = verifier(
             version,
             root,
             fetch_bytes=lambda url: checksum_bytes if url.endswith("/checksums.txt") else bodies[url.rsplit("/", 1)[1]],
+            **kwargs,
         )
         for name in ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence"):
             if case == "missing-all" or (case == "missing-one" and name == "brigade-evidence"):
@@ -1429,9 +1432,25 @@ OLD_REPOSITORY = "escoffier-labs/brigade"
 NEW_REPOSITORY = "escoffier-labs/brigadestack"
 
 
+def _recorded_as(bodies, checksums, repository, *, mutate=None):
+    """Rewrite the manifest's recorded repository in a fixture, keeping checksums consistent."""
+    manifest = json.loads(bodies["component-manifest-v1.json"])
+    for component in manifest["components"].values():
+        component["source"]["repository"] = repository
+    if mutate:
+        mutate(manifest)
+    bodies["component-manifest-v1.json"] = json.dumps(manifest).encode()
+    checksums["component-manifest-v1.json"] = hashlib.sha256(bodies["component-manifest-v1.json"]).hexdigest()
+
+
+@pytest.mark.parametrize("workflow_repository", ["", OLD_REPOSITORY, NEW_REPOSITORY])
 @pytest.mark.parametrize("repository", [OLD_REPOSITORY, NEW_REPOSITORY])
-def test_release_assets_verify_under_either_accepted_repository(acceptance_module, tmp_path, monkeypatch, repository):
-    monkeypatch.setenv("GITHUB_REPOSITORY", repository)
+def test_release_assets_verify_under_the_repository_the_manifest_records(
+    acceptance_module, tmp_path, monkeypatch, repository, workflow_repository
+):
+    # The environment never decides the release's repository: env unset with a new-name release, and
+    # env=brigadestack with a 0.31/0.32 (old-name) release, both verify.
+    monkeypatch.setenv("GITHUB_REPOSITORY", workflow_repository)
     _, bodies, checksums = _release_fixture(repository=repository)
 
     result = _verify_fixture(acceptance_module, tmp_path, bodies, checksums, repository)
@@ -1440,52 +1459,83 @@ def test_release_assets_verify_under_either_accepted_repository(acceptance_modul
     assert acceptance_module.manifest_repository(result["manifest"]) == repository
 
 
+@pytest.mark.parametrize("pinned", [OLD_REPOSITORY, NEW_REPOSITORY])
+def test_pinned_release_assets_accept_only_the_pinned_repository(acceptance_module, tmp_path, pinned):
+    other = NEW_REPOSITORY if pinned == OLD_REPOSITORY else OLD_REPOSITORY
+    _, bodies, checksums = _release_fixture(repository=other)
+
+    # The release only exists under the other name, so a pinned lookup cannot even find it...
+    with pytest.raises(acceptance_module.AcceptanceError, match="could not fetch"):
+        _verify_fixture(acceptance_module, tmp_path / "a", bodies, checksums, other, repositories=(pinned,))
+    # ...and a manifest reached under the pinned name that records the other name is rejected.
+    _, bodies, checksums = _release_fixture(repository=pinned)
+    _recorded_as(bodies, checksums, other)
+    with pytest.raises(acceptance_module.AcceptanceError, match="records"):
+        _verify_fixture(acceptance_module, tmp_path / "b", bodies, checksums, pinned, repositories=(pinned,))
+
+
+def test_pinned_repository_requires_an_accepted_workflow_repository(acceptance_module, monkeypatch):
+    monkeypatch.setenv("GITHUB_REPOSITORY", NEW_REPOSITORY)
+    assert acceptance_module.pinned_repository() == NEW_REPOSITORY
+    for value in ("", "attacker/brigade"):
+        monkeypatch.setenv("GITHUB_REPOSITORY", value)
+        with pytest.raises(acceptance_module.AcceptanceError, match="GITHUB_REPOSITORY"):
+            acceptance_module.pinned_repository()
+
+
 def test_release_assets_default_to_the_pre_rename_repository_outside_actions(acceptance_module, tmp_path):
     _, bodies, checksums = _release_fixture()
 
     _verify_fixture(acceptance_module, tmp_path, bodies, checksums)
 
 
-@pytest.mark.parametrize("workflow_repository", [OLD_REPOSITORY, NEW_REPOSITORY, ""])
-def test_release_assets_reject_a_third_repository_in_the_manifest(
-    acceptance_module, tmp_path, monkeypatch, workflow_repository
-):
-    monkeypatch.setenv("GITHUB_REPOSITORY", workflow_repository)
-    third = "attacker/brigade"
-    _, bodies, checksums = _release_fixture(repository=third)
-    fetched = []
-
-    def fetch(url):
-        fetched.append(url)
-        name = url.rsplit("/", 1)[1]
-        return (
-            b"".join(f"{d}  {n}\n".encode() for n, d in checksums.items()) if name == "checksums.txt" else bodies[name]
-        )
-
-    with pytest.raises(acceptance_module.AcceptanceError, match="does not point to"):
-        acceptance_module.verify_release_assets("1.2.3", tmp_path, fetch_bytes=fetch)
-    assert all(url.startswith(f"https://github.com/{workflow_repository or OLD_REPOSITORY}/") for url in fetched)
-
-
-def test_release_assets_reject_a_manifest_naming_the_other_accepted_repository(
-    acceptance_module, tmp_path, monkeypatch
-):
-    # The workflow ran in the old repository, so a manifest that claims the new one is not its release.
-    monkeypatch.setenv("GITHUB_REPOSITORY", OLD_REPOSITORY)
+def test_release_assets_reject_a_third_repository_in_the_manifest(acceptance_module, tmp_path):
     _, bodies, checksums = _release_fixture(repository=OLD_REPOSITORY)
-    manifest = json.loads(bodies["component-manifest-v1.json"])
-    for component in manifest["components"].values():
-        component["source"]["repository"] = NEW_REPOSITORY
-    bodies["component-manifest-v1.json"] = json.dumps(manifest).encode()
-    checksums["component-manifest-v1.json"] = hashlib.sha256(bodies["component-manifest-v1.json"]).hexdigest()
+    _recorded_as(bodies, checksums, "attacker/brigade")
 
-    with pytest.raises(acceptance_module.AcceptanceError, match="does not point to"):
+    with pytest.raises(acceptance_module.AcceptanceError, match="exactly one of"):
+        _verify_fixture(acceptance_module, tmp_path, bodies, checksums, OLD_REPOSITORY)
+
+
+@pytest.mark.parametrize("malformed", [["escoffier-labs/brigade"], {"name": "escoffier-labs/brigade"}, None, 7])
+def test_malformed_source_repository_raises_acceptance_error_not_type_error(acceptance_module, tmp_path, malformed):
+    _, bodies, checksums = _release_fixture(repository=OLD_REPOSITORY, hub=True)
+
+    def mutate(manifest):
+        manifest["components"]["brigade-hub"]["source"]["repository"] = malformed
+
+    _recorded_as(bodies, checksums, OLD_REPOSITORY, mutate=mutate)
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="exactly one of"):
+        _verify_fixture(acceptance_module, tmp_path, bodies, checksums, OLD_REPOSITORY)
+
+
+def test_brigade_hub_must_record_the_same_repository_as_the_other_components(acceptance_module, tmp_path):
+    _, bodies, checksums = _release_fixture(repository=OLD_REPOSITORY, hub=True)
+
+    def mutate(manifest):
+        manifest["components"]["brigade-hub"]["source"]["repository"] = NEW_REPOSITORY
+
+    _recorded_as(bodies, checksums, OLD_REPOSITORY, mutate=mutate)
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="exactly one of"):
+        _verify_fixture(acceptance_module, tmp_path, bodies, checksums, OLD_REPOSITORY)
+
+
+def test_unknown_component_keys_are_rejected(acceptance_module, tmp_path):
+    _, bodies, checksums = _release_fixture(repository=OLD_REPOSITORY)
+
+    def mutate(manifest):
+        manifest["components"]["extra-tool"] = dict(manifest["components"]["sessionfind"])
+
+    _recorded_as(bodies, checksums, OLD_REPOSITORY, mutate=mutate)
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="no unknown one"):
         _verify_fixture(acceptance_module, tmp_path, bodies, checksums, OLD_REPOSITORY)
 
 
 def _materialized_release(module, tmp_path, monkeypatch, *, manifest_repository, mutate=None):
     """Write a verified-looking cached release whose manifest records manifest_repository."""
-    monkeypatch.setenv("GITHUB_REPOSITORY", OLD_REPOSITORY)
     _, bodies, checksums = _release_fixture(repository=OLD_REPOSITORY)
     _verify_fixture(module, tmp_path, bodies, checksums, OLD_REPOSITORY)
     release_dir = tmp_path / "release-assets"
