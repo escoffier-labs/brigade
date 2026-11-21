@@ -209,16 +209,40 @@ def test_close_terminates_appserver_descendant_process_group(tmp_path):
         pytest.fail("app-server descendant process group survived close")
 
 
-def test_windows_appserver_uses_group_and_registry_tree_termination(monkeypatch):
+def test_windows_appserver_is_assigned_to_its_owned_job(monkeypatch):
+    """#1744: the app-server child gets the same job ownership as proc.run children."""
     events = []
     captured = {}
 
+    class FakeJob:
+        def __init__(self):
+            self.closed = False
+
+        def assign(self, process_handle):
+            events.append(("assign", process_handle))
+            return True
+
+        def resume(self, pid):
+            events.append(("resume", pid))
+            return True
+
+        def terminate(self):
+            events.append("job-terminate")
+            return True
+
+        def close(self):
+            self.closed = True
+
     class StubProcess:
         pid = 4242
+        _handle = 777
 
     class StubRegistry:
         def register(self, process):
             events.append(("register", process.pid))
+
+        def register_with_job(self, process, job):
+            events.append(("register-job", process.pid, job))
 
         def terminate(self, process):
             events.append(("terminate", process.pid))
@@ -237,9 +261,11 @@ def test_windows_appserver_uses_group_and_registry_tree_termination(monkeypatch)
         captured.update(kwargs)
         return StubProcess()
 
+    job = FakeJob()
     registry = StubRegistry()
     server = codex_appserver.AppServer(argv=["codex", "app-server"], process_registry=registry)
     monkeypatch.setattr(codex_appserver.os, "name", "nt")
+    monkeypatch.setattr(proc, "create_owned_windows_job", lambda: job)
     monkeypatch.setattr(codex_appserver.subprocess, "Popen", fake_popen)
     monkeypatch.setattr(codex_appserver.threading, "Thread", StubThread)
     monkeypatch.setattr(server, "request", lambda *args, **kwargs: {})
@@ -248,9 +274,33 @@ def test_windows_appserver_uses_group_and_registry_tree_termination(monkeypatch)
     server.start()
     server.close()
 
-    assert captured["creationflags"] == getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200)
+    expected_flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0x00000200) | proc._WINDOWS_CREATE_SUSPENDED
+    assert captured["creationflags"] == expected_flags
     assert "start_new_session" not in captured
-    assert events == [("register", 4242), ("terminate", 4242), ("unregister", 4242)]
+    assert events == [
+        ("assign", 777),
+        ("resume", 4242),
+        ("register-job", 4242, job),
+        ("terminate", 4242),
+        ("unregister", 4242),
+    ]
+    assert job.closed is True
+
+
+def test_windows_appserver_refuses_to_launch_without_an_owned_job(monkeypatch):
+    """#1744: no leaky unguarded app-server when the job object is unavailable."""
+    monkeypatch.setattr(codex_appserver.os, "name", "nt")
+    monkeypatch.setattr(proc, "create_owned_windows_job", lambda: None)
+    monkeypatch.setattr(
+        codex_appserver.subprocess,
+        "Popen",
+        lambda *args, **kwargs: pytest.fail("the app-server must not launch without an owned job"),
+    )
+
+    server = codex_appserver.AppServer(argv=["codex", "app-server"])
+
+    with pytest.raises(codex_appserver.AppServerError, match="job object is unavailable"):
+        server.start()
 
 
 class _BudgetStubServer:

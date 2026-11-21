@@ -1,0 +1,1 @@
+- Windows cancellation now terminates registered children through their owned job objects instead of a recycled pid, and an exited leader is never passed to taskkill.
