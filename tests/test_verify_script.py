@@ -164,8 +164,7 @@ def test_verify_full_gate_does_not_invoke_external_flock(tmp_path, monkeypatch):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="fcntl is POSIX")
-@pytest.mark.parametrize("topology,entrypoint", [("clone", "verify-fast"), ("worktree", "verify")])
-def test_verify_full_gate_keeps_lock_after_execvpe_into_verify(tmp_path, monkeypatch, topology, entrypoint):
+def test_verify_full_gate_keeps_lock_after_execvpe_into_verify(tmp_path, monkeypatch):
     # Stale inherited state must not bypass admission or split the host lock.
     monkeypatch.setenv("BRIGADE_VERIFY_LOCK_HELD", "1")
     monkeypatch.delenv("BRIGADE_VERIFY_LOCK_PATH", raising=False)
@@ -192,10 +191,7 @@ def test_verify_full_gate_keeps_lock_after_execvpe_into_verify(tmp_path, monkeyp
         check=True,
     )
     other = tmp_path / "other"
-    if topology == "clone":
-        subprocess.run(["git", "clone", "-q", str(checkout), str(other)], check=True)
-    else:
-        subprocess.run(["git", "-C", str(checkout), "worktree", "add", "-q", "--detach", str(other)], check=True)
+    subprocess.run(["git", "-C", str(checkout), "worktree", "add", "-q", "--detach", str(other)], check=True)
     holder_root = tmp_path / "holder"
     second_root = tmp_path / "second"
     holder_root.mkdir()
@@ -241,7 +237,7 @@ done
     holder_env["BRIGADE_VERIFY_LOCK_PATH"] = str(tmp_path / "full.lock")
     second_env["BRIGADE_VERIFY_LOCK_PATH"] = holder_env["BRIGADE_VERIFY_LOCK_PATH"]
     verify = checkout / "scripts/verify"
-    contender = other / "scripts" / entrypoint
+    contender = other / "scripts/verify"
     holder = subprocess.Popen(
         [str(verify)],
         cwd=ROOT,
@@ -440,7 +436,6 @@ def test_verify_rejects_unsafe_slot_files(tmp_path, monkeypatch, kind):
 
 
 @pytest.mark.skipif(os.name != "posix", reason="fcntl is POSIX")
-@pytest.mark.parametrize("entrypoint", ["verify", "verify-fast"])
 @pytest.mark.parametrize(
     "name,value",
     [
@@ -450,7 +445,7 @@ def test_verify_rejects_unsafe_slot_files(tmp_path, monkeypatch, kind):
         ("BRIGADE_VERIFY_SHARDS", "0"),
     ],
 )
-def test_full_entrypoints_reject_invalid_settings_before_tools(tmp_path, name, value, entrypoint):
+def test_verify_rejects_invalid_settings_before_tools(tmp_path, name, value):
     tools, log = _fake_tool_dir(tmp_path)
     env = dict(
         os.environ,
@@ -461,32 +456,6 @@ def test_full_entrypoints_reject_invalid_settings_before_tools(tmp_path, name, v
     )
     env.pop("BRIGADE_VERIFY_LOCK_HELD", None)
     env[name] = value
-    result = subprocess.run([str(ROOT / "scripts" / entrypoint)], env=env, capture_output=True, text=True, timeout=15)
+    result = subprocess.run([str(ROOT / "scripts" / "verify")], env=env, capture_output=True, text=True, timeout=15)
     assert result.returncode == 2, result.stderr
     assert not log.exists()
-
-
-@pytest.mark.skipif(os.name != "posix", reason="Bash verification entrypoint")
-@pytest.mark.parametrize("jobs,shards,expected", [("2", None, 0), ("auto", None, 2), ("2", "3", 2)])
-def test_verify_fast_jobs_compatibility_is_explicit(tmp_path, jobs, shards, expected):
-    tools, log = _fake_tool_dir(tmp_path)
-    env = dict(
-        os.environ,
-        PY=str(tools),
-        VERIFY_LOG=str(log),
-        JOBS=jobs,
-        BRIGADE_VERIFY_LOCK_PATH=str(tmp_path / "full.lock"),
-        BRIGADE_VERIFY_LOCK_PYTHON=sys.executable,
-    )
-    env.pop("BRIGADE_VERIFY_LOCK_HELD", None)
-    env.pop("BRIGADE_VERIFY_SHARDS", None)
-    if shards:
-        env["BRIGADE_VERIFY_SHARDS"] = shards
-    result = subprocess.run([str(ROOT / "scripts/verify-fast")], env=env, capture_output=True, text=True, timeout=15)
-    assert result.returncode == expected, result.stderr
-    assert "BRIGADE_VERIFY_SHARDS" in result.stderr
-    assert log.exists() == (expected == 0)
-    if expected == 0:
-        calls = log.read_text().splitlines()
-        assert calls[0] == "python\tscripts/verify_env.py"
-        assert calls[-1] == "python\tscripts/verify_parallel.py"
