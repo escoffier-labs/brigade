@@ -253,6 +253,26 @@ def test_worker_done_and_exact_transcript_make_a_quiescent_result(outcome, show_
     assert "synthetic transcript text" not in repr(obs)
 
 
+def test_repeated_worker_done_still_settles_with_a_stable_result():
+    # Orca 1.4.268 accepts a repeated worker_done with the same outcome as a duplicate
+    # (worker-report-settlement.ts), so the mailbox can hold two matching rows.
+    show, transcript = _fixture("worker-show-structured"), _fixture("worker-read")
+    show["result"]["dispatch"]["status"] = "completed"
+    show["result"]["worker"]["state"] = "succeeded"
+    transcript["result"]["status"]["worker"] = "succeeded"
+    done = _fixture("worker-done")
+    first = done["result"]["messages"][0]
+    repeat = json.loads(json.dumps(first))
+    repeat["id"] = "msg_ffffffffffff"
+    done["result"]["messages"].append(repeat)
+    reordered = json.loads(json.dumps(done))
+    reordered["result"]["messages"].reverse()
+    obs = classify_show(_worker(), show, worker_done=done, transcript=transcript)
+    again = classify_show(_worker(), show, worker_done=reordered, transcript=transcript)
+    assert (obs.family, obs.status, obs.containment) == ("terminal-candidate", "completed", "quiescent")
+    assert obs == again
+
+
 @pytest.mark.parametrize("show_name", ["worker-show-resting", "worker-show-kept-open"])
 def test_settled_terminal_worker_stays_open_until_released(show_name):
     done, transcript = _fixture("worker-done"), _fixture("worker-read")

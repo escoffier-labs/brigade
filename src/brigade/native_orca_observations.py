@@ -154,7 +154,12 @@ def _report_id(worker: WorkerReference, worker_done: object, status: str) -> str
         for message in messages
         if (report_id := _matching_report_id(worker, _fields(message), outcome)) is not None
     }
-    return matches.pop() if len(matches) == 1 else None
+    # Every match already agrees on Dispatch, Task, Run and outcome. Orca accepts a
+    # repeated worker_done with the same outcome as a duplicate without marking it
+    # rejected (worker-report-settlement.ts at v1.4.268), so two matches are one
+    # report sent twice. Take the smallest id so the choice does not depend on
+    # whether the caller read check or inbox.
+    return min(matches) if matches else None
 
 
 def _transcript_digest(worker: WorkerReference, payload: object, worker_state: str) -> str | None:
