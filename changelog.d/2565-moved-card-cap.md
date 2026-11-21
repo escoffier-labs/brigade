@@ -1,0 +1,1 @@
+- The instruction move planner enforces a 50-card cap per source file and reports `moved_card_cap_reached` instead of failing, and the count fails closed when the card folder cannot be trusted. The cap takes effect when the slice 2 PR A3 move stage passes `instruction_moved_cards.count()`.
