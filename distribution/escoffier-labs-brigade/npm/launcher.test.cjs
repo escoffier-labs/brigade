@@ -55,16 +55,80 @@ test('missing dependency fails with an installation diagnostic', t => {
 
 const posix = { skip: process.platform === 'win32' && 'POSIX signal and process group contract', timeout: 12000 };
 
-test('missing execve reports the supported Node runtime instead of reinstall advice', posix, t => {
-  const f = fixture(t, "throw new Error('dependency must not run');");
-  const result = spawnSync(process.execPath, ['-e',
-    'process.execve = undefined; require(process.argv[1]);', f.launcher,
-  ], { encoding: 'utf8', timeout: 5000 });
-  assert.equal(result.status, 1, result.stderr);
-  assert.match(result.stderr, /requires Node\.js \^22\.15\.0 \|\| >=23\.11\.0/);
-  assert.doesNotMatch(result.stderr, /reinstall/i);
-  assert.equal(result.stdout, '');
+// Node 22.0 to 22.14 has no process.execve, and `npm update -g` ignores engines, so
+// the launcher must still work there: it falls back to a child process.
+const noExecve = ['-e', 'process.execve = undefined; require(process.argv[1]);'];
+
+test('without process.execve it still passes literal arguments, streams, environment and status', posix, t => {
+  const f = fixture(t, `
+    const fs = require('node:fs');
+    console.log(JSON.stringify({args: process.argv.slice(2), cwd: process.cwd(),
+      input: fs.readFileSync(0, 'utf8'), value: process.env.BRIDGE_EXAMPLE}));
+    console.error('dependency stderr');
+    process.exitCode = 23;
+  `);
+  const args = ['two words', '"quoted"', '$(touch forbidden)', '', 'café'];
+  const result = spawnSync(process.execPath, [...noExecve, f.launcher, ...args], {
+    cwd: f.root, input: 'stdin\nbytes\n', encoding: 'utf8',
+    env: { ...process.env, PATH: '', BRIDGE_EXAMPLE: 'inherited' }, timeout: 5000,
+  });
+  assert.equal(result.status, 23, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), {
+    args, cwd: fs.realpathSync(f.root), input: 'stdin\nbytes\n', value: 'inherited',
+  });
+  assert.equal(result.stderr, 'dependency stderr\n');
+  assert.equal(fs.existsSync(path.join(f.root, 'forbidden')), false);
 });
+
+test('without process.execve a signal death of the dependency is reported as that signal', posix, t => {
+  const f = fixture(t, "process.kill(process.pid, 'SIGTERM');");
+  const result = spawnSync(process.execPath, [...noExecve, f.launcher], { encoding: 'utf8', timeout: 5000 });
+  assert.equal(result.status, null, result.stderr);
+  assert.equal(result.signal, 'SIGTERM');
+});
+
+for (const delivery of ['pid', 'group']) {
+  for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+    test(`without process.execve ${delivery} ${signal} reaches dependency once and preserves handled status`, posix, async t => {
+      const f = fixture(t, `
+        const signals = [];
+        for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, () => {
+          signals.push(signal);
+          if (signals.length === 1) setTimeout(() => {
+            console.log(JSON.stringify(signals)); process.exit(23);
+          }, 300);
+        });
+        console.log(process.pid);
+        setInterval(() => {}, 1000);
+      `);
+      const child = spawn(process.execPath, [...noExecve, f.launcher], {
+        detached: true, stdio: ['ignore', 'pipe', 'pipe'], cwd: f.root,
+      });
+      let dependencyPid;
+      t.after(() => {
+        for (const pid of [dependencyPid, child.pid]) {
+          if (pid) { try { process.kill(-pid, 'SIGKILL'); } catch {} }
+        }
+      });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', data => { stdout += data; });
+      child.stderr.on('data', data => { stderr += data; });
+      const closed = once(child, 'close');
+      await Promise.race([
+        once(child.stdout, 'data'),
+        closed.then(() => { throw new Error(`exited before ready: ${stderr}`); }),
+      ]);
+      dependencyPid = Number(stdout.trim());
+      assert.ok(dependencyPid > 0, stdout);
+      // A PID signal reaches only the launcher, which forwards it after its grace period.
+      // A group signal reaches the dependency too, so the launcher must not repeat it.
+      process.kill(delivery === 'group' ? -child.pid : child.pid, signal);
+      assert.deepEqual(await closed, [23, null], stderr);
+      assert.deepEqual(JSON.parse(stdout.trim().split('\n')[1]), [signal]);
+    });
+  }
+}
 
 test('process replacement rejection reports its cause instead of reinstall advice', posix, t => {
   const f = fixture(t, "throw new Error('dependency must not run');");

@@ -10,6 +10,15 @@ brigade --version
 
 The package installs both the `brigade` and `brigadestack` commands. The explicit package form also works: `npx --yes --package=brigadestack -- brigade --version`. Installing with `--omit=optional` prevents startup. Reinstall with optional dependencies enabled. Linux glibc x64/ARM64, macOS x64/ARM64 and Windows x64 are supported targets. Unsupported platforms should use the Python installation route. Global npm bins can overlap existing pipx or uv installations, so inspect command resolution after installation.
 
+Install only one of `brigadestack` and `@escoffier-labs/brigade` globally. Both link a `brigade` command, so npm stops with `EEXIST` on the second install. If `@escoffier-labs/brigade` is already installed, switch with:
+
+```sh
+npm uninstall --global @escoffier-labs/brigade
+npm install --global brigadestack
+```
+
+To go back, run `npm uninstall --global brigadestack`, then `npm install --global @escoffier-labs/brigade`.
+
 ### The `@escoffier-labs/brigade` compatibility package
 
 `@escoffier-labs/brigade` was the real package through 0.31.0. From 0.32.0 it is a small compatibility package, built from [`distribution/escoffier-labs-brigade/npm`](../../distribution/escoffier-labs-brigade/npm/README.md), that depends on exactly `brigadestack@<same version>` and declares its own `brigade` command. npm links only the bins of the package you installed, so `npm update --global @escoffier-labs/brigade` keeps a working `brigade`. It publishes from `npm-publish.yml` after `brigadestack` is on the registry and has passed registry acceptance.

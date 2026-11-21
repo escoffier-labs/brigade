@@ -572,3 +572,19 @@ test('an unknown payload distribution is refused before uv executes', posix, t =
   assert.ok(!fs.existsSync(path.join(f.root,'state','bootstrap.json')));
   assert.ok(!fs.existsSync(path.join(f.root,'state','install-count')));
 });
+
+for (const [version,allowed] of [['0.31.0',true],['0.30.2',true],['0.31.1',false],['0.32.0',false],['0.32.0.dev20261121',false],['1.0.0',false]]) {
+  test(`legacy brigade-cli payload ${version} is ${allowed?'accepted':'refused'}`, posix, t => {
+    const f=fixture(t,'echo','brigade-cli');const file=path.join(f.pkg,'runtime.json');const r=JSON.parse(fs.readFileSync(file));
+    const old=path.join(f.pkg,'wheel',r.payload.wheel);
+    r.payloadVersion=r.payload.version=version;r.payload.wheel=`brigade_cli-${version}-py3-none-any.whl`;
+    fs.renameSync(old,path.join(f.pkg,'wheel',r.payload.wheel));fs.writeFileSync(file,JSON.stringify(r));
+    const result=run(f,['--version']);
+    assert.equal(result.status,allowed?0:1,result.stderr);
+    if(!allowed) {
+      assert.match(result.stderr,/manifest invalid/);
+      assert.ok(!fs.existsSync(path.join(f.root,'state','install-count')),'uv must not run');
+      assert.ok(!fs.existsSync(path.join(f.root,'state','payloads')),'no payload root may be created');
+    }
+  });
+}

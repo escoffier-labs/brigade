@@ -1,10 +1,10 @@
 {
   "name": "@escoffier-labs/brigade",
-  "version": "0.32.0",
+  "version": "0.31.0",
   "description": "Compatibility package for the Brigade CLI. Depends on exactly brigadestack of the same version.",
   "license": "MIT",
   "engines": {
-    "node": "^22.15.0 || >=23.11.0"
+    "node": ">=22"
   },
   "bin": {
     "brigade": "launcher.cjs"
@@ -15,7 +15,7 @@
     "LICENSE"
   ],
   "dependencies": {
-    "brigadestack": "0.32.0"
+    "brigadestack": "0.31.0"
   },
   "scripts": {
     "test": "node --test launcher.test.cjs"

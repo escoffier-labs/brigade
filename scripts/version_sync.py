@@ -10,8 +10,6 @@ from the ``[project].version`` source of truth:
   - ``mcp-registry/*/server.json``    -> ``"version": "X"`` (server and package)
   - ``distribution/brigade-cli/pypi/pyproject.toml`` -> the PyPI compatibility package
                                         version and its ``brigadestack==X`` pin
-  - ``distribution/escoffier-labs-brigade/npm/package.json`` -> the npm compatibility
-                                        package version and its ``brigadestack`` pin
   - recorded demo assets             -> a ``brigade X.Y.Z`` token baked into the
                                         rendered frames (``.cast`` and ``.svg``)
 
@@ -70,13 +68,13 @@ PLUGIN_LOCATIONS = [
     ("plugins/brigade/.mcp.json", r'"brigadestack@([^"]+)"'),
     ("plugins/brigade/codex.mcp.json", r'"brigadestack@([^"]+)"'),
 ]
-# The compatibility packages: each one's own version and its exact brigadestack pins.
-# PyPI brigade-cli pins the base and the forwarded extras. npm @escoffier-labs/brigade pins one dependency.
+# The PyPI compatibility package: its own version and its exact brigadestack pins (base and forwarded extras).
+# The npm compatibility package is deliberately absent. npm publishes from the promotion PR of
+# RELEASE.md section 8, which moves npm/feasibility/runtime.json, so its version follows that
+# file, not pyproject.toml. tests/test_brigadestack_distribution.py gates that on every PR.
 COMPAT_PACKAGE_LOCATIONS = [
     ("distribution/brigade-cli/pypi/pyproject.toml", r'(?m)^version\s*=\s*"([^"]+)"'),
     ("distribution/brigade-cli/pypi/pyproject.toml", r'"brigadestack(?:\[[a-z]+\])?==([^"]+)"'),
-    ("distribution/escoffier-labs-brigade/npm/package.json", r'(?m)^  "version"\s*:\s*"([^"]+)"'),
-    ("distribution/escoffier-labs-brigade/npm/package.json", r'"brigadestack"\s*:\s*"([^"]+)"'),
 ]
 # ---------------------------------------------------------------------------
 

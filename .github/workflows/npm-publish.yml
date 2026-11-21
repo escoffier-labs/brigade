@@ -357,14 +357,15 @@ jobs:
       - name: Read compatibility identity and require the exact brigadestack pin
         id: identity
         run: |
-          version=$(node - "$COMPAT_DIR/package.json" npm/feasibility/runtime.json <<'JS'
+          version=$(node - "$COMPAT_DIR/package.json" npm/feasibility/runtime.json npm/feasibility/package.json <<'JS'
           const assert = require('node:assert/strict');
           const fs = require('node:fs');
-          const manifest = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
-          const runtime = JSON.parse(fs.readFileSync(process.argv[3], 'utf8'));
+          const [manifest, runtime, launcher] = process.argv.slice(2, 5).map(file => JSON.parse(fs.readFileSync(file, 'utf8')));
           assert.equal(manifest.name, '@escoffier-labs/brigade');
           assert.match(manifest.version, /^\d+\.\d+\.\d+$/, 'compatibility package publishes stable versions only');
-          assert.equal(manifest.version, runtime.version, 'compatibility version must equal the brigadestack version this run published');
+          // RELEASE.md section 8 bumps all three together in the promotion PR, and a test gates it on the PR.
+          assert.equal(manifest.version, runtime.version, 'compatibility version must equal npm/feasibility/runtime.json version');
+          assert.equal(manifest.version, launcher.version, 'compatibility version must equal npm/feasibility/package.json version');
           assert.deepEqual(manifest.dependencies, {brigadestack: manifest.version});
           assert.deepEqual(manifest.bin, {brigade: 'launcher.cjs'});
           assert.deepEqual(manifest.files, ['launcher.cjs', 'README.md', 'LICENSE']);
@@ -373,7 +374,7 @@ jobs:
           )
           echo "version=$version" >> "$GITHUB_OUTPUT"
           echo "@escoffier-labs/brigade@$version depends on brigadestack@$version"
-      - name: Require the published dependency and a new compatibility version above latest
+      - name: Require the published dependency, and a version above latest unless it is already live
         env:
           VERSION: ${{ steps.identity.outputs.version }}
         run: |
@@ -384,8 +385,9 @@ jobs:
           const [version, versionsJson, latest] = process.argv.slice(2);
           // npm prints a bare string instead of an array when only one version exists.
           if ([].concat(JSON.parse(versionsJson)).includes(version)) {
-            console.log(`::error::@escoffier-labs/brigade@${version} is already on npm; bump ${process.env.COMPAT_DIR} first`);
-            process.exit(1);
+            // A rerun after a publish that landed: publish-compat.cjs compares integrity and provenance.
+            console.log(`@escoffier-labs/brigade@${version} is already on npm; the publisher decides whether its bytes match`);
+            process.exit(0);
           }
           if (!/^\d+\.\d+\.\d+/.test(latest)) {
             console.log(`::error::cannot read the current @escoffier-labs/brigade latest dist-tag (got '${latest}')`);
@@ -422,23 +424,10 @@ jobs:
           printf '%s\n' "$reported"
           test "$reported" = "brigade $VERSION"
           "$prefix/bin/brigade" --help
-      - name: Publish the checked tarball with provenance
+      - name: Publish the checked tarball with provenance and reconcile the registry
         env:
           VERSION: ${{ steps.identity.outputs.version }}
-        run: npm publish "$RUNNER_TEMP/escoffier-brigade-npm/escoffier-labs-brigade-$VERSION.tgz" --provenance --access public --tag latest --ignore-scripts
-      - name: Confirm the registry serves the new version as latest
-        env:
-          VERSION: ${{ steps.identity.outputs.version }}
-        run: |
-          for attempt in $(seq 1 30); do
-            if test "$(npm view @escoffier-labs/brigade dist-tags.latest 2>/dev/null)" = "$VERSION"; then
-              npm view "@escoffier-labs/brigade@$VERSION" name version dependencies dist.integrity
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "::error::@escoffier-labs/brigade latest did not reach $VERSION"
-          exit 1
+        run: node npm/feasibility/publish-compat.cjs --tarball "$RUNNER_TEMP/escoffier-brigade-npm/escoffier-labs-brigade-$VERSION.tgz" --name @escoffier-labs/brigade --version "$VERSION"
 
   release-gate:
     if: always()

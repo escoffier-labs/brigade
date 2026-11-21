@@ -86,6 +86,17 @@ The updater runs `pipx install --force` with an exact requirement, then calls th
 
 When the external development timer is migrated, replace its direct pipx script with the thin invocation `brigade update --channel beta`. Disable the old direct-pipx script at the same time. This repository does not modify live timer files.
 
+## Switching npm packages
+
+`brigadestack` and `@escoffier-labs/brigade` both link a global `brigade` command, so install only one of them. npm stops with `EEXIST` on the second install, which is what `npm install --global brigadestack` does while `@escoffier-labs/brigade` owns the command. `npm update --global @escoffier-labs/brigade` keeps working: the package is a compatibility package that depends on exactly `brigadestack` at the same version. To move to the new name, uninstall the old package first:
+
+```sh
+npm uninstall --global @escoffier-labs/brigade
+npm install --global brigadestack
+```
+
+To go back, run `npm uninstall --global brigadestack`, then `npm install --global @escoffier-labs/brigade`.
+
 ## Compatibility window
 
 `brigade setup` normally resolves the running CLI's exact `vX.Y.Z` release manifest, never `latest`. Before the first unified release is available, only an absent exact release or manifest can select the bundled standalone manifest. Digest failures, malformed release metadata, manifest parse failures, and component download failures never fall back. `brigade setup --manifest-source standalone` is the explicit one-unified-release compatibility path. Offline setup uses a verified exact-manifest cache when present or that explicit standalone compatibility path.

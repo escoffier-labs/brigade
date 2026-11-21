@@ -62,19 +62,30 @@ function resolveRuntime(runtime) {
 // uv names a tool's directory after the installed distribution, so the directory
 // name follows the bundled wheel. Payload roots are keyed by that wheel's SHA-256,
 // so a wheel with a different name always lands in a fresh root and never reuses
-// (or deletes) the tools/brigade-cli directory of an older install. brigade-cli
-// stays allowed only for the legacy 0.31.0 payload pin.
-const payloadDistributions=new Set(['brigadestack','brigade-cli']);
+// (or deletes) the tools/brigade-cli directory of an older install. brigade-cli is
+// allowed only for the legacy payloads up to 0.31.0, so a later wheel can never be
+// installed into the legacy tool directory.
+const LEGACY_DISTRIBUTION='brigade-cli',LEGACY_LAST_VERSION=[0,31,0];
+function legacyVersion(version) {
+  const match=/^(\d+)\.(\d+)\.(\d+)/.exec(typeof version==='string'?version:'');
+  if(!match) return false;
+  const parts=match.slice(1).map(Number);
+  for(let i=0;i<3;i++) if(parts[i]!==LEGACY_LAST_VERSION[i]) return parts[i]<LEGACY_LAST_VERSION[i];
+  return true;
+}
+function allowedDistribution(runtime,distribution) {
+  return distribution==='brigadestack' || (distribution===LEGACY_DISTRIBUTION && legacyVersion(runtime.payloadVersion));
+}
 function toolName(runtime) {
   const distribution=runtime.payload && runtime.payload.distribution;
-  if(!payloadDistributions.has(distribution)) throw new Error('Bundled wheel integrity manifest invalid. Reinstall the exact package version.');
+  if(!allowedDistribution(runtime,distribution)) throw new Error('Bundled wheel integrity manifest invalid. Reinstall the exact package version.');
   return distribution;
 }
 function wheelName(distribution,version) {return `${distribution.replace(/-/g,'_')}-${version}-py3-none-any.whl`;}
 function payloadWheel(runtime) {
   const p=runtime.payload;
   if(!p || !/^[a-f0-9]{64}$/.test(p.sha256) || !Number.isSafeInteger(p.bytes) || p.bytes<=0 ||
-     !payloadDistributions.has(p.distribution) || p.version!==runtime.payloadVersion ||
+     !allowedDistribution(runtime,p.distribution) || p.version!==runtime.payloadVersion ||
      typeof p.wheel!=='string' || !/^[a-z0-9_]+-\d+\.\d+\.\d+(?:\.dev\d+)?-py3-none-any\.whl$/.test(p.wheel) ||
      p.wheel!==wheelName(p.distribution,runtime.payloadVersion)) {
     throw new Error('Bundled wheel integrity manifest invalid. Reinstall the exact package version.');

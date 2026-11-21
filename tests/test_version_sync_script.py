@@ -94,41 +94,6 @@ def test_version_sync_locks_the_compat_package_version_and_brigadestack_pin(tmp_
     assert module.check("1.0.0") == 0
 
 
-def test_version_sync_locks_the_npm_compat_package_version_and_brigadestack_pin(tmp_path, capsys):
-    repo = tmp_path / "repo"
-    (repo / "src/brigade/templates/components").mkdir(parents=True)
-    compat = repo / "distribution/escoffier-labs-brigade/npm/package.json"
-    compat.parent.mkdir(parents=True)
-    (repo / "pyproject.toml").write_text('[project]\nversion = "1.0.0"\n')
-    (repo / "src/brigade/__init__.py").write_text('__version__ = "1.0.0"\n')
-    (repo / "src/brigade/templates/components/manifest-v1.json").write_text('{"brigade_version": "1.0.0"}\n')
-    compat.write_text(
-        '{\n  "name": "@escoffier-labs/brigade",\n  "version": "0.9.0",\n  "dependencies": {\n    "brigadestack": "0.9.0"\n  }\n}\n'
-    )
-
-    module = _load_version_sync_module(repo)
-    module.COMPAT_PACKAGE_LOCATIONS = list(_shipped_compat_locations(module)[2:])
-    assert [path for path, _ in module.COMPAT_PACKAGE_LOCATIONS] == [
-        "distribution/escoffier-labs-brigade/npm/package.json"
-    ] * 2
-    assert module.check("1.0.0") == 1
-    err = capsys.readouterr().err
-    assert err.count("distribution/escoffier-labs-brigade/npm/package.json declares 0.9.0") == 2
-
-    assert module.write("1.0.0") == 0
-    text = compat.read_text()
-    assert '"version": "1.0.0"' in text and '"brigadestack": "1.0.0"' in text
-    assert module.check("1.0.0") == 0
-
-
-def _shipped_compat_locations(_module):
-    spec = importlib.util.spec_from_file_location("version_sync_shipped_locations", ROOT / "scripts/version_sync.py")
-    assert spec and spec.loader
-    shipped = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(shipped)
-    return shipped.COMPAT_PACKAGE_LOCATIONS
-
-
 def test_shipped_version_sync_covers_the_compat_package():
     spec = importlib.util.spec_from_file_location("version_sync_shipped", ROOT / "scripts/version_sync.py")
     assert spec and spec.loader
@@ -136,5 +101,6 @@ def test_shipped_version_sync_covers_the_compat_package():
     spec.loader.exec_module(module)
     paths = {path for path, _pattern in module._locations()}
     assert "distribution/brigade-cli/pypi/pyproject.toml" in paths
-    assert "distribution/escoffier-labs-brigade/npm/package.json" in paths
+    # The npm compatibility package follows npm/feasibility/runtime.json, not pyproject.toml.
+    assert not any(path.startswith("distribution/escoffier-labs-brigade/") for path in paths)
     assert module.check(module._expected()) == 0

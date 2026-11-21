@@ -45,10 +45,15 @@ def test_retired_npm_bridge_workflow_is_gone_and_one_workflow_publishes_every_np
     steps = "\n".join(step.get("run", "") for step in jobs["publish-compat"]["steps"])
     assert 'test "$GITHUB_SHA" = "$EXPECTED_SHA"' in steps
     assert 'npm view "brigadestack@$VERSION" version' in steps
-    assert (
-        "--provenance" in steps
-        and "distribution/escoffier-labs-brigade/npm" in jobs["publish-compat"]["env"]["COMPAT_DIR"]
-    )
+    assert jobs["publish-compat"]["env"]["COMPAT_DIR"] == "distribution/escoffier-labs-brigade/npm"
+    # A rerun reconciles integrity and provenance in the publisher instead of a bare publish, and the
+    # job no longer aborts when the version is already live.
+    assert "node npm/feasibility/publish-compat.cjs" in steps
+    assert "npm publish" not in steps
+    assert "bump ${process.env.COMPAT_DIR}" not in steps
+    assert "npm/feasibility/runtime.json" in steps and "npm/feasibility/package.json" in steps
+    publisher = (ROOT / "npm/feasibility/publish-compat.cjs").read_text()
+    assert "--provenance" in publisher and "Immutable registry integrity mismatch" in publisher
 
 
 def test_root_package_is_brigadestack_with_the_brigadestack_and_brigade_scripts():
@@ -115,16 +120,29 @@ def test_npm_real_package_is_brigadestack_with_both_commands():
     assert all(name.startswith("@escoffier-labs/brigade-uv-") for name in manifest["optionalDependencies"])
 
 
-def test_npm_compat_package_depends_on_exactly_the_root_version_and_declares_its_own_bin():
-    root = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]
+def test_npm_compat_package_is_tied_to_the_npm_promotion_files_not_pyproject():
+    # npm publishes after RELEASE.md section 5b already bumped pyproject.toml, and the npm pin in
+    # runtime.json moves later in the section 8 promotion PR. The compatibility package must move
+    # with that promotion: version, exact brigadestack pin, runtime.json and the launcher manifest.
     manifest = json.loads((NPM_COMPAT / "package.json").read_text())
+    runtime = json.loads((NPM_REAL / "runtime.json").read_text())
+    launcher = json.loads((NPM_REAL / "package.json").read_text())
     assert manifest["name"] == "@escoffier-labs/brigade"
-    assert manifest["version"] == root["version"]
-    assert manifest["dependencies"] == {"brigadestack": root["version"]}
+    assert manifest["version"] == runtime["version"] == runtime["payloadVersion"] == launcher["version"]
+    assert manifest["dependencies"] == {"brigadestack": launcher["version"]}
+
+
+def test_npm_compat_package_is_not_version_synced_with_pyproject():
+    sync = (ROOT / "scripts/version_sync.py").read_text()
+    assert "escoffier-labs-brigade" not in sync.split("COMPAT_PACKAGE_LOCATIONS = [")[1].split("]")[0]
+
+
+def test_npm_compat_package_declares_its_own_bin_and_payload():
+    manifest = json.loads((NPM_COMPAT / "package.json").read_text())
     # npm links only the installed package's own bins, so `npm update -g` needs this one.
     assert manifest["bin"] == {"brigade": "launcher.cjs"}
     assert manifest["files"] == ["launcher.cjs", "README.md", "LICENSE"]
-    assert manifest["engines"]["node"] == "^22.15.0 || >=23.11.0"
+    assert manifest["engines"]["node"] == ">=22"
     assert manifest["repository"]["directory"] == "distribution/escoffier-labs-brigade/npm"
 
 
@@ -260,3 +278,20 @@ def test_npm_launcher_preserves_controlling_terminal_and_job_control(tmp_path, e
         os.kill(shell_pid, signal.SIGKILL)
         os.waitpid(shell_pid, 0)
         os.close(terminal)
+
+
+@pytest.mark.parametrize(
+    "page",
+    [
+        "README.md",
+        "docs/update-channels.md",
+        "npm/feasibility/README.md",
+        "distribution/escoffier-labs-brigade/npm/README.md",
+    ],
+)
+def test_install_pages_explain_the_global_brigade_bin_conflict_with_both_commands(page):
+    # npm refuses the second global install because both packages link `brigade`.
+    text = (ROOT / page).read_text()
+    assert "EEXIST" in text or "refuses the second" in text or "npm refuses" in text
+    assert "npm uninstall --global @escoffier-labs/brigade" in text
+    assert "npm install --global brigadestack" in text
