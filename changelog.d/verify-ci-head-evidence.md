@@ -1,0 +1,3 @@
+- Add `brigade work verify ci` to record the required CI check on the exact head commit and show its result alongside local checks in work closeout.
+- Require a focused command, a verifier manifest, or a ranked test suggestion when planning local verification.
+- `brigade work verify plan` with no `--command` and no `--manifest` no longer proposes a whole-suite default. It now exits 1 with a blocker unless a ranked test suggestion exists.
