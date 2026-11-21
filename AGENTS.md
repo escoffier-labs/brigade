@@ -92,8 +92,9 @@ Format: trigger, then the rule, then what to do instead.
 - A test fails after your change: never weaken, skip, or delete the test to
   make it pass. Fix the code. If you believe the test itself is wrong, say so
   explicitly and get agreement before touching it.
-- Pushing (only when explicitly asked): this repo has a content-guard pre-push
-  hook. Never bypass it with `git push --no-verify`. Fix the flagged leak, or
+- Pushing: assigned in-house work may push its feature branch and open a PR
+  without asking again. Never push to `main`. This repo has a content-guard
+  pre-push hook. Never bypass it with `git push --no-verify`. Fix the flagged leak, or
   add a reviewed inline allow-tag (`<!-- content-guard: allow <rule-id> -->`)
   on the offending line.
 - Unsure how to build, test, or release: never invent commands. Check
@@ -118,6 +119,15 @@ Format: trigger, then the rule, then what to do instead.
   every template `_brigade_version` field together. `./scripts/verify` checks
   the sync.
 - Committing: use conventional commits. In escoffier-labs organizations and original solomonneas repositories, commits for substantial coding work should carry the coding agent's co-author trailer. External repositories and upstream third-party PRs remain trailer-free.
+- Posting or editing an issue, pull request, or GitHub comment on an agent's
+  behalf: end it with the attribution block shown in `CONTRIBUTING.md`
+  ("Agent attribution"): `Sent by: <orchestrator model> (via <client>)`, then a
+  `Models used` list with `Implementation/build`, `Test/verification`, and
+  `Review` entries. Name only models that did that work, with the provider when
+  the name is ambiguous, and write `none` for a role no model filled. Report
+  the exact checks and their observed results in the body, or say `not run`.
+  Do not credit a model for checks it only wrote. This applies to every issue
+  body, PR body, and comment. The human author identity stays as it is.
 
 ## Orientation
 

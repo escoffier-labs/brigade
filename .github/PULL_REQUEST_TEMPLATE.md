@@ -24,4 +24,14 @@ Closes #
 - [ ] Added a `changelog.d/<pr-number-or-slug>.md` fragment for any user-visible effect (entries describe effects, not commit subjects). Do not edit `CHANGELOG.md`; CI rejects it outside a release commit
 - [ ] No personal details, hostnames, IPs, account names, tokens, or unredacted absolute paths in code, templates, tests, or this PR (the `content-guard` CI job will fail otherwise)
 - [ ] No new runtime dependencies (Brigade is zero-runtime-dep on purpose)
-- [ ] Conventional commit messages, no AI co-authorship trailers
+- [ ] Conventional commit messages (agent co-author trailers follow the Committing rule in AGENTS.md)
+
+## Agent attribution
+
+<!-- Agent-written PRs keep this block (see CONTRIBUTING.md, "Agent attribution"). Human PRs delete it. -->
+
+Sent by: <orchestrator model> (via <client>)
+Models used:
+- Implementation/build: <model, or none>
+- Test/verification: <model, or none> (checks: <listed above, or not run>)
+- Review: <model, or none>

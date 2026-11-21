@@ -60,6 +60,18 @@ For an authored or explicitly assigned PR within an authorized task, the account
 
 After applying the required repository label, use `@coderabbitai review` for an incremental pass or `@coderabbitai full review` for a pass over all eligible files when warranted. Verify the actual reviewed head. If a required review is unavailable, follow an approved alternative or report the exact blocker without bypassing the gate. Do not enable paid review credits or add-ons to obtain a review.
 
+### Agent attribution
+
+An issue, pull request, or GitHub comment written by an agent ends with an attribution block. It names the orchestrator model and the models that did implementation, verification, and review. List only models that did each role, write `none` for a role no model filled, and keep the human author identity unchanged. Put the exact checks and their observed results in the body above the block. The `Test/verification` line names the model and points at them, or says `not run`.
+
+```text
+Sent by: <orchestrator model> (via <client>)
+Models used:
+- Implementation/build: <model, or none>
+- Test/verification: <model, or none> (checks: <listed above, or not run>)
+- Review: <model, or none>
+```
+
 ## Changelog
 
 Pull requests do not edit `CHANGELOG.md`. A PR with a user-visible effect adds one fragment, `changelog.d/<pr-number-or-slug>.md`, holding one or more `- ` bullets that describe effects, not commit subjects. A PR with no user-visible effect needs no fragment. The format is in [`changelog.d/README.md`](changelog.d/README.md), and `python3 scripts/changelog_fragments.py check` validates it locally.
