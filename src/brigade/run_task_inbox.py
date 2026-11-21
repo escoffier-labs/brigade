@@ -22,6 +22,7 @@ believe an acknowledgement was recorded when nothing reads it yet.
 
 from __future__ import annotations
 
+import contextlib
 import errno
 import hashlib
 import json
@@ -48,6 +49,8 @@ KINDS = frozenset({KIND_CANCEL, KIND_ACK})
 # never a queue. Exceeding either bound refuses instead of scanning forever.
 MAX_REQUEST_BYTES = 4096
 MAX_REQUESTS = 1024
+# Scan headroom for in-flight temporary names, which are not requests.
+_SCAN_SLACK = 64
 DEFAULT_REASON = "operator"
 
 # Closed outcomes. ``recorded`` means the journal now holds the intent,
@@ -153,16 +156,20 @@ def _open_inbox(run_dir: Path, *, create: bool) -> int | None:
     return descriptor
 
 
-def _names(descriptor: int, path: Path) -> list[str]:
-    """Directory entries, excluding our temporary files and anything hidden."""
+def _names(descriptor: int) -> list[str]:
+    """Directory entries from the held descriptor, bounded before any is read.
+
+    Temporary and hidden names count toward the scan bound but are not
+    requests. A scan that reaches the bound refuses instead of reading an
+    unbounded directory.
+    """
+    limit = MAX_REQUESTS + _SCAN_SLACK
     try:
-        if dirfd.posix_available() and os.scandir in os.supports_fd:
-            with os.scandir(descriptor) as entries:
-                names = [entry.name for entry in entries]
-        else:
-            names = os.listdir(path)
+        names = dirfd.child_names(descriptor, limit + 1)
     except OSError as exc:
         raise TaskInboxError("inbox-unavailable", "the task inbox could not be read") from exc
+    if len(names) > limit:
+        raise TaskInboxError("inbox-overflow", "the task inbox exceeds the request bound")
     return sorted(name for name in names if not name.startswith("."))
 
 
@@ -335,13 +342,23 @@ def _read(descriptor: int, name: str, path: Path) -> Any:
         if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
             raise TaskInboxError("inbox-refused", "an inbox request is a symlink") from exc
         raise TaskInboxError("inbox-unavailable", "an inbox request could not be read") from exc
-    with os.fdopen(opened, "rb") as handle:
-        data = handle.read(MAX_REQUEST_BYTES + 1)
+    try:
+        with os.fdopen(opened, "rb") as handle:
+            # The entry may have been swapped between the name check and the
+            # open, so the opened descriptor itself must be a bounded file.
+            opened_info = os.fstat(handle.fileno())
+            if not stat.S_ISREG(opened_info.st_mode):
+                raise TaskInboxError("inbox-refused", "an inbox request is not a regular file")
+            if opened_info.st_size > MAX_REQUEST_BYTES:
+                raise TaskInboxError("inbox-overflow", "an inbox request exceeds the size bound")
+            data = handle.read(MAX_REQUEST_BYTES + 1)
+    except OSError as exc:
+        raise TaskInboxError("inbox-unavailable", "an inbox request could not be read") from exc
     if len(data) > MAX_REQUEST_BYTES:
         raise TaskInboxError("inbox-overflow", "an inbox request exceeds the size bound")
     try:
         return json.loads(data)
-    except (ValueError, UnicodeDecodeError):
+    except (ValueError, UnicodeDecodeError, RecursionError):
         return None
 
 
@@ -356,7 +373,7 @@ def pending(run_dir: Path) -> Pending:
     if descriptor is None:
         return Pending((), ())
     try:
-        names = _names(descriptor, path)
+        names = _names(descriptor)
         if len(names) > MAX_REQUESTS:
             raise TaskInboxError("inbox-overflow", "the task inbox exceeds the request bound")
         requests: list[CancelRequest] = []
@@ -506,10 +523,15 @@ def cancel(
         try:
             # Non-blocking by default: a live batch keeps its lock, and this
             # command reports queued instead of waiting for it.
-            with runguard.run_lock(workspace, run_dir=run_dir, stale_action="claim"):
+            held = contextlib.ExitStack()
+            held.enter_context(runguard.run_lock(workspace, run_dir=run_dir, stale_action="claim"))
+        except (runguard.RunLockError, OSError):
+            # Only a lock this process could not take means "queued". A drain
+            # failure under the lock is a refusal, never a queued success.
+            held = None
+        if held is not None:
+            with held:
                 drained = drain(run_dir, workspace)
-        except (runguard.RunLockError, OSError, TaskInboxError):
-            drained = None
 
     for state in submitted:
         row = rows[state.handle.spec.task_id]

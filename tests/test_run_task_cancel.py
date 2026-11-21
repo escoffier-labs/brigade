@@ -121,6 +121,26 @@ def prepare_batch_run(site: Site, task_names: list[str]) -> tuple[dict, str]:
     return payload, run_dir.name
 
 
+def accept_batch(site: Site, tasks: list[dict]) -> dict:
+    """Accept explicit task dicts before dispatch, like ``prepare_batch_run``."""
+    run_dir = site.repo / ".brigade" / "runs" / ("batch-" + hashlib.sha256(b"req").hexdigest())
+    run_dir.mkdir(parents=True)
+    with runguard.run_lock(site.repo, run_dir=run_dir):
+        aboyeur._write_json(run_dir / "run.json", _run_meta(site.repo))
+        run_tasks.accept_task_batch(
+            run_dir,
+            workspace=site.repo,
+            request_id="req",
+            specs=tuple(_spec(task["task_id"], task["seat"], task["text"]) for task in tasks),
+        )
+    return {"schema": "brigade.run_batch.v1", "request_id": "req", "tasks": tasks}
+
+
+def launched(site: Site, task_id: str) -> int:
+    """Launches by journal claim: later-wave prompts quote earlier tasks as context."""
+    return len([event for event in facts(site.run_dir(), "task.launch-claimed") if event.payload["task_id"] == task_id])
+
+
 def record_launches(monkeypatch, prompts: list[str]) -> None:
     def model(agent, prompt, **kwargs):
         prompts.append(prompt)
@@ -331,3 +351,104 @@ def test_runs_tasks_cancel_reports_unknown_task(run_site, capsys):
     assert rc == 2
     assert row(payload, "missing")["outcome"] == "unknown-task"
     assert inbox_names(run_dir) == []
+
+
+def test_cancel_before_launch_does_not_skip_siblings_in_later_waves(site, capsys, monkeypatch):
+    # max_workers is 2, so one dependency layer of three tasks runs as two waves.
+    tasks = accept_batch(site, [site.task(name, read_only=True) for name in ("a", "b", "c")])
+    assert inbox.submit(site.run_dir(), "cancel", "a", reason="operator") == "created"
+    prompts: list[str] = []
+    record_launches(monkeypatch, prompts)
+
+    rc, result, err = invoke(site, capsys, tasks["tasks"])
+
+    assert rc == 1, err
+    assert (launched(site, "a"), launched(site, "b"), launched(site, "c")) == (0, 1, 1)
+    assert result["tasks"]["a"]["status"] == "cancelled"
+    assert result["tasks"]["b"]["status"] == "completed"
+    assert result["tasks"]["c"]["status"] == "completed"
+
+
+def test_dependent_of_a_cancelled_task_stays_queued_and_unrelated_tasks_run(site, capsys, monkeypatch):
+    tasks = accept_batch(
+        site,
+        [
+            site.task("a", read_only=True),
+            site.task("b", read_only=True),
+            site.task("c", read_only=True, depends_on=["a"]),
+            site.task("d", read_only=True, depends_on=["b"]),
+        ],
+    )
+    assert inbox.submit(site.run_dir(), "cancel", "a", reason="operator") == "created"
+    prompts: list[str] = []
+    record_launches(monkeypatch, prompts)
+
+    rc, result, err = invoke(site, capsys, tasks["tasks"])
+
+    assert rc == 1, err
+    assert [launched(site, name) for name in "abcd"] == [0, 1, 0, 1]
+    assert result["tasks"]["a"]["status"] == "cancelled"
+    assert result["tasks"]["b"]["status"] == "completed"
+    assert result["tasks"]["d"]["status"] == "completed"
+    # The dependent was never launched or journaled: it keeps its queued state.
+    assert result["tasks"]["c"]["status"] == "queued"
+    assert state_of(site.run_dir(), "c").handle.attempt_id is None
+
+
+def test_drain_failure_under_the_lock_is_a_refusal_not_queued(run_site, capsys, monkeypatch):
+    run_dir, _workspace = run_site
+
+    def broken(*args, **kwargs):
+        raise inbox.TaskInboxError("journal-unreadable", "task journal is not readable")
+
+    monkeypatch.setattr(inbox, "drain", broken)
+    rc, payload = cancel(run_dir, capsys, "a")
+
+    assert rc == 2
+    assert payload["refusal"]["code"] == "journal-unreadable"
+    assert payload["tasks"] == []
+
+
+@posix_only
+def test_request_swapped_for_a_fifo_after_inspection_is_refused_without_crashing(held_run, monkeypatch):
+    run_dir, _workspace = held_run
+    assert inbox.submit(run_dir, "cancel", "a", reason="operator") == "created"
+    name = inbox_names(run_dir)[0]
+    real_stat = inbox.dirfd.stat_child
+
+    def swap_then_stat(descriptor, child):
+        info = real_stat(descriptor, child)
+        if child == name:
+            target = run_dir / "task-inbox" / name
+            target.unlink()
+            os.mkfifo(target, 0o600)
+        return info
+
+    monkeypatch.setattr(inbox.dirfd, "stat_child", swap_then_stat)
+    with pytest.raises(inbox.TaskInboxError) as excinfo:
+        inbox.pending(run_dir)
+    assert excinfo.value.code in {"inbox-refused", "inbox-unavailable"}
+
+
+def test_intent_after_attempt_preparation_is_honored_at_the_claim_in_a_live_batch(site, capsys, monkeypatch):
+    # The request arrives after the launch fence prepared "a", so only the
+    # recorder's drain before the claim can see it. Later waves still run.
+    tasks = accept_batch(site, [site.task(name, read_only=True) for name in ("a", "b", "c")])
+    prompts: list[str] = []
+    record_launches(monkeypatch, prompts)
+    real_prepare = run_tasks.prepare_attempt
+
+    def prepare_then_cancel(run_dir, *, workspace, task_id, **kwargs):
+        handle = real_prepare(run_dir, workspace=workspace, task_id=task_id, **kwargs)
+        if task_id == "a":
+            inbox.submit(run_dir, "cancel", "a", reason="parent")
+        return handle
+
+    monkeypatch.setattr(run_tasks, "prepare_attempt", prepare_then_cancel)
+
+    rc, result, err = invoke(site, capsys, tasks["tasks"])
+
+    assert rc == 1, err
+    assert (launched(site, "a"), launched(site, "b"), launched(site, "c")) == (0, 1, 1)
+    assert result["tasks"]["a"]["status"] == "cancelled"
+    assert [event for event in facts(site.run_dir(), "task.launch-claimed") if event.payload["task_id"] == "a"] == []

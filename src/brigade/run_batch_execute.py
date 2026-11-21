@@ -81,6 +81,10 @@ class BatchExecution:
         self.read_only = {t["task_id"]: bool(t.get("read_only", False)) for t in plan["tasks"]}
         # Tasks refused at the launch point keep their journal state untouched.
         self.refused: set[str] = set()
+        # Declared prerequisites, and dependents never launched because one of
+        # them was cancelled. Those stay queued and do not abort later waves.
+        self.depends_on = {t["task_id"]: tuple(t.get("depends_on") or ()) for t in plan["tasks"]}
+        self.prerequisite_cancelled: set[str] = set()
         # Per-task worktrees created and validated before any launch, by task ID.
         self.workspaces: dict[str, run_batch_workspace.Binding] = {}
         # Per-task launch refusals, as (code, reason), including every workspace
@@ -337,6 +341,9 @@ class BatchExecution:
         if result.task_id is None:
             return
         task_id = str(result.task_id)
+        if task_id in self.prerequisite_cancelled:
+            # Never launched and never journaled: the task stays queued.
+            return
         if task_id in self.refused or result.status == "refused":
             # A refusal is also where a cancel gate lands: record the terminal
             # cancellation once, then leave the result untouched.
@@ -428,6 +435,14 @@ class BatchExecution:
                 # An isolated task's checkout is re-validated immediately before
                 # its launch, so a file added since creation refuses that task.
                 self._validate_at_launch(task_id)
+                blocked = sorted(
+                    dep
+                    for dep in self.depends_on.get(task_id, ())
+                    if dep in self.prerequisite_cancelled or self._cancelled(dep)
+                )
+                if blocked:
+                    self.prerequisite_cancelled.add(task_id)
+                    raise BatchError("prerequisite-cancelled", f"task {task_id} depends on cancelled task {blocked[0]}")
                 current = self.current(task_id)
                 if current.cancel_requested:
                     # A journaled intent owns this launch: record the terminal
@@ -533,10 +548,20 @@ class BatchExecution:
                 # the sibling results keep their own status.
                 lines.append(f"{result.task_id}: cancelled")
                 continue
+            if str(result.task_id) in self.prerequisite_cancelled:
+                # Never launched because a prerequisite was cancelled; it stays queued.
+                lines.append(f"{result.task_id}: prerequisite-cancelled")
+                continue
             lines.append(f"{result.task_id}: {'completed' if result.ok else result.status or 'failed'}")
         # Use the planned-run finish path with no synthesis invocation. It
         # records incomplete workers and retains every result and artifact.
-        ok = all(r.ok or self._cancelled(str(r.task_id)) for r in results) and not failures
+        ok = (
+            all(
+                r.ok or self._cancelled(str(r.task_id)) or str(r.task_id) in self.prerequisite_cancelled
+                for r in results
+            )
+            and not failures
+        )
         detail = "; ".join(failures)
         if detail:
             lines.append(detail)

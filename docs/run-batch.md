@@ -767,23 +767,34 @@ A task with a journaled intent is never launched. It is observed once as
 `cancelled` with containment `not-launched` on its deterministic attempt, which is
 the attempt its launch would have used. Replay and resume drain the inbox first,
 so a request that survived a crash is honored instead of launching the task. A
-sibling task in the same wave is unaffected and keeps its own result.
+sibling task is unaffected and keeps its own result, in the same wave or a later
+one: a cancellation is a decided outcome, so it never trips the wave scheduler's
+fail-fast skip of later waves.
+
+A task that `depends_on` a cancelled task never launches. The batch reports it
+as `prerequisite-cancelled`, journals nothing for it, and leaves it `queued`.
+Tasks that do not depend on the cancelled one still run.
 
 An unknown task reports `unknown-task`, and a terminal task reports
-`already-terminal`; neither writes anything. A request whose task is in flight is
+`already-terminal`. Neither writes anything. A request whose task is in flight is
 still reported as `queued`, plus `live-termination-unavailable` in JSON and human
 output.
 
 This slice records intent only. It does not terminate a running worker, start
 watchers or change any process registry: a task that has already launched keeps
-running, and the recorded intent applies to its next launch attempt. Process
-termination and the separate containment record are the following slice.
+running, and the recorded intent applies to its next launch attempt. The same
+holds for a request that lands after the batch's last drain before a claim: that
+launch proceeds. Process termination and the separate containment record are the
+following slice.
 
 The inbox is bounded: at most 1024 request files of at most 4 KiB each. Exceeding
 either bound refuses with `inbox-overflow`. Malformed request files are skipped
 and reported by name. A symlinked inbox directory or request file is refused with
-`inbox-refused`. The batch treats any inbox refusal as a warning and keeps
-launching, so a damaged inbox cannot stop a batch.
+`inbox-refused`, and so is an entry swapped for a non-regular file after it was
+inspected. The batch treats any inbox refusal as a warning and keeps launching,
+so a damaged inbox cannot stop a batch. The `cancel` command, by contrast,
+reports `queued` only when a live batch holds the run lock. An inbox or journal
+failure while it holds the lock itself is a refusal with exit 2.
 
 JSON output uses `brigade.runs_tasks_cancel.v1`, with `run_id`, `reason`, a
 `tasks` list of `{task_id, outcome, reason, live_termination}`, and `refusal`.
