@@ -21,7 +21,7 @@ query parameters or body. Its request headers are:
 
 | Header | Value |
 | --- | --- |
-| `User-Agent` | `brigade-cli/<version> (<OS>)`, unchanged from earlier clients |
+| `User-Agent` | `brigadestack/<version> (<OS>)`, renamed from `brigade-cli/<version>` in 0.32 |
 | `X-Brigade-Channel` | `pipx`, `pip`, `uvx`, `npm`, `source`, or `plugin` |
 
 The channel header contains a label only. The npm launcher supplies its identity
@@ -29,7 +29,7 @@ to the child. `BRIGADE_INSTALL_CHANNEL` can explicitly select a channel, includi
 `plugin` or `uvx`. Other values are ignored. Without an override, the CLI detects
 pipx from `pipx_metadata.json` in its Python environment, including custom pipx
 homes. The `uv` marker in `pyvenv.cfg` identifies uv-created environments as
-`uvx`, including `uvx --from brigade-cli brigade ...`. Other installed packages
+`uvx`, including `uvx --from brigadestack brigade ...`. Other installed packages
 are `pip`, and source trees are `source`. No environment path or arbitrary
 environment value is transmitted. The currently deployed Worker ignores the
 channel header. The channel will be recorded only after the separate Worker

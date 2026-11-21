@@ -32,7 +32,7 @@ CANONICAL_IDS = ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-eviden
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 REPOSITORY = "escoffier-labs/brigade"
 GITHUB_API_HOST = "api.github.com"
-PYPI_PROJECT_URL = "https://pypi.org/pypi/brigade-cli/json"
+PYPI_PROJECT_URL = "https://pypi.org/pypi/brigadestack/json"
 PYPI_AVAILABILITY_TIMEOUT_SECONDS = 6 * 60
 PYPI_POLL_INTERVAL_SECONDS = 5
 PIPX_INSTALL_TIMEOUT_SECONDS = 6 * 60
@@ -424,7 +424,7 @@ def install_brigade_cli(
     """Install an exact wheel, retrying while the simple index lags the JSON API."""
     deadline = monotonic() + timeout_seconds
     detail = "pipx install has not succeeded"
-    argv = [sys.executable, "-m", "pipx", "install", f"brigade-cli=={version}"]
+    argv = [sys.executable, "-m", "pipx", "install", f"brigadestack=={version}"]
     while True:
         try:
             run_checked(argv, runner=runner, env=env)
@@ -436,7 +436,7 @@ def install_brigade_cli(
         remaining = deadline - monotonic()
         if remaining <= 0:
             raise AcceptanceError(
-                f"pipx install of brigade-cli=={version} was not available within {timeout_seconds:g} seconds: {detail}"
+                f"pipx install of brigadestack=={version} was not available within {timeout_seconds:g} seconds: {detail}"
             )
         sleep(min(poll_interval_seconds, remaining))
 

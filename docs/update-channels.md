@@ -4,14 +4,14 @@
 development-machine channel for the next release's preview line. `brigade update` is the
 supported user-global mutation path for a pipx-managed Brigade installation once
 you want channel-managed upgrades. Deliberate initial or manual exact pins such
-as `pipx install brigade-cli==X.Y.Z` are valid and do not require `brigade update`
+as `pipx install brigadestack==X.Y.Z` are valid and do not require `brigade update`
 until you choose to move. It resolves immutable coordinates before changing pipx
 or native components, then publishes its state only after both commands succeed.
 
 | Machine profile | Channel | Use |
 | --- | --- | --- |
 | Production or operator | `stable` | Default. Pins the latest published non-prerelease Brigade release. |
-| Brigade development | `beta` | Intentional development-machine opt-in. Pins the newest non-yanked `brigade-cli==0.32.0.devYYYYMMDD` wheel from PyPI. |
+| Brigade development | `beta` | Intentional development-machine opt-in. Pins the newest non-yanked `brigadestack==0.32.0.devYYYYMMDD` wheel from PyPI. |
 
 Daily development wheels are built from `main` on a schedule and published as PyPI
 prereleases with versions of the form `X.Y.Z.devYYYYMMDD` (for example
@@ -24,12 +24,25 @@ Development wheels are not promoted to stable and PyPI's default resolver does n
 Install a chosen daily build with an exact version pin:
 
 ```bash
-pipx install 'brigade-cli==0.28.0.dev20260907'
+pipx install 'brigadestack==0.32.0.dev20261120'
 ```
 
-The same pin works with `pip install 'brigade-cli==0.28.0.dev20260907'`. Bare
-`pipx install brigade-cli` or `pip install brigade-cli` resolves the latest stable
+The same pin works with `pip install 'brigadestack==0.32.0.dev20261120'`. Bare
+`pipx install brigadestack` or `pip install brigadestack` resolves the latest stable
 release only; prerelease wheels are never selected as `latest`.
+
+`brigadestack` is the real PyPI package. `brigade-cli` is a compatibility package that
+depends on exactly `brigadestack==X.Y.Z` and installs the same `brigade` command.
+`brigade update` on the stable channel upgrades the pipx app under the name it was
+installed with: an app named `brigade-cli` is reinstalled as `brigade-cli==X.Y.Z`
+(which pulls `brigadestack==X.Y.Z`), and any other install uses `brigadestack`.
+Development wheels are published only as `brigadestack`, so `brigade update --channel beta`
+always installs `brigadestack`. On a machine whose pipx app is named `brigade-cli`, the beta
+update installs `brigadestack`, removes the `brigade-cli` app, installs `brigadestack` again
+(older pipx removes launchers by name), and only then runs setup and records the update. On Windows,
+where pipx copies launchers and cannot remove the running app, the update instead prints the
+two commands to run after it exits: `pipx uninstall brigade-cli`, then the same
+`pipx install --force brigadestack==<version>` to restore the `brigade` launcher.
 
 Run `brigade update` for the production default. `brigade update --channel beta`
 selects the newest non-yanked exact `0.32.0.devYYYYMMDD` wheel for the `0.32`

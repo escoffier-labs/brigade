@@ -48,6 +48,12 @@ def test_target_owns_brigade_cli_ignores_malformed_pyproject(tmp_path):
     assert roadmap_cmd._target_owns_brigade_cli(tmp_path) is False
 
 
+@pytest.mark.parametrize("name", ["brigadestack", "brigade-cli"])
+def test_target_owns_brigade_cli_accepts_both_package_names(tmp_path, name):
+    tmp_path.joinpath("pyproject.toml").write_text(f'[project]\nname = "{name}"\n')
+    assert roadmap_cmd._target_owns_brigade_cli(tmp_path) is True
+
+
 def _write_versioned_roadmap(tmp_path: Path, *, headline: str, project_version: str) -> None:
     (tmp_path / "pyproject.toml").write_text(f'[project]\nname = "brigade-cli"\nversion = "{project_version}"\n')
     (tmp_path / "ROADMAP.md").write_text(f"# Roadmap\n\n## Where things stand\n\n{headline} is current.\n")

@@ -20,6 +20,12 @@ REF_URL = f"https://api.github.com/repos/escoffier-labs/brigade/git/ref/tags/{TA
 TAG_OBJECT_URL = "https://api.github.com/repos/escoffier-labs/brigade/git/tags/"
 
 
+@pytest.fixture(autouse=True)
+def _default_install_name(monkeypatch):
+    """Keep command assertions independent of how this test environment was installed."""
+    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: update_cmd.PYPI_PROJECT)
+
+
 def _manifest() -> bytes:
     components = {}
     for component in component_manifest.KNOWN_COMPONENT_IDS:
@@ -144,7 +150,7 @@ class _Http:
 
 def _wheel_file(version: str, *, yanked: bool = False, packagetype: str = "bdist_wheel") -> dict:
     return {
-        "filename": f"brigade_cli-{version}-py3-none-any.whl",
+        "filename": f"brigadestack-{version}-py3-none-any.whl",
         "packagetype": packagetype,
         "yanked": yanked,
     }
@@ -152,7 +158,7 @@ def _wheel_file(version: str, *, yanked: bool = False, packagetype: str = "bdist
 
 def _sdist_file(version: str, *, yanked: bool = False) -> dict:
     return {
-        "filename": f"brigade_cli-{version}.tar.gz",
+        "filename": f"brigadestack-{version}.tar.gz",
         "packagetype": "sdist",
         "yanked": yanked,
     }
@@ -511,7 +517,7 @@ def test_stable_update_installs_exact_release_then_new_binary_setup(tmp_path):
     )
 
     assert result == 0
-    assert commands[0] == ["pipx", "install", "--force", "brigade-cli==1.2.3"]
+    assert commands[0] == ["pipx", "install", "--force", "brigadestack==1.2.3"]
     assert commands[1][0] == str(installed_binary)
     assert commands[1][1:3] == ["setup", "--manifest"]
     state = update_cmd.load_update_state(tmp_path / "data" / "brigade" / "update-state.json")
@@ -657,7 +663,7 @@ def test_beta_update_installs_exact_dev_wheel_and_reuses_verified_stable_manifes
     cache_path = paths.cache_root / "brigade" / "release-manifests" / f"{hashlib.sha256(manifest).hexdigest()}.json"
     assert cache_path.read_bytes() == manifest
     assert commands == [
-        ["pipx", "install", "--force", f"brigade-cli=={BETA_VERSION}"],
+        ["pipx", "install", "--force", f"brigadestack=={BETA_VERSION}"],
         [
             str(installed_binary),
             "setup",
@@ -697,7 +703,7 @@ def test_beta_update_accepts_pre_agent_notify_stable_manifest(tmp_path):
     cache_path = paths.cache_root / "brigade" / "release-manifests" / f"{hashlib.sha256(manifest).hexdigest()}.json"
     assert cache_path.read_bytes() == manifest
     assert commands == [
-        ["pipx", "install", "--force", f"brigade-cli=={BETA_VERSION}"],
+        ["pipx", "install", "--force", f"brigadestack=={BETA_VERSION}"],
         [
             str(installed_binary),
             "setup",
@@ -822,7 +828,7 @@ def test_beta_update_migrates_git_sha_state_to_exact_wheel_version(tmp_path):
         )
         == 0
     )
-    assert commands[0] == ["pipx", "install", "--force", f"brigade-cli=={BETA_VERSION}"]
+    assert commands[0] == ["pipx", "install", "--force", f"brigadestack=={BETA_VERSION}"]
     state = update_cmd.load_update_state(state_path)
     assert state is not None
     assert state.channel == "beta"
@@ -896,7 +902,7 @@ def test_beta_dry_run_prints_exact_pipx_pin_and_mutates_nothing(tmp_path, capsys
         == 0
     )
     captured = capsys.readouterr().out
-    assert f"pipx install --force brigade-cli=={BETA_VERSION}" in captured
+    assert f"pipx install --force brigadestack=={BETA_VERSION}" in captured
     assert str(paths.brigade_executable) in captured
     assert calls == []
     assert state_path.read_bytes() == before
@@ -933,7 +939,7 @@ def test_rollback_from_beta_to_stable_uses_stable_path_and_state(tmp_path):
         )
         == 0
     )
-    assert commands[0] == ["pipx", "install", "--force", "brigade-cli==1.2.3"]
+    assert commands[0] == ["pipx", "install", "--force", "brigadestack==1.2.3"]
     assert "--allow-compatible-stable-manifest" not in commands[1]
     state = update_cmd.load_update_state(paths.data_root / "brigade" / "update-state.json")
     assert state is not None
@@ -956,7 +962,7 @@ def test_stable_update_regression_still_pins_exact_release_without_pypi_lookup(t
         )
         == 0
     )
-    assert commands[0] == ["pipx", "install", "--force", "brigade-cli==1.2.3"]
+    assert commands[0] == ["pipx", "install", "--force", "brigadestack==1.2.3"]
     assert update_cmd.PYPI_PROJECT_JSON_URL not in http.urls
     assert all("/commits/main" not in url and "check-runs" not in url for url in http.urls)
 
@@ -1190,7 +1196,7 @@ def test_update_works_under_either_repository_name_and_either_stored_state(tmp_p
     )
 
     assert result == 0
-    assert commands[0] == ["pipx", "install", "--force", "brigade-cli==1.2.3"]
+    assert commands[0] == ["pipx", "install", "--force", "brigadestack==1.2.3"]
     state = update_cmd.load_update_state(paths.data_root / "brigade" / "update-state.json")
     assert state is not None
     assert state.component_tag == TAG
@@ -1541,3 +1547,194 @@ def test_current_name_makes_exactly_the_same_requests_as_before(tmp_path):
         f"https://api.github.com/repos/{CURRENT_SLUG}/git/ref/tags/{TAG}",
         BASE + "component-manifest-v1.json",
     ]
+
+
+def _run_stable_update(tmp_path, channel="stable"):
+    manifest = _manifest()
+    commands = []
+
+    def runner(argv):
+        commands.append(argv)
+        return 0
+
+    result = update_cmd.run_update(
+        channel=channel,
+        paths=update_cmd.UpdatePaths(
+            data_root=tmp_path / "data", cache_root=tmp_path / "cache", brigade_executable=tmp_path / "bin" / "brigade"
+        ),
+        http=_Http(_release(manifest), manifest),
+        runner=runner,
+        now=lambda: "2026-07-20T12:00:00+00:00",
+    )
+    return result, commands
+
+
+def test_stable_update_upgrades_a_brigade_cli_install_under_its_own_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
+    result, commands = _run_stable_update(tmp_path)
+    assert result == 0
+    assert commands[0] == ["pipx", "install", "--force", "brigade-cli==1.2.3"]
+
+
+def test_stable_update_upgrades_a_brigadestack_install_under_its_own_name(tmp_path, monkeypatch):
+    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigadestack")
+    result, commands = _run_stable_update(tmp_path)
+    assert result == 0
+    assert commands[0] == ["pipx", "install", "--force", "brigadestack==1.2.3"]
+
+
+def test_beta_update_resolves_and_installs_brigadestack_even_on_a_brigade_cli_install(tmp_path, monkeypatch):
+    # Development wheels are published only for the real package.
+    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
+    monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: False)
+    manifest = _manifest()
+    commands = []
+    http = _PypiHttp(_release(manifest), manifest)
+    result = update_cmd.run_update(
+        channel="beta",
+        paths=update_cmd.UpdatePaths(
+            data_root=tmp_path / "data", cache_root=tmp_path / "cache", brigade_executable=tmp_path / "bin" / "brigade"
+        ),
+        http=http,
+        runner=lambda argv: commands.append(argv) or 0,
+        now=lambda: "2026-07-20T12:00:00+00:00",
+    )
+    assert result == 0
+    assert commands[0] == ["pipx", "install", "--force", f"brigadestack=={BETA_VERSION}"]
+    # Install, remove the old app, install again (older pipx removes launchers by name), then
+    # setup; state is written only after all of them.
+    install = ["pipx", "install", "--force", f"brigadestack=={BETA_VERSION}"]
+    assert commands[:3] == [install, ["pipx", "uninstall", "brigade-cli"], install]
+    assert commands[3][1] == "setup"
+    assert len(commands) == 4
+    assert update_cmd.PYPI_PROJECT_JSON_URL == "https://pypi.org/pypi/brigadestack/json"
+
+
+def test_beta_update_keeps_the_new_install_when_removing_the_old_app_fails(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
+    monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: False)
+    manifest = _manifest()
+    commands = []
+
+    def runner(argv):
+        commands.append(argv)
+        return 1 if argv[1] == "uninstall" else 0
+
+    result = update_cmd.run_update(
+        channel="beta",
+        paths=update_cmd.UpdatePaths(
+            data_root=tmp_path / "data", cache_root=tmp_path / "cache", brigade_executable=tmp_path / "bin" / "brigade"
+        ),
+        http=_PypiHttp(_release(manifest), manifest),
+        runner=runner,
+        now=lambda: "2026-07-20T12:00:00+00:00",
+    )
+    assert result == 0
+    assert commands[1] == ["pipx", "uninstall", "brigade-cli"]
+    assert commands[2] == commands[0]
+    assert commands[3][1] == "setup"
+    assert "pipx uninstall brigade-cli" in capsys.readouterr().err
+
+
+def test_beta_update_records_no_state_when_the_restoring_install_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
+    monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: False)
+    manifest = _manifest()
+    commands = []
+
+    def runner(argv):
+        commands.append(argv)
+        return 1 if len(commands) == 3 else 0  # the reinstall after the uninstall fails
+
+    result = update_cmd.run_update(
+        channel="beta",
+        paths=update_cmd.UpdatePaths(
+            data_root=tmp_path / "data", cache_root=tmp_path / "cache", brigade_executable=tmp_path / "bin" / "brigade"
+        ),
+        http=_PypiHttp(_release(manifest), manifest),
+        runner=runner,
+        now=lambda: "2026-07-20T12:00:00+00:00",
+    )
+    assert result == 1
+    assert len(commands) == 3  # no setup
+    assert not list((tmp_path / "data").rglob("*state*.json"))
+
+
+def test_beta_update_leaves_the_old_app_for_after_exit_where_pipx_copies_apps(tmp_path, monkeypatch, capsys):
+    # Copy-mode pipx (Windows) uninstalls `brigade.exe` by name and cannot delete the running
+    # interpreter, so the update must not remove the app it is running from.
+    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
+    monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: True)
+    manifest = _manifest()
+    commands = []
+    result = update_cmd.run_update(
+        channel="beta",
+        paths=update_cmd.UpdatePaths(
+            data_root=tmp_path / "data", cache_root=tmp_path / "cache", brigade_executable=tmp_path / "bin" / "brigade"
+        ),
+        http=_PypiHttp(_release(manifest), manifest),
+        runner=lambda argv: commands.append(argv) or 0,
+        now=lambda: "2026-07-20T12:00:00+00:00",
+    )
+    assert result == 0
+    assert all(command[1] != "uninstall" for command in commands)
+    err = capsys.readouterr().err
+    assert "pipx uninstall brigade-cli ; pipx install --force brigadestack==" in err
+
+
+def test_beta_update_of_a_brigadestack_install_removes_nothing(tmp_path, monkeypatch):
+    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigadestack")
+    manifest = _manifest()
+    commands = []
+    result = update_cmd.run_update(
+        channel="beta",
+        paths=update_cmd.UpdatePaths(
+            data_root=tmp_path / "data", cache_root=tmp_path / "cache", brigade_executable=tmp_path / "bin" / "brigade"
+        ),
+        http=_PypiHttp(_release(manifest), manifest),
+        runner=lambda argv: commands.append(argv) or 0,
+        now=lambda: "2026-07-20T12:00:00+00:00",
+    )
+    assert result == 0
+    assert all(command[1] != "uninstall" for command in commands)
+
+
+@pytest.mark.parametrize("package", ["brigade-cli", "brigadestack"])
+def test_installed_pypi_project_reads_the_pipx_record(tmp_path, monkeypatch, package):
+    monkeypatch.undo()  # drop the autouse stub so the real function runs
+    (tmp_path / "pipx_metadata.json").write_text(json.dumps({"main_package": {"package": package}}))
+    monkeypatch.setattr(update_cmd.sys, "prefix", str(tmp_path))
+    assert update_cmd.installed_pypi_project() == package
+
+
+def test_installed_pypi_project_falls_back_to_distribution_metadata(tmp_path, monkeypatch):
+    monkeypatch.undo()
+    monkeypatch.setattr(update_cmd.sys, "prefix", str(tmp_path))  # no pipx record
+    seen = []
+
+    def fake_distribution(name):
+        seen.append(name)
+        if name == "brigade-cli":
+            return object()
+        raise update_cmd.importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(update_cmd.importlib.metadata, "distribution", fake_distribution)
+    assert update_cmd.installed_pypi_project() == "brigade-cli"
+
+    def only_real_package(name):
+        raise update_cmd.importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(update_cmd.importlib.metadata, "distribution", only_real_package)
+    assert update_cmd.installed_pypi_project() == "brigadestack"
+
+
+def test_installed_pypi_project_ignores_an_unrelated_pipx_record(tmp_path, monkeypatch):
+    monkeypatch.undo()
+    (tmp_path / "pipx_metadata.json").write_text(json.dumps({"main_package": {"package": "something-else"}}))
+    monkeypatch.setattr(update_cmd.sys, "prefix", str(tmp_path))
+
+    def missing(name):
+        raise update_cmd.importlib.metadata.PackageNotFoundError(name)
+
+    monkeypatch.setattr(update_cmd.importlib.metadata, "distribution", missing)
+    assert update_cmd.installed_pypi_project() == "brigadestack"

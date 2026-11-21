@@ -7,13 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 # The MEMORY.md index line limit is owned by brigade.budgets (the canonical
-# source of truth shared across the escoffier-labs tooling). brigade-cli is a
+# source of truth shared across the escoffier-labs tooling). brigadestack is a
 # hard dependency, so this import normally succeeds; the fallback exists only
 # for resilience (e.g. partial installs). Keep the fallback value in sync with
 # brigade.budgets.MEMORY_INDEX_MAX_LINES, which remains the canonical source.
 try:
     from brigade.budgets import MEMORY_INDEX_MAX_LINES as DEFAULT_MAX_LINES
-except ImportError:  # pragma: no cover - brigade-cli is a declared dependency
+except ImportError:  # pragma: no cover - brigadestack is a declared dependency
     DEFAULT_MAX_LINES = 180
 
 # The Claude Code harness silently DROPS MEMORY.md content read beyond a

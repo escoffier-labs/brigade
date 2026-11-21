@@ -41,7 +41,7 @@ A local service might run on localhost:8080. <!-- content-guard: allow localhost
 git config core.hooksPath hooks
 ```
 
-The guard ships with `brigade-cli`. `CONTENT_GUARD_POLICY` defaults to `public-repo`. `CONTENT_GUARD_DIR` is an explicit compatibility override for older standalone checkouts.
+The guard ships with `brigadestack`. `CONTENT_GUARD_POLICY` defaults to `public-repo`. `CONTENT_GUARD_DIR` is an explicit compatibility override for older standalone checkouts.
 
 ## Why this is part of the product
 

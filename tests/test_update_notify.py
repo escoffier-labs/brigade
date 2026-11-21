@@ -359,7 +359,7 @@ def test_run_refresh_success_writes_latest(tmp_path, monkeypatch):
     assert state == {"checked_at": 555.0, "latest": "0.30.0"}
     assert captured["url"] == update_notify.CHECK_URL
     assert captured["timeout"] == 5
-    assert str(captured["ua"]).startswith(f"brigade-cli/{__version__}")
+    assert str(captured["ua"]).startswith(f"brigadestack/{__version__}")
 
 
 def test_run_refresh_failure_still_stamps_checked_at(tmp_path, monkeypatch):
@@ -621,7 +621,7 @@ def test_refresh_privacy_headers_keep_version_fetch(tmp_path, monkeypatch, extra
     assert len(captured) == 1
     headers = dict(captured[0].header_items())
     if counted:
-        assert headers["User-agent"] == f"brigade-cli/{__version__} ({update_notify.platform.system()})"
+        assert headers["User-agent"] == f"brigadestack/{__version__} ({update_notify.platform.system()})"
         assert headers["X-brigade-channel"] in {"pipx", "pip", "uvx", "npm", "source", "plugin"}
         if extra.get("BRIGADE_INSTALL_CHANNEL"):
             assert headers["X-brigade-channel"] == "plugin"

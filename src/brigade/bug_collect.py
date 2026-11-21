@@ -201,7 +201,7 @@ def collect(
         "brigade": {
             "version": __version__,
             "channel": _install_channel(),
-            "distribution": "brigade-cli",
+            "distribution": "brigadestack",
             "extras": extras.enabled(),
         },
         "runtime": {

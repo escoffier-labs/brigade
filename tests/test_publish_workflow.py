@@ -112,6 +112,25 @@ def test_publish_workflow_builds_the_complete_native_matrix_then_attests_and_rel
     assert assemble < release < release_gate < pypi < acceptance
 
 
+def test_build_and_publish_builds_both_distributions_into_one_trusted_upload():
+    text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
+    job = text[text.index("  build-and-publish:") : text.index("  verify-version-check-endpoint:")]
+
+    root_build = job.index("python -m build --outdir dist\n")
+    compat_build = job.index("python -m build --outdir dist distribution/brigade-cli/pypi")
+    version_check = job.index("Check both distributions share the release version")
+    publish = job.index("      - name: Publish to PyPI")
+    assert root_build < compat_build < version_check < publish
+    # One upload step, default dist/ directory, so both distributions ship together.
+    assert job.count("pypa/gh-action-pypi-publish@") == 1
+    assert "packages-dir" not in job
+    for artifact in ("brigadestack-{version}-py3-none-any.whl", "brigade_cli-{version}-py3-none-any.whl"):
+        assert artifact in job
+    assert "Python package: brigadestack==${VERSION} (brigade-cli==${VERSION} is the compatibility name)" in text
+    # The tag check also covers the compatibility package version.
+    assert '"distribution/brigade-cli/pypi/pyproject.toml"' in text
+
+
 def test_go_native_build_disables_setup_go_cache_for_the_cross_platform_matrix():
     text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
     section = text[text.index("  build-go-native:") : text.index("  assemble-release:")]
@@ -138,7 +157,7 @@ def test_publish_acceptance_covers_native_arm64_and_rosetta_without_self_hosted_
     assert "softwareupdate --install-rosetta --agree-to-license" in rosetta
     assert "self-hosted" not in section
     script = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
-    assert "pypi.org/pypi/brigade-cli/json" in script
+    assert "pypi.org/pypi/brigadestack/json" in script
     assert "Get-BrigadeCliVersion" in script
     assert r"if ($line -match '^brigade\s+(.+)$')" in script
     assert "Assert-BrigadeVersionMatches" in script
@@ -385,8 +404,8 @@ def test_derive_dev_version_rejects_invalid_stable_bases(stable_version):
 def test_update_channels_documents_exact_dev_wheel_install():
     text = (ROOT / "docs" / "update-channels.md").read_text()
 
-    assert "pipx install 'brigade-cli==0.28.0.dev20260907'" in text
-    assert "pip install 'brigade-cli==0.28.0.dev20260907'" in text
+    assert "pipx install 'brigadestack==0.32.0.dev20261120'" in text
+    assert "pip install 'brigadestack==0.32.0.dev20261120'" in text
     assert "default resolver does not select them" in text
 
 

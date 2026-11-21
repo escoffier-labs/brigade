@@ -1652,7 +1652,7 @@ def _check_publish_gate(target: Path) -> List[CheckResult]:
     else:
         results.append(
             _operator_check(
-                MANUAL, "guard: embedded content guard", f"not found at {scanner_dir}; reinstall brigade-cli"
+                MANUAL, "guard: embedded content guard", f"not found at {scanner_dir}; reinstall brigadestack"
             )
         )
     return results

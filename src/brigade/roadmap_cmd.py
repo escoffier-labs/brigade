@@ -710,7 +710,7 @@ def _target_owns_brigade_cli(target: Path) -> bool:
     text = _read_text(target / "pyproject.toml")
     if not text:
         return False
-    return re.search(r'(?m)^\s*name\s*=\s*"brigade-cli"\s*$', text) is not None
+    return re.search(r'(?m)^\s*name\s*=\s*"(?:brigadestack|brigade-cli)"\s*$', text) is not None
 
 
 def audit_payload(target: Path) -> dict[str, Any]:

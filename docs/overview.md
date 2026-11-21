@@ -8,7 +8,7 @@ The full tour: every component, diagram, and workflow. The [README](../README.md
 | --- | --- |
 | GitHub | [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade) |
 | Website | [brigade.tools](https://brigade.tools) |
-| PyPI | [`brigade-cli`](https://pypi.org/project/brigade-cli/) |
+| PyPI | [`brigadestack`](https://pypi.org/project/brigadestack/), with `brigade-cli` as the compatibility package |
 | Command | `brigade` |
 | Stable release | v0.31.0 (`brigade-cli` on PyPI, `@escoffier-labs/brigade` on npm) |
 | Preview line | 0.32 beta (`0.32.0.devYYYYMMDD` wheels) |
@@ -89,7 +89,7 @@ Install:
 
 ```bash
 npm install --global @escoffier-labs/brigade@0.31.0   # needs Node.js 22+ and npm
-# alternatives: pipx install brigade-cli, or uv tool install brigade-cli
+# alternatives: pipx install brigadestack, or uv tool install brigadestack
 brigade setup
 ```
 

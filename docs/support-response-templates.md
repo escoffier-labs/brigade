@@ -9,7 +9,7 @@ Thanks for trying Brigade. Please share the redacted output from:
 ```bash
 python3 --version
 pipx --version
-pipx install brigade-cli --verbose
+pipx install brigadestack --verbose
 brigade --version
 ```
 

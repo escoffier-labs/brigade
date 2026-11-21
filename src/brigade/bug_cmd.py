@@ -122,7 +122,7 @@ def _search_issues(query: str) -> list[Any]:
         url = "https://api.github.com/search/issues?" + urlencode(
             {"q": f"repo:{REPOSITORY} is:issue {query}", "per_page": "10"}
         )
-        request = Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "brigade-cli"})
+        request = Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "brigadestack"})
         with urlopen(request, timeout=10) as response:
             body = response.read(BUNDLE_CAP + 1)
         if len(body) > BUNDLE_CAP:

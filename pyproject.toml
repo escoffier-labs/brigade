@@ -3,14 +3,14 @@ requires = ["setuptools>=84.2.1", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "brigade-cli"
+name = "brigadestack"
 version = "0.32.0"
 description = "Run coding agents anywhere and keep one record of the work, with MCP servers, tools, skills, and memory in sync across your harnesses."
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "Solomon Neas", email = "me@solomonneas.dev" }] # content-guard: allow email
-keywords = ["agents", "ai-agents", "agent-memory", "agent-handoffs", "ai-memory", "mcp", "mcp-config", "mcp-sync", "model-context-protocol", "openclaw", "claude-code", "codex", "opencode", "grok", "hermes", "memory", "bootstrap", "brigade", "brigade-cli", "operator", "local-first", "guardrails", "agents-md", "code-graph", "evidence-ledger", "mcp-server", "agent-skills"]
+keywords = ["agents", "ai-agents", "agent-memory", "agent-handoffs", "ai-memory", "mcp", "mcp-config", "mcp-sync", "model-context-protocol", "openclaw", "claude-code", "codex", "opencode", "grok", "hermes", "memory", "bootstrap", "brigade", "brigadestack", "brigade-cli", "operator", "local-first", "guardrails", "agents-md", "code-graph", "evidence-ledger", "mcp-server", "agent-skills"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
@@ -52,9 +52,11 @@ Issues = "https://github.com/escoffier-labs/brigade/issues"
 
 [project.scripts]
 brigade = "brigade.cli:process_main"
-# Same entry point under the package name, so `uvx brigade-cli ...` works (the MCP
-# registry launches PyPI servers as `uvx <package> <args>`).
-brigade-cli = "brigade.cli:process_main"
+# Same entry point under the package name, so `uvx brigadestack ...` works (the MCP
+# registry launches PyPI servers as `uvx <package> <args>`). The `brigade-cli`
+# compatibility package declares its own `brigade` and `brigade-cli` scripts under
+# distribution/brigade-cli/pypi, because pipx exposes only the installed package's scripts.
+brigadestack = "brigade.cli:process_main"
 brigade-hook = "brigade.claude_hooks.entry:main"
 
 [tool.setuptools.packages.find]

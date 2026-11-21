@@ -48,7 +48,7 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         return 0
 
     if st is not None and st.name == "memory":
-        print("memory maintenance is built into brigade-cli:")
+        print("memory maintenance is built into brigadestack:")
         print("  brigade memory status")
         print("  brigade memory lint")
         print("  brigade memory compact")
@@ -57,7 +57,7 @@ def run(target: Path, station: str, *, install_manifest: bool = False) -> int:
         print()
 
     if st is not None and st.name == "guard":
-        print("content scanning is embedded in brigade-cli:")
+        print("content scanning is embedded in brigadestack:")
         print("  brigade scrub --target . --policy public-repo")
         print("  brigade security scan --target .")
         print("plating remains an optional process-boundary helper for publish demos.")

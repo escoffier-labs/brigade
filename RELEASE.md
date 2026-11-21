@@ -100,7 +100,7 @@ complete historical 25-asset releases (27 total files), but new production requi
 the complete additive inventory. Partial alias sets and unrelated extras are rejected.
 The checked-in historical manifest stays unchanged. Package assembly stages the
 new tag's generated legacy-primary manifest. Default installation identities stay legacy.
-The release body names `brigade-cli==<version>`. Rust builds run on the exact native runner
+The release body names `brigadestack==<version>` and mentions `brigade-cli==<version>` as the compatibility name. The publish job builds both distributions: the root project as `brigadestack` and `distribution/brigade-cli/pypi` as `brigade-cli`, which pins `brigadestack==<version>` and must carry the same version (`scripts/version_sync.py` checks it). Rust builds run on the exact native runner
 for each platform. Go builds are pure-Go cross builds with `CGO_ENABLED=0`.
 
 The generated manifest and all component URLs must point to
@@ -122,11 +122,12 @@ import urllib.request
 from pathlib import Path
 
 expected = tomllib.loads(Path("pyproject.toml").read_text())["project"]["version"]
-with urllib.request.urlopen("https://pypi.org/pypi/brigade-cli/json", timeout=15) as response:
-    published = json.load(response)["info"]["version"]
-if published != expected:
-    raise SystemExit(f"published != expected: {published} != {expected}")
-print(f"published={published}")
+for name in ("brigadestack", "brigade-cli"):
+    with urllib.request.urlopen(f"https://pypi.org/pypi/{name}/json", timeout=15) as response:
+        published = json.load(response)["info"]["version"]
+    if published != expected:
+        raise SystemExit(f"{name} published != expected: {published} != {expected}")
+    print(f"{name} published={published}")
 PY
 ```
 
@@ -134,11 +135,11 @@ Create a Memory Handoff in `.claude/memory-handoffs/` for durable release workfl
 
 ## 6b. Publish the MCP Registry manifests
 
-Run this from a checkout of the release tag, only after step 6 confirms the version on PyPI. `scripts/version_sync.py` pins `mcp-registry/*/server.json` to the tagged version. The registry checks the `mcp-name` markers in the PyPI README, and clients launch the package as `uvx brigade-cli`. The first release that can be published therefore has to contain both the README markers and the `brigade-cli` console script. 0.30.0 has neither.
+Run this from a checkout of the release tag, only after step 6 confirms the version on PyPI. `scripts/version_sync.py` pins `mcp-registry/*/server.json` to the tagged version. The registry checks the `mcp-name` markers in the PyPI README, and clients launch the package as `uvx brigadestack`. The first release that can be published therefore has to contain both the README markers and the `brigadestack` console script. 0.30.0 has neither.
 
 ```bash
 git checkout vX.Y.Z
-grep -q '^brigade-cli = ' pyproject.toml && grep -q 'mcp-name: io.github.escoffier-labs/brigade-memory' README.md
+grep -q '^brigadestack = ' pyproject.toml && grep -q 'mcp-name: io.github.escoffier-labs/brigade-memory' README.md
 mcp-publisher login github            # an escoffier-labs org member
 mcp-publisher publish mcp-registry/memory/server.json
 mcp-publisher publish mcp-registry/skills/server.json

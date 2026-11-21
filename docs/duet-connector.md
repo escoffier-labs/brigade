@@ -234,7 +234,7 @@ Dot's runtime also accepts an optional `messaging_enabled`. When Dot omits it,
 
 ## Setup
 
-Install the MCP SDK with `pip install brigade-cli[connector]` (the `grokbot` extra remains an alias during the removal window), plus `uvicorn` and
+Install the MCP SDK with `pip install brigadestack[connector]` (the `grokbot` extra remains an alias during the removal window), plus `uvicorn` and
 `PyJWT[crypto]`. Before setup, prepare:
 
 - a Cloudflare Access application for the Duet host, separate from Dot's.

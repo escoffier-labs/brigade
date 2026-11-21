@@ -1,57 +1,46 @@
-# Brigade Stack bridge packages
+# Brigade Stack distributions
 
-Brigade Stack 0.31.0 adds the `brigadestack` command to stable Brigade 0.31.0.
-Choose either the Python or npm package. Existing `brigade-cli`,
-`@escoffier-labs/brigade`, and the `brigade` command remain supported.
+`brigadestack` is the real PyPI package: the root `pyproject.toml` builds it, and it
+contains the whole CLI. `brigade-cli` is the compatibility package on PyPI. Its source
+is [`distribution/brigade-cli/pypi`](../brigade-cli/pypi/README.md). It depends on
+exactly `brigadestack==<version>` and declares the `brigade`, `brigade-cli` and
+`brigade-hook` commands so `pipx upgrade brigade-cli` keeps a working `brigade`.
+The npm bridge in this directory still pins stable 0.31.0 until the npm package flips.
 
-| Package | Exact dependency | Command added |
+| Package | Contains | Commands |
 | --- | --- | --- |
-| PyPI `brigadestack==0.31.0` | `brigade-cli==0.31.0` | `brigadestack` |
-| npm `brigadestack@0.31.0` | `@escoffier-labs/brigade@0.31.0` | `brigadestack` |
+| PyPI `brigadestack` | the CLI | `brigade`, `brigadestack`, `brigade-hook` |
+| PyPI `brigade-cli` | metadata only, `brigadestack==<version>` | `brigade`, `brigade-cli`, `brigade-hook` |
+| npm `brigadestack@0.31.0` | launcher, `@escoffier-labs/brigade@0.31.0` | `brigadestack` |
 
-The Python distribution contains metadata and a console entry point to the
-dependency's `brigade.cli:process_main`. The npm distribution runs the dependency's
-launcher with Node. Both use the existing CLI behavior, Python imports, workspace
-files, and storage formats.
-
-See the [Python instructions](pypi/README.md) or [npm instructions](npm/README.md).
+Both Python distributions use the existing CLI behavior, Python imports, workspace
+files, and storage formats. See the [npm instructions](npm/README.md).
 Documentation lives at [brigade.tools](https://brigade.tools/docs).
 The source repository is [escoffier-labs/brigade](https://github.com/escoffier-labs/brigade/tree/main/distribution/brigadestack).
 
-## Publishing the Python bridge
+## Publishing the Python distributions
 
-Configure a pending GitHub trusted publisher in the existing PyPI account before
-the first upload, using these exact fields:
+Both distributions publish from `publish.yml` on a stable `vX.Y.Z` tag. The
+`build-and-publish` job builds the root project as `brigadestack` and
+`distribution/brigade-cli/pypi` as `brigade-cli` into one `dist/` directory, checks
+that exactly those four files carry the tag's version, and uploads them in one
+trusted-publishing step in the `pypi` environment. `scripts/version_sync.py` keeps
+the compatibility package's version and its `brigadestack==<version>` pin equal to
+the root version, and the tag check in `validate-release` covers it too.
+
+Each PyPI project needs a trusted publisher for this workflow. Configure these exact
+fields on `brigadestack` and on `brigade-cli`:
 
 | PyPI publisher field | Value |
 | --- | --- |
-| Project name | `brigadestack` |
 | Owner | `escoffier-labs` |
 | Repository name | `brigade` |
-| Workflow name | `brigadestack-publish.yml` |
+| Workflow name | `publish.yml` |
 | Environment name | `pypi` |
 
-A pending publisher configuration alone does not reserve the project name.
-The first successful upload creates the project. Complete account configuration
-through the authorized browser session. The workflow uses GitHub OIDC trusted
-publishing and needs no PyPI API token or local upload configuration.
-
-After the controller reviews and merges the bridge source and workflow, select
-**Brigade Stack PyPI publication** in GitHub Actions and run it on `main`.
-The workflow accepts no inputs and runs only in `escoffier-labs/brigade` on
-`refs/heads/main`. Review the selected source commit before dispatch.
-
-The unprivileged job builds only `distribution/brigadestack/pypi`, checks the
-0.31.0 wheel and sdist, and installs the wheel with the actual stable
-`brigade-cli==0.31.0` dependency to exercise `brigadestack --version` and `--help`.
-It passes those two checked artifacts to a separate publish job in the `pypi`
-environment. Only that job can request an OIDC token. The root development
-package and native release assets are outside this workflow's build path.
-
-Publication runs are serialized. Before dispatch or retry, inspect PyPI for
-`brigadestack==0.31.0` and stop if it already exists. Duplicate uploads fail.
-After a successful run, the controller must download and install the published
-artifacts in a fresh environment and check identity, hashes and CLI behavior.
+`brigadestack` also needs the same publisher for `publish-dev.yml`, which uploads the
+daily `X.Y.Z.devYYYYMMDD` wheels of the root project. The one-time workflow that
+published the 0.31.0 `brigadestack` alias (`brigadestack-publish.yml`) is retired.
 
 ## Publishing the npm bridge
 
@@ -91,6 +80,6 @@ If only that final confirmation fails, the package may already be published.
 Check `npm view brigadestack dist-tags` before dispatching again; a second run
 stops at the "already on npm" check once the version exists.
 
-Like the PyPI bridge, this workflow publishes the `main` commit current at
+This workflow publishes the `main` commit current at
 dispatch and takes no reviewed-SHA input, unlike `npm-publish.yml`. The bridge is
 four files with an exact dependency, so review the `main` head before dispatch.

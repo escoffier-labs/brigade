@@ -108,7 +108,7 @@ def hook_status(target: Path, policy: str = "public-repo") -> dict[str, Any]:
         suggestions.append(
             "unset CONTENT_GUARD_DIR to use Brigade's embedded guard"
             if external_configured
-            else "reinstall brigade-cli so the embedded guard package is present"
+            else "reinstall brigadestack so the embedded guard package is present"
         )
     if not policy_exists:
         checks.append(
@@ -266,7 +266,7 @@ def run_scan(scan_target: Path, *, repo_target: Path | None = None, policy: str 
             "stderr": (
                 "unset CONTENT_GUARD_DIR to use Brigade's embedded guard"
                 if external_configured
-                else "reinstall brigade-cli so the embedded guard package is present"
+                else "reinstall brigadestack so the embedded guard package is present"
             ),
             "policy": policy,
             "policy_path": None,
@@ -360,7 +360,7 @@ def run(
             (
                 "brigade scrub: unset CONTENT_GUARD_DIR to use Brigade's embedded guard"
                 if external_configured
-                else "brigade scrub: reinstall brigade-cli so the embedded guard package is present"
+                else "brigade scrub: reinstall brigadestack so the embedded guard package is present"
             ),
             file=sys.stderr,
         )

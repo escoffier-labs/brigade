@@ -30,10 +30,11 @@ def test_release_checklist_verifies_pypi_version():
 
     tag_push = text.index('git push origin "v$version"')
     workflow_wait = text.index('gh run watch "$run_id" --exit-status')
-    pypi_check = text.index("https://pypi.org/pypi/brigade-cli/json")
+    pypi_check = text.index("https://pypi.org/pypi/{name}/json")
 
     assert tag_push < workflow_wait < pypi_check
     assert "published != expected" in text
+    assert 'for name in ("brigadestack", "brigade-cli"):' in text
 
 
 def test_release_checklist_documents_additive_assets_and_legacy_primary_manifest():

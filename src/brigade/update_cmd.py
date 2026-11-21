@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib.metadata
 import json
 import os
 import re
@@ -33,7 +34,11 @@ REPOSITORY_ID = 1238165856
 _RELEASE_REPOSITORIES = (REPOSITORY, RENAMED_REPOSITORY)
 STATE_SCHEMA_VERSION = 1
 MANIFEST_ASSET = "component-manifest-v1.json"
-PYPI_PROJECT = "brigade-cli"
+PYPI_PROJECT = "brigadestack"
+# The pre-0.32 package name. It stays published as a compatibility package that depends
+# on PYPI_PROJECT at the same version, so a pipx app installed under this name keeps
+# upgrading under it instead of gaining a second app that shadows `brigade`.
+LEGACY_PYPI_PROJECT = "brigade-cli"
 PYPI_PROJECT_JSON_URL = f"https://pypi.org/pypi/{PYPI_PROJECT}/json"
 BETA_PREVIEW_BASE = "0.32.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -702,6 +707,40 @@ def _same_coordinates(left: UpdateState, right: UpdateState) -> bool:
     )
 
 
+def installed_pypi_project() -> str:
+    """Name of the PyPI distribution this installation was made from.
+
+    pipx records the requested package in ``pipx_metadata.json``, which is exact even
+    when the compatibility package pulled in its real dependency. Other layouts fall
+    back to the installed distribution metadata. Anything unknown is the real package.
+    """
+    try:
+        recorded = json.loads((Path(sys.prefix) / "pipx_metadata.json").read_text(encoding="utf-8"))
+        package = recorded["main_package"]["package"]
+    except (OSError, ValueError, KeyError, TypeError):
+        package = None
+    if package in (PYPI_PROJECT, LEGACY_PYPI_PROJECT):
+        return package
+    try:
+        importlib.metadata.distribution(LEGACY_PYPI_PROJECT)
+    except importlib.metadata.PackageNotFoundError:
+        return PYPI_PROJECT
+    return LEGACY_PYPI_PROJECT
+
+
+def _pipx_copies_apps() -> bool:
+    """True where pipx copies app launchers into its bin directory instead of linking them."""
+    return os.name == "nt"
+
+
+def _retire_after_exit_hint(retire_command: list[str], install_command: list[str]) -> str:
+    return (
+        f"brigade update: installed {PYPI_PROJECT}. After this command exits, remove the old "
+        f"{LEGACY_PYPI_PROJECT} app and restore the brigade launcher with: "
+        f"{' '.join(retire_command)} ; {' '.join(install_command)}"
+    )
+
+
 def _default_runner(argv: list[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(argv, check=False, text=True)
 
@@ -765,28 +804,55 @@ def run_update(
                 return 0
             # Stable and beta both force-reinstall the one user-global pipx app
             # with an exact package pin. Beta never uses a mutable Git main SHA.
-            pipx_spec = f"{PYPI_PROJECT}=={coordinate}"
+            # Stable keeps the installed package name. Beta resolves daily wheels of the real
+            # package only: the compatibility package has no development builds.
+            installed_project = installed_pypi_project()
+            install_project = installed_project if channel == "stable" else PYPI_PROJECT
+            pipx_spec = f"{install_project}=={coordinate}"
+            # A beta update of a brigade-cli app installs brigadestack as a new pipx app whose
+            # `brigade` and `brigade-hook` replace the old links (--force), removes the old app so
+            # it cannot relink them on a later `pipx upgrade-all`, then installs brigadestack once
+            # more, because older pipx (1.4.x) uninstalls launchers by name even when another app
+            # owns them. Setup and the state write come after, so a lost launcher never records a
+            # finished update. Where pipx copies apps (Windows), uninstall also fails on the
+            # running interpreter, so there the user removes the old app after exit.
+            retire_legacy = installed_project == LEGACY_PYPI_PROJECT and install_project != LEGACY_PYPI_PROJECT
+            retire_after_exit = retire_legacy and _pipx_copies_apps()
             cached_manifest_path = Path(
                 component_paths.verified_manifest_path(str(selected_paths.cache_root), release.manifest_sha256)
             )
             setup_command = [str(selected_paths.brigade_executable), "setup", "--manifest", str(cached_manifest_path)]
             if compatible_manifest_version is not None:
                 setup_command.extend(["--allow-compatible-stable-manifest", compatible_manifest_version])
-            commands = [
-                [selected_paths.pipx_executable, "install", "--force", pipx_spec],
-                setup_command,
-            ]
+            install_command = [selected_paths.pipx_executable, "install", "--force", pipx_spec]
+            retire_command = [selected_paths.pipx_executable, "uninstall", LEGACY_PYPI_PROJECT]
+            retire_now = retire_legacy and not retire_after_exit
+            commands = [install_command, retire_command, install_command] if retire_now else [install_command]
+            commands.append(setup_command)
             if dry_run:
                 for command in commands:
                     print(" ".join(command))
+                if retire_after_exit:
+                    print(_retire_after_exit_hint(retire_command, install_command))
                 return 0
             manifest_path = _cache_manifest(selected_paths, release)
             if manifest_path != cached_manifest_path:
                 raise UpdateError("verified manifest cache path changed unexpectedly")
             for command in commands:
-                if _returncode(selected_runner(command)) != 0:
-                    raise UpdateError(f"update command failed: {' '.join(command)}")
+                if _returncode(selected_runner(command)) == 0:
+                    continue
+                if command is retire_command:
+                    # The reinstall that follows restores any launcher a partial removal took;
+                    # a leftover old app is untidy, not broken.
+                    print(
+                        f"brigade update: could not remove the old app; remove it with: {' '.join(retire_command)}",
+                        file=sys.stderr,
+                    )
+                    continue
+                raise UpdateError(f"update command failed: {' '.join(command)}")
             write_update_state(state_path, next_state)
+            if retire_after_exit:
+                print(_retire_after_exit_hint(retire_command, install_command), file=sys.stderr)
     except (UpdateError, OSError, UnicodeDecodeError, ValueError) as exc:
         print(f"brigade update: {exc}", file=sys.stderr)
         return 1

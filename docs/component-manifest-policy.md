@@ -84,7 +84,7 @@ Stable validation remains strict: every published component on a stable manifest
 five-platform matrix with matching digests and provenance.
 
 Beta is the intentional development channel for the `0.32` preview line. It installs the newest
-non-yanked `brigade-cli==0.32.0.devYYYYMMDD` wheel from PyPI into the existing user-global pipx
+non-yanked `brigadestack==0.32.0.devYYYYMMDD` wheel from PyPI into the existing user-global pipx
 environment, but reuses the last verified stable component manifest for native bytes, so beta and
 stable cannot install different native assets from two manifests at once.
 

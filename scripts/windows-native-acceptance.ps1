@@ -95,7 +95,7 @@ function Get-PipxBinDir {
 
 function Get-InstalledBrigadePython {
     param([string]$PipxHome)
-    foreach ($name in @("brigade-cli", "brigade")) {
+    foreach ($name in @("brigadestack", "brigade-cli", "brigade")) {
         $candidate = Join-Path $PipxHome "venvs\$name\Scripts\python.exe"
         if (Test-Path -LiteralPath $candidate) {
             return $candidate
@@ -160,6 +160,7 @@ function Invoke-Pipx {
 
 function Remove-BrigadePipxInstall {
     param([string]$BootstrapPython)
+    Invoke-Pipx -BootstrapPython $BootstrapPython uninstall brigadestack 2>$null | Out-Null
     Invoke-Pipx -BootstrapPython $BootstrapPython uninstall brigade-cli 2>$null | Out-Null
     if ($LASTEXITCODE -ne 0) {
         Invoke-Pipx -BootstrapPython $BootstrapPython uninstall brigade 2>$null | Out-Null
@@ -769,14 +770,14 @@ function Install-BrigadeFromPyPI {
     if (-not $Version) {
         throw "BrigadeVersion is required when InstallMode is pypi"
     }
-    Write-Step "Installing brigade-cli==$Version from PyPI"
+    Write-Step "Installing brigadestack==$Version from PyPI"
 
     $maxAttempts = 36
     $installed = $false
     for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
         $releaseReady = $false
         try {
-            $response = Invoke-RestMethod -Uri "https://pypi.org/pypi/brigade-cli/json" -Method Get -UseBasicParsing
+            $response = Invoke-RestMethod -Uri "https://pypi.org/pypi/brigadestack/json" -Method Get -UseBasicParsing
             $releaseNames = @($response.releases.PSObject.Properties.Name)
             if ($releaseNames -contains $Version) {
                 $releaseReady = $true
@@ -788,7 +789,7 @@ function Install-BrigadeFromPyPI {
 
         if ($releaseReady) {
             Remove-BrigadePipxInstall -BootstrapPython $BootstrapPython
-            Invoke-Pipx -BootstrapPython $BootstrapPython install "brigade-cli==$Version"
+            Invoke-Pipx -BootstrapPython $BootstrapPython install "brigadestack==$Version"
             if ($LASTEXITCODE -eq 0) {
                 $installed = $true
                 break
@@ -798,7 +799,7 @@ function Install-BrigadeFromPyPI {
         Start-Sleep -Seconds 10
     }
     if (-not $installed) {
-        throw "timed out installing brigade-cli==$Version from PyPI"
+        throw "timed out installing brigadestack==$Version from PyPI"
     }
 }
 

@@ -265,7 +265,7 @@ The npm package runs the published `brigade-cli` wheel on a managed Python that 
 With Python 3.11 or newer:
 
 ```bash
-pipx install brigade-cli
+pipx install brigadestack
 ```
 
 Or, to track `main`:
@@ -1070,7 +1070,7 @@ timeout = 180
 The web tier needs the optional browser dependency, installed once:
 
 ```bash
-pip install 'brigade-cli[research]' && playwright install chromium
+pip install 'brigadestack[research]' && playwright install chromium
 ```
 
 PageForge can serve as the web provider when you want searches and fetched pages banked in its local SQLite cache instead of reading each page through headless Chromium:

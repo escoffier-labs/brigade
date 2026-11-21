@@ -12,7 +12,10 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-PYPI_URL = "https://pypistats.org/api/packages/brigade-cli/overall?mirrors=false"
+# brigadestack is the real package. brigade-cli is the compatibility package that
+# existing installs, pipx apps and scripts still pull, so both count as PyPI downloads.
+PYPI_PACKAGES = ("brigadestack", "brigade-cli")
+PYPI_URLS = {name: f"https://pypistats.org/api/packages/{name}/overall?mirrors=false" for name in PYPI_PACKAGES}
 NPM_URL = "https://api.npmjs.org/downloads/range/last-year/@escoffier-labs/brigade"
 MAX_BYTES = 2 * 1024 * 1024
 # Keep public JSON counts within JavaScript's exactly representable integer range.
@@ -53,8 +56,8 @@ def parse_day(value):
     return day
 
 
-def daily_counts(payload, *, pypi, today):
-    package = "brigade-cli" if pypi else "@escoffier-labs/brigade"
+def daily_counts(payload, *, pypi, today, package=None):
+    package = package or ("brigadestack" if pypi else "@escoffier-labs/brigade")
     if not isinstance(payload, dict) or payload.get("package") != package:
         raise ValueError("unexpected source package")
     if pypi and payload.get("type") != "overall_downloads":
@@ -95,14 +98,20 @@ def aggregate(pypi, npm, *, now):
     if now.tzinfo is None:
         raise ValueError("updated time must include a timezone")
     now = now.astimezone(timezone.utc)
-    pypi_days = daily_counts(pypi, pypi=True, today=now.date())
+    # ``pypi`` maps each PyPI package name to its pypistats payload.
+    if not isinstance(pypi, dict) or set(pypi) != set(PYPI_PACKAGES):
+        raise ValueError("unexpected PyPI package set")
+    pypi_series = {
+        name: daily_counts(pypi[name], pypi=True, today=now.date(), package=name) for name in PYPI_PACKAGES
+    }
     npm_days = daily_counts(npm, pypi=False, today=now.date())
-    end = min(max(pypi_days), max(npm_days))
+    end = min([max(days) for days in pypi_series.values()] + [max(npm_days)])
     start = end - timedelta(days=29)
     days = [start + timedelta(days=n) for n in range(30)]
-    if any(day not in pypi_days or day not in npm_days for day in days):
+    if any(day not in series for series in (*pypi_series.values(), npm_days) for day in days):
         raise ValueError("missing day in the shared 30-day window")
-    pypi_total = sum(pypi_days[day] for day in days)
+    pypi_packages = {name: sum(series[day] for day in days) for name, series in pypi_series.items()}
+    pypi_total = sum(pypi_packages.values())
     npm_total = sum(npm_days[day] for day in days)
     total = pypi_total + npm_total
     # Nonnegative counts mean this bound also bounds each source subtotal.
@@ -115,7 +124,12 @@ def aggregate(pypi, npm, *, now):
         "color": "blue",
         "total": total,
         "sources": {
-            "pypi": {"package": "brigade-cli", "downloads": pypi_total, "mirrors": False},
+            "pypi": {
+                "package": PYPI_PACKAGES[0],
+                "downloads": pypi_total,
+                "mirrors": False,
+                "packages": pypi_packages,
+            },
             "npm": {"package": "@escoffier-labs/brigade", "downloads": npm_total},
         },
         "period": {"start": start.isoformat(), "end": end.isoformat(), "days": 30, "timezone": "UTC"},
@@ -129,7 +143,8 @@ def main(argv=None):
     args = parser.parse_args(argv)
     temporary = None
     try:
-        badge = aggregate(fetch_json(PYPI_URL), fetch_json(NPM_URL), now=datetime.now(timezone.utc))
+        pypi = {name: fetch_json(url) for name, url in PYPI_URLS.items()}
+        badge = aggregate(pypi, fetch_json(NPM_URL), now=datetime.now(timezone.utc))
         # Replace only after both sources validate and the entire file is written.
         with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=args.output.parent, delete=False) as stream:
             temporary = Path(stream.name)

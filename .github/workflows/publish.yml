@@ -42,6 +42,9 @@ jobs:
           expected = sys.argv[1]
           versions = {
               "pyproject.toml": tomllib.loads(pathlib.Path("pyproject.toml").read_text())["project"]["version"],
+              "distribution/brigade-cli/pypi/pyproject.toml": tomllib.loads(
+                  pathlib.Path("distribution/brigade-cli/pypi/pyproject.toml").read_text()
+              )["project"]["version"],
               "src/brigade/__init__.py": re.search(
                   r'__version__ = "([^"]+)"', pathlib.Path("src/brigade/__init__.py").read_text()
               ).group(1),
@@ -414,7 +417,7 @@ jobs:
           elif grep -qi "release not found" release-view.err; then
             VERSION="${TAG#v}"
             gh release create "$TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --verify-tag \
-              --title "$TAG" --notes "Python package: brigade-cli==${VERSION}"
+              --title "$TAG" --notes "Python package: brigadestack==${VERSION} (brigade-cli==${VERSION} is the compatibility name)"
           else
             cat release-view.err >&2
             exit 1
@@ -470,7 +473,28 @@ jobs:
       - name: Install build tooling
         run: python -m pip install --upgrade pip build
       - name: Build sdist + wheel
-        run: python -m build
+        run: python -m build --outdir dist
+      - name: Build brigade-cli compatibility sdist + wheel
+        run: python -m build --outdir dist distribution/brigade-cli/pypi
+      - name: Check both distributions share the release version
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          python - "${TAG#v}" <<'EOF'
+          import pathlib, sys
+
+          version = sys.argv[1]
+          expected = {
+              f"brigadestack-{version}-py3-none-any.whl",
+              f"brigadestack-{version}.tar.gz",
+              f"brigade_cli-{version}-py3-none-any.whl",
+              f"brigade_cli-{version}.tar.gz",
+          }
+          found = {path.name for path in pathlib.Path("dist").iterdir()}
+          if found != expected:
+              print(f"::error::dist/ holds {sorted(found)}, expected {sorted(expected)}")
+              sys.exit(1)
+          EOF
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@7245906fb61fa33a13554f9d5fb856fe61758086
         with:

@@ -19,7 +19,7 @@ body:
       description: Paste the exact commands you ran. Prefer a temporary test repo if possible.
       render: shell
       placeholder: |
-        python3 -m pipx install brigade-cli
+        python3 -m pipx install brigadestack
         target="$(mktemp -d)"
         git init -q -b main "$target"
         brigade operator quickstart --target "$target" --harnesses codex --json
