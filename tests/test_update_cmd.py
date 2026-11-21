@@ -1601,9 +1601,12 @@ def test_beta_update_resolves_and_installs_brigadestack_even_on_a_brigade_cli_in
     )
     assert result == 0
     assert commands[0] == ["pipx", "install", "--force", f"brigadestack=={BETA_VERSION}"]
-    # The old app goes last, after the new one owns `brigade` and setup ran.
-    assert commands[-1] == ["pipx", "uninstall", "brigade-cli"]
-    assert len(commands) == 3
+    # Install, remove the old app, install again (older pipx removes launchers by name), then
+    # setup; state is written only after all of them.
+    install = ["pipx", "install", "--force", f"brigadestack=={BETA_VERSION}"]
+    assert commands[:3] == [install, ["pipx", "uninstall", "brigade-cli"], install]
+    assert commands[3][1] == "setup"
+    assert len(commands) == 4
     assert update_cmd.PYPI_PROJECT_JSON_URL == "https://pypi.org/pypi/brigadestack/json"
 
 
@@ -1627,8 +1630,34 @@ def test_beta_update_keeps_the_new_install_when_removing_the_old_app_fails(tmp_p
         now=lambda: "2026-07-20T12:00:00+00:00",
     )
     assert result == 0
-    assert commands[-1] == ["pipx", "uninstall", "brigade-cli"]
+    assert commands[1] == ["pipx", "uninstall", "brigade-cli"]
+    assert commands[2] == commands[0]
+    assert commands[3][1] == "setup"
     assert "pipx uninstall brigade-cli" in capsys.readouterr().err
+
+
+def test_beta_update_records_no_state_when_the_restoring_install_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
+    monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: False)
+    manifest = _manifest()
+    commands = []
+
+    def runner(argv):
+        commands.append(argv)
+        return 1 if len(commands) == 3 else 0  # the reinstall after the uninstall fails
+
+    result = update_cmd.run_update(
+        channel="beta",
+        paths=update_cmd.UpdatePaths(
+            data_root=tmp_path / "data", cache_root=tmp_path / "cache", brigade_executable=tmp_path / "bin" / "brigade"
+        ),
+        http=_PypiHttp(_release(manifest), manifest),
+        runner=runner,
+        now=lambda: "2026-07-20T12:00:00+00:00",
+    )
+    assert result == 1
+    assert len(commands) == 3  # no setup
+    assert not list((tmp_path / "data").rglob("*state*.json"))
 
 
 def test_beta_update_leaves_the_old_app_for_after_exit_where_pipx_copies_apps(tmp_path, monkeypatch, capsys):

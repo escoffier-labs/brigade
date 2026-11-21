@@ -38,7 +38,8 @@ installed with: an app named `brigade-cli` is reinstalled as `brigade-cli==X.Y.Z
 (which pulls `brigadestack==X.Y.Z`), and any other install uses `brigadestack`.
 Development wheels are published only as `brigadestack`, so `brigade update --channel beta`
 always installs `brigadestack`. On a machine whose pipx app is named `brigade-cli`, the beta
-update installs `brigadestack`, runs setup, then removes the `brigade-cli` app. On Windows,
+update installs `brigadestack`, removes the `brigade-cli` app, installs `brigadestack` again
+(older pipx removes launchers by name), and only then runs setup and records the update. On Windows,
 where pipx copies launchers and cannot remove the running app, the update instead prints the
 two commands to run after it exits: `pipx uninstall brigade-cli`, then the same
 `pipx install --force brigadestack==<version>` to restore the `brigade` launcher.
