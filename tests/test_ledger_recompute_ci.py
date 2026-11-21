@@ -320,6 +320,10 @@ def run_recompute(
     )
 
 
+SCRIPT_RUNS_ON_UBUNTU = pytest.mark.skipif(os.name == "nt", reason="the recompute job runs on Ubuntu")
+
+
+@SCRIPT_RUNS_ON_UBUNTU
 @pytest.mark.parametrize("event", ["pull_request", "merge_group", "workflow_dispatch"])
 def test_a_change_that_leaves_the_ledger_alone_passes_at_once(recompute_repo, tmp_path, event):
     (recompute_repo / "README.md").write_text("changed\n")
@@ -329,16 +333,19 @@ def test_a_change_that_leaves_the_ledger_alone_passes_at_once(recompute_repo, tm
     assert "ledger is untouched" in result.stdout
 
 
+@SCRIPT_RUNS_ON_UBUNTU
 def test_a_push_to_main_is_not_recomputed(recompute_repo, tmp_path):
     result = run_recompute(recompute_repo, tmp_path, "push")
     assert result.returncode == 0 and "merge group" in result.stdout
 
 
+@SCRIPT_RUNS_ON_UBUNTU
 def test_an_unknown_event_fails(recompute_repo, tmp_path):
     result = run_recompute(recompute_repo, tmp_path, "schedule")
     assert result.returncode == 1 and "unsupported event" in result.stdout
 
 
+@SCRIPT_RUNS_ON_UBUNTU
 def test_a_ledger_change_fails_closed_when_the_evidence_cannot_be_read(recompute_repo, tmp_path):
     (recompute_repo / "outcome-ledger/skills.json").write_text('{"edited": true}\n')
     git(recompute_repo, "commit", "-qam", "edit ledger")
@@ -347,6 +354,7 @@ def test_a_ledger_change_fails_closed_when_the_evidence_cannot_be_read(recompute
     assert "cannot read trusted evidence" in result.stdout
 
 
+@SCRIPT_RUNS_ON_UBUNTU
 def test_a_deleted_ledger_is_a_ledger_change(recompute_repo, tmp_path):
     git(recompute_repo, "rm", "-q", "outcome-ledger/skills.json")
     git(recompute_repo, "commit", "-qm", "delete ledger")
@@ -355,6 +363,7 @@ def test_a_deleted_ledger_is_a_ledger_change(recompute_repo, tmp_path):
     assert "ledger is untouched" not in result.stdout
 
 
+@SCRIPT_RUNS_ON_UBUNTU
 def test_the_script_imports_only_the_tree_it_runs_from(recompute_repo, tmp_path):
     """A planted package in the checkout under test is never imported, even from the working directory."""
     decoy = recompute_repo / "brigade"

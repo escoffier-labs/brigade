@@ -126,7 +126,7 @@ class World:
         self.root = root
         self.gh = FakeGh()
         self.git("init", "-q", "-b", "main")
-        manifest = (ROOT / "verify/manifests/skill-note.json").read_text()
+        manifest = (ROOT / "verify/manifests/skill-note.json").read_bytes().decode()
         history = {"schema": 1, "files": {"skill:note": [{"sha256": digest(GOOD), "tag": "v0.5.0"}]}}
         self.c0 = self.commit(
             {
@@ -175,7 +175,7 @@ class World:
                 path.unlink()
                 continue
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(text)
+            path.write_bytes(text.encode())
         self.git("add", "-A")
         self.git("commit", "-q", "-m", f"commit at {when}", when=when)
         return self.git("rev-parse", "HEAD")
