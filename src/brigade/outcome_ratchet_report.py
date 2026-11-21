@@ -251,6 +251,20 @@ def load_report(target: Path) -> dict[str, Any]:
     return payload
 
 
+def reported_trial_counts(raw: Mapping[str, Any]) -> tuple[str, str]:
+    """Render trial counts read from a report file as reported values, never as trusted ones.
+
+    The report lives in the target workspace and the scored agent can write it, so a
+    reader must not mistake these numbers for a recomputed or independent attestation.
+    """
+
+    def label(key: str) -> str:
+        value = raw.get(key)
+        return str(value) if isinstance(value, int) and not isinstance(value, bool) else "not recorded"
+
+    return label("local_trials"), label("attested_trials")
+
+
 def proposal_counts(summary: Mapping[str, Any]) -> dict[str, int] | None:
     """Return the persisted inbox proposal counts, or None when the run did not file proposals."""
     raw = summary.get("outcome_proposals")

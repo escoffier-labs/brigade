@@ -8,16 +8,48 @@ import subprocess
 from contextlib import redirect_stdout
 from pathlib import Path
 
-from brigade import localio, outcome, outcome_cmd, verify_trial, work_cmd
+from brigade import localio, outcome, outcome_cmd, verify_manifest, verify_trial, work_cmd
 
 from tests.test_verify_trial import (
     _run_manifest_verify,
     _stamp_receipt_digest,
-    _write_patch_manifest,
+    _track_workspace_manifest,
     _write_skill_subject,
 )
 
 pytest_plugins = ["tests.test_verify_trial"]
+
+
+def _write_portable_patch_manifest(target: Path) -> None:
+    """Use a command with no path separators so both shlex modes normalise it the same way.
+
+    The shared test helper embeds ``sys.executable`` in the check command. On Windows that
+    path holds backslashes, which the verify runtime splits with ``posix=False`` while the
+    eligibility projection splits with ``posix=True``. The two command plans then differ
+    and the receipt reads as ``verifier_manifest_mismatch`` before attestation is reached.
+    """
+    payload = {
+        "schema": "brigade.verify_manifest.v1",
+        "schema_version": 1,
+        "manifest_id": "test-skill-patch",
+        "binding_mode": "patch_backed",
+        "verifier_id": "brigade.verify.test",
+        "patch_source": "worktree",
+        "subject": {
+            "artifact_kind": "skill",
+            "artifact_id": "brigade-work",
+            "subject_path": "skills/brigade-work/SKILL.md",
+        },
+        "checks": [
+            {
+                "check_id": "verify.echo-ok",
+                "check_role": "effectiveness",
+                "command": "git --version",
+            }
+        ],
+    }
+    verify_manifest.write_workspace_manifest(target, payload)
+    _track_workspace_manifest(target, "test-skill-patch")
 
 
 def _rank(target: Path, *, json_output: bool) -> tuple[dict, str]:
@@ -30,7 +62,7 @@ def _rank(target: Path, *, json_output: bool) -> tuple[dict, str]:
 
 
 def test_forged_local_session_state_still_yields_a_local_trial(scoreable_target, monkeypatch):
-    _write_patch_manifest(scoreable_target)
+    _write_portable_patch_manifest(scoreable_target)
     assert work_cmd.start(target=scoreable_target, title="producer") == 0
     skill = _write_skill_subject(scoreable_target, content="# brigade-work\npatched\n")
     subprocess.run(
@@ -52,7 +84,7 @@ def test_forged_local_session_state_still_yields_a_local_trial(scoreable_target,
     session["ownership_proof"] = "hub-held"
     session["independent_verifier"] = "verifier-seat"
     session["start"]["attestation"] = "attested"
-    session_path.write_text(json.dumps(session))
+    session_path.write_bytes(json.dumps(session).encode("utf-8"))
 
     projection = verify_trial.project_trial(receipt, target=scoreable_target)
     assert projection.eligible is True, projection.reason
