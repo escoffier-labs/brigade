@@ -651,11 +651,16 @@ def command_for(cli_ref: str, command: tuple[str, ...] | None = None) -> str:
     return cli_ref
 
 
+_MUSE_NATIVE_ONLY = "Muse is an Orca-only seat and cannot run through headless Brigade dispatch"
+
+
 def resolve_agent_executable(
     cli_ref: str, path: str | None = None, command: tuple[str, ...] | None = None
 ) -> proc.ExecutableIdentity:
     """Resolve the adapter executable Brigade would launch for cli_ref."""
 
+    if cli_ref == "muse":
+        return proc.ExecutableIdentity(cli_ref, None, "native-only", False, _MUSE_NATIVE_ONLY)
     return proc.resolve_executable(command_for(cli_ref, command), path=path)
 
 
@@ -874,6 +879,8 @@ def build_argv(
     antigravity_print_timeout_supported: bool | None = None,
     antigravity_mode_supported: bool | None = None,
 ) -> List[str]:
+    if cli_ref == "muse":
+        raise ValueError(_MUSE_NATIVE_ONLY)
     if resume_session_id is not None:
         if cli_ref != "grok":
             raise ValueError("exact-session continuation supports grok only")
@@ -1273,7 +1280,10 @@ def run_agent(
         else resolve_agent_executable(cli_ref, path=executable_path)
     )
     if not executable.runnable:
-        failure_kind = "command-not-found" if executable.kind == "missing" else "unsupported-command-shim"
+        failure_kind = {
+            "missing": "command-not-found",
+            "native-only": "native-only",
+        }.get(executable.kind, "unsupported-command-shim")
         return AgentResult(
             text="",
             ok=False,

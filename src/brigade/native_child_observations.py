@@ -25,7 +25,7 @@ STATUS = ("queued", "running", "waiting", *TERMINAL)
 # no dependency on its persistence or event implementation.
 _REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:%~+/@=-]*", re.ASCII)
 REASONS = {
-    "refused": ("origin-mismatch", "task-mismatch", "remote-mismatch"),
+    "refused": ("origin-mismatch", "task-mismatch", "remote-mismatch", "circuit-broken"),
     "awaiting": (
         "origin-unknown",
         "acceptance-uncertain",

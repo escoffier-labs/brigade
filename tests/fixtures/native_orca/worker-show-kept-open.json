@@ -1,0 +1,92 @@
+{
+  "orca_version": "1.4.268",
+  "source": "src/main/runtime/rpc/methods/orchestration/worker/worker-control.ts",
+  "payload": {
+    "id": "rpc-example",
+    "ok": true,
+    "_meta": {
+      "runtimeId": "runtime-example"
+    },
+    "result": {
+      "dispatch": {
+        "id": "ctx_000000000003",
+        "taskId": "task_000000000002",
+        "runId": "run_000000000001",
+        "status": "completed",
+        "hostScope": {
+          "kind": "local",
+          "hostId": "local"
+        }
+      },
+      "worker": {
+        "dispatchId": "ctx_000000000003",
+        "state": "succeeded",
+        "stage": "settled",
+        "agentTerminalHandle": "term_example"
+      },
+      "projection": {
+        "host": {
+          "id": "local"
+        },
+        "stage": {
+          "activity": "done"
+        },
+        "liveness": {
+          "verdict": "live",
+          "source": "agent_status",
+          "observedAt": 0
+        },
+        "nextAction": {
+          "argv": []
+        }
+      },
+      "observation": {
+        "agentWait": null,
+        "exactWorker": true,
+        "status": "live"
+      },
+      "coordinatedFrom": null,
+      "terminal": {
+        "handle": "term_example",
+        "agentWait": null,
+        "connected": true,
+        "ptyId": "example-pty",
+        "worktreeId": "example-checkout",
+        "worktreePath": "/example/worktree",
+        "branch": "example",
+        "tabId": "example-tab",
+        "leafId": "example-leaf",
+        "title": null,
+        "writable": true,
+        "lastOutputAt": null,
+        "preview": "",
+        "paneRuntimeId": 1,
+        "rendererGraphEpoch": 1,
+        "verdict": "live"
+      },
+      "terminalResource": {
+        "ownerDispatchId": "ctx_000000000003",
+        "releaseState": "retained",
+        "ownershipState": "owned",
+        "terminalHandle": "term_example",
+        "autoReleaseAt": null,
+        "retainedReason": "user_requested",
+        "id": "wtr_000000000006",
+        "worktreeId": "example-checkout",
+        "endpointId": null,
+        "endpointIncarnation": null,
+        "originDispatchId": "ctx_000000000003",
+        "releaseRequestedAt": null,
+        "releaseCompletedAt": null,
+        "releaseError": null,
+        "recoveryAttemptCount": 0,
+        "lastRecoveryAt": null,
+        "archive": {
+          "source": null,
+          "status": null
+        }
+      },
+      "autoReleaseAt": null
+    }
+  }
+}

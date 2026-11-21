@@ -1,0 +1,28 @@
+{
+  "orca_version": "1.4.268",
+  "source": "src/shared/orchestration/workers/orchestration-worker-output.ts",
+  "payload": {
+    "ok": true,
+    "result": {
+      "dispatchId": "ctx_000000000003",
+      "source": "transcript",
+      "sourceIdentity": "example-transcript",
+      "provider": "codex",
+      "transcript": {"messages": [
+        {
+          "id": "example-message",
+          "role": "assistant",
+          "blocks": [{"type": "text", "text": "synthetic transcript text"}],
+          "timestamp": null,
+          "source": "transcript"
+        }
+      ], "nextCursor": "example-cursor", "limited": false, "returnedMessageCount": 1},
+      "cursor": "example-cursor",
+      "status": {"worker": "succeeded", "terminal": "exited", "liveness": "exited"},
+      "fallbackReason": null,
+      "sourceExact": true,
+      "contentComplete": true,
+      "warnings": []
+    }
+  }
+}
