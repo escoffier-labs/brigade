@@ -1,1 +1,0 @@
-- Fix verify trial command matching on Windows when a manifest command uses backslash paths.

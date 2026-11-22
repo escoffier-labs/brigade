@@ -1,2 +1,0 @@
-- Apply derived freshness and review dates through the reversible memory-care journal, with a fixes tend stage and `plan-fixes --apply`. Keep index changes for review.
-- Retry abandoned document undo after protection is lifted, and recover pending appends through a rebuildable decision index.

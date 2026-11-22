@@ -11,6 +11,8 @@ Validation errors exit 2, with a stable code in text or `error.code` in JSON.
 Tasks that `brigade t3 open` refuses as `t3-unsupported` belong here, submitted
 as a separate request with its own admission, budget and receipts. See
 [work T3 cannot run](t3-governed-delegation.md#work-t3-cannot-run).
+Tasks that `brigade orca open` refuses as `orca-unsupported` also belong here.
+See [governed Orca delegation](orca-governed-delegation.md).
 
 ```json
 {
@@ -734,15 +736,12 @@ its requested seat. No synthesis model call or budget is created.
 ## Cancellation
 
 `brigade runs tasks cancel <run> <task_id>... [--reason operator|parent|budget] [--json]`
-records that one selected assignment should not run. It never touches a sibling
-and never rewrites a completed result. `--reason` is a closed token; it is not
-free text.
+requests cancellation of the selected assignments. Each request targets one
+task. `--reason` accepts the tokens shown above.
 
-Cancellation intent and acknowledgement are separate facts. This release records
-only the intent (`task.cancel-requested`) and the containment it produces. An
-acknowledgement or containment record cannot be submitted yet: the inbox reserves
-the `ack` kind and refuses it with `ack-unsupported` rather than accept a request
-nothing reads.
+The journal records intent as `task.cancel-requested` and the worker outcome
+separately as `task.observed`. The inbox reserves the `ack` kind and refuses it
+with `ack-unsupported`.
 
 A task journal may only be written by the active run owner. A cancel request
 often comes from another process, so it never journals directly. It is first
@@ -753,54 +752,74 @@ and are never overwritten, so the first request for a task wins and a repeated
 request is a no-op. They are also never deleted, because the file is the replay
 source.
 
-The owner drains that inbox and appends the fact:
+The owner drains the inbox before each launch claim and every 0.5 seconds
+while dispatch is active. A journaled request for an unclaimed task blocks the
+launch. Brigade records one `cancelled` observation with containment
+`not-launched` on the task's deterministic attempt. Replay and resume drain
+the inbox before preparing another dispatch.
 
-- A live batch drains before each launch claim. An intent that arrives after the
-  attempt was prepared is journaled first, and the claim returns
-  `cancelled-before-launch` instead of a generic stale-history refusal.
-- `brigade runs tasks cancel` takes the workspace run lock without waiting. When
-  the batch is not live it drains immediately and reports `recorded`. When a live
-  batch holds the lock it reports `queued`; that batch journals the request before
-  its next launch.
+For a claimed task, Brigade decides between completion and cancellation at
+the worker result handoff. If the result reaches the batch before the watcher
+claims cancellation, Brigade keeps the worker's status and result. A journaled
+intent then appears as `cancel.too_late: true` in `runs tasks show` and
+`runs tasks list`. If the watcher wins, Brigade terminates subprocesses
+registered to that task and attempt, or requests interruption of that exact
+app-server turn. On Windows it uses each subprocess's existing Job Object to
+terminate the owned process tree. A worker or turn registering after the
+watcher wins is also cancelled.
 
-A task with a journaled intent is never launched. It is observed once as
-`cancelled` with containment `not-launched` on its deterministic attempt, which is
-the attempt its launch would have used. Replay and resume drain the inbox first,
-so a request that survived a crash is honored instead of launching the task. A
-sibling task is unaffected and keeps its own result, in the same wave or a later
-one: a cancellation is a decided outcome, so it never trips the wave scheduler's
-fail-fast skip of later waves.
+Once the worker returns, Brigade collects partial worktree changes through
+the usual artifact collection path and records one `cancelled` observation.
+When the stop was not confirmed (`still_active` or `error`), the worker may
+still be writing its checkout, so Brigade commits nothing from it: the
+observation rests on the receipt and the worktree is left as it is.
+Containment reports `interrupted`, `still_active`, or `error` based on the
+observed stop outcome, or `unknown` when no stop outcome was available. An
+app-server interrupt acknowledgement alone does not prove that the turn
+stopped. The batch joins the watcher when dispatch ends. A failed watcher poll
+is reported and the next poll continues. A watcher that ends for any reason
+stops advertising live termination, so `runs tasks cancel` never reports
+`requested` without a watcher to act on it.
 
-A task that `depends_on` a cancelled task never launches. The batch reports it
-as `prerequisite-cancelled`, journals nothing for it, and leaves it `queued`.
-Tasks that do not depend on the cancelled one still run.
+Fleet remote dispatch routes each task by seat, and it cannot cancel one
+exact remote request. When a batch has a remote router, Brigade records where
+each task went. The watcher stops a task only once the router has kept it on
+this machine. A task routed to another machine, or not routed yet, is never
+stopped and never recorded as `cancelled` after launch: it keeps its real
+result, and the intent shows as `cancel.too_late: true`. The cancel command
+promises `requested` only for a task known to run here and reports
+`live-termination-unavailable` for the rest. Intent still keeps a task that
+has not launched from launching, wherever it would have run.
 
-An unknown task reports `unknown-task`, and a terminal task reports
-`already-terminal`. Neither writes anything. A `queued` request always carries
-`live-termination-unavailable` in JSON and human output: the live batch may claim
-the task after the command read its state, so the command never reports a queued
-task as stopped before launch.
+Cancellation leaves same-seat siblings eligible to finish. It also counts as
+a decided outcome for fail-fast, so unrelated tasks in later waves still run.
+Only a cancellation the batch's own watcher performed counts. A worker that
+reports `cancelled` on its own, with no cancel request, is a failure and still
+stops later waves.
+A task that `depends_on` a cancelled task never launches. The batch reports
+it as `prerequisite-cancelled` and leaves it `queued` in the journal.
 
-This slice records intent only. It does not terminate a running worker, start
-watchers or change any process registry: a task that has already launched keeps
-running, and the recorded intent applies to its next launch attempt. The same
-holds for a request that lands after the batch's last drain before a claim: that
-launch proceeds. Process termination and the separate containment record are the
-following slice.
+An unknown task reports `unknown-task`, and a task that is already terminal
+when the command reads it reports `already-terminal`. Neither writes a request.
 
 The inbox is bounded: at most 1024 request files of at most 4 KiB each. Exceeding
 either bound refuses with `inbox-overflow`. Malformed request files are skipped
 and reported by name. A symlinked inbox directory or request file is refused with
 `inbox-refused`, and so is an entry swapped for a non-regular file after it was
 inspected. The batch treats any inbox refusal as a warning and keeps launching,
-so a damaged inbox cannot stop a batch. The `cancel` command, by contrast,
-reports `queued` only when a live batch holds the run lock. An inbox or journal
-failure while it holds the lock itself is a refusal with exit 2.
+so a damaged inbox cannot stop a batch. The `cancel` command tries to acquire
+the workspace run lock without waiting. If it acquires the lock, it journals
+the intent and reports `recorded`. An inbox or journal failure under that lock
+is a refusal with exit 2.
 
 JSON output uses `brigade.runs_tasks_cancel.v1`, with `run_id`, `reason`, a
 `tasks` list of `{task_id, outcome, reason, live_termination}`, and `refusal`.
 Closed outcomes are `recorded`, `queued`, `already-terminal`, `unknown-task` and
-`not-recorded`. When writing one request fails, the requests already written stay
+`not-recorded`. A `queued` request with `live_termination: "requested"` is
+available for the live watcher to act on. `live-termination-unavailable`
+means there is no live batch watcher to stop a potentially running task.
+`null` means live termination did not apply. When writing one request fails,
+the requests already written stay
 in the answer, the failed task and any after it report `not-recorded`, and
 `refusal` names the failure.
 Exit 2 means at least one task was not recorded.

@@ -337,8 +337,9 @@ def test_npm_publishers_derive_their_identity_from_the_environment_and_the_repos
     assert "1238165856" not in text, "reuse REPOSITORY_ID from provenance.cjs"
 
 
-def test_npm_registry_acceptance_requires_the_repository_id_in_provenance():
+def test_npm_registry_acceptance_uses_the_shared_archive_identity():
     text = (FEASIBILITY / "acceptance.cjs").read_text()
-    assert "const {REPOSITORY_ID}=require('./provenance.cjs');" in text
-    assert "repositoryId:REPOSITORY_ID" in text
+    assert "archiveIdentity(archiveRepositoryUrl,metadata.sourceCommit," in text
+    assert not _SLUG.search(text)
+    assert "github.com/escoffier-labs" not in text
     assert "1238165856" not in text

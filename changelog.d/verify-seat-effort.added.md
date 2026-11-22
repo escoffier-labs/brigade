@@ -1,1 +1,0 @@
-- Let a claude verify seat pin its effort level with roster `reasoning`. Verify passes it as `--effort`, and the seat fingerprint covers it. `brigade roster doctor` reports such a pin as a verify-only warning.

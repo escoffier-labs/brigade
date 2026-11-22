@@ -36,7 +36,8 @@ STATES = frozenset(
 TERMINAL = frozenset({"completed", "failed", "interrupted", "cancelled"})
 # ``not-launched`` names the containment of a cancellation that stopped a task
 # before any worker existed, so it is never confused with a quiescent worker.
-CONTAINMENT = frozenset({"unknown", "active", "quiescent", "not-launched"})
+LIVE_CANCEL_CONTAINMENT = frozenset({"interrupted", "still_active", "error"})
+CONTAINMENT = frozenset({"unknown", "active", "quiescent", "not-launched"}) | LIVE_CANCEL_CONTAINMENT
 # Closed cancel-intent reasons: who asked for the cancellation, never free text.
 CANCEL_REASONS = frozenset({"operator", "parent", "budget"})
 ARTIFACT_KINDS = frozenset({"commit", "patch", "receipt", "unavailable"})
@@ -275,6 +276,8 @@ def validate_payload(event_type: str, payload: Mapping[str, Any]) -> None:
         if not valid:
             raise run_events.CanonicalizationError("invalid task reference field")
     if event_type == "task.observed":
+        if payload["containment"] in LIVE_CANCEL_CONTAINMENT and payload["status"] != "cancelled":
+            raise run_events.CanonicalizationError("live cancel containment requires a cancelled task")
         terminal = payload["status"] in TERMINAL
         if terminal != (payload["result_id"] is not None):
             raise run_events.CanonicalizationError("task result identity requires terminal status")

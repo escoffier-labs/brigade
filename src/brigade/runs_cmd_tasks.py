@@ -97,7 +97,7 @@ def _pending_cancel_reasons(run_dir: Path) -> dict[str, str]:
 def _cancel_state(result: tasks.TaskResult, pending: dict[str, str]) -> dict[str, Any]:
     """Journaled intent wins; an inbox-only request is reported as queued."""
     if result.cancel_requested:
-        return {"requested": True, "queued": False, "reason": result.cancel_reason}
+        return {"requested": True, "queued": False, "reason": result.cancel_reason, "too_late": result.cancel_too_late}
     reason = pending.get(result.handle.spec.task_id)
     if reason is not None:
         return {"requested": False, "queued": True, "reason": reason}

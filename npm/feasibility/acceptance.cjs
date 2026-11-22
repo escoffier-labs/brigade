@@ -7,7 +7,7 @@ const assert=require('node:assert/strict');
 const zlib=require('node:zlib');
 const {spawn,spawnSync}=require('node:child_process');
 const {performance}=require('node:perf_hooks');
-const {REPOSITORY_ID}=require('./provenance.cjs');
+const {archiveIdentity,archiveRepository,createVerifier}=require('./provenance.cjs');
 
 const args=process.argv.slice(2);
 function option(name) { const i=args.indexOf(name); if(i<0 || !args[i+1]) throw new Error(`Required: ${name}`); return path.resolve(args[i+1]); }
@@ -328,6 +328,7 @@ async function main() {
   const platform=receipt.platform;
   const chosen=metadata.artifacts.filter(a=>a.platform===platform || !a.platform);
   assert.equal(chosen.length,2,'launcher plus compatible companion required');
+  let archiveRepositoryUrl;
   for(const artifact of metadata.artifacts) {
     const data=fs.readFileSync(path.join(artifactsDir,artifact.filename));
     const sha=crypto.createHash('sha256').update(data).digest('hex');
@@ -343,7 +344,11 @@ async function main() {
     const manifest=JSON.parse(files.get('package/package.json'));
     assert.equal(manifest.private,undefined);assert.equal(manifest.version,metadata.runtime.version);
     assert.equal(manifest.publishConfig.access,'public');
-    assert.deepEqual(manifest.repository,{type:'git',url:'git+https://github.com/escoffier-labs/brigade.git',directory:'npm/feasibility'});
+    if(archiveRepositoryUrl===undefined) {
+      archiveRepository(manifest.repository?.url);
+      archiveRepositoryUrl=manifest.repository.url;
+    }
+    assert.deepEqual(manifest.repository,{type:'git',url:archiveRepositoryUrl,directory:'npm/feasibility'});
     if(!artifact.platform) assert.deepEqual(manifest.optionalDependencies,Object.fromEntries(Object.values(metadata.runtime.platforms).map(p=>[p.package,metadata.runtime.version])));
     if(!artifact.platform) {
       const packed=JSON.parse(files.get('package/runtime.json'));
@@ -356,8 +361,9 @@ async function main() {
   }
   if(registryMode) {
     assert.equal(metadata.sourceCommit,expectedPackagingSha,'artifact packaging commit must equal expected packaging SHA (default GITHUB_SHA)');
-    const verifier=require('./provenance.cjs').createVerifier(npmCli,path.join(root,'provenance-tuf'));
+    const verifier=createVerifier(npmCli,path.join(root,'provenance-tuf'));
     for(const artifact of metadata.artifacts) {
+      const expected=archiveIdentity(archiveRepositoryUrl,metadata.sourceCommit,artifact.name,runtime.version,verifier);
       let visible=false;
       for(const delay of [0,1000,2000,4000,8000]) {
         if(delay) await new Promise(resolve=>setTimeout(resolve,delay));
@@ -374,12 +380,7 @@ async function main() {
         if(!url) continue;
         const digest=crypto.createHash('sha512').update(fs.readFileSync(path.join(artifactsDir,artifact.filename))).digest('hex');
         try {
-          if(await verifier.verifyRegistry(url,digest,{
-            purl:verifier.purl(artifact.name,runtime.version),sourceCommit:metadata.sourceCommit,
-            repository:'https://github.com/escoffier-labs/brigade',repositoryId:REPOSITORY_ID,workflow:'.github/workflows/npm-publish.yml',ref:'refs/heads/main',
-            san:'https://github.com/escoffier-labs/brigade/.github/workflows/npm-publish.yml@refs/heads/main',
-            issuer:'https://token.actions.githubusercontent.com',builder:'https://github.com/actions/runner/github-hosted',
-          })) {verified=true;break;}
+          if(await verifier.verifyRegistry(url,digest,expected)) {verified=true;break;}
         } catch(error) {throw new Error(`Invalid registry provenance: ${artifact.name}: ${error.message}`,{cause:error});}
       }
       assert.ok(verified,'registry provenance deadline: '+artifact.name);
