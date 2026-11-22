@@ -61,19 +61,19 @@ def test_hub_image_is_non_root_and_has_a_single_writable_state_directory():
         "FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e"
         in text
     )
-    assert text.count("ARG BRIGADE_SHA256=5a0cd597e970d17eedf3597cfd33d1a909c1e8f33f9077184abb421cedf3e67f\n") == 2
+    assert text.count("ARG BRIGADE_SHA256=886090adadf2ad00870d9c535f820ec468655573851da56fd09159ede242d2b2\n") == 2
     assert "ARG BRIGADE_VERSION=0.31.0\n" in text
     assert 'org.opencontainers.image.version="${BRIGADE_VERSION}"' in text
     pin = (
         "--build-arg BRIGADE_REF=e6009f6969dc6e45db2ab93790aa3e407c791409 \\\n"
-        "  --build-arg BRIGADE_SHA256=68014a8e99c61f5e547d8bf223a5f3ad7ea31f60355a4c30356bffd78e15c168 \\\n"
+        "  --build-arg BRIGADE_SHA256=fd56274a692492174c2b9378404825889d874d025bf4f71ca937e403603fb2b5 \\\n"
         "  --build-arg BRIGADE_VERSION=0.28.0 \\\n"
     )
     assert pin in (ROOT / "docs" / "runbooks" / "fleet-hub-containers.md").read_text(encoding="utf-8")
     smoke = (ROOT / "tests" / "fleet_hub_container_smoke.py").read_text(encoding="utf-8")
     for name in ("BRIGADE_REF", "BRIGADE_SHA256", "BRIGADE_VERSION"):
         assert f'f"{name}={{{name}}}",' in smoke
-    assert 'BRIGADE_SHA256 = "68014a8e99c61f5e547d8bf223a5f3ad7ea31f60355a4c30356bffd78e15c168"' in smoke
+    assert 'BRIGADE_SHA256 = "fd56274a692492174c2b9378404825889d874d025bf4f71ca937e403603fb2b5"' in smoke
     assert "setuptools==75.8.0 wheel==0.45.1" in text
     assert "--no-build-isolation /tmp/brigade.tar.gz" in text
     assert 'org.opencontainers.image.revision="${BRIGADE_REF}"' in text
@@ -91,10 +91,14 @@ def test_compose_recipe_publishes_no_port_and_keeps_the_token_out_of_environment
     assert "ports:" not in text
     assert text.count('network_mode: "service:netns"') == 2
     assert "file: ./secrets/admin-token.txt" in text and "      - admin_token\n" in text
-    assert dockerignore == ["**", "!ops/", "!ops/fleet-hub/", "!ops/fleet-hub/Containerfile"]
-    # Nothing comes from the build context: every COPY takes an earlier stage's output.
+    # Only file-level exceptions: a directory exception such as `!ops/` re-includes the whole
+    # tree, which sent ops/fleet-hub/secrets/admin-token.txt to the builder.
+    assert dockerignore == ["**", "!ops/fleet-hub/Containerfile", "!ops/fleet-hub/bin/source-tree-digest.py"]
+    # Only the digest script is copied from the build context.
     assert not any(line.startswith("ADD ") for line in containerfile)
-    assert all(line.startswith("COPY --from=") for line in containerfile if line.startswith("COPY "))
+    assert [line for line in containerfile if line.startswith("COPY ") and not line.startswith("COPY --from=")] == [
+        "COPY ops/fleet-hub/bin/source-tree-digest.py /tmp/source-tree-digest.py"
+    ]
     assert "BRIGADE_FLEET_TOKEN" not in text
     assert "restart: unless-stopped" in text
     assert "healthcheck:" in text

@@ -1,6 +1,8 @@
 """The Fleet Hub route-registration seam (v2 slice S22a)."""
 
 import json
+from http.server import BaseHTTPRequestHandler
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -135,6 +137,25 @@ def test_hub_route_inventory_is_unchanged():
         + [("PUT", "/preference"), ("PATCH", "/work/*"), ("DELETE", "/work/*")]
     )
     assert table.registered() == expected
+
+
+@pytest.mark.parametrize(
+    ("target", "parsed"),
+    [
+        ("//health", "/health"),
+        ("//policy?mode=fixture%2Bvalue", "/policy?mode=fixture%2Bvalue"),
+        ("///work//items", "/work//items"),
+        ("//", "/"),
+        ("//unknown", "/unknown"),
+        ("//deck/actions/aa_x", "/deck/actions/aa_x"),
+    ],
+)
+def test_stdlib_normalizes_only_leading_request_slashes(target, parsed):
+    handler = BaseHTTPRequestHandler.__new__(BaseHTTPRequestHandler)
+    handler.raw_requestline = f"GET {target} HTTP/1.1\r\n".encode("ascii")
+    handler.rfile = BytesIO(b"Host: example.test\r\n\r\n")
+    assert handler.parse_request()
+    assert handler.path == parsed
 
 
 def test_request_log_fixture_covers_registered_python_routes():

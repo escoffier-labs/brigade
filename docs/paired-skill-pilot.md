@@ -255,6 +255,32 @@ live validator from the schema. The init gate reports the CLI's own view of its
 configuration. Model and CLI authenticity remain unverified, and the result can
 neither score nor promote a skill.
 
+#### Deadline and leftovers
+
+On Linux a cell's deadline is hard. Stdout is read through `poll` against a
+monotonic deadline instead of waiting for EOF, so a process the arm started that
+calls `setsid` and keeps the inherited pipe open cannot hold the cell past its
+timeout. The read stops at the deadline, the arm's group and session are
+signalled, and the cell fails as `descendant_held_pipes` while the trial moves on
+to the next cell. After teardown the adapter scans `/proc` for a live process
+whose environment still carries that cell's random `BRIGADE_PAIRED_CELL` token,
+which every descendant inherits. A process without the token is never touched,
+even with the same user and a working directory inside the cell, and each token
+is read again after the pidfd is held. Each stray is signalled through its pidfd,
+then an otherwise passing cell fails as `descendant_survived`, keeps its work dir
+and records the pids in `live.diagnostics`. A same-user process whose environment
+cannot be read is never signalled. It fails the cell as
+`process_group_drain_failed` only when it started during the cell and either runs
+in the work dir or holds one of the cell's pipes. Unrelated same-user processes
+keep their environment unreadable by design, as sshd does, so they are skipped.
+On Linux a cell that cannot scan `/proc` at all fails as
+`process_group_drain_failed` and keeps its work dir, so a missing process table
+never lets a cell pass unchecked. Every wait on the leader is bounded as well, so
+a leader stuck in uninterruptible sleep records a cleanup failure instead of
+holding the trial. Windows behavior is unchanged, and there is no cgroup or
+PID-namespace containment yet, so a descendant that clears its own environment
+can still escape the scan.
+
 #### Size caps
 
 Every read is bounded before it is buffered, and exceeding a cap fails the cell

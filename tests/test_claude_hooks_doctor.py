@@ -489,3 +489,36 @@ def test_doctor_treats_a_crlf_template_checkout_as_current(tmp_path: Path, monke
     monkeypatch.setattr(classify, "template_root", lambda: crlf_root)
 
     assert classify._skill_current(target) == (True, True)
+
+
+def test_classify_shares_stop_gate_across_sessions(tmp_path, monkeypatch):
+    from brigade.claude_hooks import classify
+
+    target = _wired(tmp_path).resolve()
+    now = localio.utc_now_iso()
+    monkeypatch.setattr(
+        classify,
+        "iter_session_states",
+        lambda *_args, **_kwargs: [
+            {"session_id": session, "target": str(target), "write_observed": True, "started_at": now}
+            for session in ("first", "second")
+        ],
+    )
+    gates = []
+
+    def inspect_receipt(*_args, gate=None, **_kwargs):
+        gates.append(gate)
+        return False
+
+    def inspect_foreign_write(*_args, gate=None):
+        gates.append(gate)
+        return True
+
+    monkeypatch.setattr(classify, "_receipt_since", inspect_receipt)
+    monkeypatch.setattr(classify, "_shared_tree_block_is_foreign", inspect_foreign_write)
+
+    classify.classify(target)
+
+    assert len(gates) == 4
+    assert gates[0] is not None
+    assert all(gate is gates[0] for gate in gates)

@@ -78,8 +78,10 @@ under #2046/#2049.
 id, status, attempt id, whether the status is terminal, whether its result was
 acknowledged, containment, result id, and artifact classification and digest.
 `brigade runs tasks show <run> <task_id> [--json]` prints the same fields for
-one task and, when the batch result receipt exists, its run-relative path and
-SHA-256 digest. Neither command prints task text, prompt text, receipt bodies,
+one task, the batch task's `selection` (`{"kind": "seat"|"capability",
+"capability": tag|null}`) when its request marker is readable, and, when the
+batch result receipt exists, its run-relative path and SHA-256 digest. Neither
+command prints task text, prompt text, receipt bodies,
 or worker output. An unknown task exits 2 with code `unknown-task` and at most
 10 sorted known task ids. A missing task journal exits 2 with code
 `no-task-journal`.

@@ -55,7 +55,9 @@ def worktrees(tmp_path: Path, monkeypatch) -> tuple[Path, Path]:
 
 
 def replacement(target: Path) -> str:
-    return runtime._verify_replacement(target, "<test>", runtime._session_fingerprint(SESSION))
+    return runtime._verify_replacement(
+        target, ["pytest", "tests/test_example.py"], runtime._session_fingerprint(SESSION)
+    )
 
 
 def verify(cwd: Path, target: Path):

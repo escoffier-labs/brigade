@@ -21,6 +21,7 @@ from . import (
     localio,
     proc,
     run_batch_artifacts,
+    run_batch_capability,
     run_batch_launch,
     run_batch_synthesis,
     run_batch_workspace,
@@ -33,7 +34,8 @@ from . import (
     run_tasks,
     runguard,
 )
-from .run_batch import BatchError
+from .run_batch import MARKER_NAME, BatchError, read_request_marker
+from .run_batch_capability import read_only_enforcement_error
 from .run_transport import TASK_CANCELLED_STATUS, Assignment, WorkerResult
 from .roster import Roster, read_only_cloud_mutation_error
 
@@ -70,25 +72,6 @@ def _batch_task_id(task: str) -> str | None:
 def _reference(value: str | None) -> str | None:
     """Drop a provider value the journal would refuse, rather than lose the whole observation."""
     return value if run_task_journal.provider_reference(value) else None
-
-
-def _read_only_enforcement_error(task_id: str, agent: Any, roster: Roster, *, read_only: bool) -> str | None:
-    """Refuse a per-task read-only setting the seat cannot hard-enforce.
-
-    The shared-writable layer rule lets a read-only task run beside a writer in
-    one checkout, so a soft or prompt-only read-only mode is not enough. A
-    read-only roster sandbox likewise cannot carry a writable task.
-    """
-    if read_only:
-        enforcement = agents.read_only_enforcement(agent.cli or "", sandbox=roster.sandbox, transport=agent.transport)
-        if enforcement != "hard":
-            return (
-                f"task {task_id} is read_only but seat {agent.name!r} enforces read-only as {enforcement!r} "
-                f"under sandbox {roster.sandbox!r}; use isolation worktree, depends_on, or a hard read-only seat"
-            )
-    elif roster.sandbox == "read-only":
-        return f"task {task_id} is writable but the roster sandbox is read-only"
-    return None
 
 
 def _refuse_externally_controlled(run_dir: Path) -> None:
@@ -458,7 +441,7 @@ class BatchExecution:
                 # The same refusal a read-only run applies to a mutating cloud seat.
                 error = read_only_cloud_mutation_error(agent)
             if error is None and agent is not None:
-                error = _read_only_enforcement_error(task["task_id"], agent, roster, read_only=read_only)
+                error = read_only_enforcement_error(task["task_id"], agent, roster, read_only=read_only)
             if error is not None:
                 raise BatchError("invalid-seat", error)
         specs = tuple(
@@ -601,13 +584,17 @@ class BatchExecution:
 
         # Reuse the wave scheduler and its fail-fast behavior. No wave exceeds
         # the effective roster limit, even before transport admission is applied.
-        waves: list[Assignment] = []
-        stage = 0
-        for layer in sorted({a.stage for a in assignments}):
-            members = [a for a in assignments if a.stage == layer]
-            for offset in range(0, len(members), roster.max_workers):
-                waves.extend(replace(a, stage=stage) for a in members[offset : offset + roster.max_workers])
-                stage += 1
+        # An enrolled Fleet Hub also caps same-seat members by that seat's free
+        # capacity; the lease at launch stays the final check. Only a layer with
+        # two tasks on one seat can be reshaped by that cap, so no other batch
+        # pays for the read.
+        per_layer: dict[int, list[str]] = {}
+        for assignment in assignments:
+            per_layer.setdefault(assignment.stage, []).append(assignment.worker)
+        capacity: dict[str, int] = {}
+        if any(len(seats) != len(set(seats)) for seats in per_layer.values()):
+            capacity = run_batch_capability.remaining_capacity(roster)
+        waves = run_batch_capability.build_waves(assignments, roster.max_workers, capacity)
         original_prompt = kwargs["build_prompt"]
 
         def build_prompt(agent, assignment, **prompt_kwargs):
@@ -939,6 +926,7 @@ def stored_result(
             "result_id": state.result_id if state else None,
             "result_ref": str(path.relative_to(run_dir)) if path.is_file() else None,
             "workspace": "worktree" if worktree else "shared",
+            "selection": run_batch_capability.selection(task),
             "artifact": artifact,
             "refusal": {"code": refusal[0], "reason": refusal[1]} if refusal is not None else None,
         }
@@ -1003,6 +991,62 @@ def request_lock(run_dir: Path):
         raise BatchError("request-busy", "another caller is dispatching this batch request") from exc
 
 
+def _batch_roster(workspace: Path, explicit: Path | None) -> Roster:
+    """Load the same roster the run dispatch would load for this workspace."""
+    from . import roster as roster_mod
+
+    try:
+        resolution = roster_mod.resolve_roster(workspace, explicit)
+        return roster_mod.load_roster(resolution.path, resolution=resolution)
+    except FileNotFoundError as exc:
+        raise BatchError("roster-unavailable", f"capability selection needs a roster: {exc}") from exc
+    except ValueError as exc:
+        raise BatchError("roster-invalid", f"capability selection needs a valid roster: {exc}") from exc
+
+
+def accepted_plan(plan: dict[str, Any], marker: dict[str, Any] | None, workspace: Path, args: Any) -> dict[str, Any]:
+    """Bind capability tasks to seats once, or replay the seats already recorded.
+
+    The first acceptance resolves against the live roster and persists the
+    result with the request. A retry or resume never recomputes: it validates
+    the recorded block, re-checks the recorded seat, and refuses when the roster
+    no longer declares or no longer admits that seat.
+    """
+    if not run_batch_capability.has_capability(plan):
+        return plan
+    roster = _batch_roster(workspace, getattr(args, "roster", None))
+    snapshot = fleet_client.load_model_policy_snapshot()
+    if marker is None:
+        return run_batch_capability.resolve(plan, roster, snapshot=snapshot)
+    return run_batch_capability.reuse(plan, marker, roster, snapshot=snapshot)
+
+
+def _refuse_recorded_seat_conflict(run_dir: Path, plan: dict[str, Any]) -> None:
+    """Refuse a capability task the journal already accepted on another seat.
+
+    Acceptance refuses a changed descriptor as a journal identity conflict; a
+    closed code keeps a retry that bound a different seat from surfacing as an
+    unhandled journal error. A task with no accepted spec is not checked here.
+    """
+    if not run_lifecycle._journal_path(run_dir).exists():
+        return
+    try:
+        accepted = run_tasks.read_tasks(run_dir)
+    except run_tasks.TaskJournalError:
+        return
+    seats = {row.handle.spec.task_id: row.handle.spec.seat for row in accepted}
+    for task in plan["tasks"]:
+        if not isinstance(task.get("capability"), str):
+            continue
+        seat = seats.get(task["task_id"])
+        if seat is not None and seat != task["seat"]:
+            raise BatchError(
+                "capability-seat-conflict",
+                f"task {task['task_id']} is already accepted on seat {seat!r}, "
+                f"not the recorded seat {task['seat']!r}; refusing launch. Use a new request_id",
+            )
+
+
 def execute_cli(args: Any, plan: dict[str, Any]) -> int:
     from . import cli
     from .cli.run import dispatch
@@ -1054,11 +1098,11 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
     # Serialize retry eligibility with dispatch, including preflight. The
     # workspace run lock remains the authority for executing worker processes.
     with request_lock(run_dir):
-        marker_path = run_dir / "batch-request.json"
-        marker = localio.read_json_dict(marker_path)
-        if marker_path.exists() and (
-            marker is None or re.fullmatch(r"[0-9a-f]{64}", str(marker.get("fingerprint"))) is None
-        ):
+        marker_path = run_dir / MARKER_NAME
+        # The reservation is read no-follow and bounded: a symlinked or oversized
+        # marker is refused rather than silently treated as absent.
+        marker = read_request_marker(run_dir)
+        if marker is not None and re.fullmatch(r"[0-9a-f]{64}", str(marker.get("fingerprint"))) is None:
             raise BatchError("request-unknown", "request reservation has no readable fingerprint; refusing launch")
         if marker is not None and marker.get("fingerprint") != plan["fingerprint"]:
             raise BatchError("request-conflict", "request_id already belongs to a different batch")
@@ -1097,8 +1141,14 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
                 if execution.refusal is not None:
                     raise BatchError(*execution.refusal)
         else:
-            localio.write_json(marker_path, plan)
-            run_journal._fsync_directory(run_dir)
+            # A valid marker is never rewritten: the accepted request, including
+            # its capability resolutions and digest, stays exactly as accepted.
+            fresh = marker is None
+            plan = accepted_plan(plan, marker, workspace, args)
+            _refuse_recorded_seat_conflict(run_dir, plan)
+            if fresh:
+                localio.write_json(marker_path, plan)
+                run_journal._fsync_directory(run_dir)
             execution = BatchExecution(plan, run_dir, workspace)
             # The base is checked once before the run starts, so a caller that
             # moved HEAD is refused with its own code and no run artifacts.

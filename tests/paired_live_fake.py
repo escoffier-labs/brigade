@@ -91,6 +91,25 @@ if SC.get("escaped_writer"):
         time.sleep(0.01)
     else:
         raise SystemExit("escaped writer never became ready")
+if SC.get("session_orphan"):
+    # A descendant that leaves the CLI's session with setsid, so neither a group kill nor a session
+    # drain reaches it. It keeps the arm's stdout and stderr open unless it is marked quiet, and
+    # publishes readiness by CLI pid, so the CLI only exits once the orphan is provably alive.
+    orphan = SC["session_orphan"]
+    quiet = subprocess.DEVNULL if orphan.get("quiet") else None
+    subprocess.Popen([sys.executable, "-c", orphan["code"]], stdin=subprocess.DEVNULL,
+                     stdout=quiet, stderr=quiet)
+    ready = orphan["ready"] + "." + str(os.getpid())
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        try:
+            if os.path.getsize(ready) > 0:
+                break
+        except OSError:
+            pass
+        time.sleep(0.01)
+    else:
+        raise SystemExit("session orphan never became ready")
 for event in SC.get("pre_events", []):
     emit(event)
 steps = SC.get("steps", [])

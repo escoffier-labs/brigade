@@ -36,7 +36,7 @@ from . import closeout_receipt
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
-from . import verify_argv_files, verify_ci, verify_ranking, verify_receipt_details, verify_runtime
+from . import verify_argv_files, verify_ci, verify_gate, verify_ranking, verify_receipt_details, verify_runtime
 from .closeout_receipt import write_markdown as _write_work_closeout_markdown
 from .verify_scoreability import _print_graph_impact, _print_scoreability_notice, _scoreability_notice
 
@@ -501,6 +501,7 @@ def _finalize_verify_receipt(
     else:
         receipt["status"], rc = verify_receipt_details.terminal_status(receipt, rc)
         verify_receipt_details.stamp_tree_after(target, receipt)
+    verify_gate.stamp_gating(target, receipt)
     commands = receipt.get("commands")
     if isinstance(commands, list):
         for command in commands:
@@ -605,6 +606,7 @@ def _safe_finalize_verify_receipt(
             # The status changed after these were stamped, so stamp them again.
             verify_trial.stamp_verify_receipt_failure_taxonomy(receipt)
             _stamp_verification_contract_outcomes(receipt)
+        verify_gate.stamp_gating(target, receipt)
         receipt.setdefault("completed_at", helpers._now().isoformat())
         # Keep a valid digest/signature if fallback did not change the payload.
         # A completed digest must never authenticate a newly canceled receipt.
@@ -1694,6 +1696,7 @@ def _write_reused_receipt(
     planned_display: list[str],
     timeout: int,
     *,
+    gating: dict[str, Any],
     admitted_fingerprint: str | None,
     capture: str | None = None,
     capture_kind: str = "skill",
@@ -1738,6 +1741,7 @@ def _write_reused_receipt(
     reused_from = latest.get("run_id")
     if isinstance(reused_from, str) and reused_from:
         receipt["reused_from"] = reused_from
+    receipt["gating"] = gating
     git = _receipt_git_snapshot(target)
     if git is not None:
         receipt["git"] = git
@@ -2008,12 +2012,17 @@ def verify_run(
             if reuse and manifest is None:
                 fingerprint = localio.tree_fingerprint(target)
                 latest = _latest_verify_receipt(target)
-                if verify_argv_files.reusable_receipt(target, planned, planned_display, fingerprint, latest):
+                if (
+                    latest is not None
+                    and verify_argv_files.reusable_receipt(target, planned, planned_display, fingerprint, latest)
+                    and (gating := verify_gate.reuse_gating(target, latest)) is not None
+                ):
                     receipt, rc = _write_reused_receipt(
                         target,
-                        latest or {},
+                        latest,
                         planned_display,
                         timeout,
+                        gating=gating,
                         admitted_fingerprint=fingerprint,
                         capture=capture,
                         capture_kind=capture_kind,

@@ -540,13 +540,45 @@ fn bearer_token(req: &Request<Body>) -> Option<&str> {
         .and_then(|v| v.strip_prefix("Bearer "))
         .filter(|v| !v.is_empty())
 }
-async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
+/// The request target that carries no extra leading slashes, if any.
+///
+/// `None` means the target is already unchanged and is used as is, without an
+/// allocation or clone. Absolute-form targets keep their scheme and authority;
+/// only the leading run of path slashes collapses.
+fn effective_uri(uri: &axum::http::Uri) -> Result<Option<axum::http::Uri>, ()> {
+    let Some(target) = uri.path_and_query().filter(|p| p.path().starts_with("//")) else {
+        return Ok(None);
+    };
+    let raw = target.as_str();
+    let leading = raw.len() - raw.trim_start_matches('/').len();
+    let mut parts = uri.clone().into_parts();
+    parts.path_and_query = Some(raw[leading - 1..].parse().map_err(|_| ())?);
+    axum::http::Uri::from_parts(parts).map(Some).map_err(|_| ())
+}
+
+/// The normalised target could not be rebuilt. `handle_inner` refuses it with
+/// the same 400 as any other invalid request target.
+#[derive(Clone, Copy)]
+struct InvalidTarget;
+
+async fn handle(State(app): State<App>, mut req: Request<Body>) -> Response<Body> {
     use brigade_hub::{
         modes::{Mode, family, method_label, route_label},
         shadow,
         telemetry::{RequestLog, Stage, StageSlot},
     };
     let started = std::time::Instant::now();
+    // Match Python's request parser (gh-87389) before logging, admission,
+    // dispatch, or proxying. Rebuild only the URI with extra leading slashes.
+    match effective_uri(req.uri()) {
+        Ok(Some(uri)) => *req.uri_mut() = uri,
+        Ok(None) => {}
+        Err(()) => {
+            // Fail closed through the normal reply path so the refusal is still
+            // logged and counted like any other refused request.
+            req.extensions_mut().insert(InvalidTarget);
+        }
+    }
     let f = family(req.method().as_str(), req.uri().path(), "");
     // Keep a caller-provided slot available to cancellation tests.
     let stage = req
@@ -722,10 +754,11 @@ async fn handle_inner(State(app): State<App>, req: Request<Body>) -> Response<Bo
             slot.set(next);
         }
     };
-    if req
-        .uri()
-        .path_and_query()
-        .is_none_or(|p| !p.as_str().starts_with('/'))
+    if req.extensions().get::<InvalidTarget>().is_some()
+        || req
+            .uri()
+            .path_and_query()
+            .is_none_or(|p| !p.as_str().starts_with('/'))
     {
         return json(
             StatusCode::BAD_REQUEST,
@@ -2137,6 +2170,30 @@ fn main() {
 mod tests {
     use super::*;
     use tokio::net::TcpListener;
+
+    /// Only a leading run of slashes collapses; everything else is untouched.
+    #[test]
+    fn effective_uri_collapses_only_extra_leading_slashes() {
+        for (input, expected) in [
+            ("/a", None),
+            ("//", Some("/")),
+            ("///", Some("/")),
+            ("//?q", Some("/?q")),
+            ("//a?x=//y", Some("/a?x=//y")),
+            ("//%2f", Some("/%2f")),
+            ("//host/path", Some("/host/path")),
+            ("//@x", Some("/@x")),
+            ("///work//items", Some("/work//items")),
+            ("http://h//p", Some("http://h/p")),
+            ("*", None),
+            ("example.test:80", None),
+        ] {
+            let uri: axum::http::Uri = input.parse().expect(input);
+            let got = effective_uri(&uri).expect(input).map(|uri| uri.to_string());
+            assert_eq!(got.as_deref(), expected, "{input}");
+        }
+    }
+
     // Wait for the shell to install its disposition before sending the stop.
     async fn stop_test_child(disposition: &str) -> Child {
         use tokio::io::{AsyncBufReadExt, BufReader};
