@@ -6,6 +6,11 @@ on:
   pull_request:
   merge_group:
     types: [checks_requested]
+  # The scheduled ledger writer dispatches CI on its own branch, because events made
+  # with the built-in token start no pull_request run (#2589). A dispatched run has no
+  # base event: `changes` fails closed to full CI and lint and the changelog guard use
+  # the merge base with main.
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -247,7 +252,7 @@ jobs:
               stream.write(output)
           PY
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
-        if: ${{ github.event_name != 'merge_group' }}
+        if: ${{ github.event_name != 'merge_group' && github.event_name != 'workflow_dispatch' }}
         id: filter
         with:
           filters: |
@@ -272,7 +277,7 @@ jobs:
       - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         # Same action and diff source as the step above. The hub path list
         # lives in one file that the merge-group selector also reads (from main).
-        if: ${{ github.event_name != 'merge_group' }}
+        if: ${{ github.event_name != 'merge_group' && github.event_name != 'workflow_dispatch' }}
         id: hub_filter
         with:
           filters: scripts/ci_hub_paths.yml
@@ -707,6 +712,12 @@ jobs:
               exit 1
             fi
             base=$(git rev-parse HEAD^1)
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # No base event on a dispatched run. Compare with where this branch left main.
+            deepen=
+            if [ "$(git rev-parse --is-shallow-repository)" = true ]; then deepen=--unshallow; fi
+            git fetch --no-tags --filter=blob:none $deepen origin '+refs/heads/main:refs/remotes/origin/main'
+            base=$(git merge-base HEAD refs/remotes/origin/main)
           else
             base=$EVENT_BASE_SHA
           fi
@@ -1011,6 +1022,7 @@ jobs:
       - content-guard
       - repo-metadata
       - changelog-fragments
+      - ledger-recompute
       - install-from-source
       - quickstart-smoke
       - windows-native-acceptance
@@ -1030,7 +1042,7 @@ jobs:
           mandatory = {
               "changes", "lint", "test", "test-shards", "coverage",
               "cosign-integration", "fleet-hub-container", "hub-rust", "component-manifest-provenance", "engine-rename-installer",
-              "content-guard", "repo-metadata", "changelog-fragments", "install-from-source",
+              "content-guard", "repo-metadata", "changelog-fragments", "ledger-recompute", "install-from-source",
               "quickstart-smoke", "windows-native-acceptance",
           }
           needs = json.loads(os.environ["NEEDS_JSON"])
@@ -1267,6 +1279,13 @@ jobs:
             # an inherited release.
             python3 scripts/changelog_fragments.py guard --base "$base" \
               --provenance "$PR_HEAD_SHA" --trusted-ref refs/remotes/origin/main
+          elif [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            # No base event on a dispatched run. Guard against where this branch left main.
+            deepen=
+            if [ "$(git rev-parse --is-shallow-repository)" = true ]; then deepen=--unshallow; fi
+            git fetch --no-tags --filter=blob:none $deepen origin '+refs/heads/main:refs/remotes/origin/main'
+            base=$(git merge-base HEAD refs/remotes/origin/main)
+            python3 scripts/changelog_fragments.py guard --base "$base"
           else
             base=$EVENT_BASE_SHA
             if [ -z "$base" ]; then
@@ -1276,6 +1295,52 @@ jobs:
             git fetch --no-tags --depth=1 origin "$base"
             python3 scripts/changelog_fragments.py guard --base "$base"
           fi
+
+  # Rebuilds outcome-ledger/skills.json from trusted main and fails on any difference
+  # (#2589). A push to main is checked too, against the ledger the push replaced.
+  # Never docs-skipped: a ledger edit is data, and the check must see it. The
+  # logic comes from a copy of main's tree, never from the proposal, the way the hub
+  # selector does. The proposal's ledger is read as data only.
+  ledger-recompute:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Recompute the outcome ledger from trusted main
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # A fixed refspec: the trusted ref never comes from the event or the proposal.
+          git fetch --no-tags --no-recurse-submodules origin '+refs/heads/main:refs/ci-trusted/main'
+          trusted=$(git rev-parse --verify 'refs/ci-trusted/main^{commit}')
+          if ! git cat-file -e "$trusted:scripts/ledger_recompute.py" 2>/dev/null; then
+            # The bootstrap pass is only for the change that introduces the logic, and that
+            # change carries no ledger. A ledger on trusted main or in the proposal means the
+            # check was removed or the ledger is trying to land unchecked, so this fails.
+            if git cat-file -e "$trusted:outcome-ledger/skills.json" 2>/dev/null; then
+              echo "Trusted main has an outcome ledger but no scripts/ledger_recompute.py. The check was removed, so this fails." >&2
+              exit 1
+            fi
+            if [ -n "$(git ls-tree -r --name-only HEAD -- outcome-ledger/)" ]; then
+              echo "The proposal carries an outcome ledger while trusted main has no scripts/ledger_recompute.py. Nothing can check it, so this fails." >&2
+              exit 1
+            fi
+            echo "Trusted main has no ledger recompute logic yet, so there is nothing to recompute against."
+            exit 0
+          fi
+          tree="$RUNNER_TEMP/ledger-trusted"
+          rm -rf "$tree"
+          mkdir -p "$tree"
+          git archive "$trusted" scripts/ledger_recompute.py src/brigade | tar -x -C "$tree"
+          python3 -I -S "$tree/scripts/ledger_recompute.py" \
+            --repo "$GITHUB_WORKSPACE" --main-ref refs/ci-trusted/main --head-ref HEAD
 
   install-from-source:
     if: ${{ !cancelled() && needs.changes.result == 'success' && needs.changes.outputs.docs_only != 'true' }}

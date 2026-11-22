@@ -1,0 +1,1 @@
+- Content guard recognizes Python hostname expressions in nested and multiline f-strings and continues to report literal private hosts.
