@@ -312,6 +312,13 @@ async fn log_request(
 #[tokio::test]
 async fn request_log_labels_native_health_and_drops_query() {
     let app = log_test_app(String::new());
+    let (line, text) =
+        log_request(&app, "GET", "/health?fixture_query=fixture_value", "health").await;
+    assert_eq!(line["status"], 200);
+    assert_eq!(line["method"], "GET");
+    assert_eq!(line["route"], "/health");
+    assert!(!text.contains("fixture_query"));
+    assert!(!text.contains("fixture_value"));
     let (line, text) = log_request(
         &app,
         "GET",
@@ -324,6 +331,22 @@ async fn request_log_labels_native_health_and_drops_query() {
     assert_eq!(line["route"], "/health");
     assert!(!text.contains("fixture_query"));
     assert!(!text.contains("fixture_value"));
+}
+
+#[tokio::test]
+async fn absolute_form_doubled_leading_slashes_serve_as_single() {
+    let app = log_test_app(String::new());
+    let request = |uri: &str| {
+        Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let single = answer(&app, request("http://example.test/health")).await;
+    let doubled = answer(&app, request("http://example.test//health")).await;
+    assert_eq!(single, doubled);
+    assert_eq!(single.0, 200);
 }
 
 #[tokio::test]

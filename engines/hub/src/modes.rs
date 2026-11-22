@@ -144,6 +144,7 @@ const OTHER_ROUTE: &str = "other";
 
 route_labels! {
     /// Effective native and Python dispatch paths, classified independently of method.
+    /// Callers pass the effective path; `handle` normalises extra leading slashes.
     pub fn route_label(path: &str);
     FRONT_ROUTE_LABELS;
     match path;
@@ -351,6 +352,9 @@ mod tests {
             ("/healthcheck", "other"),
             ("/policyX", "other"),
             ("/health/", "other"),
+            // route_label takes the effective path; handle normalises extra
+            // leading slashes before calling it.
+            ("//health", "other"),
             // The Python Worklore dispatcher discards empty path segments.
             ("/work/campaigns/", "/work/campaigns"),
             ("/work/campaigns//fixture", "/work/campaigns/:key"),
