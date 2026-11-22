@@ -78,6 +78,7 @@ def test_quoted_fields_do_not_hide_literal_hosts(source: str) -> None:
         'f"https://{x==cfg.HOST}/p"',
         'f"https://{fallback or cfg.HOST}/p"',
         'f"https://{x == cfg.HOST}/p"',
+        'config = (\n    base\n    + f"prefix {cfg.HOST}/ {cfg.HOST}"\n)',
         "f\"https://{lookup('café', cfg.HOST)}/p\"",
     ],
 )
@@ -122,6 +123,7 @@ def test_fstring_hostname_expressions_are_code(source: str) -> None:
         "f\"{lookup('cfg.HOST')}\"",
         "config = {'key': f\"{x or 'HOST'}\"}",
         "value = prefix + f\"{'HOST' if a else b}\"",
+        'config = (\n    base\n    + f"prefix {cfg.HOST}/LITERAL"\n)',
     ],
 )
 def test_fstring_literal_host_remains_reported(source: str) -> None:

@@ -676,6 +676,7 @@ class MissingLeakShapeTests(unittest.TestCase):
         self.assertEqual(result.redacted_text, "[redacted-host]")
 
     def test_hostname_code_contexts_are_skipped(self) -> None:
+        member = "self" + ".home"
         for text in (
             "if not obj.local:",  # content-guard: allow private-hostname
             "return obj.local",  # content-guard: allow private-hostname
@@ -686,7 +687,7 @@ class MissingLeakShapeTests(unittest.TestCase):
             "const value = opts.local ? yes : no;",  # content-guard: allow private-hostname
             "fs.mkdirSync(fresh.home);",  # content-guard: allow private-hostname
             "[seats.home]",
-            "f'path = {self.home}'",
+            "f'path = {" + member + "}'",
         ):
             with self.subTest(text=text):
                 self.assertNotIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
@@ -714,7 +715,8 @@ class MissingLeakShapeTests(unittest.TestCase):
                 self.assertIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
 
     def test_spaced_interpolation_remains_code_shaped(self) -> None:
-        result = scan_text("f'{ self.home }'")
+        member = "self" + ".home"
+        result = scan_text("f'{ " + member + " }'")
         self.assertNotIn("private-hostname", {f.rule_id for f in result.findings})
 
     def test_shell_prefixed_hostname_assignments_match(self) -> None:

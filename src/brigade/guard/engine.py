@@ -472,12 +472,10 @@ def _fstring_expression_spans(source: str, offset: int, *, whole_field_only: boo
     root = tree.body
     if not isinstance(root, ast.JoinedStr):
         return
-    if whole_field_only and (len(root.values) != 1 or not isinstance(root.values[0], ast.FormattedValue)):
-        return
     text_parts = [part.value for part in root.values if isinstance(part, ast.Constant) and isinstance(part.value, str)]
     has_literal_url = any("://" in part for part in text_parts)
-    # Quoted URL examples in literal text can have their own braces.
-    if has_literal_url and any('"' in part or "'" in part for part in text_parts):
+    # URLs in ambiguous positions and quoted URL examples keep detection.
+    if has_literal_url and (whole_field_only or any('"' in part or "'" in part for part in text_parts)):
         return
     lines = source.split("\n")
     starts = _line_starts(source)
