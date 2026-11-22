@@ -432,47 +432,62 @@ _HOSTNAME_KEY = r"(?:[a-z][a-z0-9]*[_-])*(?:host|hostname|server|endpoint|domain
 _JS_RECEIVER = r"(?:(?:args|argv|options|opts|params|props|this|globalThis)|process\.env)"
 
 
-def _fstring_operands(tree: ast.Expression) -> Iterator[ast.expr]:
-    for node in ast.walk(tree):
+def _fstring_code_nodes(root: ast.JoinedStr, whole_field_only: bool) -> Iterator[ast.expr]:
+    pending: list[tuple[ast.AST, ast.expr | None]] = [(root, None)]
+    while pending:
+        node, field = pending.pop()
         if isinstance(node, ast.FormattedValue):
-            yield node.value
-        elif isinstance(node, ast.Call):
-            arguments = [*node.args, *(keyword.value for keyword in node.keywords)]
+            if whole_field_only and field is not None:
+                continue
+            field = node.value
+        if isinstance(node, ast.Call) and any(
+            isinstance(arg, ast.Constant) and isinstance(arg.value, str) and "://" in arg.value
+            for arg in (*node.args, *(keyword.value for keyword in node.keywords))
+        ):
             # A separate URL in the call keeps the existing hostname detection.
-            if not any(
-                isinstance(arg, ast.Constant) and isinstance(arg.value, str) and "://" in arg.value for arg in arguments
+            continue
+        if field is not None and isinstance(node, (ast.Name, ast.Attribute, ast.Subscript)):
+            # A leading operand of a larger field expression keeps detection.
+            if node is field or (
+                not whole_field_only and (node.lineno, node.col_offset) != (field.lineno, field.col_offset)
             ):
-                yield from arguments
-        elif isinstance(node, ast.Subscript):
-            yield node.slice
-        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
-            yield node.left
-            yield node.right
-        elif isinstance(node, ast.Compare):
-            yield from node.comparators
-        elif isinstance(node, ast.BoolOp):
-            yield from node.values[1:]
+                yield node
+        elif (
+            node is field
+            and isinstance(node, ast.BinOp)
+            and all(
+                isinstance(part, (ast.BinOp, ast.Sub, ast.Attribute, ast.Name, ast.Load)) for part in ast.walk(node)
+            )
+        ):
+            # A hyphenated match can be a whole subtraction of identifiers.
+            yield node
+        pending.extend((child, field) for child in ast.iter_child_nodes(node))
 
 
-def _fstring_expression_spans(source: str, offset: int) -> Iterator[tuple[int, int]]:
+def _fstring_expression_spans(source: str, offset: int, *, whole_field_only: bool) -> Iterator[tuple[int, int]]:
     try:
         tree = ast.parse(source, mode="eval")
     except (SyntaxError, RecursionError, UnicodeError):
         return
-    if isinstance(tree.body, ast.JoinedStr):
-        text_parts = [
-            part.value for part in tree.body.values if isinstance(part, ast.Constant) and isinstance(part.value, str)
-        ]
-        # Quoted URL examples in literal text can have their own braces.
-        if any("://" in part for part in text_parts) and any('"' in part or "'" in part for part in text_parts):
-            return
+    root = tree.body
+    if not isinstance(root, ast.JoinedStr):
+        return
+    if whole_field_only and (len(root.values) != 1 or not isinstance(root.values[0], ast.FormattedValue)):
+        return
+    text_parts = [part.value for part in root.values if isinstance(part, ast.Constant) and isinstance(part.value, str)]
+    has_literal_url = any("://" in part for part in text_parts)
+    # Quoted URL examples in literal text can have their own braces.
+    if has_literal_url and any('"' in part or "'" in part for part in text_parts):
+        return
     lines = source.split("\n")
     starts = _line_starts(source)
     columns: dict[int, list[int]] = {}
-    for operand in _fstring_operands(tree):
+    for operand in _fstring_code_nodes(root, whole_field_only):
         # Require the whole operand span. A quoted host is a Constant and
         # a host-shaped substring of a larger expression cannot match here.
-        if not isinstance(operand, (ast.Attribute, ast.BinOp)) or operand.lineno != operand.end_lineno:
+        if operand.lineno != operand.end_lineno:
+            continue
+        if has_literal_url and isinstance(operand, ast.BinOp):
             continue
         row = operand.lineno - 1
         start, end = operand.col_offset, operand.end_col_offset
@@ -529,15 +544,14 @@ def _index_fstring_hosts(
             assert outer is not None
             line, column = outer.start
             prefix = outer.line[:column]
-            if (
-                line != comment_line
-                and not prefix.lstrip().startswith(_LINE_START_COMMENT_PREFIXES)
-                and _FSTRING_POSITION.search(prefix)
-            ):
-                start = line_starts[line - 1] + column
-                end = line_starts[item.end[0] - 1] + item.end[1]
-                literals.add(start, end, "")
-                expressions.update(_fstring_expression_spans(text[start:end], start))
+            start = line_starts[line - 1] + column
+            end = line_starts[item.end[0] - 1] + item.end[1]
+            literals.add(start, end, "")
+            if line != comment_line and not prefix.lstrip().startswith(_LINE_START_COMMENT_PREFIXES):
+                # Preserve bare whole-field exclusions in mixed-language code.
+                # Other positions still need literal detection.
+                whole_field_only = _FSTRING_POSITION.search(prefix) is None
+                expressions.update(_fstring_expression_spans(text[start:end], start, whole_field_only=whole_field_only))
     except (tokenize.TokenError, SyntaxError, UnicodeError):
         # Mixed-language text may end lexing early. Keep detection in that tail.
         return
@@ -1232,11 +1246,9 @@ def _hostname_context(text: str, start: int, end: int, js_fields: set[int] | Non
     # These delimiters introduce expressions, including expressions inside
     # interpolated strings. Check them before accepting a surrounding quote.
     normalized = _normalized_shell_assignments(before)
-    interpolation = re.search(r"\b(?:rf|fr|f)[\"'][^\n]*\{[^}]*$", normalized, re.IGNORECASE)
-    if interpolation:
-        # A Python-shaped opener absent from the token index may be an example
-        # inside an enclosing multiline string. Retain detection there.
-        return bool(_FSTRING_POSITION.search(normalized[: interpolation.start()]))
+    if re.search(r"\b(?:rf|fr|f)[\"'][^\n]*\{[^}]*$", normalized, re.IGNORECASE):
+        # Untokenized f-string text may contain quoted hosts or examples.
+        return True
     if before.rstrip().endswith(("[", "{")):
         return False
     if _quote_at(line, column, None) is not None:

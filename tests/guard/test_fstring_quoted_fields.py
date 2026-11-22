@@ -102,6 +102,11 @@ def test_fstring_hostname_expressions_are_code(source: str) -> None:
         "f\"https://{lookup('cfg.HOST')}/p\"",
         "f\"https://{parts['cfg.HOST']}/p\"",
         "f\"https://{x=='cfg.HOST'}/p\"",
+        "f\"https://{x or 'HOST'}/p\"",
+        "f\"https://{'HOST' if a else b}/p\"",
+        "f\"https://{f('HOST')}/p\"",
+        "f\"https://{d['HOST']}/p\"",
+        'f"""https://{f"{\'HOST\'}"}/p"""',
         "f\"https://{x//'HOST'}/p\"",
         "f\"https://{x#'HOST'}/p\"",
         r"""f"https://{lookup('''a\''''+'HOST')}/p" """,
@@ -115,6 +120,8 @@ def test_fstring_hostname_expressions_are_code(source: str) -> None:
         'hint = `\nf"{HOST}"\n`',
         'f"{value} literal HOST"',
         "f\"{lookup('cfg.HOST')}\"",
+        "config = {'key': f\"{x or 'HOST'}\"}",
+        "value = prefix + f\"{'HOST' if a else b}\"",
     ],
 )
 def test_fstring_literal_host_remains_reported(source: str) -> None:
