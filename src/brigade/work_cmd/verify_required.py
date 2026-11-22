@@ -19,11 +19,24 @@ CONFIG_PATH = "verify/required-tests.json"
 CONFIG_SCHEMA = "brigade.verify_required_config.v1"
 PLAN_SCHEMA = "brigade.verify_required.v1"
 PLANNER_TIMEOUT_SECONDS = 60
+PYTEST_OPTION_GUIDANCE = (
+    "Put extra pytest options such as -p xdist -n 4 after the command prefix and before any separator or test path."
+)
 _MAX_HINT_TESTS = 40
 _MAX_HINT_CHARS = 4000
 _PLANNER_PREFIX = "{planner_dir}/"
 _PLANNER_TOKENS = {"{base}", "{head}", "{output}", "{planner_dir}", "{repo}", "{python}", "{head_dir}"}
 _GIT_OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+_PLANNER_ENV = {"PATH", "HOME", "USERPROFILE", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TEMP", "TMP"}
+_WINDOWS_PLANNER_ENV = {"SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "SYSTEMDRIVE"}
+
+
+def _planner_env() -> dict[str, str]:
+    """Pass only the OS settings needed by the planner and its Git commands."""
+    if os.name == "nt":
+        allowed = _PLANNER_ENV | _WINDOWS_PLANNER_ENV
+        return {key.upper(): value for key, value in os.environ.items() if key.upper() in allowed}
+    return {key: value for key, value in os.environ.items() if key in _PLANNER_ENV}
 
 
 def _remaining(deadline: float | None, limit: float) -> float:
@@ -41,7 +54,7 @@ def _git(target: Path, *args: str, deadline: float | None = None) -> bytes:
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=_remaining(deadline, 30),
-            env=verify_manifest_git.trusted_git_env(),
+            env=_planner_env(),
         )
     except subprocess.TimeoutExpired as exc:
         raise ValueError(f"git {args[0]} timed out") from exc
@@ -187,7 +200,7 @@ def _copy_head(
                 stdout=blobs,
                 stderr=subprocess.DEVNULL,
                 timeout=_remaining(deadline, 30),
-                env=verify_manifest_git.trusted_git_env(),
+                env=_planner_env(),
             )
         except subprocess.TimeoutExpired as exc:
             raise ValueError("git cat-file timed out copying HEAD") from exc
@@ -233,7 +246,7 @@ def _run_planner(
             "{python}": sys.executable,
         }
         tokens: list[str] = config["planner_argv"]
-        env = verify_manifest_git.trusted_git_env()
+        env = _planner_env()
         if snapshot or "{head_dir}" in tokens:
             head_dir = scratch / "head"
             head_dir.mkdir()
@@ -376,6 +389,7 @@ def _print_hint(template: list[str], tests: list[str], record_path: str) -> None
             print(command)
             shell = "Git Bash" if shell_quote.is_windows() else "Bash"
             print(f"Run from the repository root in {shell}.")
+            print(PYTEST_OPTION_GUIDANCE)
             break
         shown -= 1
     if shown < len(tests):
@@ -401,7 +415,7 @@ def _print_human(payload: dict[str, Any], config: dict[str, Any] | None) -> None
 
 
 def _resolve_base(target: Path, deadline: float | None = None) -> tuple[str, str]:
-    resolved = verify_manifest_git.resolve_base(target, deadline=deadline)
+    resolved = verify_manifest_git.resolve_base(target, deadline=deadline, git_env=_planner_env())
     if resolved.status != "resolved" or resolved.commit is None or resolved.source is None:
         raise ValueError(resolved.message or "default base is unresolved")
     return _commit_id(resolved.commit.encode("ascii")), resolved.source
@@ -448,18 +462,14 @@ def required(*, target: Path, json_output: bool = False, worktree: bool = False)
         if target != root:
             raise ValueError("target must be the repository root, not a subdirectory")
         if deadline is not None:
-            tree, snapshot_head = localio.tree_fingerprint_with_head(
-                root, git_env=verify_manifest_git.trusted_git_env(), deadline=deadline
-            )
+            tree, snapshot_head = localio.tree_fingerprint_with_head(root, git_env=_planner_env(), deadline=deadline)
             if tree is None or snapshot_head != head:
                 _remaining(deadline, PLANNER_TIMEOUT_SECONDS)
                 raise ValueError("could not snapshot the working tree at HEAD")
             payload.update(tree_id=tree, covers_worktree=True)
         else:
             tree = payload["tree_id"] = _commit_id(_git(root, "rev-parse", "--verify", f"{head}^{{tree}}"))
-            payload["covers_worktree"] = (
-                localio.tree_fingerprint(root, git_env=verify_manifest_git.trusted_git_env()) == tree
-            )
+            payload["covers_worktree"] = localio.tree_fingerprint(root, git_env=_planner_env()) == tree
         resolved_base, source = _resolve_base(root, deadline)
         payload.update(base=resolved_base, base_source=source, base_trusted=source == "default_branch")
         if deadline is not None:

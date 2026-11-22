@@ -28,8 +28,8 @@ _HEAD_FALLBACK_BUDGET_SECONDS = 1.0
 # The operator chose this limit on 2026-11-22 to avoid long local runs.
 _MAX_LOCAL_TEST_FILES = 20
 _PLAN_SCHEMA_VERSION = 1
-_TEST_ENV_OVERRIDES = {"PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTHONPATH", "PY"}
-_SINGLE_OPTIONS = {"-q", "-v", "-vv"}
+_TEST_ENV_OVERRIDES = {"PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTHONPATH"}
+_SINGLE_OPTIONS = {"-v", "-vv"}
 _NUMBER_OPTIONS = {"-n", "--timeout", "--durations"}
 _TRACEBACK_STYLES = {"auto", "long", "short", "line", "native", "no"}
 
@@ -247,13 +247,15 @@ def _coverage_path(arg: str) -> str | None:
 
 def _command_files(args: list[str], entries: Mapping[str, tuple[bytes, bytes]]) -> set[str]:
     files: set[str] = set()
-    values = iter(args[1:] if args[:1] == ["--"] else args)
+    values = iter(args)
+    parse_options = True
     for arg in values:
-        if arg in _SINGLE_OPTIONS:
-            continue
-        if arg == "-p" and next(values, None) == "xdist":
-            continue
-        if arg.startswith("-"):
+        if parse_options and arg.startswith("-"):
+            if arg == "--":
+                parse_options = False
+                continue
+            if arg in _SINGLE_OPTIONS or (arg == "-p" and next(values, None) == "xdist"):
+                continue
             option, separator, value = arg.partition("=")
             if option not in _NUMBER_OPTIONS and option != "--tb":
                 return set()
@@ -275,7 +277,7 @@ def _covered_files(
     receipt: Mapping[str, Any], policy: _GatePolicy, entries: Mapping[str, tuple[bytes, bytes]]
 ) -> set[str]:
     inherited = receipt.get("inherited_test_env") or {}
-    if inherited.get("pythonpath_set") or inherited.get("py_set") or _TEST_ENV_OVERRIDES.intersection(inherited):
+    if inherited.get("pythonpath_set") or _TEST_ENV_OVERRIDES.intersection(inherited):
         return set()
     covered: set[str] = set()
     prefix = list(policy.argv_prefix)
@@ -498,7 +500,10 @@ def _plan_guidance(receipt: Mapping[str, Any], reason: str) -> tuple[str | None,
             ):
                 shown = ", ".join(missing[:10])
                 rest = f" and {len(missing) - 10} more" if len(missing) > 10 else ""
-                return f"The last run missed required test files {shown}{rest}.", argv
+                return (
+                    f"The last run missed required test files {shown}{rest}. {verify_required.PYTEST_OPTION_GUIDANCE}",
+                    argv,
+                )
     return _INELIGIBLE_NOTICE.get(reason), None
 
 
