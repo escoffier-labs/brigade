@@ -3536,14 +3536,24 @@ def test_stop_fails_open_when_git_errors_in_the_manifest_probe(tmp_path: Path, m
 
     target = _manifest_repo(tmp_path)
     stop, _written = _stop_after_subject_write(target, monkeypatch)
+    probe_attempted = False
 
     def broken_git(*_args, **_kwargs):
+        nonlocal probe_attempted
+        probe_attempted = True
         raise subprocess.TimeoutExpired(cmd="git", timeout=1)
 
-    monkeypatch.setattr(manifest_loop.subprocess, "run", broken_git)
+    monkeypatch.setattr(
+        manifest_loop,
+        "subprocess",
+        SimpleNamespace(
+            run=broken_git, DEVNULL=subprocess.DEVNULL, PIPE=subprocess.PIPE, TimeoutExpired=subprocess.TimeoutExpired
+        ),
+    )
 
     result = runtime.handle_payload("Stop", stop)
 
+    assert probe_attempted
     assert result is None or result.get("decision") != "block"
 
 

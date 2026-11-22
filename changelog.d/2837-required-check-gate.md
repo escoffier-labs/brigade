@@ -1,0 +1,1 @@
+- The Claude Stop gate now requires a passing receipt for the command declared in `verify/required-check.json` or a completed manifest run. Repositories without a declaration stay audit-only.

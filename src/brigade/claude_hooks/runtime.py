@@ -16,7 +16,7 @@ from datetime import datetime
 from io import StringIO
 from queue import Empty
 from pathlib import Path
-from typing import Any, BinaryIO, Callable, Iterator
+from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Iterator
 
 from .. import handoff_worktrees, localio, work_mode
 from ..component_paths import cache_root
@@ -58,6 +58,9 @@ from .session_state import (
     _session_state_lock,  # noqa: F401 - runtime compatibility alias
     _write_session_state_preserving_latch,
 )
+
+if TYPE_CHECKING:
+    from ..work_cmd.verify_gate import StopGate
 
 BRIEF_TIMEOUT_SECONDS = 10
 _monotonic = time.monotonic
@@ -1725,56 +1728,35 @@ def _foreign_write_since(
     return _foreign_receipt_since(target, fingerprint, since)
 
 
+def _qualified_verify_receipts(
+    target: Path, started: datetime, fingerprint: str | None, gate: StopGate | None
+) -> Iterator[tuple[dict[str, Any], datetime]]:
+    if gate is None:
+        from ..work_cmd.verify_gate import StopGate
+
+        gate = StopGate(target)
+    for receipt in _iter_verify_receipts(target):
+        if _receipt_target_matches(receipt, target):
+            completed = gate.completion_in_window(receipt, started, fingerprint)
+            if completed is not None:
+                yield receipt, completed
+
+
 def _session_has_completed_receipt(
-    target: Path,
-    *,
-    session_fingerprint: str,
-    since: object,
+    target: Path, *, session_fingerprint: str, since: object, gate: StopGate | None = None
 ) -> bool:
     started = localio.parse_iso_datetime(since)
     if started is None:
         return False
-    target = target.expanduser().resolve()
-    for receipt in _iter_verify_receipts(target):
-        if receipt.get("status") != "completed":
-            continue
-        harness_session = receipt.get("harness_session")
-        if not isinstance(harness_session, dict):
-            continue
-        if harness_session.get("harness") != "claude" or harness_session.get("fingerprint") != session_fingerprint:
-            continue
-        if not _receipt_target_matches(receipt, target):
-            continue
-        receipt_started = localio.parse_iso_datetime(receipt.get("started_at"))
-        completed = localio.parse_iso_datetime(receipt.get("completed_at"))
-        if receipt_started is None or completed is None or receipt_started < started or completed < receipt_started:
-            continue
-        return True
-    return False
-
-
-def _session_has_unverified_attributed_write(
-    target: Path,
-    state: dict[str, Any],
-    *,
-    session_fingerprint: str,
-) -> bool:
-    """True when this session's own Write/Edit/Bash PostToolUse is still unverified.
-
-    A Write or Edit PostToolUse is direct attribution, not a shared-tree
-    inference. Those writes must still hard-block even when neighbors are
-    alive (#959 review).
-    """
-    attributed = state.get("last_attributed_write_at")
-    if localio.parse_iso_datetime(attributed) is None:
-        return False
-    return not _receipt_since(target, attributed, session_fingerprint=session_fingerprint)
+    receipts = _qualified_verify_receipts(target.expanduser().resolve(), started, session_fingerprint, gate)
+    return next(receipts, None) is not None
 
 
 def _shared_tree_block_is_foreign(
     target: Path,
     session_id: str,
     state: dict[str, Any],
+    gate: StopGate | None = None,
 ) -> bool:
     """True when a Stop block would be controlled by another session's writes.
 
@@ -1786,9 +1768,12 @@ def _shared_tree_block_is_foreign(
     fingerprint = state.get("session_fingerprint")
     if not isinstance(fingerprint, str) or not fingerprint:
         fingerprint = _session_fingerprint(session_id)
-    if not _session_has_completed_receipt(target, session_fingerprint=fingerprint, since=state.get("started_at")):
+    if not _session_has_completed_receipt(
+        target, session_fingerprint=fingerprint, since=state.get("started_at"), gate=gate
+    ):
         return False
-    if _session_has_unverified_attributed_write(target, state, session_fingerprint=fingerprint):
+    own_write = localio.parse_iso_datetime(state.get("last_attributed_write_at"))
+    if own_write is not None and not _receipt_since(target, own_write, session_fingerprint=fingerprint, gate=gate):
         return False
     threshold = localio.parse_iso_datetime(
         state.get("last_verification_write_at") or state.get("last_write_at") or state.get("started_at")
@@ -2021,7 +2006,9 @@ def _normalize_state(
     return normalized
 
 
-def _receipt_since(target: Path, started_at: object, *, session_fingerprint: str | None = None) -> bool:
+def _receipt_since(
+    target: Path, started_at: object, *, session_fingerprint: str | None = None, gate: StopGate | None = None
+) -> bool:
     """Return whether a completed verify receipt covers the current write boundary.
 
     A timestamp by itself is not evidence that the verification exercised this
@@ -2039,21 +2026,7 @@ def _receipt_since(target: Path, started_at: object, *, session_fingerprint: str
         _session_id_for_fingerprint(target, session_fingerprint) if isinstance(session_fingerprint, str) else None
     )
     drifted: list[datetime] = []
-    for receipt in _iter_verify_receipts(target):
-        if receipt.get("status") != "completed":
-            continue
-        if session_fingerprint is not None:
-            harness_session = receipt.get("harness_session")
-            if not isinstance(harness_session, dict):
-                continue
-            if harness_session.get("harness") != "claude" or harness_session.get("fingerprint") != session_fingerprint:
-                continue
-        if not _receipt_target_matches(receipt, target):
-            continue
-        receipt_started = localio.parse_iso_datetime(receipt.get("started_at"))
-        completed = localio.parse_iso_datetime(receipt.get("completed_at"))
-        if receipt_started is None or completed is None or receipt_started < started or completed < receipt_started:
-            continue
+    for receipt, completed in _qualified_verify_receipts(target, started, session_fingerprint, gate):
         if audited_tree is None or receipt.get("tree_fingerprint") == audited_tree:
             return True
         drifted.append(completed)
@@ -2481,6 +2454,8 @@ def _handle_event(
     if event == "Stop":
         if payload.get("stop_hook_active") is True:
             return None
+        from ..work_cmd.verify_gate import StopGate
+
         blocking_failures: list[str] = []
         manifest_failures: list[str] = []
         shared_tree_notes: list[str] = []
@@ -2510,8 +2485,9 @@ def _handle_event(
                 or stop_state.get("last_write_at")
                 or stop_state.get("started_at")
             )
-            if not _receipt_since(stop_target, receipt_threshold, session_fingerprint=fingerprint):
-                if _shared_tree_block_is_foreign(stop_target, session_id, stop_state):
+            gate = StopGate(stop_target)
+            if not _receipt_since(stop_target, receipt_threshold, session_fingerprint=fingerprint, gate=gate):
+                if _shared_tree_block_is_foreign(stop_target, session_id, stop_state, gate):
                     # Another session owns the live tree. A hard block here is
                     # unsatisfiable: capture, foreign write, re-arm (#959).
                     shared_tree_notes.append(
@@ -2525,18 +2501,18 @@ def _handle_event(
                 exercised = stop_state.get("exercised_artifact_id")
                 replacement = _verify_replacement(
                     stop_target,
-                    "<test>",
+                    gate.command(),
                     fingerprint,
                     capture_artifact_id=exercised if isinstance(exercised, str) else None,
                 )
-                blocking_failures.append(f"{stop_target}: run `{replacement}`")
+                blocking_failures.append(gate.block_guidance(replacement))
             elif not _handoff_since(stop_target, stop_state.get("started_at")):
                 handoff_target = stop_target
             manifest_failures += manifest_loop.stop_failures(
                 stop_target,
                 stop_state,
                 _verify_env_prefix(fingerprint, None),
-                is_foreign=functools.partial(_shared_tree_block_is_foreign, stop_target, session_id, stop_state),
+                is_foreign=functools.partial(_shared_tree_block_is_foreign, stop_target, session_id, stop_state, gate),
             )
         if blocking_failures or manifest_failures:
             return {"decision": "block", "reason": manifest_loop.block_reason(blocking_failures, manifest_failures)}
