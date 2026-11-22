@@ -13,6 +13,7 @@ from ... import extras as _extras_mod
 from ...claude_hooks.package import MANAGED_EVENTS as _CLAUDE_HOOK_EVENTS
 from ...dogfood_cmd import DEFAULT_TIMEOUT_SECONDS
 from ...work_cmd import TASK_PRIORITIES, TASK_SEAT_CLASSES, TASK_TYPES
+from ...work_cmd.verify_ci import DEFAULT_CHECK_NAME
 from .. import extras as _extras_cli
 from .dispatching import dispatch
 from .phases import _register_phases
@@ -238,7 +239,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
     )
     p_work_sweep_review.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_work_verify = work_sub.add_parser("verify", help="Plan and run local work verification.")
+    p_work_verify = work_sub.add_parser("verify", help="Plan local checks and record verification evidence.")
     verify_sub = p_work_verify.add_subparsers(dest="verify_command", metavar="<verify-command>")
     verify_sub.required = True
     p_work_verify_plan = verify_sub.add_parser("plan", help="Plan local verification without running commands.")
@@ -265,8 +266,8 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help=(
             "Repo-relative changed file for GraphTrail affected-test ranking (repeatable). "
-            "When omitted, uses `git diff --name-only HEAD`. Advisory only; the worker still "
-            "chooses the command to run."
+            "When omitted, uses `git diff --name-only HEAD`. With no --command or --manifest, "
+            "the ranked suggestion becomes the planned command."
         ),
     )
     p_work_verify_plan.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -349,6 +350,12 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
     )
     p_work_verify_show.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_verify_ci = verify_sub.add_parser("ci", help="Record a GitHub CI check for the current HEAD.")
+    p_work_verify_ci.add_argument("--target", "-t", type=Path, default=Path("."), help="Git checkout to inspect.")
+    p_work_verify_ci.add_argument(
+        "--check", default=DEFAULT_CHECK_NAME, help="GitHub check name (default: %(default)s)."
+    )
+    p_work_verify_ci.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_closeout = work_sub.add_parser("closeout", help="Write a local work closeout receipt.")
     p_work_closeout.add_argument("session_id", help="Work session id, unique prefix, or latest.")
     p_work_closeout.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")

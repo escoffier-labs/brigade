@@ -382,7 +382,8 @@ directory with the same files and file hashes as the source.
 | `session_path` | string | yes | |
 | `task` | object \| null | yes | Task summary, or `null` when absent |
 | `acceptance_criteria` | array | yes | |
-| `verification` | object \| null | yes | Latest verify receipt ref, or `null` when absent |
+| `verification` | object \| null | yes | Latest verify receipt ref, or `null` when absent. These are local checks |
+| `ci_verification` | object | yes (new writes) | Saved `brigade.verify_ci.v1` record for `ci-gate` on the current commit, or `state: unknown` with a `hint`. See [verify-ci.md](verify-ci.md) |
 | `scanner_sweep` | object | yes | |
 | `code_review` | object | yes | |
 | `handoff_drafts` | object | yes | |

@@ -113,6 +113,25 @@ def record_claim(
     return record_requested(run_dir, workspace, handle.spec.seat, attempt)
 
 
+def require_durable_claim(
+    events: Sequence[run_journal.RunEvent],
+    result: run_tasks.TaskResult,
+    *,
+    require_launch: bool = True,
+    require_requested: bool = True,
+) -> journal_core.ClaimBinding:
+    binding = journal_core.claim_binding(events, result.handle.spec.task_id)
+    if binding is None or result.handle.attempt_id != binding.attempt_id:
+        raise refuse("no-claim", "the task has no durable governed claim")
+    if result.launch_claim is None and require_launch:
+        raise refuse("no-claim", "the task has no durable launch claim")
+    if require_requested and result.launch_claim is not None:
+        binding_key = (result.launch_claim.seat, result.launch_claim.dispatch_attempt)
+        if binding_key not in journal_core.requested_attempts(events):
+            raise refuse("claim-incomplete", "the claim has no durable dispatch request")
+    return binding
+
+
 def run_claim(
     host: NativeChildHost,
     ops: ClaimOps,

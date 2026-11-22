@@ -175,6 +175,15 @@ def latest(events: Sequence[run_journal.RunEvent], event_type: str, task_id: str
     return None
 
 
+def start_refusal(events: Sequence[run_journal.RunEvent], task_id: str) -> str | None:
+    """Read the durable no-worker verdict for a claimed attempt, if present."""
+    from .native_child_observations import RESOURCE_EVENT, START_REFUSALS
+
+    fact = latest(events, RESOURCE_EVENT, task_id)
+    reason = fact.get("reason") if fact is not None else None
+    return reason if isinstance(reason, str) and reason in START_REFUSALS else None
+
+
 def claim_binding(events: Sequence[run_journal.RunEvent], task_id: str) -> ClaimBinding | None:
     payload = latest(events, CLAIM_EVENT, task_id)
     if payload is None:
