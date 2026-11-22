@@ -54,6 +54,7 @@ def _observation(
     subject: Any = "unknown",
     reason: str | None = None,
     source_digest: str | None = None,
+    population: Any = "passed",
 ) -> control_readiness.ArtifactObservation:
     reasons = [reason] if reason else []
     return control_readiness.ArtifactObservation(
@@ -65,10 +66,32 @@ def _observation(
             signature=signature,
             authorization=authorization,
             subject=subject,
-            population="passed",
+            population=population,
         ),
         reasons,
         source_digest_sha256=source_digest,
+    )
+
+
+def incomplete_signed_receipt_observation(
+    relpath: str,
+    receipt: dict[str, Any] | None,
+    result: attestation.AttestationVerifyResult,
+    subject_ok: bool,
+) -> control_readiness.ArtifactObservation | None:
+    """Return the status-gated observation for a valid signed receipt, if needed."""
+    status = receipt.get("status") if receipt is not None else None
+    if result.status != attestation.STATUS_SIGNED_OK or not subject_ok or status not in {"canceled", "busy"}:
+        return None
+    return _observation(
+        relpath,
+        "incomplete",
+        integrity="passed",
+        signature="passed",
+        authorization="passed",
+        subject="passed",
+        reason=f"status_{status}",
+        population="not_applicable",
     )
 
 

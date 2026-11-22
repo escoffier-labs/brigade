@@ -579,11 +579,10 @@ def _evaluate_sshsig_test_result_signed_ok(ctx: _Context) -> _Discovery:
             except Exception:
                 obs = _verifier_unavailable(relpath, "verifier_error")
             else:
-                # A valid attestation copied from another run directory is not
-                # evidence for this one.
-                obs = _attestation_observation(
-                    relpath, result, subject_ok=result.rederived and result.run_id == run_dir.name
-                )
+                subject_ok = result.rederived and result.run_id == run_dir.name
+                obs = control_crosswalk_cosign.incomplete_signed_receipt_observation(
+                    relpath, receipt, result, subject_ok
+                ) or _attestation_observation(relpath, result, subject_ok=subject_ok)
         # An unreadable receipt leaves the attestation unbound; it is never
         # assumed to belong to the requested run.
         _bind(obs, ctx, _receipt_binding(receipt))

@@ -2709,6 +2709,32 @@ def test_signed_ok_rederived_validates_and_verifier_exception_is_unavailable(tmp
     assert readiness["reason"] == "verifier_error"
 
 
+@pytest.mark.parametrize(("status", "reason"), [("busy", "status_busy"), ("canceled", "status_canceled")])
+def test_signed_attestation_does_not_validate_incomplete_receipt_status(tmp_path, monkeypatch, status, reason):
+    from brigade import attestation
+
+    monkeypatch.setattr(control_crosswalk, "_ssh_keygen_available", lambda: True)
+    target = _ec02_target(tmp_path)
+    run_dir = _verify_dir(target, "v1")
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["status"] = status
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    _write_json(receipt_path, receipt)
+    _stub_attestation(
+        monkeypatch,
+        attestation.AttestationVerifyResult(status=attestation.STATUS_SIGNED_OK, rederived=True, run_id="v1"),
+    )
+
+    readiness = _assess(target, "EC-02")
+
+    assert readiness["outcome"] == "incomplete"
+    assert readiness["reason"] == reason
+
+
 def test_passed_signature_cannot_override_failed_prerequisite():
     from brigade import control_readiness
 
@@ -3394,7 +3420,16 @@ def test_ec10_period_uses_real_outcome_record_ts(tmp_path):
 )
 def test_verify_receipt_terminal_states_stay_distinct(tmp_path, status, outcome, reason, state):
     target = _ws(tmp_path)
-    _write_verify_receipt(_verify_dir(target, "v1"), run_id="v1", status=status)
+    run_dir = _verify_dir(target, "v1")
+    _write_verify_receipt(run_dir, run_id="v1", status=status)
+    if status == "busy":
+        receipt_path = run_dir / "receipt.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["digests"] = {
+            "algorithm": "sha256",
+            "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+        }
+        _write_json(receipt_path, receipt)
     readiness = _assess(target, "EC-01")
     assert (readiness["outcome"], readiness["reason"], readiness["legacy_state"]) == (outcome, reason, state)
 

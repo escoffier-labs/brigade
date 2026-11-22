@@ -228,8 +228,8 @@ def read_jsonl_dicts(path: Path) -> list[dict[str, Any]]:
         return []
     records: list[dict[str, Any]] = []
     try:
-        lines = path.read_text().splitlines()
-    except OSError:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeDecodeError):
         return records
     for line in lines:
         if not line.strip():

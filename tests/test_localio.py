@@ -22,11 +22,41 @@ def test_read_json_dict_invalid_utf8_returns_none(tmp_path: Path):
     assert localio.read_json_dict(path) is None
 
 
-def test_read_json_dict_reads_utf8_non_ascii_value(tmp_path: Path):
+def test_read_json_dict_reads_utf8_non_ascii_value(tmp_path: Path, monkeypatch):
     path = tmp_path / "utf8.json"
     path.write_bytes('{"value":"café"}'.encode("utf-8"))
+    read_text = Path.read_text
+    encodings = []
+
+    def recording_read_text(self, *args, **kwargs):
+        if self == path:
+            encodings.append(kwargs.get("encoding"))
+        return read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", recording_read_text)
 
     assert localio.read_json_dict(path) == {"value": "café"}
+    assert encodings == ["utf-8"]
+
+
+def test_read_jsonl_dicts_reads_utf8_and_returns_empty_for_invalid_utf8(tmp_path: Path, monkeypatch):
+    path = tmp_path / "utf8.jsonl"
+    path.write_bytes('{"value":"café"}\n'.encode("utf-8"))
+    read_text = Path.read_text
+    encodings = []
+
+    def recording_read_text(self, *args, **kwargs):
+        if self == path:
+            encodings.append(kwargs.get("encoding"))
+        return read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", recording_read_text)
+
+    assert localio.read_jsonl_dicts(path) == [{"value": "café"}]
+    assert encodings == ["utf-8"]
+
+    path.write_bytes(b'{"value":"\xff"}\n')
+    assert localio.read_jsonl_dicts(path) == []
 
 
 def test_write_json_round_trips_and_is_sorted(tmp_path: Path):
