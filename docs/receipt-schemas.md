@@ -220,6 +220,7 @@ merged, pushed or published. Integration is described in
 | `tree_fingerprint` | string \| null | yes | Verified Git tree hash, or `null` with the unavailable identity tuple |
 | `tree_fingerprint_after` | string \| null | no (additive) | Git tree fingerprint captured after a non-canceled run |
 | `tree_stable` | boolean \| null | no (additive) | Whether the fingerprints match or the Git trees differ only under `.brigade/`. `false` if different fingerprints cannot be compared. `null` when either fingerprint is unavailable or the receipt was reused |
+| `gating` | object | no (additive) | Eligibility to satisfy the local Stop gate. Included in the receipt digest |
 | `tree_fingerprint_head` | string \| null | yes | Fingerprint-time HEAD commit used to reset excluded evidence paths, or `null` with the unavailable identity tuple |
 | `changes_patch_sha256` | string \| null | yes | SHA-256 of `changes.patch`, or `null` with the unavailable identity tuple |
 | `git` | object | no | `{head, branch, dirty_files}` |
@@ -240,7 +241,7 @@ merged, pushed or published. Integration is described in
 | `verification` | object | no | Verification outcome stamped separately from model completion (#500) |
 | `model_completion` | object | no | For contract-bearing verify receipts: `{status: not_applicable, detail}` because verify is verifier-owned |
 
-The `busy` status, the three fields marked additive and the command-level
+The `busy` status, the fields marked additive and the command-level
 `test_outcomes` field were added without a version change. Receipts written
 before them are still valid version 2 receipts, so a reader must treat the
 fields as optional.
@@ -254,6 +255,23 @@ A command object's `test_outcomes`
 field is either `null` or an object containing integer `passed`, `failed`,
 `errors`, `skipped`, `xfailed`, `xpassed`, and `deselected` counts plus the
 boolean `no_tests_ran`. The parser uses the full captured standard output.
+
+**`gating` object**
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `mode` | string | `required_check` when a declaration was loaded, `audit_only` when there is no declaration, or `unresolved` when the declaration is invalid or unreadable |
+| `eligible` | boolean | Whether the receipt can satisfy the Stop gate, subject to the hook's session, target, time, and tree checks |
+| `reason` | string | Machine-readable verdict such as `passed_required_check`, `no_tests_passed`, or `declaration_invalid` |
+| `declaration_sha256` | string | SHA-256 of the original declaration bytes, present when the declaration was loaded |
+| `base_commit` | string | Commit that supplied the declaration, present when loaded from a Git commit |
+| `fallback_source` | string | Present when the Git base could not be resolved. `default_branch_tip` uses the fetched default branch, `head` uses local HEAD, `worktree` uses the working tree, and `none` means no fallback contained a declaration |
+| `plan_coverage` | string | `not_checked`. The verdict evaluates the recorded command and its results. |
+
+A reused receipt copies its source verdict when the policy mode, declaration
+digest, and fallback source match. Stop treats a mismatched policy identity
+like a missing verdict and accepts those receipts only in audit-only mode.
+See [the verify gate](verify-gate.md) for the declaration and eligibility rules.
 
 **`verification_contract` object** (`brigade.verification_contract.v1`)
 

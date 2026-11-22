@@ -6,7 +6,9 @@ import json
 import os
 import subprocess
 from dataclasses import dataclass
+from functools import partial
 from pathlib import Path
+from time import monotonic
 from typing import Any, Literal
 
 MAX_MANIFEST_BYTES = 1024 * 1024
@@ -19,6 +21,7 @@ class BaseResolution:
     reference: str | None = None
     commit: str | None = None
     message: str | None = None
+    default_branch_tip: str | None = None
 
 
 @dataclass(frozen=True)
@@ -44,51 +47,71 @@ def trusted_git_env() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
 
 
-def _git(target: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
+def _git(target: Path, *args: str, deadline: float | None = None) -> subprocess.CompletedProcess[bytes]:
     command = ["git", *args]
+    timeout = 30.0 if deadline is None else min(30.0, deadline - monotonic())
+    if timeout <= 0:
+        raise subprocess.TimeoutExpired(command, timeout)
     try:
         return subprocess.run(
             command,
             cwd=target,
             stdin=subprocess.DEVNULL,
             capture_output=True,
-            timeout=30,
+            timeout=timeout,
             env=trusted_git_env(),
         )
-    except (OSError, subprocess.TimeoutExpired):
-        # No git, or a hung git, means no trusted base. Callers treat a non-zero code as that.
-        return subprocess.CompletedProcess(command, 127, b"", b"")
+    except subprocess.TimeoutExpired:
+        if deadline is not None:
+            raise
+    except OSError:
+        pass
+    # Callers without a deadline treat an unavailable or hung git as a failed probe.
+    return subprocess.CompletedProcess(command, 127, b"", b"")
 
 
-def resolve_base(target: Path) -> BaseResolution:
-    remotes = _git(target, "remote")
-    if remotes.returncode == 0 and not remotes.stdout.strip():
-        head = _git(target, "rev-parse", "--verify", "HEAD^{commit}")
+def resolve_base(target: Path, *, deadline: float | None = None) -> BaseResolution:
+    git = partial(_git, target, deadline=deadline)
+    remotes = git("remote")
+    if remotes.returncode != 0:
+        return BaseResolution("unresolved_default_branch", message="Git could not list remotes for this target")
+    if not remotes.stdout.strip():
+        head = git("rev-parse", "--verify", "HEAD^{commit}")
         if head.returncode != 0:
             return BaseResolution("no_merge_base", message="verify manifest base has no commit at HEAD")
         return BaseResolution("resolved", "no_remote", "HEAD", head.stdout.decode("ascii").strip())
     candidates: list[str] = []
-    symbolic = _git(target, "symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
+    symbolic = git("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
     if symbolic.returncode == 0:
         full = symbolic.stdout.decode("ascii", "ignore").strip()
         if full.startswith("refs/remotes/origin/"):
             candidates.append(full)
     candidates.extend(["refs/remotes/origin/main", "refs/remotes/origin/master"])
-    reference = next(
-        (item for item in candidates if _git(target, "rev-parse", "--verify", f"{item}^{{commit}}").returncode == 0),
-        None,
-    )
-    if reference is None:
+    for reference in dict.fromkeys(candidates):
+        tip = git("rev-parse", "--verify", f"{reference}^{{commit}}")
+        if tip.returncode == 0 and tip.stdout.strip():
+            tip_commit = tip.stdout.decode("ascii").strip()
+            break
+    else:
         return BaseResolution(
             "unresolved_default_branch",
             message="verify manifest default branch is unresolved; run git fetch origin <branch> or git remote set-head origin -a",
         )
-    merged = _git(target, "merge-base", "HEAD", reference)
+    try:
+        merged = git("merge-base", "HEAD", tip_commit)
+    except subprocess.TimeoutExpired:
+        return BaseResolution(
+            "no_merge_base",
+            reference=reference,
+            message=f"Git timed out while finding the merge base for {reference}.",
+            default_branch_tip=tip_commit,
+        )
     if merged.returncode != 0 or not merged.stdout.strip():
         return BaseResolution(
             "no_merge_base",
             reference=reference,
             message=f"verify manifest default branch has no merge base with HEAD: {reference}",
+            default_branch_tip=tip_commit,
         )
     return BaseResolution("resolved", "default_branch", reference, merged.stdout.decode("ascii").strip())
 
