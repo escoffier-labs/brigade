@@ -22,10 +22,17 @@ The workflow drift test checks paths named in workflow commands and inputs.
 Transitive inputs are covered only where listed in
 [`tests/test_workflow_guard.py`](../tests/test_workflow_guard.py).
 
+## Who applies the label
+
+The author of a change does not approve it, and a builder that wrote the change never applies the label. The conductor who owns the pull request applies `workflow-change-approved` after one independent security review of the protected-path changes at the current head commit. The review checks what the change does to CI checks, including a removed or weakened check, narrowed test selection, changed pass condition, new skip, widened allowlist, changed permission, or changed trigger. A comment on the pull request records the reviewed commit, lists the protected files, and gives the verdict; the label is applied only when the verdict is to ship.
+
+A protected-file change needs one such review at the pull request head. A push that changes protected files again needs a new review and label. A push that leaves the protected files unchanged still needs the label again, but may cite the earlier review in a comment that says so. No pull request gets more than two of these reviews without the operator's agreement. The approval is recorded and audited after the fact; it does not come from a separate account.
+
 ## Approval
 
-When protected files change, a maintainer applies the
-`workflow-change-approved` label after reviewing the change. The workflow
+When protected files change, the pull request conductor applies the
+`workflow-change-approved` label after an independent security review of the
+protected-path changes at the current head says to ship. The workflow
 writes a success status to the head commit in the label event if the label
 is still present when the writer checks. Removing the label records a failure
 status on the event's head commit, and a delayed approval event also records
@@ -56,8 +63,12 @@ The changed-file and approval checks run on pull request events.
 
 Source and test files outside the listed paths are outside the guard's scope. A pull
 request can still weaken a test it edits, and code review is what catches
-that. An account with permission to label pull requests can apply the
-approval label to its own change.
+that. The approval is recorded and audited after the fact; it does not come
+from a separate account.
+
+## Approval digest
+
+Run `python scripts/workflow_approval_digest.py --repo OWNER/NAME` to print the last seven days of merged pull requests that changed protected paths. Whoever audits approvals should run the script once a week. Use `--days N` to choose another range or `--since ISO-DATE-OR-DATETIME` to choose another cutoff. The digest lists approval status timestamps and label presence, then calls out protected changes without an approval status for audit. API failures stop the command with exit status 2 and no partial digest.
 
 ## Before making the check required
 
