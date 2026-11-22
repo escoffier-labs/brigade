@@ -1,1 +1,0 @@
-- JSON nested past the parser recursion limit now reads as malformed on the hook session-state, verify receipt, scorecard, run.json, parent-manifest and outcome ledger reads instead of raising RecursionError. A hook trial that meets such a session state from another session now fails closed as `concurrent_session_ownership` (#2589).

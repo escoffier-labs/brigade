@@ -1,1 +1,0 @@
-- Produce authoritative, read-only `admission` and `capacity` readiness observations for `brigade` route operations in `brigade roster ready`, consulting local roster admission, the local run lock, Hub model admission (without writing LKG caches), Hub repo claims, and enrolled fleet policy without reserving leases or mutating state.

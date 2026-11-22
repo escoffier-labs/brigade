@@ -1,2 +1,0 @@
-- Serve the fleet hub's `GET /status` from the active window instead of ranking the whole event journal on every call, so a poll costs the runs that can still be live rather than every event ever recorded. The default reply keeps the same runs, order, ties and Grok Bot rule; `?all=1` still ranks the journal because its reply carries every run.
-- Name the request log's `stage` (`received`, `credential-lookup`, `handler`, `writer`, `upstream`, `replying`) so a cancelled request reads back to the phase that stalled instead of only showing `status` and `credential_kind`.

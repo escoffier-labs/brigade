@@ -1,3 +1,0 @@
-- Memory care drops the decision directory a refused prepare created, so a card blocked by an unfinished projection no longer leaves one empty journal directory behind on every pass.
-- `brigade memory care recover` accepts the id of an interrupted undo operation, so a card that undo blocks can be unblocked by naming that id.
-- The retirement stage reports cards blocked by an unfinished projection in one top-level `projection_blocked` list, never repeats them in `refused`, and keeps `skipped` as integer counters only.

@@ -1,3 +1,0 @@
-- Add `brigade fleet campaign complete KEY [--repo R] [--evidence REF]...` and `POST /work/items/<id>/completions` so an operator can complete a campaign member or, once every member is terminal, the campaign item. The completion walks the existing lifecycle edges in one transaction and records the path and evidence.
-- Refuse a campaign completion with `campaign-incomplete` (409) from inside that same write transaction, so a member added concurrently cannot be missed, and refuse a re-create of a terminal campaign with `campaign-closed` (409) so a finished campaign cannot gain members.
-- Refuse a non-array `evidence_refs` with `field-bound` instead of reading it as no evidence, and stamp every step of one completion with the same timestamp.

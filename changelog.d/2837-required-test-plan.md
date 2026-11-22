@@ -1,1 +1,0 @@
-- Add `brigade work verify required` to plan focused tests using the configuration and planner files from the Git base resolved from the default branch. Git operations and the planner ignore inherited Git environment overrides. Plans based on local `HEAD` in repositories without remotes report `base_trusted: false`. Full plans and planning errors require CI.

@@ -1,1 +1,0 @@
-- Accept `statusline-setup` as a Claude Code built-in agent in the paired-live and memory verify seat init gates. Claude Code 2.1.327 lists it in every init event, so the first live `passing-verify` pair failed both arms at the gate before any model call. Custom agents are still refused.

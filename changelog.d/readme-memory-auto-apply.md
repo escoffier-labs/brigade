@@ -1,1 +1,0 @@
-- The README and overview now say that memory reflection can apply two low-risk operations without human review when a hub policy enables it and every gate passes, and that this is off by default.

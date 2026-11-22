@@ -1,1 +1,0 @@
-- Pin only claim blocks the hub can structurally address, so reflection skips paragraphs with inline code or other opaque Markdown instead of opening proposals the hub rejects.

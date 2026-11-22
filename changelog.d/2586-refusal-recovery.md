@@ -1,1 +1,0 @@
-- Restore refused review drafts even when unrelated journal records are unreadable or resolved copies are protected by read-only paths. Keep protected copies unchanged and exclude their removal from undo.
