@@ -1,1 +1,0 @@
-- Document that an accepted fleet reservation holds its node slot until release, and list `reservation-accept` among the Hub's node policy actions.

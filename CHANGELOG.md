@@ -596,6 +596,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Let `brigade run --worktree` use a separate run lock and fleet claim for each detached checkout so sibling runs can proceed concurrently.
 - Recover and prune clean, branch-backed worktrees with dead leases. Prune empty directories left by interrupted setup after the stale-lease grace period.
 - The `observe` and `off` work modes now keep the strict-mode Memory Handoff rule. The Claude Stop hook gives a session in those modes that wrote code the same handoff note, never a block: write a handoff when the session learned something durable, otherwise end with `Nothing durable: <reason>`. The note repeats on each Stop until a handoff lands or the turn ends with `Nothing durable:`. When a session wrote into both a strict and an unenforced target, the strict target's note, with "Verification is recorded", is the one shown. The brief checklist, `brigade init` guidance, doctor and docs no longer call handoffs optional or on request. The receipt gate stays strict-only.
+- Add `brigade work verify required` to plan focused tests using the configuration and planner files from the Git base resolved from the default branch. Git operations and the planner ignore inherited Git environment overrides. Plans based on local `HEAD` in repositories without remotes report `base_trusted: false`. Full plans and planning errors require CI.
+- The workflow records approval for protected CI changes for one pull request targeting the default branch, using the head commit named when a maintainer applies the approval label. A delayed approval event records failure if the label is absent. A push to a new commit needs a fresh label event. If a push lands just before labeling, the new commit can receive the approval.
+- The guard fails when GitHub returns an incomplete changed-file list. Pull requests with more than 3,000 changed files must be split even if the head commit has approval.
+- Document that an accepted fleet reservation holds its node slot until release, and list `reservation-accept` among the Hub's node policy actions.
 
 ## [0.31.0] - 2026-11-14
 
