@@ -1,1 +1,0 @@
-- Keep a live `tasks.json.lock` or `run.lock` holder active on Windows by querying its process handle with `OpenProcess` and `GetExitCodeProcess` instead of `os.kill(pid, 0)`, which Windows reads as Ctrl+C and reported as a missing process for holders running in another console.

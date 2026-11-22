@@ -1,3 +1,0 @@
-- Each node's T3 observer now reports its memory-used fraction on Linux and Windows, and the Hub stores it with the node's health row (#2710).
-- `brigade fleet place` takes the highest of CPU load, session ratio and node memory as a machine's effective load, so a memory-bound machine sheds work; a machine with no fresh reading gets the informational reason `memory-unknown` and stays placeable (#2710).
-- Upgrade the Hub before the node observers: an older Hub rejects the new `memory_used` field. The Hub adds the column to an existing health table on the first report (#2710).

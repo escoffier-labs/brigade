@@ -1,1 +1,0 @@
-- Scope `memory search --include-archived` to configured `card_roots` even when `include_paths` and `exclude_paths` are empty. Archived cards whose original path falls outside the corpus no longer appear in results.

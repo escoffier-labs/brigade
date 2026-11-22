@@ -1,1 +1,0 @@
-- Bind lesson evidence to independent registered verification, preserve failure context, and bound review retries. Route each admitted lesson alone to review until trusted origin admission is available. Keep prompt hooks free of workspace writes and refuse linked lesson state paths.

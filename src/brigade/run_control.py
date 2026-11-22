@@ -110,6 +110,7 @@ class LiveTurnRegistry:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._active: dict[tuple[str, str, str | None], ActiveTurn] = {}
+        self._task_interrupts: dict[tuple[str, str, str | None], str | None] = {}
 
     @staticmethod
     def _key(worker: str, task_id: str | None, attempt_id: str | None) -> tuple[str, str, str | None]:
@@ -122,9 +123,29 @@ class LiveTurnRegistry:
         _validate_assignment_ids(task_id, attempt_id)
         thread_id = getattr(thread, "thread_id", "")
         active = ActiveTurn(worker, thread, thread_id, turn_id, task_id, attempt_id)
+        key = self._key(worker, task_id, attempt_id)
         with self._lock:
-            self._active[self._key(worker, task_id, attempt_id)] = active
+            self._active[key] = active
+            interrupt = key in self._task_interrupts
+        if interrupt:
+            self._interrupt_latched(key, active)
         return active
+
+    def _interrupt_latched(self, key: tuple[str, str, str | None], active: ActiveTurn) -> None:
+        try:
+            active.thread.interrupt(active.turn_id)
+        except Exception:
+            outcome = "error"
+        else:
+            # An RPC acknowledgement does not prove that the turn stopped.
+            outcome = "still_active"
+        with self._lock:
+            if self._task_interrupts[key] != "error":
+                self._task_interrupts[key] = outcome
+
+    def task_interrupt_outcome(self, task_id: str, attempt_id: str) -> str | None:
+        with self._lock:
+            return self._task_interrupts.get(self._key("", task_id, attempt_id))
 
     def unregister(
         self,
@@ -177,9 +198,34 @@ class LiveTurnRegistry:
         return response
 
     def interrupt(
-        self, worker: str | None = None, *, task_id: str | None = None, attempt_id: str | None = None
+        self,
+        worker: str | None = None,
+        *,
+        task_id: str | None = None,
+        attempt_id: str | None = None,
+        latch_task: bool = False,
     ) -> dict[str, object]:
         """Acknowledge interrupt requests, without asserting execution containment."""
+        if latch_task:
+            _validate_assignment_ids(task_id, attempt_id)
+            if worker is not None or task_id is None or attempt_id is None:
+                raise ControlError("a latched interrupt requires a task and attempt", code="invalid-target")
+            key = self._key("", task_id, attempt_id)
+            with self._lock:
+                if key in self._task_interrupts:
+                    return {"ok": True, "interrupted": 0, "workers": []}
+                self._task_interrupts[key] = None
+                active = self._active.get(key)
+            if active is not None:
+                self._interrupt_latched(key, active)
+                if self.task_interrupt_outcome(task_id, attempt_id) == "still_active":
+                    return {
+                        "ok": True,
+                        "interrupted": 1,
+                        "workers": [active.worker],
+                        "tasks": [{"task_id": task_id, "attempt_id": attempt_id}],
+                    }
+            return {"ok": True, "interrupted": 0, "workers": []}
         turns = self._turns(worker, task_id=task_id, attempt_id=attempt_id)
         interrupted: list[str] = []
         for active in turns:

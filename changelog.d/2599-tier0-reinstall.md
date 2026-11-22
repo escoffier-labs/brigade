@@ -1,1 +1,0 @@
-- Fixed care reinstall opting existing workspaces into Tier 0 automatic reflection. New-workspace initialization records a versioned opt-in marker. Existing workspaces require an explicit switch or install flag. Cached retries no longer consume new-proposal slots.

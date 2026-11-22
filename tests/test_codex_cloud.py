@@ -187,7 +187,12 @@ def _assert_windows_hub_refusal(monkeypatch, target, *, operation="launch", caps
     assert not (target / ".brigade").exists()
 
 
-def test_launch_task_uses_stdin_and_binds_codex_lease(monkeypatch, tmp_path):
+@pytest.fixture
+def launch_branch(monkeypatch):
+    monkeypatch.setattr(codex_cloud, "_resolve_launch_branch", lambda *args: ("main", None))
+
+
+def test_launch_task_uses_stdin_and_binds_codex_lease(launch_branch, monkeypatch, tmp_path):
     if sys.platform == "win32":
         _assert_windows_hub_refusal(monkeypatch, tmp_path)
         return
@@ -204,7 +209,7 @@ def test_launch_task_uses_stdin_and_binds_codex_lease(monkeypatch, tmp_path):
 
     assert launched["ok"] is True
     assert launched["task_id"] == "task_launch99"
-    assert seen["argv"] == ["codex", "cloud", "exec", "--env", "env-launch", "-"]
+    assert seen["argv"] == ["codex", "cloud", "exec", "--env", "env-launch", "--branch", "main", "-"]
     assert seen["stdin"] == b"private prompt"
     assert "private prompt" not in seen["argv"]
     assert calls["admit"][0]["args"][0] == "codex"
@@ -216,7 +221,7 @@ def test_launch_task_uses_stdin_and_binds_codex_lease(monkeypatch, tmp_path):
 
 @pytest.mark.skipif(codex_cloud.os.name != "posix", reason="POSIX umask and mode checks")
 @pytest.mark.parametrize("setup", ["config", "registry"])
-def test_codex_cloud_setup_creates_durable_secure_ancestors(monkeypatch, tmp_path, setup):
+def test_codex_cloud_setup_creates_durable_secure_ancestors(launch_branch, monkeypatch, tmp_path, setup):
     from brigade import dirfd
 
     calls = _grant_hub(monkeypatch)
@@ -263,7 +268,9 @@ def test_codex_cloud_setup_creates_durable_secure_ancestors(monkeypatch, tmp_pat
 
 @pytest.mark.skipif(codex_cloud.os.name != "posix", reason="POSIX ownership and mode checks")
 @pytest.mark.parametrize("unsafe_component", [".", ".brigade", ".brigade/cloud"])
-def test_codex_cloud_setup_preserves_refusal_of_unsafe_existing_ancestors(monkeypatch, tmp_path, unsafe_component):
+def test_codex_cloud_setup_preserves_refusal_of_unsafe_existing_ancestors(
+    launch_branch, monkeypatch, tmp_path, unsafe_component
+):
     _make_recovery_cloud_directory(tmp_path)
     unsafe = tmp_path / unsafe_component
     unsafe.chmod(0o775)
@@ -288,7 +295,7 @@ def test_codex_cloud_setup_preserves_refusal_of_unsafe_existing_ancestors(monkey
     assert calls["release"][0]["kwargs"] == {"state": "submit-failed", "holder": "h1"}
 
 
-def test_launch_task_releases_lease_when_submission_fails(monkeypatch, tmp_path):
+def test_launch_task_releases_lease_when_submission_fails(launch_branch, monkeypatch, tmp_path):
     if sys.platform == "win32":
         _assert_windows_hub_refusal(monkeypatch, tmp_path)
         return
@@ -302,7 +309,7 @@ def test_launch_task_releases_lease_when_submission_fails(monkeypatch, tmp_path)
     assert calls["release"][0]["kwargs"]["state"] == "submit-failed"
 
 
-def test_launch_task_keeps_lease_when_submission_times_out(monkeypatch, tmp_path):
+def test_launch_task_keeps_lease_when_submission_times_out(launch_branch, monkeypatch, tmp_path):
     if sys.platform == "win32":
         _assert_windows_hub_refusal(monkeypatch, tmp_path)
         return
@@ -352,50 +359,157 @@ def test_register_codex_task_lease_is_idempotent(monkeypatch, tmp_path):
     assert cloud_tracker.load_registry(tmp_path)["entries"][0]["lease_holder"] == "h1"
 
 
-def test_cli_cloud_launch_codex_cloud_submission(monkeypatch, tmp_path, capsys):
-    if sys.platform == "win32":
-        _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="cli-launch", capsys=capsys)
-        return
-    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows Hub storage refusal")
+def test_cli_cloud_launch_refuses_hub_on_windows(monkeypatch, tmp_path, capsys):
+    _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="cli-launch", capsys=capsys)
+
+
+@pytest.mark.parametrize(
+    "launch_mode",
+    [
+        pytest.param(
+            "cli",
+            marks=pytest.mark.skipif(
+                not getattr(codex_cloud.os, "O_NOFOLLOW", 0), reason="CLI prompt files require O_NOFOLLOW"
+            ),
+        ),
+        "direct",
+    ],
+)
+@pytest.mark.parametrize(
+    ("requested", "gh_result", "git_result", "expected", "reason", "lookups"),
+    [
+        (
+            None,
+            _result(stdout='{"defaultBranchRef":{"name":"private-default"}}'),
+            _result(code=128, stderr="private transport diagnostic"),
+            "private-default",
+            None,
+            ["gh"],
+        ),
+        (
+            None,
+            _result(code=127),
+            _result(stdout="ref: refs/heads/trunk\tHEAD\nabc123\tHEAD\n"),
+            "trunk",
+            None,
+            ["gh", "git"],
+        ),
+        (
+            "release/stable",
+            _result(stdout='{"name":"release/stable"}'),
+            _result(code=128),
+            "release/stable",
+            None,
+            ["gh"],
+        ),
+        (
+            "local-only",
+            _result(code=1, stderr="gh: Not Found (HTTP 404)"),
+            _result(stdout="abc123\trefs/heads/prefix/local-only\n"),
+            None,
+            "branch-unavailable",
+            ["gh", "git"],
+        ),
+        (
+            "offline",
+            _result(code=4),
+            _result(code=128, stderr="private transport diagnostic"),
+            None,
+            "branch-unverifiable",
+            ["gh", "git"],
+        ),
+        (
+            "inaccessible",
+            _result(code=1, stderr="gh: Not Found (HTTP 404)"),
+            _result(code=128),
+            None,
+            "branch-unverifiable",
+            ["gh", "git"],
+        ),
+    ],
+    ids=["private-default", "missing-gh", "explicit-gh", "absent", "offline", "ambiguous-404"],
+)
+def test_codex_cloud_launch_branch_selection(
+    monkeypatch, tmp_path, capsys, requested, gh_result, git_result, expected, reason, lookups, launch_mode
+):
     codex_cloud.save_environment_config(tmp_path, environment_id="env-cli")
-    prompt_file = tmp_path / "prompt.txt"
-    prompt_file.write_text("private prompt", encoding="utf-8")
-    prompt_file.chmod(0o600)
     calls = _grant_hub(monkeypatch)
+    hub_configured = launch_mode == "cli" and sys.platform != "win32"
+    if not hub_configured:
+        monkeypatch.setattr(codex_cloud, "_hub_configured", lambda: False)
     seen = {}
+    branch_lookups = []
 
     def fake_run(argv, timeout=30.0, env=None, cwd=None, stdin=None, process_registry=None):
+        if argv[0] == "gh":
+            branch_lookups.append("gh")
+            assert not calls["admit"]
+            if requested is None:
+                assert argv == ["gh", "repo", "view", "github.com/owner/repo", "--json", "defaultBranchRef"]
+            else:
+                branch_path = "release%2Fstable" if requested == "release/stable" else requested
+                assert argv == ["gh", "api", "--hostname", "github.com", f"repos/owner/repo/branches/{branch_path}"]
+            return gh_result
+        if argv[:2] == ["git", "ls-remote"]:
+            branch_lookups.append("git")
+            assert "https://github.com/owner/repo" in argv
+            assert not calls["admit"]
+            assert argv[-1] == ("HEAD" if requested is None else f"refs/heads/{requested}")
+            return git_result
+        if argv[:3] != ["codex", "cloud", "exec"]:
+            return _result(code=1)
         seen.update(argv=argv, stdin=stdin)
         return _result(stdout="task_cli_launch99")
 
     monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
-    rc = cli.main(
-        [
-            "run",
-            "cloud",
-            "launch",
-            "--target",
-            str(tmp_path),
-            "--provider",
-            "codex-cloud",
-            "--repo",
-            "owner/repo",
-            "--label",
-            "cli-codex",
-            "--prompt-file",
-            str(prompt_file),
-            "--json",
-        ]
-    )
+    if launch_mode == "cli":
+        monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+        prompt_file = tmp_path / "prompt.txt"
+        prompt_file.write_bytes(b"private prompt")
+        prompt_file.chmod(0o600)
+        rc = cli.main(
+            [
+                "run",
+                "cloud",
+                "launch",
+                "--target",
+                str(tmp_path),
+                "--provider",
+                "codex-cloud",
+                "--repo",
+                "owner/repo",
+                "--label",
+                "cli-codex",
+                "--prompt-file",
+                str(prompt_file),
+                "--json",
+                *(["--branch", requested] if requested is not None else []),
+            ]
+        )
+        output = capsys.readouterr()
+        payload = json.loads(output.out)
+        assert rc == (1 if expected is None else 0), payload
+        assert payload["provider"] == "codex-cloud"
+        assert "holder" not in payload
+        assert "private transport diagnostic" not in output.out + output.err
+    else:
+        payload = codex_cloud.launch_task(
+            "private prompt", target=tmp_path, repo="owner/repo", label="cli-codex", branch=requested
+        )
 
-    assert rc == 0
-    payload = json.loads(capsys.readouterr().out)
+    assert payload["ok"] is (expected is not None)
+    assert branch_lookups == lookups
+    if expected is None:
+        assert payload["reason"] == reason
+        assert not seen
+        assert not any(calls.values())
+        assert not cloud_tracker.load_registry(tmp_path)["entries"]
+        return
     assert payload["task_id"] == "task_cli_launch99"
-    assert payload["provider"] == "codex-cloud"
-    assert "holder" not in payload
-    assert seen["argv"] == ["codex", "cloud", "exec", "--env", "env-cli", "-"]
+    assert seen["argv"] == ["codex", "cloud", "exec", "--env", "env-cli", "--branch", expected, "-"]
     assert seen["stdin"] == b"private prompt"
-    assert len(calls["admit"]) == len(calls["bind"]) == 1
+    assert len(calls["admit"]) == len(calls["bind"]) == int(hub_configured)
 
 
 def test_cli_register_codex_cloud_acquires_one_lease(monkeypatch, tmp_path, capsys):
@@ -437,7 +551,9 @@ def test_cli_register_codex_cloud_acquires_one_lease(monkeypatch, tmp_path, caps
 @pytest.mark.parametrize("stream", ["stdout", "stderr"])
 @pytest.mark.parametrize("code", [1, 124])
 @pytest.mark.parametrize("hub_configured", [True, False])
-def test_launch_task_retains_known_work_on_nonzero_exit(monkeypatch, tmp_path, stream, code, hub_configured):
+def test_launch_task_retains_known_work_on_nonzero_exit(
+    launch_branch, monkeypatch, tmp_path, stream, code, hub_configured
+):
     if sys.platform == "win32" and hub_configured:
         _assert_windows_hub_refusal(monkeypatch, tmp_path)
         return
@@ -510,7 +626,7 @@ def test_codex_registry_preflight_preserves_live_registry(monkeypatch, tmp_path,
 
 
 @pytest.mark.parametrize("hub_configured", [True, False])
-def test_launch_task_tracking_failure_preserves_task_and_lease(monkeypatch, tmp_path, hub_configured):
+def test_launch_task_tracking_failure_preserves_task_and_lease(launch_branch, monkeypatch, tmp_path, hub_configured):
     if sys.platform == "win32" and hub_configured:
         _assert_windows_hub_refusal(monkeypatch, tmp_path)
         return
@@ -532,7 +648,7 @@ def test_launch_task_tracking_failure_preserves_task_and_lease(monkeypatch, tmp_
 
 
 @pytest.mark.parametrize("code", [0, 1])
-def test_launch_task_bind_failure_preserves_known_work(monkeypatch, tmp_path, code):
+def test_launch_task_bind_failure_preserves_known_work(launch_branch, monkeypatch, tmp_path, code):
     if sys.platform == "win32":
         _assert_windows_hub_refusal(monkeypatch, tmp_path)
         return
@@ -653,8 +769,10 @@ def test_cli_codex_failure_text_rejects_unsanitized_task_id(task_id, capsys):
     assert capsys.readouterr().err == "error: uncertain\n"
 
 
-@pytest.mark.parametrize("state", ["running", "completed"])
-def test_codex_tracking_failure_recovers_holder_for_manual_registration_and_sync(monkeypatch, tmp_path, state):
+@pytest.mark.parametrize("state", ["running", "completed", "error"])
+def test_codex_tracking_failure_recovers_holder_for_manual_registration_and_sync(
+    launch_branch, monkeypatch, tmp_path, state
+):
     if sys.platform == "win32":
         _assert_windows_hub_refusal(monkeypatch, tmp_path)
         return
@@ -694,7 +812,7 @@ def test_codex_tracking_failure_recovers_holder_for_manual_registration_and_sync
     assert "h1" not in json.dumps(payload)
 
 
-def test_codex_holder_recovery_is_durable_before_provider_submission(monkeypatch, tmp_path):
+def test_codex_holder_recovery_is_durable_before_provider_submission(launch_branch, monkeypatch, tmp_path):
     if sys.platform == "win32":
         _assert_windows_hub_refusal(monkeypatch, tmp_path)
         return
@@ -715,7 +833,7 @@ def test_codex_holder_recovery_is_durable_before_provider_submission(monkeypatch
     assert codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")["ok"]
 
 
-def test_codex_holder_recovery_write_failure_prevents_provider_submission(monkeypatch, tmp_path):
+def test_codex_holder_recovery_write_failure_prevents_provider_submission(launch_branch, monkeypatch, tmp_path):
     if sys.platform == "win32":
         _assert_windows_hub_refusal(monkeypatch, tmp_path)
         return
@@ -965,7 +1083,7 @@ def test_recovery_v3_fsyncs_new_directory_parent_before_record(monkeypatch, tmp_
     assert synced.index(parent_key) < synced.index(record_key) < synced.index(directory_key)
 
 
-def test_recovery_v3_parent_fsync_failure_prevents_submission(monkeypatch, tmp_path):
+def test_recovery_v3_parent_fsync_failure_prevents_submission(launch_branch, monkeypatch, tmp_path):
     if sys.platform == "win32":
         _assert_windows_hub_refusal(monkeypatch, tmp_path)
         return
@@ -2626,7 +2744,7 @@ def test_windows_hub_cli_refuses_before_prompt_or_registry(monkeypatch, tmp_path
 
 
 @pytest.mark.parametrize("command", ["launch", "register"])
-def test_windows_no_hub_keeps_local_launch_and_registration(monkeypatch, tmp_path, capsys, command):
+def test_windows_no_hub_keeps_local_launch_and_registration(launch_branch, monkeypatch, tmp_path, capsys, command):
     from types import SimpleNamespace
 
     monkeypatch.setenv("BRIGADE_EXTRAS", "1")

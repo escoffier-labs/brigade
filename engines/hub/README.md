@@ -120,6 +120,12 @@ token reads as `anonymous`; and `unchecked` when a token was presented but no
 lookup completed, including `/health` and `/ready`, which never wait on a
 reader for a label.
 
+Each request log line also includes `method` and `route`, even for early
+refusals. The method is `GET`, `POST`, `PUT`, `PATCH`, `DELETE`, `HEAD`,
+`OPTIONS` or `other`. The route is a fixed endpoint label such as
+`/policy` or `/work/items/:id`. Unknown paths use `other`. Route labels
+omit query strings and path parameters.
+
 Requests have separate credential, browser and anonymous budgets. Validated
 credentials admit 64 requests each and hold at most four of the 16 credential
 proxy slots. Browser requests share four proxy slots and anonymous requests

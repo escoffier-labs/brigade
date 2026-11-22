@@ -1,0 +1,12 @@
+{
+  "id": "orca-governed-delegation",
+  "title": "orca-governed-delegation",
+  "version": "0.1.0",
+  "description": "Governed local Orca delegation through Brigade, including replay-safe worker starts, receipt reporting, observation, acknowledgement and recovery for Orca 1.4.269.",
+  "required_tools": [
+    "Read",
+    "Grep",
+    "Bash(brigade orca:*)"
+  ],
+  "tests": ["brigade skills lint orca-governed-delegation"]
+}

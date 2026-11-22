@@ -22,6 +22,7 @@ from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 from uuid import uuid4
 
 from . import bug_io, cloud_tracker, dirfd, fleet_client, localio, proc
@@ -353,7 +354,58 @@ def _attach_registered_lease_holder(target: Path, task_id: str, holder: str) -> 
             cloud_tracker.save_registry(target, registry)
 
 
-def launch_task(prompt: str, *, target: Path, repo: str, label: str) -> dict[str, Any]:
+def _resolve_launch_branch(target: Path, repo: str, branch: str | None) -> tuple[str | None, str | None]:
+    """Resolve a GitHub base branch and distinguish absent refs from failed lookups."""
+    url = f"https://github.com/{repo}"
+    if not _GITHUB_REPO_RE.fullmatch(url) or any(part in {".", ".."} for part in repo.split("/")):
+        return None, "branch-unavailable"
+    if branch is not None and (branch in {"", ".", ".."} or branch.startswith("-")):
+        return None, "branch-unavailable"
+
+    gh_argv = (
+        ["gh", "repo", "view", f"github.com/{repo}", "--json", "defaultBranchRef"]
+        if branch is None
+        else ["gh", "api", "--hostname", "github.com", f"repos/{repo}/branches/{quote(branch, safe='')}"]
+    )
+    gh = proc.run(gh_argv, timeout=10.0, cwd=target, env={**os.environ, "GH_PROMPT_DISABLED": "1"})
+    gh_reports_no_default = False
+    if gh.code == 0:
+        try:
+            data = json.loads(gh.stdout)
+        except json.JSONDecodeError:
+            data = None
+        if isinstance(data, dict):
+            gh_reports_no_default = branch is None and "defaultBranchRef" in data and data["defaultBranchRef"] is None
+            ref = data.get("defaultBranchRef") if branch is None else data
+            name = ref.get("name") if isinstance(ref, dict) else None
+            if isinstance(name, str) and name and not name.startswith("-") and (branch is None or name == branch):
+                return name, None
+
+    # GitHub can return 404 for an inaccessible private repository. Only
+    # a successful ref query can confirm that an explicit branch is absent.
+    prefix = "refs/heads/"
+    argv = (
+        ["git", "ls-remote", "--symref", "--", url, "HEAD"]
+        if branch is None
+        else ["git", "ls-remote", "--refs", "--", url, f"{prefix}{branch}"]
+    )
+    result = proc.run(argv, timeout=10.0, cwd=target, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    if result.code != 0:
+        return None, "branch-unavailable" if gh_reports_no_default else "branch-unverifiable"
+    refs = [line.partition("\t") for line in result.stdout.splitlines()]
+    if branch is not None:
+        if any(ref == f"{prefix}{branch}" for _, _, ref in refs):
+            return branch, None
+    elif any(ref == "HEAD" and not value.startswith("ref: ") for value, _, ref in refs):
+        for value, _, ref in refs:
+            if ref == "HEAD" and value.startswith(f"ref: {prefix}"):
+                default = value.removeprefix(f"ref: {prefix}")
+                if default and not default.startswith("-"):
+                    return default, None
+    return None, "branch-unavailable"
+
+
+def launch_task(prompt: str, *, target: Path, repo: str, label: str, branch: str | None = None) -> dict[str, Any]:
     """Submit one task from stdin and bind its Codex provider lease."""
     from . import cloud_tracker
 
@@ -365,7 +417,10 @@ def launch_task(prompt: str, *, target: Path, repo: str, label: str) -> dict[str
         return {"ok": False, "reason": "registry-unwritable"}
     env_id = resolve_environment_id(CONFIGURED_SELECTOR, target=target)
     prompt_hash = cloud_tracker.prompt_hash(prompt)
-    canonical_repo = repo.removeprefix("https://github.com/").removesuffix(".git").strip("/")
+    canonical_repo = repo.removeprefix("https://github.com/").strip("/").removesuffix(".git")
+    base_branch, reason = _resolve_launch_branch(target, canonical_repo, branch)
+    if base_branch is None:
+        return {"ok": False, "reason": reason}
     lease_id: str | None = None
     holder: str | None = None
     if hub_configured:
@@ -391,7 +446,7 @@ def launch_task(prompt: str, *, target: Path, repo: str, label: str) -> dict[str
 
     try:
         result = proc.run(
-            ["codex", "cloud", "exec", "--env", env_id, "-"],
+            ["codex", "cloud", "exec", "--env", env_id, "--branch", base_branch, "-"],
             timeout=SUBMIT_TIMEOUT,
             cwd=target,
             stdin=prompt.encode("utf-8"),

@@ -78,10 +78,11 @@ class ProcessCancelledError(RuntimeError):
 
 @dataclass(frozen=True)
 class RegisteredChild:
-    """One registered child: its Brigade seat and the job that owns its tree."""
+    """One child, its dispatch identity, and the job that owns its tree."""
 
     seat: str | None = None
     job: OwnedJob | None = None
+    task_key: tuple[str, str] | None = None
 
 
 class ProcessRegistry:
@@ -101,6 +102,7 @@ class ProcessRegistry:
         self._cancel_gate = threading.Lock()
         self._processes: dict[subprocess.Popen[bytes], RegisteredChild] = {}
         self._cancel_outcomes: dict[subprocess.Popen[bytes], ProcessCancelOutcome] = {}
+        self._task_cancels: dict[tuple[str, str], dict[subprocess.Popen[bytes], ProcessCancelOutcome]] = {}
         self._cancellation_group_count = 0
         self._canceled = False
 
@@ -138,7 +140,12 @@ class ProcessRegistry:
                     )
             return tuple(observed.values())
 
-    def _cancel_processes(self, processes: tuple[tuple[subprocess.Popen[bytes], RegisteredChild], ...]) -> None:
+    def _cancel_processes(
+        self,
+        processes: tuple[tuple[subprocess.Popen[bytes], RegisteredChild], ...],
+        *,
+        task_key: tuple[str, str] | None = None,
+    ) -> None:
         if not processes:
             return
         jobs = {process: registered.job for process, registered in processes if registered.job is not None}
@@ -163,10 +170,11 @@ class ProcessRegistry:
                 (process, ProcessCancelOutcome(registered.seat, "error")) for process, registered in processes
             )
         with self._lock:
+            recorded = self._cancel_outcomes if task_key is None else self._task_cancels[task_key]
             for process, outcome in outcomes:
-                previous = self._cancel_outcomes.get(process)
+                previous = recorded.get(process)
                 if previous is None or previous.result != "error":
-                    self._cancel_outcomes[process] = outcome
+                    recorded[process] = outcome
 
     def register(
         self,
@@ -174,18 +182,22 @@ class ProcessRegistry:
         *,
         seat: str | None = None,
         job: OwnedJob | None = None,
+        task_key: tuple[str, str] | None = None,
     ) -> None:
         """Track one child, keeping the owned job that contains its Windows tree."""
-        registered = RegisteredChild(seat, job)
+        registered = RegisteredChild(seat, job, task_key)
         with self._lock:
             self._processes[process] = registered
-            canceled = self._canceled
+            task_canceled = task_key is not None and task_key in self._task_cancels
+            canceled = self._canceled or task_canceled
         if canceled:
             with self._cancel_gate:
                 with self._lock:
-                    pending = process not in self._cancel_outcomes
+                    key = task_key if task_canceled else None
+                    recorded = self._cancel_outcomes if key is None else self._task_cancels[key]
+                    pending = process not in recorded
                 if pending:
-                    self._cancel_processes(((process, registered),))
+                    self._cancel_processes(((process, registered),), task_key=key)
 
     def register_with_job(self, process: subprocess.Popen[bytes], job: OwnedJob) -> None:
         """Register a child together with the job object that owns its tree."""
@@ -193,10 +205,40 @@ class ProcessRegistry:
 
     def unregister(self, process: subprocess.Popen[bytes]) -> None:
         with self._lock:
+            child = self._processes.get(process)
+            if child is None or child.task_key not in self._task_cancels:
+                self._processes.pop(process, None)
+                return
+        # Keep the launcher-owned job open until the cancellation snapshot is
+        # done with it. The launcher closes the job after unregister returns.
+        with self._cancel_gate, self._lock:
             self._processes.pop(process, None)
 
     def for_seat(self, seat: str) -> _SeatProcessRegistry:
         return _SeatProcessRegistry(self, seat)
+
+    def for_task(self, task_id: str, attempt_id: str, seat: str) -> _SeatProcessRegistry:
+        return _SeatProcessRegistry(self, seat, (task_id, attempt_id))
+
+    def _check_task_cancellation(self, key: tuple[str, str] | None) -> None:
+        with self._lock:
+            if key is not None and key in self._task_cancels:
+                raise ProcessCancelledError("worker task canceled")
+
+    def task_cancellation_outcomes(self, task_id: str, attempt_id: str) -> tuple[ProcessCancelOutcome, ...]:
+        with self._lock:
+            return tuple(self._task_cancels.get((task_id, attempt_id), {}).values())
+
+    def cancel_task(self, task_id: str, attempt_id: str) -> tuple[ProcessCancelOutcome, ...]:
+        key = (task_id, attempt_id)
+        with self._cancel_gate:
+            with self._lock:
+                if key in self._task_cancels:
+                    return tuple(self._task_cancels[key].values())
+                self._task_cancels[key] = {}
+                processes = tuple((p, child) for p, child in self._processes.items() if child.task_key == key)
+            self._cancel_processes(processes, task_key=key)
+            return self.task_cancellation_outcomes(task_id, attempt_id)
 
     def cancel(self) -> tuple[ProcessCancelOutcome, ...]:
         with self._cancel_gate:
@@ -235,26 +277,31 @@ class ProcessCancelOutcome:
 class _SeatProcessRegistry:
     """Label process registrations with a Brigade seat without changing adapters."""
 
-    def __init__(self, parent: ProcessRegistry, seat: str) -> None:
+    def __init__(self, parent: ProcessRegistry, seat: str, task_key: tuple[str, str] | None = None) -> None:
         self._parent = parent
         self._seat = seat
+        self._task_key = task_key
 
     def check_cancellation(self) -> None:
         self._parent.check_cancellation()
+        self._parent._check_task_cancellation(self._task_key)
 
     def ensure_launch_allowed(self) -> None:
         self._parent.ensure_launch_allowed()
+        self._parent._check_task_cancellation(self._task_key)
 
     def register(self, process: subprocess.Popen[bytes]) -> None:
-        self._parent.register(process, seat=self._seat)
+        self._parent.register(process, seat=self._seat, task_key=self._task_key)
 
     def register_with_job(self, process: subprocess.Popen[bytes], job: OwnedJob) -> None:
-        self._parent.register(process, seat=self._seat, job=job)
+        self._parent.register(process, seat=self._seat, job=job, task_key=self._task_key)
 
     def unregister(self, process: subprocess.Popen[bytes]) -> None:
         self._parent.unregister(process)
 
     def cancel(self) -> tuple[ProcessCancelOutcome, ...]:
+        if self._task_key is not None:
+            return self._parent.cancel_task(*self._task_key)
         return self._parent.cancel()
 
     def terminate(self, process: subprocess.Popen[bytes]) -> None:

@@ -1,1 +1,0 @@
-- `tests/test_aboyeur.py` now passes on Windows: fake grok and codex seat launchers resolve as native executables there, the SIGTERM terminalization subprocess tests skip with a stated reason because Windows cannot deliver SIGTERM to a Python handler, and the sidecar fsync and event-writer byte-bound assertions follow each platform instead of POSIX assumptions (#2262).

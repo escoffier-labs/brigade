@@ -1,1 +1,0 @@
-- The work-loop guidance in the shipped templates, the `brigade-work` skill, install next-steps and doctor hints now shows `brigade work verify run ... --capture auto` as the default. A typed id never moves a skill (#2589).

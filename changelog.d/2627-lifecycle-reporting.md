@@ -1,4 +1,0 @@
-- The memory lifecycle stage skips only a card it cannot read or commit, keeps the transitions its siblings already committed, and reports the stage as failed so `tend` still exits nonzero. A card file that cannot be decoded is reported instead of dropped.
-- Lifecycle reports policy floors it raised as `policy_adjusted`, so a configured 7-day stale window shows as 30 days instead of changing silently.
-- A lifecycle pass that stops archiving for missing hub read coverage reports `archive_blocked` and still commits stale transitions, while `blocked` means the stage stopped. `memory care status` shows both states.
-- The absolute-path reference match indexes each line once, so long single-line task ledgers no longer make a care pass scale quadratically.

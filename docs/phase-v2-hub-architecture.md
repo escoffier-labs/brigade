@@ -613,7 +613,10 @@ an unknown or revoked token reads as `anonymous`, as it did on main.
 `unchecked` means a token was presented but no lookup completed for it, whether
 the request was refused before the lookup or the lookup timed out, and it stays
 the label for the health family (`/health` and `/ready`), which never waits on
-a reader for a label.
+a reader for a label. The log also has a bounded `method` and `route`.
+Native and proxied endpoints have fixed route labels, with placeholders for
+path parameters and `other` for unrecognized paths. These fields are set
+before admission and appear only in the request log.
 
 The same line's `stage` names where the request was when the line was written:
 `received` (before the credential lookup), `credential-lookup` (inside it),

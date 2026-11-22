@@ -47,7 +47,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--worker", action="append", required=True, help="Selected seat pool; repeat to add seats (duplicates ignored)."
     )
     p_ready.add_argument("--concurrency", type=int, default=1)
-    p_ready.add_argument("--route", choices=("brigade", "t3"), default="brigade")
+    p_ready.add_argument("--route", choices=("brigade", "t3", "orca"), default="brigade")
     p_ready.add_argument("--isolation", choices=("shared", "worktree"), default="shared")
     p_ready.add_argument("--capability", default=None)
     p_ready.add_argument(

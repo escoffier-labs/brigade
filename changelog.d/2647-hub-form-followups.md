@@ -1,2 +1,0 @@
-- The Fleet Hub PR rule action row now reads "Required for the first action" instead of "Optional", matching what the server enforces.
-- A blank rollback revision is refused with the message the rollback form declares.
