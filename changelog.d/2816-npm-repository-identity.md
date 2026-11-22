@@ -1,0 +1,1 @@
+- Stamp npm launcher, platform companion, and compatibility archives with the publishing repository URL, and verify registry provenance under the repository recorded in the original archive.

@@ -512,11 +512,7 @@ def companion_package_manifest(runtime: dict, platform: str) -> dict:
         "name": pin["package"],
         "version": runtime["version"],
         "publishConfig": {"access": "public"},
-        "repository": {
-            "type": "git",
-            "url": "git+https://github.com/escoffier-labs/brigade.git",
-            "directory": "npm/feasibility",
-        },
+        "repository": json.loads((SOURCE / "package.json").read_text())["repository"],
         "homepage": "https://brigadestack.com",
         "license": "MIT OR Apache-2.0",
         "os": [system],
@@ -684,7 +680,12 @@ def main() -> None:
     parser.add_argument("--out", type=Path)
     parser.add_argument("--verify-artifacts", type=Path)
     parser.add_argument("--allow-dirty", action="store_true", help="local evidence only, records dirty provenance")
+    parser.add_argument(
+        "--stamp-publishing-repository", action="store_true", help="stamp stable archives for publication"
+    )
     args = parser.parse_args()
+    if args.stamp_publishing_repository and (args.out is None or args.candidate or args.verify_artifacts):
+        parser.error("--stamp-publishing-repository requires a stable archive build with --out")
     if args.verify_artifacts:
         metadata = verify_artifacts(args.verify_artifacts.resolve(), candidate=args.candidate)
         print(json.dumps({"status": "verified", "sourceCommit": metadata["sourceCommit"], "archives": 6}))
@@ -695,6 +696,17 @@ def main() -> None:
     if output == REPO or REPO in output.parents:
         parser.error("generated artifacts must be outside the source checkout")
     identity, paths = source_snapshot(args.allow_dirty)
+    repository_url = None
+    if args.stamp_publishing_repository:
+        repository_url = subprocess.check_output(
+            [
+                "node",
+                "-p",
+                "require(process.argv[1]).publishingPackageRepositoryUrl(process.env)",
+                str(SOURCE / "provenance.cjs"),
+            ],
+            text=True,
+        ).strip()
     output.mkdir(parents=True, exist_ok=True)
     downloads = output / "downloads"
     downloads.mkdir(exist_ok=True)
@@ -736,6 +748,8 @@ def main() -> None:
         for name, data in licenses.items():
             (package / name).write_bytes(data)
         manifest = companion_package_manifest(runtime, platform)
+        if repository_url is not None:
+            manifest["repository"]["url"] = repository_url
         write_json(package / "package.json", manifest)
         write_json(
             package / "manifest.json",
@@ -763,10 +777,13 @@ def main() -> None:
     (launcher / "launcher.cjs").chmod(0o755)
     (launcher / "wheel").mkdir()
     shutil.copyfile(wheel, launcher / "wheel" / wheel.name)
-    if args.candidate:
+    if args.candidate or repository_url is not None:
         manifest = json.loads((launcher / "package.json").read_text())
-        manifest["version"] = runtime["version"]
-        manifest["optionalDependencies"] = {p["package"]: runtime["version"] for p in runtime["platforms"].values()}
+        if args.candidate:
+            manifest["version"] = runtime["version"]
+            manifest["optionalDependencies"] = {p["package"]: runtime["version"] for p in runtime["platforms"].values()}
+        else:
+            manifest["repository"]["url"] = repository_url
         write_json(launcher / "package.json", manifest)
     write_json(launcher / "runtime.json", runtime)
     artifacts.append(pack(launcher, output))
