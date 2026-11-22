@@ -1,6 +1,7 @@
 """Security regressions for automatic lesson admission and publication."""
 
 import json
+import subprocess
 
 import pytest
 
@@ -104,7 +105,14 @@ def test_receipt_binding_and_failure_sequence(scope, monkeypatch, damage):
     path = scope / candidate["evidence"]
     receipt = json.loads(path.read_text())
     if damage == "unregistered":
-        (scope / "verify/manifests/lesson.json").unlink()
+        # A manifest stays registered while it is on the Git base, so removing
+        # the working copy is not enough. Commit the removal.
+        subprocess.run(["git", "rm", "-q", "verify/manifests/lesson.json"], cwd=scope, check=True)
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "drop manifest"],
+            cwd=scope,
+            check=True,
+        )
     elif damage == "content":
         receipt["subject_binding"]["content_fingerprint"] = "sha256:" + "0" * 64
     elif damage == "subject":

@@ -61,12 +61,23 @@ class Assignment:
     attempt_id: str | None = None
 
 
+# Decided launch-point outcomes that are not failures: a batch task cancelled
+# before launch, and a dependent never launched because its prerequisite was
+# cancelled. Neither aborts later waves under fail-fast, so siblings still run.
+NON_ABORTING_STATUSES = frozenset({"cancelled-before-launch", "prerequisite-cancelled"})
+
+
 class LaunchRefused(Exception):
     """A dispatch-requested callback refuses this launch.
 
     Raised before route resolution, model lease or provider execution. The
     worker is recorded as refused and nothing falls back to another seat or route.
+    A closed ``code`` from ``NON_ABORTING_STATUSES`` becomes the result status.
     """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -1131,7 +1142,7 @@ def dispatch(
                         text="",
                         ok=False,
                         detail=str(exc),
-                        status="refused",
+                        status=exc.code if exc.code in NON_ABORTING_STATUSES else "refused",
                         failure_phase="dispatch",
                         failure_kind="launch-refused",
                         transport=_receipt_transport(selected_agent, appserver=appserver),
@@ -1482,12 +1493,16 @@ def dispatch(
                     raise
                 except Exception as exc:  # pragma: no cover - defensive boundary
                     assignment = stage_assignments[index]
+                    # A launch-point refusal with a closed decided code keeps
+                    # that code as its status, so fail-fast can tell it apart.
+                    code = getattr(exc, "code", None)
                     stage_results_by_index[index] = WorkerResult(
                         worker=assignment.worker,
                         task=assignment.task,
                         text="",
                         ok=False,
                         detail=str(exc)[:200],
+                        status=code if code in NON_ABORTING_STATUSES else "",
                         task_id=assignment.task_id,
                     )
         except KeyboardInterrupt as exc:
@@ -1511,7 +1526,7 @@ def dispatch(
             executor.shutdown(wait=True)
         stage_results = [stage_results_by_index[index] for index in range(len(stage_assignments))]
         all_results.extend(stage_results)
-        if fail_fast and any(not result.ok for result in stage_results):
+        if fail_fast and any(not result.ok and result.status not in NON_ABORTING_STATUSES for result in stage_results):
             abort_after_stage = stage
     return all_results
 

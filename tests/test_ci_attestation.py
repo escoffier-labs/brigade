@@ -20,6 +20,7 @@ from brigade.ci_attestation import GhNotFound, GhUnavailable
 
 from tests.test_scorecard import (
     _effectiveness_command,
+    _ensure_scorecard_manifest,
     _fixture_binding,
     _write_verify_receipt,
 )
@@ -43,6 +44,8 @@ def _observation_enabled(monkeypatch):
 @pytest.fixture
 def merged_repo(scoreable_target: Path) -> tuple[Path, str]:
     """A workspace whose origin is a GitHub repo and whose HEAD is the merged commit on origin/main."""
+    # Manifests are read from the merge base with origin/main, so commit the fixture manifest first.
+    _ensure_scorecard_manifest(scoreable_target)
     subprocess.run(
         ["git", "remote", "add", "origin", f"https://github.com/{SLUG}.git"], cwd=scoreable_target, check=True
     )
