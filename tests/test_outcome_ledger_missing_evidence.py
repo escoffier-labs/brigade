@@ -119,7 +119,7 @@ def test_deleted_failed_run_keeps_its_own_hurt_row_before_a_later_scoped_success
 @pytest.mark.parametrize("missing_state", ["no-run", "running", "past-grace"])
 def test_manifest_round_trip_preserves_missing_verdict_from_old_pin(world, base, missing_state):
     path = "verify/manifests/skill-note.json"
-    manifest_a = (world.root / path).read_text()
+    manifest_a = (world.root / path).read_bytes().decode()
     manifest_b = json.loads(manifest_a)
     manifest_b["checks"][0]["command"] = "true"
     day = 22 if missing_state == "past-grace" else 23
@@ -137,7 +137,7 @@ def test_manifest_round_trip_preserves_missing_verdict_from_old_pin(world, base,
 @pytest.mark.parametrize("finish", ["before-restart", "after-restart"])
 def test_a_failure_from_the_old_pin_survives_a_manifest_round_trip(world, base, finish):
     path = "verify/manifests/skill-note.json"
-    manifest_a = (world.root / path).read_text()
+    manifest_a = (world.root / path).read_bytes().decode()
     manifest_b = json.loads(manifest_a)
     manifest_b["checks"][0]["command"] = "true"
     c1 = world.touch_skill_json(1, T % (22, "23:10:00Z"))
@@ -196,7 +196,8 @@ def test_the_commit_changing_the_pin_is_scoped_by_the_previous_manifest(world, b
 @pytest.mark.parametrize("unavailable", [None, "[]"], ids=["missing", "malformed"])
 def test_an_unavailable_manifest_keeps_the_previous_scope_and_grace_window(world, base, unavailable):
     path = "verify/manifests/skill-note.json"
-    manifest = (world.root / path).read_text()
+    # Restore the same manifest pin, including any CRLF line endings.
+    manifest = (world.root / path).read_bytes().decode()
     world.commit({path: unavailable}, T % (23, "12:00:00Z"), branch="main")
     c1 = world.touch_skill_json(1, T % (23, "12:15:00Z"))
     covers = world.commit({path: manifest}, T % (23, "12:30:00Z"), branch="main")
