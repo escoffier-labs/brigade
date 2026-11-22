@@ -9,7 +9,7 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
-from . import localio, outcome_cmd, runguard, verification_contract
+from . import localio, outcome_cmd, runguard, verification_contract, verify_manifest_git
 from .router import PATHS
 
 VERIFY_MANIFEST_SCHEMA = "brigade.verify_manifest.v1"
@@ -54,6 +54,12 @@ class VerifyManifest:
     path: Path | None = None
     consequential: bool = False
     verification_contract: dict[str, Any] | None = None
+    manifest_worktree_modified: bool | None = None
+    manifest_base_commit: str | None = None
+    manifest_base_payload_sha256: str | None = None
+    manifest_worktree_missing: bool | None = None
+    manifest_base_source: str | None = None
+    manifest_base_reference: str | None = None
 
     @property
     def planned_commands(self) -> list[str | list[str]]:
@@ -322,7 +328,12 @@ def validate_manifest_payload(payload: dict[str, Any]) -> list[str]:
     return errors
 
 
-def manifest_from_payload(payload: dict[str, Any], *, path: Path | None = None) -> VerifyManifest:
+def manifest_from_payload(
+    payload: dict[str, Any],
+    *,
+    path: Path | None = None,
+    base: verify_manifest_git.BaseManifestPayload | None = None,
+) -> VerifyManifest:
     errors = validate_manifest_payload(payload)
     if errors:
         raise ValueError("; ".join(errors))
@@ -378,6 +389,12 @@ def manifest_from_payload(payload: dict[str, Any], *, path: Path | None = None) 
         path=path,
         consequential=bool(payload.get("consequential", False)),
         verification_contract=contract_payload,
+        manifest_worktree_modified=base.worktree_modified if base else None,
+        manifest_base_commit=base.commit if base else None,
+        manifest_base_payload_sha256=base.payload_sha256 if base else None,
+        manifest_worktree_missing=base.worktree_missing if base else None,
+        manifest_base_source=base.base_source if base else None,
+        manifest_base_reference=base.base_reference if base else None,
     )
 
 
@@ -387,14 +404,17 @@ def _discover_builtin_manifest_files() -> list[Path]:
     return []
 
 
-def _discover_workspace_manifest_files(target: Path, *, tracked_only: bool = False) -> list[Path]:
-    workspace_root = _workspace_manifests_root(target)
-    if not workspace_root.is_dir():
+def _discover_workspace_manifest_files(
+    target: Path, *, tracked_only: bool = False, base: verify_manifest_git.BaseResolution | None = None
+) -> list[Path]:
+    del tracked_only
+    resolution = base or verify_manifest_git.resolve_base(target)
+    try:
+        return verify_manifest_git.list_base_manifests(target, resolution)
+    except verify_manifest_git.ManifestGitError:
+        # No trusted base means no registered workspace manifests. Resolving one
+        # by id or path still reports why (see resolve_manifest).
         return []
-    paths = sorted(workspace_root.glob("*.json"))
-    if tracked_only:
-        paths = [path for path in paths if _is_git_tracked(target, path)]
-    return paths
 
 
 def _discover_manifest_files(target: Path, *, tracked_only: bool = False) -> list[Path]:
@@ -404,10 +424,33 @@ def _discover_manifest_files(target: Path, *, tracked_only: bool = False) -> lis
     )
 
 
+def trusted_workspace_manifests(target: Path) -> list[VerifyManifest]:
+    """Load all workspace manifests from one trusted base resolution."""
+    target = target.expanduser().resolve()
+    resolution = verify_manifest_git.resolve_base(target)
+    manifests: list[VerifyManifest] = []
+    for path in _discover_workspace_manifest_files(target, base=resolution):
+        try:
+            base = verify_manifest_git.load_base_manifest(target, path, resolution)
+            manifests.append(manifest_from_payload(base.payload, path=path, base=base))
+        except (verify_manifest_git.ManifestGitError, ValueError):
+            # One unusable manifest must not hide the others.
+            continue
+    return manifests
+
+
 def registered_manifest_ids(target: Path) -> list[str]:
+    base_resolution = verify_manifest_git.resolve_base(target)
     ids: list[str] = []
-    for path in _discover_manifest_files(target, tracked_only=True):
-        payload = _load_manifest_file(path)
+    for path in _discover_builtin_manifest_files() + _discover_workspace_manifest_files(target, base=base_resolution):
+        payload: dict[str, Any] | None
+        if _is_builtin_manifest(path):
+            payload = _load_manifest_file(path)
+        else:
+            try:
+                payload = verify_manifest_git.load_base_manifest(target, path, base_resolution).payload
+            except verify_manifest_git.ManifestGitError:
+                continue
         if not isinstance(payload, dict):
             continue
         manifest_id = payload.get("manifest_id")
@@ -423,70 +466,73 @@ def _normalize_repo_path(path: str) -> str:
     return normalized.lstrip("/")
 
 
-def _workspace_manifest_file_from_selector(target: Path, selector: str) -> Path | None:
-    raw = selector.strip()
-    if not raw:
+def _workspace_selector_path(target: Path, selector: str) -> Path | None:
+    raw = selector.strip().replace("\\", "/")
+    prefix = f"{_WORKSPACE_MANIFESTS_REL.as_posix()}/"
+    if not raw.startswith(prefix) or "/" in raw[len(prefix) :] or not raw.endswith(".json"):
         return None
-    candidate = Path(raw)
-    if not candidate.is_absolute():
-        candidate = target / candidate
-    try:
-        resolved = candidate.resolve()
-        workspace_root = _workspace_manifests_root(target).resolve()
-        resolved.relative_to(workspace_root)
-    except (OSError, ValueError):
-        return None
-    if resolved.suffix != ".json" or not resolved.is_file():
-        return None
-    return resolved
-
-
-def _load_tracked_workspace_manifest(
-    target: Path, path: Path, *, selector: str
-) -> tuple[VerifyManifest | None, str | None]:
-    payload = _load_manifest_file(path)
-    manifest_label = selector
-    if isinstance(payload, dict):
-        named = payload.get("manifest_id")
-        if isinstance(named, str) and named.strip():
-            manifest_label = named
-    if not _is_git_tracked(target, path):
-        return None, f"verify manifest not tracked: {manifest_label}"
-    if not isinstance(payload, dict):
-        return None, f"verify manifest not found: {selector}"
-    try:
-        return manifest_from_payload(payload, path=path), None
-    except ValueError as exc:
-        return None, str(exc)
+    return target / Path(raw)
 
 
 def resolve_manifest(target: Path, manifest_id: str) -> tuple[VerifyManifest | None, str | None]:
     target = target.expanduser().resolve()
     selector = str(manifest_id).strip()
     matches: list[VerifyManifest] = []
-    untracked_workspace_match = False
-    for path in _discover_manifest_files(target):
+    for path in _discover_builtin_manifest_files():
         payload = _load_manifest_file(path)
-        if not isinstance(payload, dict):
+        if isinstance(payload, dict) and str(payload.get("manifest_id") or "") == selector:
+            try:
+                matches.append(manifest_from_payload(payload, path=path))
+            except ValueError as exc:
+                return None, str(exc)
+    base_resolution = verify_manifest_git.resolve_base(target)
+    try:
+        workspace_paths = verify_manifest_git.list_base_manifests(target, base_resolution)
+    except verify_manifest_git.ManifestGitError as exc:
+        # A built-in manifest needs no Git base. A workspace one cannot be trusted without it.
+        if matches:
+            return (matches[0], None) if len(matches) == 1 else (None, f"verify manifest id is ambiguous: {selector}")
+        return None, f"{exc.reason}: {exc}"
+    selector_path = _normalize_repo_path(selector)
+    for path in workspace_paths:
+        relative_path = path.relative_to(target).as_posix()
+        try:
+            base = verify_manifest_git.load_base_manifest(target, path, base_resolution)
+        except verify_manifest_git.ManifestGitError as exc:
+            # One unusable manifest must not block the others. Name it only when it was asked for.
+            if relative_path == selector_path:
+                return None, f"{exc.reason}: {exc}"
             continue
-        if str(payload.get("manifest_id") or "") != selector:
-            continue
-        if not _is_builtin_manifest(path) and not _is_git_tracked(target, path):
-            untracked_workspace_match = True
+        if str(base.payload.get("manifest_id") or "") != selector and relative_path != selector_path:
             continue
         try:
-            matches.append(manifest_from_payload(payload, path=path))
+            matches.append(manifest_from_payload(base.payload, path=path, base=base))
         except ValueError as exc:
             return None, str(exc)
     if matches:
         if len(matches) > 1:
             return None, f"verify manifest id is ambiguous: {selector}"
         return matches[0], None
-    source_path = _workspace_manifest_file_from_selector(target, selector)
-    if source_path is not None:
-        return _load_tracked_workspace_manifest(target, source_path, selector=selector)
-    if untracked_workspace_match:
-        return None, f"verify manifest not tracked: {selector}"
+    selected_path = _workspace_selector_path(target, selector)
+    if selected_path is not None:
+        if selected_path.is_symlink():
+            return None, f"manifest_not_regular_file: verify manifest is not a regular file: {selector}"
+        if selected_path.exists():
+            return (
+                None,
+                f"manifest_not_on_default_branch: verify manifest is not on the default branch yet: {selector}; a new manifest can be used once it is on the default branch",
+            )
+    # Give an actionable result when an untrusted file advertises this id, without
+    # allowing that file to affect selection of a trusted manifest.
+    root = _workspace_manifests_root(target)
+    if root.is_dir():
+        for candidate in root.glob("*.json"):
+            payload = _load_manifest_file(candidate)
+            if isinstance(payload, dict) and payload.get("manifest_id") == selector:
+                return (
+                    None,
+                    f"manifest_not_on_default_branch: verify manifest is not on the default branch yet: {selector}; a new manifest can be used once it is on the default branch",
+                )
     return None, f"verify manifest not found: {selector}"
 
 
@@ -529,15 +575,20 @@ def manifests_matching_paths(target: Path, paths: Sequence[str]) -> list[VerifyM
     if not candidates:
         return []
     matches: list[VerifyManifest] = []
-    seen: set[str] = set()
-    for path in _discover_workspace_manifest_files(target, tracked_only=True):
-        payload = _load_manifest_file(path)
-        if not isinstance(payload, dict):
-            continue
+    resolution = verify_manifest_git.resolve_base(target)
+    manifests: list[VerifyManifest] = []
+    for path in _discover_workspace_manifest_files(target, base=resolution):
         try:
-            manifest = manifest_from_payload(payload, path=path)
+            base = verify_manifest_git.load_base_manifest(target, path, resolution)
+            manifests.append(manifest_from_payload(base.payload, path=path, base=base))
         except ValueError:
+            # Covers ManifestGitError too. One unusable manifest must not hide the others.
             continue
+    # Two base manifests can share an id. Keep the first in path order, as before:
+    # the caller names it by its source path, which still resolves, where the bare
+    # id would be ambiguous.
+    seen: set[str] = set()
+    for manifest in manifests:
         if manifest.manifest_id in seen:
             continue
         if any(path_in_manifest_scope(manifest, item) for item in candidates):
@@ -593,6 +644,8 @@ def manifest_source_path(target: Path, manifest: VerifyManifest) -> str | None:
 
 
 def manifest_payload_sha256(manifest: VerifyManifest) -> str | None:
+    if manifest.manifest_base_payload_sha256 is not None:
+        return manifest.manifest_base_payload_sha256
     if manifest.path is None or not manifest.path.is_file():
         return None
     return f"sha256:{localio.file_sha256(manifest.path)}"
@@ -606,6 +659,18 @@ def build_manifest_binding(target: Path, manifest: VerifyManifest) -> dict[str, 
         "manifest_id": manifest.manifest_id,
         "payload_sha256": payload_sha256,
     }
+    if manifest.manifest_worktree_modified is not None:
+        binding["manifest_worktree_modified"] = manifest.manifest_worktree_modified
+    if manifest.manifest_worktree_missing is not None:
+        binding["manifest_worktree_missing"] = manifest.manifest_worktree_missing
+    if manifest.manifest_base_source is not None:
+        binding["base_source"] = manifest.manifest_base_source
+    if manifest.manifest_base_reference is not None:
+        binding["base_reference"] = manifest.manifest_base_reference
+    if manifest.manifest_base_commit is not None:
+        binding["base_commit"] = manifest.manifest_base_commit
+    if manifest.manifest_base_payload_sha256 is not None:
+        binding["base_payload_sha256"] = manifest.manifest_base_payload_sha256
     source_path = manifest_source_path(target, manifest)
     if source_path:
         binding["source_path"] = source_path

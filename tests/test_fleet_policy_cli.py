@@ -45,7 +45,7 @@ def test_help_lists_required_subcommands_and_flags(monkeypatch):
     assert "Accept, renew, or release a routing reservation." in text
     rc, reservation_help, reservation_err = _run(monkeypatch, ["reservation", "--help"])
     assert rc == 0
-    assert "Accept a routing reservation. Its slot stays held until release." in " ".join(
+    assert "Accept a routing reservation as the selected target. Its slot stays held until release." in " ".join(
         (reservation_help + reservation_err).split()
     )
 

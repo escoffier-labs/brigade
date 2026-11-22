@@ -1207,8 +1207,8 @@ def test_inventory_ingest_without_collectors_is_denied(tmp_path):
         assert "not configured" in denied["error"]["message"]
 
 
-def test_reservation_accept_client_uses_node_authenticated_transport(tmp_path, monkeypatch):
-    from brigade import fleet_client_policy, fleet_hub_policy_api, fleet_hub_routing
+def test_reservation_cli_lifecycle_requires_selected_target(tmp_path, monkeypatch, capsys):
+    from brigade import cli, fleet_client_policy, fleet_hub_policy_api, fleet_hub_routing
 
     with _hub(tmp_path) as hub:
         token = _enroll(hub)
@@ -1256,18 +1256,42 @@ def test_reservation_accept_client_uses_node_authenticated_transport(tmp_path, m
         for auth, expected in [(None, 401), (ADMIN_TOKEN, 403), (other, 403)]:
             status, refused = _request(hub, "POST", "/policy", token=auth, body={"action": "reservation-accept", **ids})
             assert status == expected, refused
-        calls = []
+        for auth in (token, ADMIN_TOKEN):
+            for action in ("reservation-renew", "reservation-release"):
+                status, refused = _request(hub, "POST", "/policy", token=auth, body={"action": action, **ids})
+                assert status == 403, (action, refused)
+                assert refused["error"]["code"] == "auth-failed"
 
         def configured_transport(*, admin):
-            calls.append(admin)
+            assert admin is False
             return f"http://{hub[0]}:{hub[1]}", token
 
         monkeypatch.setattr(fleet_client_policy, "_hub_and_token", configured_transport)
-        accepted = fleet_client_policy.accept_reservation(**ids)
+
+        def run_reservation(action):
+            args = ["fleet", "policy", "reservation", action, "--json"]
+            for name, value in ids.items():
+                args.extend((f"--{name.replace('_', '-')}", value))
+            assert cli.main(args) == 0
+            return json.loads(capsys.readouterr().out)
+
+        accepted = run_reservation("accept")
         assert accepted["state"] == "accepted"
         assert accepted["reservation_id"] == ids["reservation_id"]
-        assert fleet_client_policy.accept_reservation(**ids) == accepted
-        assert calls == [False, False]
+        assert run_reservation("accept") == accepted
+
+        for auth in (other, ADMIN_TOKEN):
+            for action in ("reservation-renew", "reservation-release"):
+                status, refused = _request(hub, "POST", "/policy", token=auth, body={"action": action, **ids})
+                assert status == 403, (action, refused)
+                assert refused["error"]["code"] == "auth-failed"
+
+        renewed = run_reservation("renew")
+        assert renewed["reservation_id"] == ids["reservation_id"]
+        assert renewed["state"] == "active"
+        released = run_reservation("release")
+        assert released["reservation_id"] == ids["reservation_id"]
+        assert released["state"] == "released"
 
 
 def test_reservation_accept_cli_lifecycle_over_real_http(tmp_path, monkeypatch, capsys):

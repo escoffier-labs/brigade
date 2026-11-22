@@ -1714,8 +1714,11 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
         names: set[str] = set()
         # A nested repository's index can hide paths still in an outer index.
         for marker_root in worktrees:
+            # Git locates the parent of a relative gitfile target using '/'.
+            # ls-files runs from the configured worktree, which can be elsewhere.
+            git_dir = (marker_root / ".git").as_posix()
             discovery = subprocess.run(
-                ["git", "-C", str(marker_root), "--git-dir", str(marker_root / ".git"), "rev-parse", "--show-cdup"],
+                ["git", "-C", str(marker_root), "--git-dir", git_dir, "rev-parse", "--show-cdup"],
                 capture_output=True,
                 env=env,
                 timeout=30,
@@ -1733,7 +1736,7 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
                     "-C",
                     str(worktree),
                     "--git-dir",
-                    str(marker_root / ".git"),
+                    git_dir,
                     "--work-tree",
                     str(worktree),
                     "-c",

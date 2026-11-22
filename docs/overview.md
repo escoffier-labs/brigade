@@ -8,9 +8,9 @@ The full tour: every component, diagram, and workflow. The [README](../README.md
 | --- | --- |
 | GitHub | [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade) |
 | Website | [brigade.tools](https://brigade.tools) |
-| PyPI | [`brigadestack`](https://pypi.org/project/brigadestack/), with `brigade-cli` as the compatibility package |
+| PyPI | [`brigadestack`](https://pypi.org/project/brigadestack/), with `brigade-cli` as the same code under the old name |
 | Command | `brigade` |
-| Stable release | v0.31.0 (`brigade-cli` on PyPI, `@escoffier-labs/brigade` on npm). From 0.32.0 the real packages are `brigadestack` on both, and `brigade-cli` and `@escoffier-labs/brigade` are compatibility packages |
+| Stable release | v0.31.0 (`brigade-cli` on PyPI, `@escoffier-labs/brigade` on npm). From 0.32.0 the real packages are `brigadestack` on both, `brigade-cli` is the same code under the old name, and `@escoffier-labs/brigade` is a compatibility package |
 | Preview line | 0.32 beta (`0.32.0.devYYYYMMDD` wheels) |
 
 This Brigade Stack is the AI-agent operator CLI from Escoffier Labs. It is not the archived CNCF/Microsoft Kubernetes Brigade, Spinabot Brigade, or the 2017 Python package that became Nornir.

@@ -71,18 +71,26 @@ binding is a `t3-binding-missing` routing rejection, not a reason to guess.
 
 The source owns the orchestration receipt and a read-only model plan
 projection. It never leases a model seat, calls a provider, renews a
-reservation, or releases one for a remote branch. Reservation release is
-target-only and the Hub enforces that, so a blocked source route leaves the
-reservation to its own TTL rather than attempting an unauthorized release.
-The target first accepts its reservation with `brigade fleet policy reservation accept`
-(Hub action `reservation-accept`), then renews it as needed, and releases it at
-the end. All three commands require the same reservation ID, decision ID, and
-session ID returned by routing. Acceptance commits the slot. An accepted
-reservation occupies node capacity until it is released, even after its lease
-expires, so the target must release it on every exit path. The accept reply has
-`state: "accepted"`. A renew reply has `state: "active"`. After acceptance, the
-target performs prepare -> context application -> ack -> launch proof -> provider
-execution.
+reservation, or releases one for a remote branch. A blocked source route leaves
+the unaccepted reservation to expire at its TTL.
+
+At launch admission, before target preparation, the selected target uses its
+node credentials to accept the reservation with the reservation and decision
+IDs from routing and its session ID:
+
+```bash
+brigade fleet policy reservation accept --reservation-id R --decision-id D --session-id S --json
+```
+
+The target must receive `state: "accepted"` before provider execution. Acceptance
+commits the slot. An accepted reservation occupies node capacity until release,
+even after its lease expires, so the target must release it on every exit path.
+The target renews as needed during execution and releases when work ends. Accept,
+renew, and release all require the same reservation ID, decision ID, and session
+ID. The accept reply has `state: "accepted"`. A renew reply has `state: "active"`.
+The Hub checks that each operation comes from the selected target and requires
+acceptance before renew or release. The target then performs prepare -> context
+application -> ack -> launch proof -> provider execution.
 
 ## Result states and handoff
 

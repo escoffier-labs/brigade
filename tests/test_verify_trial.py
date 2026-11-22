@@ -17,6 +17,27 @@ from brigade.work_cmd import verification as verify_mod
 from tests.work_cmd_test_helpers import _init_git_repo
 
 
+@pytest.mark.parametrize(
+    ("platform", "command", "identity"),
+    [
+        ("nt", r"python -m pytest tests\test_x.py", r"python -m pytest 'tests\test_x.py'"),
+        ("nt", r'python -m pytest "tests\with spaces\test_x.py"', r"python -m pytest 'tests\with spaces\test_x.py'"),
+        ("posix", r'python  -m pytest tests\test_x.py "space value"', "python -m pytest teststest_x.py 'space value'"),
+    ],
+)
+def test_manifest_command_matches_receipt_identity(monkeypatch, platform, command, identity):
+    with monkeypatch.context() as context:
+        context.setattr(os, "name", platform)
+        argv = verify_mod._verification_split_command(command)
+        manifest_identity = verify_trial._normalize_manifest_command(command)
+        receipt_identity = verify_trial._normalize_command_identity({"argv": argv})
+        text_receipt_identity = verify_trial._normalize_command_identity({"command": command})
+
+    assert receipt_identity == identity
+    assert manifest_identity == receipt_identity
+    assert text_receipt_identity == receipt_identity
+
+
 def _init_verify_git_repo(path: Path) -> None:
     _init_git_repo(path)
     (path / ".gitignore").write_text(".brigade/\n")
@@ -234,7 +255,8 @@ def test_resolve_manifest_rejects_untracked_workspace_manifest(scoreable_target)
 
     manifest, error = verify_manifest.resolve_manifest(scoreable_target, "untracked-patch")
     assert manifest is None
-    assert error == "verify manifest not tracked: untracked-patch"
+    assert error is not None
+    assert "not on the default branch yet" in error
     assert "untracked-patch" not in verify_manifest.registered_manifest_ids(scoreable_target)
 
 
@@ -273,6 +295,7 @@ def test_manifest_verify_writes_subject_binding_and_check_roles(scoreable_target
     binding = receipt["subject_binding"]
     assert binding["binding_mode"] == "patch_backed"
     assert binding["manifest_binding"]["manifest_id"] == "test-skill-patch"
+    assert binding["manifest_binding"]["manifest_worktree_modified"] is False
     assert binding["artifact_id"] == "brigade-work"
     assert binding["patch_binding"]["subject_path"] == "skills/brigade-work/SKILL.md"
     assert receipt["commands"][0]["check_role"] == "effectiveness"
@@ -728,6 +751,21 @@ def test_project_trial_missing_receipt_digest_is_ineligible(scoreable_target):
     assert projection.eligible is False
     assert projection.reason == "receipt_digest_missing"
     assert projection.attributed is True
+
+
+def test_modified_manifest_runs_base_command_and_stamps_receipt(scoreable_target, monkeypatch):
+    payload = _write_patch_manifest(scoreable_target, manifest_id="base-command")
+    payload["checks"][0]["command"] = f'{sys.executable} -c "raise SystemExit(9)"'
+    verify_manifest.write_workspace_manifest(scoreable_target, payload)
+
+    receipt = _run_manifest_verify(scoreable_target, "base-command", monkeypatch=monkeypatch)
+
+    binding = receipt["subject_binding"]["manifest_binding"]
+    assert receipt["status"] == "completed"
+    assert binding["manifest_worktree_modified"] is True
+    assert binding["base_commit"]
+    assert binding["base_payload_sha256"] == binding["payload_sha256"]
+    assert "print('ok')" in receipt["commands"][0]["command"]
 
 
 def test_project_trial_receipt_digest_mismatch_is_ineligible(scoreable_target):
