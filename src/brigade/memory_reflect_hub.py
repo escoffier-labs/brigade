@@ -892,6 +892,7 @@ def _reflect(
         from .memory_reflect_policy import AutoApplyPacer
 
         pacer = AutoApplyPacer()
+        preview_heads = {(head["scope"], head["card_id"]): head for head in heads} if not apply else {}
         served_any = False
 
         def served(digest: str) -> None:
@@ -906,7 +907,24 @@ def _reflect(
             remembered_id = previous.get(digest, {}).get("proposal_id")
             if anchoring and not remembered_id:
                 if not apply:
-                    skipped["anchor_apply_required"] = skipped.get("anchor_apply_required", 0) + 1
+                    reason = "anchor_apply_required"
+                    skipped[reason] = skipped.get(reason, 0) + 1
+                    op = ops[0]
+                    head = preview_heads[op["scope"], op["card_id"]]
+                    proposals.append(
+                        {
+                            "proposal_id": None,
+                            "state": "dry_run",
+                            "reason": reason,
+                            "ops": [_redacted(op)],
+                            # Unanchored blocks have no IDs. Use positions in the pinned revision.
+                            "block_indices": [
+                                index
+                                for index, block in enumerate(anchors.blocks(head["text"]))
+                                if block.block_id is None
+                            ],
+                        }
+                    )
                     continue
                 from .memory_reflect_policy import allowed
 
@@ -940,9 +958,6 @@ def _reflect(
                 skipped["proposal_quota"] = skipped.get("proposal_quota", 0) + len(selected) - position
                 attempted = position
                 break
-            if sent.outcome in (DENIED, UNAVAILABLE):
-                error = sent.code
-                break
             if sent.outcome == FAILED:
                 if sent.anchor_no_delta:
                     no_delta_ops += 1
@@ -950,6 +965,10 @@ def _reflect(
                 else:
                     failed_ops += 1
                 continue
+            if sent.outcome not in (OPENED, DUPLICATE):
+                # The hub may have accepted the proposal even if we could not confirm it.
+                error = sent.code or "hub_reflect_submit_unknown"
+                break
             if anchoring and not remembered_id and sent.outcome == OPENED and proposal_quota is not None:
                 proposal_quota = (proposal_quota[0] + 1, proposal_quota[1])
             if sent.proposal_id is not None:
