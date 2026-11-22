@@ -12,7 +12,7 @@ import os
 import re
 import stat
 import sys
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from threading import Lock
@@ -239,43 +239,37 @@ def _stop(run_dir: Path, workspace: Path) -> None:
     try:
         if _finished(run_dir):
             return
-        journal = run_dir / "events" / "lifecycle.jsonl"
-        with store.journal_scope(run_dir):
-            _stop_bound(run_dir, workspace, journal)
+        _stop_bound(run_dir, workspace)
     except Exception:
         # A full or unavailable journal cannot carry even a stop reference.
         pass
 
 
-def _stop_bound(run_dir: Path, workspace: Path, journal: Path) -> None:
-    from . import run_lifecycle
-
-    journaled = _journal_present(journal)
-    with (
-        run_lifecycle.checkpoint_event_pair(),
-        run_journal.journal_mutation(journal) if journaled else nullcontext(),
-        store.directory(run_dir, create=True, create_root=False) as parent,
-    ):
-        if _finished(run_dir):
-            return
-        if journaled and not runguard.is_active_run_owner(workspace, run_dir):
-            return
-        files = store.inventory(parent)
-        names = {name for name, _ in files}
-        if ".stopped" in names:
-            return
-        data = _STOP_BYTES
-        fits = sum(info.st_size for _, info in files) + len(data) <= store.MAX_RUN_BYTES
-        if fits:
-            store.publish(parent, data)
-        descriptor = dirfd.open_child_file(parent, ".stopped", os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-        try:
-            os.fsync(descriptor)
-        finally:
-            os.close(descriptor)
-        dirfd.fsync_directory(parent)
-        if fits and journaled:
-            _append_reference(run_dir, workspace, _reference(data, "public-metadata"))
+def _stop_bound(run_dir: Path, workspace: Path) -> None:
+    with store.publication_scope(run_dir) as journal:
+        journaled = _journal_present(journal)
+        run_dir = journal.parent.parent
+        with store.directory(run_dir, create=True, create_root=False) as parent:
+            if _finished(run_dir):
+                return
+            if journaled and not runguard.is_active_run_owner(workspace, run_dir):
+                return
+            files = store.inventory(parent)
+            names = {name for name, _ in files}
+            if ".stopped" in names:
+                return
+            data = _STOP_BYTES
+            fits = sum(info.st_size for _, info in files) + len(data) <= store.MAX_RUN_BYTES
+            if fits:
+                store.publish(parent, data)
+            descriptor = dirfd.open_child_file(parent, ".stopped", os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            dirfd.fsync_directory(parent)
+            if fits and journaled:
+                _append_reference(run_dir, workspace, _reference(data, "public-metadata"))
 
 
 def record_result(
@@ -464,50 +458,44 @@ def _record_result(
     blobs.append(("public-metadata", data))
     if sum(len(raw) for _, raw in blobs) > store.MAX_ENTRY_BYTES:
         raise store.CassetteError("cassette entry byte cap reached")
-    journal = run_dir / "events" / "lifecycle.jsonl"
-    with store.journal_scope(run_dir):
-        return _publish_blobs(run_dir, workspace, journal, blobs, data)
+    return _publish_blobs(run_dir, workspace, blobs, data)
 
 
 def _publish_blobs(
-    run_dir: Path, workspace: Path, journal: Path, blobs: list[tuple[str, bytes]], data: bytes
+    run_dir: Path, workspace: Path, blobs: list[tuple[str, bytes]], data: bytes
 ) -> dict[str, Any] | None:
-    from . import run_lifecycle
-
-    journaled = _journal_present(journal)
-    with (
-        run_lifecycle.checkpoint_event_pair(),
-        run_journal.journal_mutation(journal) if journaled else nullcontext(),
-        store.directory(run_dir, create=True, create_root=False) as parent,
-    ):
-        if _finished(run_dir):
-            return None
-        files = store.inventory(parent)
-        if any(name == ".stopped" for name, _ in files):
-            return None
-        if len(files) + len(blobs) + 2 > store.MAX_FILES:
-            raise store.CassetteError("cassette file cap reached")
-        existing = {name for name, _ in files}
-        added = sum(len(raw) for _, raw in blobs if hashlib.sha256(raw).hexdigest() + ".json" not in existing)
-        if sum(info.st_size for _, info in files) + added + len(_STOP_BYTES) > store.MAX_RUN_BYTES:
-            raise store.CassetteError("cassette run byte cap reached")
-        # Check journal admission before publishing any bodies.
-        if journaled:
-            if not runguard.is_active_run_owner(workspace, run_dir):
-                raise store.CassetteError("cassette publication requires the active run lock")
-            report = run_journal.read_journal_bounded(journal)
-            if (
-                report.chain_errors
-                or report.partial_tail
-                or len(report.events) >= MAX_JOURNAL_EVENTS - _LIFECYCLE_EVENT_RESERVE
-                or _journal_size(journal) + 2048 > MAX_JOURNAL_BYTES
-            ):
-                raise store.CassetteError("cassette journal cap reached")
-        for _, raw in blobs:
-            store.publish(parent, raw)
-        ref = _reference(data, "public-metadata")
-        if journaled:
-            _append_reference(run_dir, workspace, ref)
+    with store.publication_scope(run_dir) as journal:
+        journaled = _journal_present(journal)
+        run_dir = journal.parent.parent
+        with store.directory(run_dir, create=True, create_root=False) as parent:
+            if _finished(run_dir):
+                return None
+            files = store.inventory(parent)
+            if any(name == ".stopped" for name, _ in files):
+                return None
+            if len(files) + len(blobs) + 2 > store.MAX_FILES:
+                raise store.CassetteError("cassette file cap reached")
+            existing = {name for name, _ in files}
+            added = sum(len(raw) for _, raw in blobs if hashlib.sha256(raw).hexdigest() + ".json" not in existing)
+            if sum(info.st_size for _, info in files) + added + len(_STOP_BYTES) > store.MAX_RUN_BYTES:
+                raise store.CassetteError("cassette run byte cap reached")
+            # Check journal admission before publishing any bodies.
+            if journaled:
+                if not runguard.is_active_run_owner(workspace, run_dir):
+                    raise store.CassetteError("cassette publication requires the active run lock")
+                report = run_journal.read_journal_bounded(journal)
+                if (
+                    report.chain_errors
+                    or report.partial_tail
+                    or len(report.events) >= MAX_JOURNAL_EVENTS - _LIFECYCLE_EVENT_RESERVE
+                    or _journal_size(journal) + 2048 > MAX_JOURNAL_BYTES
+                ):
+                    raise store.CassetteError("cassette journal cap reached")
+            for _, raw in blobs:
+                store.publish(parent, raw)
+            ref = _reference(data, "public-metadata")
+            if journaled:
+                _append_reference(run_dir, workspace, ref)
     return ref
 
 
