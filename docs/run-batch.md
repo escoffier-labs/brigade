@@ -813,8 +813,11 @@ acknowledgement.
 Acknowledgement requests use the same closed, exclusive inbox publication as
 cancellation. A second process never writes task facts: the active run-lock
 owner drains `ack` and appends `task.acknowledged`. A request queued behind a
-live owner already counts as consumed for `next`. The owner records it later.
-Stale result ids are ignored during drain. A timeout exits 3, writes nothing,
+live owner already counts as consumed for `next`. The owner records it later,
+and running `ack` again once the run lock is free journals it at once. If the
+inbox cannot be read, `next` and `ack` refuse with exit 2, so neither offers a
+result whose acknowledgement may be queued. Stale result ids are ignored during
+drain. A timeout exits 3, writes nothing,
 and never cancels the run. `done: true` means every accepted task has a terminal
 result and all such results are acknowledged.
 

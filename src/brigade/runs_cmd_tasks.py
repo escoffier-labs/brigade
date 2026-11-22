@@ -151,10 +151,9 @@ def _journal_present(run_dir: Path) -> bool:
 def _pending_acks(run_dir: Path) -> set[tuple[str, str]]:
     from . import run_task_inbox
 
-    try:
-        requests = run_task_inbox.pending(run_dir).requests
-    except run_task_inbox.TaskInboxError:
-        return set()
+    # Fail closed: an unreadable inbox could hide a queued acknowledgement, so
+    # the caller refuses instead of re-offering a result already consumed.
+    requests = run_task_inbox.pending(run_dir).requests
     return {
         (request.task_id, request.result_id)
         for request in requests
@@ -478,6 +477,8 @@ def next_task(
     sleep: Callable[[float], None] = time.sleep,
 ) -> int:
     """Pull the oldest unacknowledged terminal result without mutating the run."""
+    from . import run_task_inbox
+
     # Multiple parents can be added here by giving each consumer its own cursor.
     if timeout is not None and (not math.isfinite(timeout) or timeout < 0):
         return _fail("invalid-timeout", "timeout must not be negative")
@@ -495,13 +496,16 @@ def next_task(
                 return _fail("task-journal-unreadable", str(exc))
             sleep(min(interval, max(0.0, deadline - monotonic())))
             continue
-        acks = _pending_acks(run_dir)
+        try:
+            acks = _pending_acks(run_dir)
+        except run_task_inbox.TaskInboxError as exc:
+            return _fail(exc.code, exc.detail)
         order = _terminal_order(run_dir)
         terminal = [r for r in results if r.status in run_task_journal.TERMINAL and r.result_id is not None]
         offered = [r for r in terminal if not r.acknowledged and (r.handle.spec.task_id, r.result_id or "") not in acks]
         offered.sort(key=lambda r: order.get(r.handle.spec.task_id, 2**63))
         task = _row(offered[0], acknowledged=acks) if offered else None
-        done = bool(results) and len(terminal) == len(results) and not offered
+        done = len(terminal) == len(results) and not offered
         remaining = sum(
             1
             for result in terminal
@@ -563,31 +567,46 @@ def ack_task(
     state = next((item for item in results if item.handle.spec.task_id == task_id), None)
     outcome = "unknown-task"
     if state is not None:
+        try:
+            # Resolve everything that can refuse before the request is written,
+            # so a refusal never leaves a durable acknowledgement behind it.
+            workspace = _workspace_for_run(run_dir)
+            pending_acks = _pending_acks(run_dir)
+        except run_task_inbox.TaskInboxError as exc:
+            return _fail(exc.code, exc.detail)
         if state.status not in run_task_journal.TERMINAL or state.result_id is None:
             outcome = "no-result"
         elif state.result_id != result_id:
             outcome = "result-mismatch"
-        elif state.acknowledged or (task_id, result_id) in _pending_acks(run_dir):
+        elif state.acknowledged:
             outcome = "already-acknowledged"
         else:
-            try:
-                run_task_inbox.submit(run_dir, run_task_inbox.KIND_ACK, task_id, result_id=result_id)
-            except run_task_inbox.TaskInboxError as exc:
-                return _fail(exc.code, exc.detail)
-            workspace = _workspace_for_run(run_dir)
+            # A request already queued is retried below, so a later call can
+            # still journal an acknowledgement a busy batch never drained.
+            if (task_id, result_id) not in pending_acks:
+                try:
+                    run_task_inbox.submit(run_dir, run_task_inbox.KIND_ACK, task_id, result_id=result_id)
+                except run_task_inbox.TaskInboxError as exc:
+                    return _fail(exc.code, exc.detail)
+            outcome = "queued"
             held = contextlib.ExitStack()
             try:
                 held.enter_context(runguard.run_lock(workspace, run_dir=run_dir, stale_action="claim"))
             except (runguard.RunLockError, OSError):
                 held.close()
-                outcome = "queued"
             else:
                 with held:
                     try:
                         run_task_inbox.drain(run_dir, workspace)
-                    except run_task_inbox.TaskInboxError as exc:
-                        return _fail(exc.code, exc.detail)
-                outcome = "acknowledged"
+                        journaled = next(
+                            (r for r in tasks.read_tasks(run_dir) if r.handle.spec.task_id == task_id), None
+                        )
+                    except (run_task_inbox.TaskInboxError, tasks.TaskJournalError) as exc:
+                        # The request stays queued and `next` treats it as
+                        # consumed; the refusal says it is not journaled yet.
+                        return _fail(getattr(exc, "code", "journal-unreadable"), str(exc))
+                if journaled is not None and journaled.acknowledged:
+                    outcome = "acknowledged"
     payload = {
         "schema": RUN_TASKS_ACK_SCHEMA,
         "run_id": run_dir.name,

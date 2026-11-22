@@ -74,7 +74,6 @@ ERROR_CODES = frozenset(
         "already-terminal",
         "invalid-kind",
         "invalid-reason",
-        "ack-unsupported",
         "invalid-result",
         "owner-required",
         "inbox-refused",
@@ -126,6 +125,8 @@ def request_name(kind: str, task_id: str, result_id: str | None = None) -> str:
         raise TaskInboxError("unknown-task", "a task id is not a valid task identity")
     if kind == KIND_ACK and (result_id is None or not journal.digest(result_id)):
         raise TaskInboxError("invalid-result", "acknowledgement requires a valid result id")
+    if kind == KIND_CANCEL and result_id is not None:
+        raise TaskInboxError("invalid-result", "a cancel request carries no result id")
     key = hashlib.sha256(task_id.encode("utf-8")).hexdigest()
     suffix = "" if result_id is None else f"-{result_id}"
     return f"{kind}-{key}{suffix}.json"
@@ -696,6 +697,9 @@ def cancel(
             current = states.get(state.handle.spec.task_id, state)
             if current.launch_claim is not None:
                 row["live_termination"] = LIVE_TERMINATION_UNAVAILABLE
+        elif outcome in {"terminal", "acknowledged", "already-acknowledged", "stale"}:
+            # An acknowledgement drained in the same pass means the task is terminal.
+            row["outcome"] = OUTCOME_ALREADY_TERMINAL
         else:
             row["outcome"] = OUTCOME_UNKNOWN_TASK
     return {

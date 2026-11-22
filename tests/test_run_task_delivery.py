@@ -173,3 +173,67 @@ def test_done_true_after_all_results_are_acknowledged(run_site, capsys):
     rc, payload, _ = _next(run_dir, capsys)
     assert rc == 0 and payload["task"] is None and payload["done"] is True
     assert payload["remaining"] == 0
+
+
+def test_next_orders_by_terminal_observation_not_task_order(run_site, capsys):
+    run_dir, workspace = run_site
+    _observe(run_dir, workspace, "b")
+    _observe(run_dir, workspace, "a")
+    assert _next(run_dir, capsys)[1]["task"]["task_id"] == "b"
+
+
+def test_retrying_a_queued_ack_journals_it_once_the_lock_is_free(run_site, capsys):
+    run_dir, workspace = run_site
+    result = _observe(run_dir, workspace, "a")
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        assert _ack(run_dir, "a", result.result_id, capsys)[1]["outcome"] == "queued"
+    assert facts(run_dir, "task.acknowledged") == []
+    rc, payload, _ = _ack(run_dir, "a", result.result_id, capsys)
+    assert rc == 0 and payload["outcome"] == "acknowledged"
+    assert len(facts(run_dir, "task.acknowledged")) == 1
+
+
+def test_stale_or_tampered_ack_requests_journal_nothing(held_run):
+    run_dir, workspace = held_run
+    result = _observe_under_owner(run_dir, workspace, "a")
+    other = "0" * 64 if result.result_id != "0" * 64 else "1" * 64
+    assert inbox.submit(run_dir, inbox.KIND_ACK, "a", result_id=other) == "created"
+    assert inbox.drain(run_dir, workspace)["a"] == "stale"
+    # A valid file name whose document names a different task is malformed.
+    name = inbox.request_name(inbox.KIND_ACK, "b", result_id=result.result_id)
+    document = {
+        "schema": "brigade.task_inbox_request.v1",
+        "kind": "ack",
+        "task_id": "a",
+        "result_id": result.result_id,
+        "reason": None,
+        "requested_at": "2026-11-22T00:00:00Z",
+    }
+    path = run_dir / "task-inbox" / name
+    path.write_text(json.dumps(document))
+    os.chmod(path, 0o600)
+    assert name in inbox.pending(run_dir).malformed
+    inbox.drain(run_dir, workspace)
+    assert facts(run_dir, "task.acknowledged") == []
+
+
+def test_cancel_request_rejects_a_result_id():
+    import pytest
+
+    with pytest.raises(inbox.TaskInboxError):
+        inbox.request_name(inbox.KIND_CANCEL, "a", result_id="0" * 64)
+
+
+def test_unreadable_inbox_makes_next_and_ack_fail_closed(run_site, capsys, monkeypatch):
+    run_dir, workspace = run_site
+    result = _observe(run_dir, workspace, "a")
+
+    def broken(run_dir_arg):
+        raise inbox.TaskInboxError("inbox-overflow", "the task inbox exceeds the request bound")
+
+    monkeypatch.setattr(inbox, "pending", broken)
+    rc, _payload, _ = _next(run_dir, capsys)
+    assert rc == 2
+    rc, _payload, _ = _ack(run_dir, "a", result.result_id, capsys)
+    assert rc == 2
+    assert not (run_dir / "task-inbox").exists() or not any((run_dir / "task-inbox").iterdir())
