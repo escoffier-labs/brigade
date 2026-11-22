@@ -1,4 +1,4 @@
-"""Durable per-run command inbox for task cancellation intent.
+"""Durable per-run command inbox for task cancellation and acknowledgement.
 
 A task fact may only be journaled by the active run owner; that check is what
 keeps a second process from rewriting another run's history. A cancel request
@@ -13,11 +13,8 @@ The inbox holds no paths and no free text. One request is a closed
 reason token and a UTC timestamp. Request files are created exclusively and are
 never overwritten, so the first request wins and a replay is a no-op. They are
 deliberately never deleted: the file is the replay source, and the journaled
-``task.cancel-requested`` fact makes draining idempotent.
+task fact makes draining idempotent.
 
-``ack`` is a reserved kind for the acknowledgement/containment slice that
-follows. It is refused here rather than silently accepted, so a caller cannot
-believe an acknowledgement was recorded when nothing reads it yet.
 """
 
 from __future__ import annotations
@@ -78,6 +75,7 @@ ERROR_CODES = frozenset(
         "invalid-kind",
         "invalid-reason",
         "ack-unsupported",
+        "invalid-result",
         "owner-required",
         "inbox-refused",
         "inbox-unavailable",
@@ -86,11 +84,12 @@ ERROR_CODES = frozenset(
 )
 
 _NAME = re.compile(r"(?P<kind>cancel|ack)-(?P<key>[0-9a-f]{64})(?:-(?P<result>[A-Za-z0-9._:%-]+))?\.json", re.ASCII)
-_REQUEST_FIELDS = frozenset({"schema", "kind", "task_id", "reason", "requested_at"})
+_CANCEL_FIELDS = frozenset({"schema", "kind", "task_id", "reason", "requested_at"})
+_ACK_FIELDS = frozenset({"schema", "kind", "task_id", "result_id", "reason", "requested_at"})
 
 
 class TaskInboxError(RuntimeError):
-    """One bounded inbox refusal; no journal fact has been written."""
+    """One bounded inbox or journal refusal."""
 
     def __init__(self, code: str, detail: str):
         if code not in ERROR_CODES:
@@ -106,8 +105,9 @@ class CancelRequest:
 
     kind: str
     task_id: str
-    reason: str
+    reason: str | None
     requested_at: str
+    result_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -124,6 +124,8 @@ def request_name(kind: str, task_id: str, result_id: str | None = None) -> str:
         raise TaskInboxError("invalid-kind", "inbox kind must be cancel or ack")
     if not journal.task_id(task_id):
         raise TaskInboxError("unknown-task", "a task id is not a valid task identity")
+    if kind == KIND_ACK and (result_id is None or not journal.digest(result_id)):
+        raise TaskInboxError("invalid-result", "acknowledgement requires a valid result id")
     key = hashlib.sha256(task_id.encode("utf-8")).hexdigest()
     suffix = "" if result_id is None else f"-{result_id}"
     return f"{kind}-{key}{suffix}.json"
@@ -256,6 +258,17 @@ def _document(kind: str, task_id: str, reason: str, requested_at: str) -> dict[s
     }
 
 
+def _ack_document(task_id: str, result_id: str, requested_at: str) -> dict[str, Any]:
+    return {
+        "schema": INBOX_SCHEMA,
+        "kind": KIND_ACK,
+        "task_id": task_id,
+        "result_id": result_id,
+        "reason": None,
+        "requested_at": requested_at,
+    }
+
+
 def submit(
     run_dir: Path,
     kind: str,
@@ -269,22 +282,26 @@ def submit(
     ``created`` and ``already-requested`` are both success. A different reason
     for the same task keeps the request that arrived first.
     """
-    if kind == KIND_ACK:
-        raise TaskInboxError(
-            "ack-unsupported",
-            "acknowledgement requests are reserved for a later release and are not read yet",
-        )
     name = request_name(kind, task_id, result_id)
-    selected = DEFAULT_REASON if reason is None else reason
-    if selected not in journal.CANCEL_REASONS:
-        raise TaskInboxError("invalid-reason", "cancel reason must be operator, parent or budget")
+    if kind == KIND_ACK:
+        selected = None
+    else:
+        selected = DEFAULT_REASON if reason is None else reason
+        if selected not in journal.CANCEL_REASONS:
+            raise TaskInboxError("invalid-reason", "cancel reason must be operator, parent or budget")
     try:
         run_dir = run_journal.normalize_run_dir(Path(run_dir))
     except (OSError, ValueError, run_journal.RunJournalError) as exc:
         raise TaskInboxError("unknown-run", "run directory is not a run") from exc
     if not run_dir.is_dir():
         raise TaskInboxError("unknown-run", "run directory is not a run")
-    payload = _document(kind, task_id, selected, run_events.format_recorded_at(datetime.now(timezone.utc)))
+    requested_at = run_events.format_recorded_at(datetime.now(timezone.utc))
+    if kind == KIND_ACK:
+        assert result_id is not None
+        payload = _ack_document(task_id, result_id, requested_at)
+    else:
+        assert selected is not None
+        payload = _document(kind, task_id, selected, requested_at)
     data = run_events.canonical_bytes(payload)
     descriptor = _open_inbox(run_dir, create=True)
     assert descriptor is not None
@@ -296,9 +313,10 @@ def submit(
     return "created" if created else "already-requested"
 
 
-def _request(document: Any, *, kind: str, key: str) -> CancelRequest | None:
+def _request(document: Any, *, kind: str, key: str, name_result_id: str | None) -> CancelRequest | None:
     """Validate one closed request document, or ``None`` when it is malformed."""
-    if not isinstance(document, Mapping) or set(document) != _REQUEST_FIELDS:
+    fields = _ACK_FIELDS if kind == KIND_ACK else _CANCEL_FIELDS
+    if not isinstance(document, Mapping) or set(document) != fields:
         return None
     if document["schema"] != INBOX_SCHEMA or document["kind"] != kind:
         return None
@@ -308,12 +326,16 @@ def _request(document: Any, *, kind: str, key: str) -> CancelRequest | None:
     if hashlib.sha256(task_id.encode("utf-8")).hexdigest() != key:
         return None
     reason = document["reason"]
-    if reason not in journal.CANCEL_REASONS:
+    result_id = document.get("result_id")
+    if kind == KIND_ACK:
+        if reason is not None or not journal.digest(result_id) or name_result_id != result_id:
+            return None
+    elif reason not in journal.CANCEL_REASONS or name_result_id is not None:
         return None
     requested_at = document["requested_at"]
     if not run_events.is_valid_recorded_at(requested_at):
         return None
-    return CancelRequest(kind, task_id, reason, requested_at)
+    return CancelRequest(kind, task_id, reason, requested_at, result_id)
 
 
 def _read(descriptor: int, name: str, path: Path) -> Any:
@@ -384,7 +406,12 @@ def pending(run_dir: Path) -> Pending:
             if document is None:
                 malformed.append(name)
                 continue
-            request = _request(document, kind=matched.group("kind"), key=matched.group("key"))
+            request = _request(
+                document,
+                kind=matched.group("kind"),
+                key=matched.group("key"),
+                name_result_id=matched.group("result"),
+            )
             if request is None:
                 malformed.append(name)
                 continue
@@ -395,7 +422,7 @@ def pending(run_dir: Path) -> Pending:
 
 
 def drain(run_dir: Path, workspace: Path) -> dict[str, str]:
-    """Journal every pending cancel intent, under the active owner only.
+    """Journal pending cancellation and acknowledgement requests under the owner.
 
     Returns one closed outcome per named task. Requests are never deleted: the
     journaled fact is what makes a later drain idempotent.
@@ -406,17 +433,32 @@ def drain(run_dir: Path, workspace: Path) -> dict[str, str]:
         raise TaskInboxError("unknown-run", "run directory is not a run") from exc
     if not runguard.is_active_run_owner(workspace, run_dir):
         raise TaskInboxError("owner-required", "only the active run owner journals a cancel intent")
-    cancels = [request for request in pending(run_dir).requests if request.kind == KIND_CANCEL]
+    requests = pending(run_dir).requests
     outcomes: dict[str, str] = {}
-    if not cancels:
+    if not requests:
         return outcomes
     try:
         with journal.transaction(run_dir, workspace=workspace, writing=True) as (run_dir, events):
             states = run_tasks._fold(run_dir.name, events)
-            for request in cancels:
+            for request in requests:
                 current = states.get(request.task_id)
                 if current is None:
                     outcomes.setdefault(request.task_id, "unknown")
+                    continue
+                if request.kind == KIND_ACK:
+                    if current.result_id != request.result_id or current.acknowledged:
+                        outcomes.setdefault(
+                            request.task_id, "already-acknowledged" if current.acknowledged else "stale"
+                        )
+                        continue
+                    journal.append(
+                        run_dir,
+                        workspace=workspace,
+                        event_type="task.acknowledged",
+                        payload={"task_id": request.task_id, "result_id": request.result_id},
+                    )
+                    states[request.task_id] = replace(current, acknowledged=True)
+                    outcomes[request.task_id] = "acknowledged"
                     continue
                 if current.cancel_requested:
                     outcomes.setdefault(request.task_id, "already-requested")
@@ -435,7 +477,7 @@ def drain(run_dir: Path, workspace: Path) -> dict[str, str]:
                 )
                 outcomes[request.task_id] = "recorded"
     except journal.TaskJournalError as exc:
-        raise TaskInboxError("journal-unreadable", "the task journal refused the cancel intent") from exc
+        raise TaskInboxError("journal-unreadable", "the task journal refused an inbox request") from exc
     return outcomes
 
 

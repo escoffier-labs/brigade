@@ -550,6 +550,21 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
     )
     p_tasks_wait.add_argument("--json", action="store_true", help="Emit the brigade.runs_tasks.v1 JSON contract.")
+    p_tasks_next = tasks_sub.add_parser("next", help="Pull the oldest unacknowledged terminal task result.")
+    p_tasks_next.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
+    p_tasks_next.add_argument(
+        "--timeout", type=float, default=None, help="Stop polling after these seconds; never cancels."
+    )
+    p_tasks_next.add_argument("--cwd", type=Path, default=Path("."))
+    p_tasks_next.add_argument("--runs-dir", type=Path, default=None)
+    p_tasks_next.add_argument("--json", action="store_true", help="Emit brigade.runs_tasks_next.v1 JSON.")
+    p_tasks_ack = tasks_sub.add_parser("ack", help="Acknowledge consumption of one task result.")
+    p_tasks_ack.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
+    p_tasks_ack.add_argument("task_id", help="Task id whose result was consumed.")
+    p_tasks_ack.add_argument("--result-id", required=True, help="Exact result id returned by tasks next.")
+    p_tasks_ack.add_argument("--cwd", type=Path, default=Path("."))
+    p_tasks_ack.add_argument("--runs-dir", type=Path, default=None)
+    p_tasks_ack.add_argument("--json", action="store_true", help="Emit brigade.runs_tasks_ack.v1 JSON.")
     p_tasks_integrate = tasks_sub.add_parser(
         "integrate",
         help=(

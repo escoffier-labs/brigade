@@ -1,0 +1,1 @@
+- Add pull delivery and inbox-backed acknowledgements for terminal batch task results.
