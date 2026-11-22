@@ -92,7 +92,7 @@ The workflow `.github/workflows/outcome-attest.yml` is what produces the results
 
 The host reads those check runs with `gh api`. A trial counts as seen passing when the receipt names a manifest and a head commit, that commit belongs to a merged pull request into `main`, and a completed check run named `outcome-attest/<manifest>` on the merge commit comes from the `github-actions` app on that same commit and concluded `success`. Commit statuses are never read. Any failure to ask GitHub (no `gh`, no network, a rate limit, malformed output) means the trial is not counted and nothing raises into rank. Set `BRIGADE_CI_ATTESTATION=off` to skip the lookup. The repository is taken from the `origin` remote.
 
-Promotion decisions come from the [outcome ledger](#outcome-ledger), which reads the Actions API and never these check runs. The scheduled job that writes the ledger is a follow-up change. Until it lands, nothing promotes, installs or rolls back on a CI result.
+Promotion decisions come from the [outcome ledger](#outcome-ledger), which uses workflow job verdicts from the Actions API.
 
 ## Outcome ledger
 
@@ -100,7 +100,7 @@ The outcome ledger is the one place a CI result can change a skill's standing. I
 
 The first subject is the bundled `note` skill (`verify/manifests/skill-note.json`). Its check, `scripts/skill_contract_check.py`, is not part of the pytest suite. Normal CI never runs it on the live skill text, so a worse revision can merge and then fail attestation on the merge commit.
 
-The change that adds the code, the manifest, the contract script and the required job does not carry a ledger. The first ledger arrives in its own follow-up change. By then trusted main already holds `scripts/ledger_recompute.py`, so the check rebuilds that first ledger like any other and rejects one that differs.
+The writer sends the first ledger through its own pull request after the recompute check is on main. It seeds the `note` subject with a released bundle from main's history and includes trials from the introduction of the `skill-note` manifest.
 
 ### What the ledger records
 
@@ -158,13 +158,29 @@ For a change that does, the check requires all of these:
 7. `approved` is append only. Every entry matches git history at its commit, `release` entries match the shipped file history, and `owner_review` entries have the review described below.
 8. The change touches the ledger file and a restored skill bundle, and nothing else. A ledger pull request that also touches `scripts/`, `src/brigade/outcome_ledger*`, `.github/workflows/` or `verify/manifests/` is rejected.
 
+For a cumulative merge queue group, the check uses the ledger pull request's squash commit for the allowed path list and checks restored bytes at the group tip.
+
 A push to main is checked as well. The ledger at the pushed commit is verified against the ledger at the commit before it, with the same rules, except that the age limit and the touched paths rule do not apply because the pull request is over and other changes may have merged in the same push. A push that leaves the ledger alone passes. A push that introduces the first ledger is verified as a first ledger, with no earlier ledger to build on, whenever the tree before the push already holds `scripts/ledger_recompute.py`. Only the push that introduces the script itself passes unchecked, because nothing could have checked it.
 
 The bootstrap exception is narrow. While main has neither `scripts/ledger_recompute.py` nor `outcome-ledger/skills.json`, the job passes with a notice. That is true only for the change that introduces the logic, and only when that change carries no ledger. A ledger on main or in the proposal while main lacks the script fails the job.
 
 ### Owner review
 
-An `owner_review` approval is an APPROVED review on the pull request's head commit from a login in the owners list in `outcome_ledger.py`. Describe it accurately as an owner review recorded on a merged pull request in public history. It is a visibility control. Agents on the host work under the owner's GitHub identity, so an approval is forgeable by a same-user agent in the same way a merge already is. The ledger does not claim otherwise, and CODEOWNERS is out of scope here.
+An `owner_review` approval is an APPROVED review on the pull request's head commit from a login in the owners list in `outcome_ledger.py`. The ledger records the owner review on the merged pull request.
+
+Owner review on the approval pull request is a visibility control. Agents on the host work under the owner's GitHub identity, so an approval is forgeable by a same-user agent, just as a merge already is.
+
+### Scheduled writer policy
+
+`Outcome decide` runs on main every day at 06:17 UTC. Maintainers can also run it from the Actions tab on main. The compute job reads the ledger, main history and attest jobs and builds through the main tip. The publish job recomputes the proposal before publishing it. When the automatic proposal has the same evidence and decisions as the tracked ledger, it closes any leftover `ledger/auto` pull request and comments with the reason. A stale proposal or a pending attest verdict waits for the next run, including when a rerun starts between compute and publish.
+
+CI promotes approved text and restores the latest eligible approved bundle on rollback. The writer updates one pull request on `ledger/auto`, dispatches `ci.yml` for its head and enables auto-merge through the merge queue. It leaves the branch alone while the pull request is queued. Automatic merge safety depends on the active **Merge queue (main)** ruleset.
+
+A never-approved bundle that qualifies for promotion gets a separate pull request on `ledger/approve/<subject>-<fp12>` after the automatic evidence update lands. The writer opens at most one new approval pull request per run. Approvals serialize through main because each proposal records the ledger it was built from. The pull request description includes the changed files, bundle fingerprint, comparison link, and attest jobs. Large diffs are excerpted with a link to the full comparison. The owner reviews the final head on GitHub, reruns failed CI jobs if the recompute ran before the review, and queues the pull request once CI passes. Closing an approval pull request permanently rejects its fingerprint, even if that pull request is reopened. The writer skips updates and CI dispatch for rejected approvals. If the writer cannot read an approval's close history or auto-merge state, it stops publication. If auto-merge is enabled on an approval pull request, the writer disables it and skips publication for that approval for the run. A failure to disable auto-merge stops publication. A refreshed head needs a fresh review.
+
+Enable **Allow GitHub Actions to create and approve pull requests** in the repository's Actions settings so the built-in token can open these pull requests. The writer uses an explicit workflow dispatch to produce the required `ci-gate` on a branch it published with that token.
+
+`brigade outcome ledger` shows the ledger on main, including its trials, approved versions and open approval pull requests. Use `brigade outcome ledger --plan` with current local main history and GitHub CLI access to preview the scheduled decision. Both commands are read-only. The work brief summarizes its committed ledger locally and links to the GitHub approval search when a fingerprint awaits its owner.
 
 ### Soak runbook
 
@@ -175,8 +191,6 @@ The soak needs two things inside seven days: one real attested promotion, and on
 3. Merge a worse `SKILL.md` that drops a required step. Run `scripts/shipped_file_history.py --write` in the same change, because lint requires the new text to be recorded. The entry has no tag, so it is not a `release` text. Normal CI passes and the attest job fails.
 4. The writer proposes a rollback. The pull request restores the approved bytes and the recompute accepts it.
 5. The attest run on the restore commit passes, and the ledger shows both decisions with their job ids.
-
-The scheduled writer, the approval pull request and the dispatch of CI on the ledger branch are a follow-up change. Until then the ledger is built and checked by hand with the functions in `src/brigade/outcome_ledger.py`.
 
 ## Workflow
 

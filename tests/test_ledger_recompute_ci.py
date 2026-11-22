@@ -853,3 +853,60 @@ def test_the_job_names_the_bootstrap_exception_only_for_a_main_without_a_ledger(
     gate = script.index('git cat-file -e "$trusted:scripts/ledger_recompute.py"')
     assert script.index('git cat-file -e "$trusted:outcome-ledger/skills.json"') > gate
     assert script.index("exit 1") < script.index("nothing to recompute against")
+
+
+def test_a_merge_group_checks_the_ledger_commit_with_its_own_pr_number(recompute_run):
+    run = recompute_run
+    from tests.test_outcome_ledger import T
+
+    world = run.world
+    raw = world.build(prev_raw=None, covers=world.c0, approved=(world.approved_row(world.c0),))
+    before, ledger_commit = genesis_push(run, raw)
+    after = world.commit({"README.md": "unrelated queued change\n"}, T % (24, "00:20:00Z"))
+    ledger_ref = f"refs/remotes/origin/gh-readonly-queue/main/pr-23-{before}"
+    world.git("update-ref", ledger_ref, ledger_commit)
+    world.git("update-ref", "refs/ci-trusted/main", before)
+    payload = {
+        "merge_group": {"head_sha": after, "head_ref": f"refs/heads/gh-readonly-queue/main/pr-24-{ledger_commit}"}
+    }
+    event = run.tmp_path / "queue.json"
+    event.write_text(json.dumps(payload))
+    run.monkeypatch.setenv("GITHUB_EVENT_PATH", str(event))
+    run.monkeypatch.setenv("GITHUB_EVENT_NAME", "merge_group")
+    result = run.module.main(["--repo", str(world.root)])
+    assert result == 0, run.capsys.readouterr().out
+    assert run.module.queue_ledger_pr(world.repo, payload, ledger_commit, after) == 23
+
+
+def test_queue_pr_mapping_requires_the_ledger_commit_and_its_actual_parent(recompute_run):
+    run = recompute_run
+    from tests.test_outcome_ledger import T
+
+    before, ledger_commit = genesis_push(run)
+    world = run.world
+    after = world.commit({"README.md": "unrelated queued change\n"}, T % (21, "01:00:00Z"))
+    wrong = "b" * 40
+    world.git("update-ref", f"refs/remotes/origin/gh-readonly-queue/main/pr-23-{wrong}", ledger_commit)
+    world.git("update-ref", f"refs/remotes/origin/gh-readonly-queue/main/pr-25-{before}", after)
+    payload = {
+        "merge_group": {"head_sha": after, "head_ref": f"refs/heads/gh-readonly-queue/main/pr-24-{ledger_commit}"}
+    }
+    assert run.module.queue_ledger_pr(world.repo, payload, ledger_commit, after) is None
+
+
+def test_batched_push_looks_up_the_ledger_commit_instead_of_the_tip(recompute_run, monkeypatch):
+    run = recompute_run
+    from tests.test_outcome_ledger import T
+
+    before, ledger_commit = genesis_push(run)
+    after = run.world.commit({"README.md": "other landed pull request\n"}, T % (21, "01:00:00Z"))
+    seen = []
+
+    def context(event_name, payload, gh, slug):
+        seen.append(payload["after"])
+        return run.module.ledger.EventContext(event_name, 7)
+
+    monkeypatch.setattr(run.module, "event_context", context)
+    code, out = run.push(before, after)
+    assert code == 0, out
+    assert seen == [ledger_commit]

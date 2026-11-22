@@ -12,6 +12,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     outcome_sub = p_outcome.add_subparsers(dest="outcome_command", metavar="<outcome-command>")
     outcome_sub.required = True
 
+    p_ledger = outcome_sub.add_parser("ledger", help="Show the CI promotion ledger on main.")
+    p_ledger.add_argument("--target", "-t", type=Path, default=Path("."))
+    p_ledger.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
+    p_ledger.add_argument("--plan", action="store_true", help="Dry-run the scheduled ledger decision.")
+    p_ledger.set_defaults(func=_dispatch_ledger)
+
     p_score = outcome_sub.add_parser("score", help="Show verified outcome scores for learned cards and skills.")
     p_score.add_argument("artifact_id", nargs="?", default=None, help="Limit to a single artifact id.")
     p_score.add_argument("--target", "-t", type=Path, default=Path("."))
@@ -183,6 +189,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_backfill_scorecard.add_argument("--target", "-t", type=Path, default=Path("."))
     p_backfill_scorecard.add_argument("--json", action="store_true", help="Emit machine-readable JSON instead of text.")
     p_backfill_scorecard.set_defaults(func=_dispatch_backfill_scorecard)
+
+
+def _dispatch_ledger(args) -> int:
+    from .. import outcome_ledger_view
+
+    return outcome_ledger_view.display(args.target, json_output=args.json, dry_run=args.plan)
 
 
 def _dispatch_backfill_scorecard(args) -> int:

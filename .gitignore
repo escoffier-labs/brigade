@@ -57,6 +57,7 @@ Thumbs.db
 !/scripts/memory_scan_bundle.py
 !/scripts/outcome_attest_plan.py
 !/scripts/ledger_recompute.py
+!/scripts/ledger_decide.py
 !/scripts/skill_contract_check.py
 !/scripts/memory_scan_unicode14_unassigned.ranges
 !/scripts/verify-engine-rename-installer

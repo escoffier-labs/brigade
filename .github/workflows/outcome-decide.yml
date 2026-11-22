@@ -1,0 +1,58 @@
+name: Outcome decide
+
+on:
+  schedule:
+    - cron: '17 6 * * *'
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: outcome-decide
+  cancel-in-progress: false
+
+jobs:
+  compute:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Build the next ledger
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -S scripts/ledger_decide.py compute --artifact "$RUNNER_TEMP/ledger-plan"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: outcome-ledger-plan
+          path: ${{ runner.temp }}/ledger-plan/
+          include-hidden-files: true
+          if-no-files-found: error
+
+  publish:
+    if: github.ref == 'refs/heads/main'
+    needs: compute
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          fetch-depth: 0
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: outcome-ledger-plan
+          path: ${{ runner.temp }}/ledger-plan/
+      - name: Verify and publish ledger pull requests
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 -I -S scripts/ledger_decide.py publish --artifact "$RUNNER_TEMP/ledger-plan"

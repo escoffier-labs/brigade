@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from ... import dogfood_cmd, localio, memory_care_instructions, outcome_ratchet_report
+from ... import dogfood_cmd, localio, memory_care_instructions, outcome_ledger_view, outcome_ratchet_report
 from ...config import load_config
 from ...install import apply_gitignore
 from .. import brief_values, constants, helpers, ledger as ledger_mod, config as config_mod, services as services_mod
@@ -509,6 +509,12 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
     outcome_health = sections.call(
         "outcome-loop", lambda: outcome_cmd.health(target), _UnavailableSection(), key="outcome_loop"
     )
+    outcome_ledger_line = sections.call(
+        "outcome-ledger",
+        lambda: outcome_ledger_view.brief_line(target),
+        "ledger: unavailable",
+        key="outcome_ledger",
+    )
     outcome_ratchet = sections.call(
         "outcome-ratchet",
         lambda: outcome_ratchet_report.brief_payload(outcome_ratchet_report.load_report(target)),
@@ -784,6 +790,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
             "top_issue": outcome_health["top_issue"],
         },
         "outcome_ratchet": outcome_ratchet,
+        "outcome_ledger": outcome_ledger_line,
         "dogfood": resolved["dogfood"],
         "next_source": resolved["source"],
         "task_id": resolved.get("task_id"),
@@ -1218,6 +1225,7 @@ def _render_brief_text(*, target: Path, limit: int, emit: Any) -> int:
         top_outcome = outcome_loop.get("top_issue") if isinstance(outcome_loop.get("top_issue"), dict) else None
         if top_outcome:
             print(_top_issue_line("outcome_loop_issue", top_outcome))
+    print(payload.get("outcome_ledger", "ledger: unavailable"))
     ratchet = payload.get("outcome_ratchet")
     if isinstance(ratchet, dict):
         print(_outcome_ratchet_line(ratchet))
