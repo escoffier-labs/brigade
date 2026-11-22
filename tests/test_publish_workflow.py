@@ -1171,7 +1171,7 @@ def test_windows_published_recheck_is_read_only_and_runs_the_encoding_proof():
         ('{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"brigade-code-graph"}}}', 0, None),
         ('{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}}', 0, "invalid initialize"),
         ('{"jsonrpc":"2.0","id":"1","result":{"serverInfo":{"name":"brigade-code-graph"}}}', 0, "invalid initialize"),
-        ('{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"graphtrail-mcp"}}}', 0, "invalid initialize"),
+        ('{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"unexpected-server"}}}', 0, "invalid initialize"),
         (
             '{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"brigade-code-graph"}},"error":null}',
             0,
