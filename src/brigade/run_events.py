@@ -32,12 +32,13 @@ from brigade.receipt_schema import RUN_EVENT_SCHEMA, RUN_EVENT_SCHEMA_VERSION, R
 SCHEMA = RUN_EVENT_SCHEMA
 SCHEMA_VERSION = RUN_EVENT_SCHEMA_VERSION
 LEGACY_SCHEMA_VERSION = 1
-# Schema version 3 introduces the per-task worktree facts and nothing else:
-# ``task.workspace-bound``, ``task.integrated``, ``task.disposed`` and
+# Schema version 3 introduces the per-task worktree, integration, disposal,
+# cancellation and collection facts and nothing else: ``task.workspace-bound``,
+# ``task.integrated``, ``task.disposed``, ``task.cancel-requested`` and
 # ``task.artifact-collected``. It is reserved for journals that record per-task
-# batch worktrees, explicit integrations and their disposal, so an older binary
-# refuses only those journals instead of every journal written after this
-# change.
+# batch worktrees, explicit integrations and their disposal, recorded
+# cancellation intent, so an older binary refuses only those journals instead of
+# every journal written after this change.
 WORKSPACE_SCHEMA_VERSION = RUN_EVENT_WORKSPACE_SCHEMA_VERSION
 SUPPORTED_SCHEMA_VERSIONS = frozenset({LEGACY_SCHEMA_VERSION, SCHEMA_VERSION, WORKSPACE_SCHEMA_VERSION})
 
@@ -218,6 +219,9 @@ _TASK_EVENT_TYPES = frozenset(
         "task.workspace-bound",
         "task.integrated",
         "task.disposed",
+        # One recorded cancellation intent. The fact stops a launch that has not
+        # happened yet; it never changes the task status by itself.
+        "task.cancel-requested",
         "task.artifact-collected",
     }
 )
@@ -282,6 +286,10 @@ EVENT_TYPES.update(
         # One explicit disposal of a task worktree, with the closed mode that
         # justified it and whether its branch survived.
         "task.disposed": frozenset({"task_id", "mode", "branch_kept"}),
+        # One recorded cancellation intent and the closed reason for it. It
+        # carries no free text and no evidence, so it can never leak prompt or
+        # operator notes into the journal.
+        "task.cancel-requested": frozenset({"task_id", "reason"}),
         # One recovered artifact collection: the sidecar digest, the candidate
         # (or null) and the delivery the collection recorded, so a commit
         # artifact can be read from either the observation or this fact.
@@ -326,7 +334,13 @@ _NATIVE_T3_EVENT_TYPES = frozenset(
 # The only event types written under schema version 3. A v3 envelope must carry
 # one of these, and every other event type keeps the v2 envelope.
 _SCHEMA_V3_EVENT_TYPES = frozenset(
-    {"task.workspace-bound", "task.integrated", "task.disposed", "task.artifact-collected"}
+    {
+        "task.workspace-bound",
+        "task.integrated",
+        "task.disposed",
+        "task.cancel-requested",
+        "task.artifact-collected",
+    }
 )
 _SCHEMA_V2_EVENT_TYPES = (
     frozenset({"approval", "run.ship", "run.merge"}) | _TASK_EVENT_TYPES | _NATIVE_T3_EVENT_TYPES
