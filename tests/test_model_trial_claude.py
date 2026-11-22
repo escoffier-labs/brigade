@@ -2,6 +2,7 @@
 
 import errno
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -42,13 +43,7 @@ from tests._child_publish import PUBLISH_SOURCE, process_is_running
 from tests._posix import requires_process_groups
 from tests.paired_live_fake import GOOD_STEPS, make_fake, records, render_script
 
-pytestmark = [
-    pytest.mark.allow_agent_cli,  # launches only the fake claude from tests/paired_live_fake.py
-    pytest.mark.skipif(
-        os.name == "nt",
-        reason="paired-live call phase hangs in a pipe wait on Windows (issue #2720); predates this change",
-    ),
-]
+pytestmark = pytest.mark.allow_agent_cli  # launches only the fake claude from tests/paired_live_fake.py
 
 FIXTURES = Path(__file__).parents[1] / "src/brigade/fixtures/paired-brigade-work"
 LIVE = FIXTURES / "live-claude.json"
@@ -433,8 +428,8 @@ def _forge_one_attempt_away(output, destination):
     payload = json.loads((destination / "evidence.json").read_text())
     payload["attempts"].pop()
     payload["pairs"] = _pairs(payload["plan"], payload["attempts"])
-    (destination / "evidence.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-    (destination / "evidence.sha256").write_text(digest(payload) + "\n")
+    (destination / "evidence.json").write_bytes((json.dumps(payload, indent=2, sort_keys=True) + "\n").encode())
+    (destination / "evidence.sha256").write_bytes((digest(payload) + "\n").encode())
     return digest(payload)
 
 
@@ -765,6 +760,114 @@ def test_revalidation_checks_the_stored_cwd_against_init(good, tmp_path):
         model_trials.paired_validate(copy, digest(payload))
 
 
+@pytest.mark.parametrize(
+    "leader_exited, releases_pipes",
+    [(True, True), (False, True), (True, False)],
+    ids=["leader-exited", "leader-times-out", "pipe-outlives-job"],
+)
+def test_windows_arm_has_a_deadline_even_when_a_descendant_holds_the_pipes(
+    monkeypatch, tmp_path, leader_exited, releases_pipes
+):
+    released = threading.Event()
+    actions = []
+    code = 0 if leader_exited else None
+
+    class HeldPipe(io.BytesIO):
+        def readline(self, size=-1):
+            released.wait(2)
+            return b""
+
+        def read1(self, size=-1):
+            return self.readline(size)
+
+    class Child:
+        args = ["fake"]
+        pid = 4242
+        stdin = io.BytesIO()
+        stdout = HeldPipe()
+        stderr = HeldPipe()
+        returncode = None
+
+        def poll(self):
+            self.returncode = code
+            return code
+
+        def wait(self, timeout=None):
+            if self.poll() is None:
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            return self.returncode
+
+        def kill(self):
+            nonlocal code
+            actions.append("kill-cli")
+            code = 125
+
+    class Job:
+        def terminate(self):
+            nonlocal code
+            actions.append("terminate")
+            if code is None:
+                code = 125
+            if releases_pipes:
+                released.set()
+            return True
+
+        def close(self):
+            actions.append("close")
+
+    job = Job()
+    child = Child()
+
+    def launch(*args, **kwargs):
+        actions.append(("launch", kwargs.get("creationflags")))
+        return child
+
+    def bind(actual_job, actual_child, argv):
+        assert (actual_job, actual_child, argv) == (job, child, child.args)
+        actions.append("bind")
+
+    def create_job():
+        actions.append("create")
+        return job
+
+    monkeypatch.setattr(model_trial_claude, "os", types.SimpleNamespace(name="nt"))
+    monkeypatch.setattr(proc, "create_owned_windows_job", create_job)
+    monkeypatch.setattr(proc, "suspended_process_group_kwargs", lambda: {"creationflags": 4})
+    monkeypatch.setattr(proc, "bind_owned_windows_child", bind)
+    monkeypatch.setattr(model_trial_claude.subprocess, "Popen", launch)
+    observer = _Observer(expected_model="m", session_id="s", version="v", cwd=tmp_path)
+    start = time.monotonic()
+    try:
+        _, _, exit_code, timed_out, drain_failed = _run_process(child.args, {}, tmp_path, "", 0.15, observer, "tok")
+        assert time.monotonic() - start < 1
+        assert exit_code == (0 if leader_exited else 125)
+        assert timed_out is not leader_exited
+        assert drain_failed is not releases_pipes
+        assert actions == ["create", ("launch", 4), "bind", "terminate", "close"]
+    finally:
+        released.set()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="exercises native Windows job and inherited pipes")
+def test_windows_job_stops_a_descendant_that_inherits_both_arm_output_pipes(tmp_path):
+    script = (
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)'], "
+        "stdin=subprocess.DEVNULL, stdout=sys.stdout, stderr=sys.stderr)\n"
+        "print('  ', flush=True)\n"
+        "print('diagnostic', file=sys.stderr, flush=True)\n"
+    )
+    observer = _Observer(expected_model="m", session_id="s", version="v", cwd=tmp_path)
+    env = {key: os.environ[key] for key in ENV_PASSTHROUGH if key in os.environ}
+    stream, stderr, code, timed_out, drain_failed = _run_process(
+        [sys.executable, "-c", script], env, tmp_path, "", 10, observer, "tok"
+    )
+    assert stream.strip() == b"" and stream
+    assert stderr.splitlines() == [b"diagnostic"]
+    assert (code, timed_out, drain_failed) == (0, False, False)
+
+
+@requires_process_groups
 def test_expiry_cannot_flip_a_finished_cell_or_signal_a_recycled_group(monkeypatch, tmp_path):
     events, callbacks, kills = [], [], []
 
@@ -1192,6 +1295,7 @@ def test_a_finished_cell_stops_a_descendant_that_left_its_process_group(tmp_path
             shutil.rmtree(path, ignore_errors=True)
 
 
+@requires_process_groups
 def test_a_drain_failure_keeps_the_original_error_and_reaps_the_leader(monkeypatch, tmp_path):
     threads, events, children = [], [], []
     real_thread = threading.Thread
@@ -1249,6 +1353,7 @@ def test_a_drain_failure_keeps_the_original_error_and_reaps_the_leader(monkeypat
         assert any("drain" in note for note in raised.value.__notes__)
 
 
+@requires_process_groups
 def test_a_drain_failure_fails_only_its_cell_and_keeps_its_work_dir(tmp_path, monkeypatch):
     exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS)
     work_dirs = _track_work_dirs(monkeypatch)
@@ -1280,6 +1385,7 @@ def test_the_bounded_drain_re_signals_members_on_every_poll(monkeypatch):
     assert len(calls) == 3 and alive == []
 
 
+@pytest.mark.skipif(not drain_supported(), reason="process-group draining needs /proc")
 def test_an_unreadable_process_table_fails_the_drain_at_once(monkeypatch):
     real_listdir = os.listdir
 
@@ -1296,6 +1402,7 @@ def test_an_unreadable_process_table_fails_the_drain_at_once(monkeypatch):
     assert time.monotonic() - started < 0.3
 
 
+@requires_process_groups
 def test_a_stream_error_with_a_failed_drain_keeps_the_work_dir(tmp_path, monkeypatch):
     exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS)
     work_dirs = _track_work_dirs(monkeypatch)
@@ -1317,6 +1424,7 @@ def test_a_stream_error_with_a_failed_drain_keeps_the_work_dir(tmp_path, monkeyp
             shutil.rmtree(path, ignore_errors=True)
 
 
+@requires_process_groups
 def test_a_drainer_that_outlives_the_join_keeps_the_work_dir(tmp_path, monkeypatch):
     exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS)
     work_dirs = _track_work_dirs(monkeypatch)

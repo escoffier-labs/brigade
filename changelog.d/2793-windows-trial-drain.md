@@ -1,0 +1,1 @@
+- Bound Windows Claude trial pipe reads to the cell deadline and stop descendants when the arm exits.
