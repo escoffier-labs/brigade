@@ -244,9 +244,6 @@ def register(sub: argparse._SubParsersAction) -> None:
     verify_sub.required = True
     p_work_verify_required = verify_sub.add_parser("required", help="Plan the tests required by the current diff.")
     p_work_verify_required.add_argument("--target", "-t", type=Path, default=Path("."), help="Repository to inspect.")
-    p_work_verify_required.add_argument(
-        "--base", nargs="?", const="", default=None, help="Base Git revision (default: upstream merge base)."
-    )
     p_work_verify_required.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_verify_plan = verify_sub.add_parser("plan", help="Plan local verification without running commands.")
     p_work_verify_plan.add_argument(

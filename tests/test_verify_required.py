@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli
+from brigade import cli, verify_manifest_git
 from brigade.work_cmd import verify_required
 
 
@@ -93,10 +93,13 @@ def repo(tmp_path: Path) -> tuple[Path, str]:
     return target, base
 
 
-def run(target, capsys, *, base=None, status=0, human=False):
+def pin_base(target: Path, base: str) -> None:
+    git(target, "remote", "add", "origin", "unused.git")
+    git(target, "update-ref", "refs/remotes/origin/main", base)
+
+
+def run(target, capsys, *, status=0, human=False):
     args = ["work", "verify", "required", "--target", str(target)]
-    if base is not None:
-        args.append(f"--base={base}")
     if not human:
         args.append("--json")
     assert cli.main(args) == status
@@ -109,8 +112,8 @@ def run(target, capsys, *, base=None, status=0, human=False):
     return result
 
 
-def error(target, capsys, *, base=None):
-    result = run(target, capsys, base=base, status=1)
+def error(target, capsys):
+    result = run(target, capsys, status=1)
     assert result["mode"] == "error"
     assert result["local_requirement"] == "ci"
     assert result["tests"] == []
@@ -119,27 +122,29 @@ def error(target, capsys, *, base=None):
 
 def test_selective_plan_sorts_tests_prints_command_and_writes_record(repo, capsys):
     target, base = repo
-    result = run(target, capsys, base=base)
+    pin_base(target, base)
+    result = run(target, capsys)
     assert result["tests"] == ["tests/a.py", "tests/z.py"]
     assert result["run_argv"] == ["focused", "tests/a.py", "tests/z.py"]
     assert result["local_requirement"] == "tests"
     assert result["covers_worktree"] is True
-    assert result["base_source"] == "explicit"
+    assert result["base_source"] == "default_branch"
+    assert result["base_trusted"] is True
     assert Path(result["record_path"]).name == f"{result['head_sha']}.{base[:12]}.json"
-    assert "focused tests/a.py tests/z.py" in run(target, capsys, base=base, human=True)
+    assert "focused tests/a.py tests/z.py" in run(target, capsys, human=True)
 
 
 def test_full_plan_requires_ci_and_keeps_planner_reasons(repo, capsys):
     target, _ = repo
     reasons = [{"path": "suite.ini", "reason": "global change"}]
     plan(target, ["tests/a.py"], mode="full", full_triggers=reasons)
-    base = commit(target, "full planner")
-    result = run(target, capsys, base=base)
+    commit(target, "full planner")
+    result = run(target, capsys)
     assert result["mode"] == "full"
     assert result["local_requirement"] == "ci"
     assert result["tests"] == result["run_argv"] == []
     assert result["reasons"] == reasons
-    output = run(target, capsys, base=base, human=True)
+    output = run(target, capsys, human=True)
     assert "Required CI on head commit" in output
     assert "focused" not in output
 
@@ -153,7 +158,7 @@ def test_base_planner_and_its_import_are_pinned(repo, capsys, monkeypatch, commi
         target, "from helper import selected\nout.write_text(json.dumps(dict(mode='selective', selected=selected)))"
     )
     pinned = [(name, (target / name).read_bytes()) for name in ["helper.py", "planner.py"]]
-    base = commit(target, "pin planner")
+    pin_base(target, commit(target, "pin planner"))
     write(target, "helper.py", "selected = ['tests/z.py']\n")
     plan(target, ["tests/z.py"])
     # A caller's PYTHONPATH must not replace the base import or load checkout startup code.
@@ -161,7 +166,7 @@ def test_base_planner_and_its_import_are_pinned(repo, capsys, monkeypatch, commi
     monkeypatch.setenv("PYTHONPATH", str(target))
     if committed:
         commit(target, "change planner")
-    result = run(target, capsys, base=base)
+    result = run(target, capsys)
     assert result["tests"] == ["tests/a.py"]
     digest = hashlib.sha256()
     for name, blob in pinned:
@@ -171,18 +176,18 @@ def test_base_planner_and_its_import_are_pinned(repo, capsys, monkeypatch, commi
 
 
 def test_worktree_config_change_cannot_replace_base_config(repo, capsys):
-    target, base = repo
+    target, _ = repo
     configure(target, planner_files=["missing.py"])
-    assert run(target, capsys, base=base)["tests"] == ["tests/a.py", "tests/z.py"]
+    assert run(target, capsys)["tests"] == ["tests/a.py", "tests/z.py"]
 
 
 def test_missing_base_config_is_unconfigured(repo, capsys):
     target, _ = repo
     (target / verify_required.CONFIG_PATH).unlink()
-    base = commit(target, "remove config")
+    pin_base(target, commit(target, "remove config"))
     configure(target)
     commit(target, "configure HEAD")
-    result = run(target, capsys, base=base, status=3)
+    result = run(target, capsys, status=3)
     assert result["mode"] == "unconfigured"
     assert result["local_requirement"] == "unknown"
 
@@ -191,12 +196,13 @@ def test_missing_base_config_is_unconfigured(repo, capsys):
 def test_invalid_base_config_is_error(repo, capsys, raw):
     target, _ = repo
     (target / verify_required.CONFIG_PATH).write_bytes(raw)
-    assert "UTF-8 JSON" in error(target, capsys, base=commit(target, "broken config"))["reason"]
+    commit(target, "broken config")
+    assert "UTF-8 JSON" in error(target, capsys)["reason"]
 
 
 @pytest.mark.parametrize(("command", "timeout"), [("ls-tree", True), ("cat-file", False)])
 def test_git_read_failures_cannot_look_unconfigured(repo, capsys, monkeypatch, command, timeout):
-    target, base = repo
+    target, _ = repo
     run_git = subprocess.run
 
     def fail_read(argv, *args, **kwargs):
@@ -207,7 +213,7 @@ def test_git_read_failures_cannot_look_unconfigured(repo, capsys, monkeypatch, c
         return run_git(argv, *args, **kwargs)
 
     monkeypatch.setattr(subprocess, "run", fail_read)
-    reason = error(target, capsys, base=base)["reason"]
+    reason = error(target, capsys)["reason"]
     assert reason == (f"git {command} timed out" if timeout else f"git {command} failed (exit 128)")
 
 
@@ -218,16 +224,15 @@ def test_nonregular_tree_entries_are_errors(repo, capsys, path):
     oid = git(target, "hash-object", "-w", "change.py")
     git(target, "update-index", "--cacheinfo", f"120000,{oid},{path}")
     git(target, "commit", "-qm", "record symlink")
-    base = git(target, "rev-parse", "HEAD")
-    assert "regular file" in error(target, capsys, base=base)["reason"]
+    assert "regular file" in error(target, capsys)["reason"]
 
 
 def test_missing_planner_file_at_base(repo, capsys):
     target, _ = repo
     configure(target, planner_files=["planner.py", "missing.py"])
-    base = commit(target, "reference missing planner file")
+    commit(target, "reference missing planner file")
     write(target, "missing.py", "")
-    assert "missing.py" in error(target, capsys, base=base)["reason"]
+    assert "missing.py" in error(target, capsys)["reason"]
 
 
 @pytest.mark.parametrize(
@@ -243,10 +248,10 @@ def test_missing_planner_file_at_base(repo, capsys):
 def test_planner_failures_are_errors(repo, capsys, monkeypatch, body, timeout, reason):
     target, _ = repo
     planner(target, body)
-    base = commit(target, "broken planner")
+    commit(target, "broken planner")
     if timeout:
         monkeypatch.setattr(verify_required, "PLANNER_TIMEOUT_SECONDS", 0.01)
-    assert reason in error(target, capsys, base=base)["reason"]
+    assert reason in error(target, capsys)["reason"]
 
 
 @pytest.mark.parametrize(
@@ -272,32 +277,17 @@ def test_planner_failures_are_errors(repo, capsys, monkeypatch, body, timeout, r
 def test_malformed_selections_fail_closed(repo, capsys, mode, selected):
     target, _ = repo
     plan(target, selected, mode=mode)
-    error(target, capsys, base=commit(target, "configure malformed plan"))
+    commit(target, "configure malformed plan")
+    error(target, capsys)
 
 
 def test_selected_object_uses_keys(repo, capsys):
     target, _ = repo
     plan(target, {"tests/a.py": ["changed"]})
-    result = run(target, capsys, base=commit(target, "use selection reasons"))
+    commit(target, "use selection reasons")
+    result = run(target, capsys)
     assert result["tests"] == ["tests/a.py"]
     assert result["planner_digest"] != "self-reported"
-
-
-@pytest.mark.parametrize("base", ["-q", "--all", "nonexistent", ""])
-def test_invalid_explicit_base_outputs_json(repo, capsys, base):
-    result = error(repo[0], capsys, base=base)
-    assert result["base_source"] == "explicit"
-    assert result["base"] is None
-    assert Path(result["record_path"]).name.endswith(".unknown.json")
-
-
-@pytest.mark.parametrize("revision", [[], ["--invalid-revision"]])
-def test_separate_base_argument_still_reports_a_json_error(repo, capsys, revision):
-    args = ["work", "verify", "required", "-t", str(repo[0]), "--base", *revision, "--json"]
-    assert cli.main(args) == 1
-    result = json.loads(capsys.readouterr().out)
-    assert result["base_source"] == "explicit"
-    assert result["mode"] == "error"
 
 
 @pytest.mark.parametrize("fetch_default", [False, True])
@@ -311,21 +301,91 @@ def test_git_remote_requires_local_default_branch_ref(repo, capsys, tmp_path, fe
         git(target, "fetch", "-q", "origin")
         result = run(target, capsys)
         assert result["base_source"] == "default_branch"
+        assert result["base_trusted"] is True
         assert result["base"] == base != result["head_sha"]
     else:
         git(target, "update-ref", "-d", "refs/remotes/origin/main")
-        assert "default branch is unresolved" in error(target, capsys)["reason"]
+        result = error(target, capsys)
+        assert "default branch is unresolved" in result["reason"]
+        assert result["base_trusted"] is False
 
 
 def test_no_remote_uses_head_as_base(repo, capsys):
     result = run(repo[0], capsys)
     assert result["base_source"] == "no_remote"
     assert result["base"] == result["head_sha"]
+    assert result["base_trusted"] is False
+    output = run(repo[0], capsys, human=True)
+    assert (
+        "The plan was computed from local HEAD because the repository has no remote. It is not an independent check."
+        in output.splitlines()
+    )
+
+
+def test_cli_rejects_base_override(repo, capsys):
+    target, base = repo
+    args = ["work", "verify", "required", "-t", str(target), f"--base={base}"]
+    with pytest.raises(SystemExit) as exc:
+        cli.main(args)
+    assert exc.value.code == 2
+    assert "unrecognized arguments: --base=" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("entry_point", ["required", "required_with_snapshot", "resolve_base"])
+def test_git_subprocesses_use_target_environment(repo, capsys, monkeypatch, tmp_path, entry_point):
+    target, _ = repo
+    other = tmp_path / "other"
+    other.mkdir()
+    git(other, "init", "-q", "-b", "main")
+    if entry_point == "required_with_snapshot":
+        config = json.loads((target / verify_required.CONFIG_PATH).read_text(encoding="utf-8"))
+        config["planner_argv"].extend(["--head-dir", "{head_dir}"])
+        configure(target, **config)
+        commit(target, "configure committed source snapshot")
+    head = git(target, "rev-parse", "HEAD")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    monkeypatch.setenv("Git_Config_Count", "0")
+    original_run = subprocess.run
+    planner_environments = []
+
+    def check_environment(argv, *args, **kwargs):
+        env = kwargs.get("env")
+        assert env is not None
+        git_keys = {key for key in env if key.upper().startswith("GIT_")}
+        if argv[0] == "git":
+            assert git_keys == ({"GIT_INDEX_FILE"} if argv[1] == "-C" else set())
+        else:
+            if entry_point == "required_with_snapshot":
+                assert git_keys == {"GIT_DIR", "GIT_WORK_TREE", "GIT_NO_REPLACE_OBJECTS"}
+                assert Path(env["GIT_DIR"]).resolve() == (target / ".git").resolve()
+                assert Path(env["GIT_WORK_TREE"]) == kwargs["cwd"].parent / "head"
+                assert env["GIT_NO_REPLACE_OBJECTS"] == "1"
+            else:
+                assert git_keys == set()
+            planner_environments.append(git_keys)
+        return original_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", check_environment)
+    if entry_point == "resolve_base":
+        assert verify_manifest_git.resolve_base(target).commit == head
+    else:
+        result = run(target, capsys)
+        assert result["head_sha"] == head
+        assert result["covers_worktree"] is True
+        assert len(planner_environments) == 1
+
+
+def test_ignored_untracked_files_are_outside_worktree_coverage(repo, capsys):
+    target, _ = repo
+    write(target, ".git/info/exclude", "/conftest.py\n")
+    write(target, "conftest.py", "# Ignored test configuration\n")
+    assert run(target, capsys)["covers_worktree"] is True
 
 
 def test_subdirectory_target_is_error(repo, capsys):
-    target, base = repo
-    result = error(target / "tests", capsys, base=base)
+    target, _ = repo
+    result = error(target / "tests", capsys)
     assert "repository root" in result["reason"]
     assert Path(result["record_path"]).is_relative_to(target / ".brigade")
 
@@ -339,16 +399,18 @@ def test_invalid_target_prints_one_json_object(tmp_path, capsys):
 
 def test_two_bases_write_two_records(repo, capsys):
     target, base = repo
-    first = run(target, capsys, base=base)
+    pin_base(target, base)
+    first = run(target, capsys)
+    git(target, "remote", "remove", "origin")
     second = run(target, capsys)
     assert first["record_path"] != second["record_path"]
     assert json.loads(Path(first["record_path"]).read_text(encoding="utf-8")) == first
 
 
 def test_dirty_worktree_is_not_covered(repo, capsys):
-    target, base = repo
+    target, _ = repo
     write(target, "change.py", "dirty = True\n")
-    assert run(target, capsys, base=base)["covers_worktree"] is False
+    assert run(target, capsys)["covers_worktree"] is False
 
 
 def test_hint_quotes_arguments_for_bash(repo, capsys):
@@ -357,8 +419,8 @@ def test_hint_quotes_arguments_for_bash(repo, capsys):
     for path in paths:
         write(target, path, "")
     plan(target, paths)
-    base = commit(target, "add files with shell characters")
-    output = run(target, capsys, base=base, human=True)
+    commit(target, "add files with shell characters")
+    output = run(target, capsys, human=True)
     assert "Bash" in output
     assert shlex.split(output.splitlines()[0]) == ["focused", *paths]
 
@@ -367,8 +429,8 @@ def test_test_filenames_are_not_pytest_argument_files(repo, capsys):
     target, _ = repo
     write(target, "@test_a.py", "")
     plan(target, ["@test_a.py"])
-    base = commit(target, "add test with an at sign")
-    result = run(target, capsys, base=base)
+    commit(target, "add test with an at sign")
+    result = run(target, capsys)
     assert result["tests"] == ["@test_a.py"]
     assert result["run_argv"] == ["focused", "./@test_a.py"]
 
@@ -381,8 +443,8 @@ def test_hint_limits_file_count_and_command_length(repo, capsys, long_paths):
     for path in files:
         write(target, path, "")
     plan(target, files)
-    base = commit(target, "add large plan")
-    output = run(target, capsys, base=base, human=True)
+    commit(target, "add large plan")
+    output = run(target, capsys, human=True)
     command, *message = output.splitlines()
     shown = len(shlex.split(command)) - 1
     assert 0 < shown <= 40
@@ -390,7 +452,7 @@ def test_hint_limits_file_count_and_command_length(repo, capsys, long_paths):
     assert len(command) <= 4000
     assert f"{len(files) - shown} more" in " ".join(message)
     assert str(target / ".brigade/work/verify-required") in output
-    assert run(target, capsys, base=base)["tests"] == files
+    assert run(target, capsys)["tests"] == files
 
 
 def test_bundled_planner_reads_committed_sources(repo, capsys):
@@ -404,10 +466,10 @@ def test_bundled_planner_reads_committed_sources(repo, capsys):
     write(target, "src/brigade/a.py", "value = 1\n")
     write(target, "tests/test_a.py", "from brigade import a\n")
     write(target, "tests/test_module_size_ratchet.py", "")
-    base = commit(target, "install bundled planner")
+    pin_base(target, commit(target, "install bundled planner"))
     write(target, "src/brigade/a.py", "value = 2\n")
     commit(target, "change a module")
     write(target, "tests/test_a.py", "\n")
-    result = run(target, capsys, base=base)
+    result = run(target, capsys)
     assert result["tests"] == ["tests/test_a.py", "tests/test_module_size_ratchet.py"]
     assert result["covers_worktree"] is False

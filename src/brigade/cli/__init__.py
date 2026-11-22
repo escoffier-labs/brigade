@@ -161,15 +161,6 @@ def main(argv=None) -> int:
         parser = _build_parser_for(raw_argv)
         parser.parse_args(raw_argv)
         return 0
-    if raw_argv[:3] == ["work", "verify", "required"]:
-        # Let the command record a rejected revision even when it looks like a flag.
-        options = {"--target", "-t", "--json", "--help", "-h", "--", "--base"}
-        for index in range(len(raw_argv) - 2, 2, -1):
-            if raw_argv[index] != "--base":
-                continue
-            value = raw_argv[index + 1]
-            if value.startswith("-") and value.partition("=")[0] not in options:
-                raw_argv[index : index + 2] = [f"--base={value}"]
     parse_argv, engine_args = _peel_passthrough_engine_args(raw_argv)
     parser = _build_parser_for(parse_argv)
     if not parse_argv:

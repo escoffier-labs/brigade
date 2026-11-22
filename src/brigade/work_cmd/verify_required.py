@@ -34,6 +34,7 @@ def _git(target: Path, *args: str, input_data: bytes | None = None) -> bytes:
             stdin=subprocess.DEVNULL if input_data is None else None,
             capture_output=True,
             timeout=30,
+            env=verify_manifest_git.trusted_git_env(),
         )
     except subprocess.TimeoutExpired as exc:
         raise ValueError(f"git {args[0]} timed out") from exc
@@ -173,6 +174,7 @@ def _copy_head(target: Path, entries: dict[str, tuple[bytes, bytes]], directory:
                 stdout=blobs,
                 stderr=subprocess.DEVNULL,
                 timeout=30,
+                env=verify_manifest_git.trusted_git_env(),
             )
         except subprocess.TimeoutExpired as exc:
             raise ValueError("git cat-file timed out copying HEAD") from exc
@@ -212,13 +214,13 @@ def _run_planner(
             "{python}": sys.executable,
         }
         tokens: list[str] = config["planner_argv"]
-        env = None
+        env = verify_manifest_git.trusted_git_env()
         if "{head_dir}" in tokens:
             head_dir = scratch / "head"
             head_dir.mkdir()
             _copy_head(target, entries, head_dir)
             git_dir = os.fsdecode(_git(target, "rev-parse", "--absolute-git-dir").rstrip(b"\n"))
-            env = {**os.environ, "GIT_DIR": git_dir, "GIT_WORK_TREE": str(head_dir), "GIT_NO_REPLACE_OBJECTS": "1"}
+            env.update(GIT_DIR=git_dir, GIT_WORK_TREE=str(head_dir), GIT_NO_REPLACE_OBJECTS="1")
             replacements["{head_dir}"] = str(head_dir)
         argv = [
             str(directory / item.removeprefix(_PLANNER_PREFIX))
@@ -326,25 +328,20 @@ def _print_human(payload: dict[str, Any], config: dict[str, Any] | None) -> None
         print(f"Required-test planning failed: {payload['reason']}. CI is required.")
     if payload["tree_id"] is not None and not payload["covers_worktree"]:
         print("Uncommitted changes are not covered by this plan.")
+    if payload["base_source"] == "no_remote":
+        print(
+            "The plan was computed from local HEAD because the repository has no remote. It is not an independent check."
+        )
 
 
-def _resolve_base(target: Path, base: str | None) -> tuple[str, str]:
-    if base is not None:
-        if not base or base.startswith("-"):
-            raise ValueError("--base must be a Git revision that does not start with '-'")
-        try:
-            return _commit_id(
-                _git(target, "rev-parse", "--verify", "--end-of-options", f"{base}^{{commit}}")
-            ), "explicit"
-        except ValueError as exc:
-            raise ValueError(f"cannot resolve --base as a commit: {base!r}") from exc
+def _resolve_base(target: Path) -> tuple[str, str]:
     resolved = verify_manifest_git.resolve_base(target)
     if resolved.status != "resolved" or resolved.commit is None or resolved.source is None:
         raise ValueError(resolved.message or "default base is unresolved")
     return _commit_id(resolved.commit.encode("ascii")), resolved.source
 
 
-def required(*, target: Path, base: str | None = None, json_output: bool = False) -> int:
+def required(*, target: Path, json_output: bool = False) -> int:
     """Run the base-pinned repository planner and record its plan."""
     config = None
     record_root = None
@@ -359,7 +356,8 @@ def required(*, target: Path, base: str | None = None, json_output: bool = False
     payload: dict[str, Any] = {
         "schema": PLAN_SCHEMA,
         "base": None,
-        "base_source": "explicit" if base is not None else None,
+        "base_source": None,
+        "base_trusted": False,
         "head_sha": None,
         "tree_id": None,
         "covers_worktree": False,
@@ -381,9 +379,11 @@ def required(*, target: Path, base: str | None = None, json_output: bool = False
         if target != root:
             raise ValueError("target must be the repository root, not a subdirectory")
         tree = payload["tree_id"] = _commit_id(_git(root, "rev-parse", "--verify", f"{head}^{{tree}}"))
-        payload["covers_worktree"] = localio.tree_fingerprint(root) == tree
-        resolved_base, source = _resolve_base(root, base)
-        payload.update(base=resolved_base, base_source=source)
+        payload["covers_worktree"] = (
+            localio.tree_fingerprint(root, git_env=verify_manifest_git.trusted_git_env()) == tree
+        )
+        resolved_base, source = _resolve_base(root)
+        payload.update(base=resolved_base, base_source=source, base_trusted=source == "default_branch")
         config = _config_at(root, resolved_base)
         if config is None:
             payload.update(

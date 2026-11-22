@@ -176,7 +176,7 @@ def _dispatch_impl(args) -> int:
         if args.verify_command == "required":
             from ...work_cmd.verify_required import required
 
-            return required(target=args.target, base=args.base, json_output=args.json)
+            return required(target=args.target, json_output=args.json)
         if args.verify_command == "plan":
             has_manifest = bool(args.verify_manifest_id)
             has_command = bool(args.verify_commands)
