@@ -1,0 +1,2 @@
+- Work closeout counts only completed local verification for the session and current tree. It reports the number of command records in the closeout summary.
+- Verification runs the commands again if the tree changes between accepting a reusable pass and capturing the new receipt.

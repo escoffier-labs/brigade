@@ -1038,6 +1038,44 @@ def test_verify_no_reuse_flag_forces_run(tmp_target, monkeypatch):
     assert "reused_from" not in receipts[0]
 
 
+def test_verify_runs_again_if_tree_changes_while_writing_reuse(tmp_target, monkeypatch):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
+    commands = [[sys.executable, "-c", "print('ran')"]]
+    assert verification.verify_run(target=tmp_target, commands=commands) == 0
+    old_tree = localio.tree_fingerprint(tmp_target)
+    capture_identity = verification._capture_verify_identity
+
+    def change_tree_before_capture(target, run_dir):
+        (target / "newfile.txt").write_text("new tree\n")
+        return capture_identity(target, run_dir)
+
+    monkeypatch.setattr(verification, "_capture_verify_identity", change_tree_before_capture)
+    assert verification.verify_run(target=tmp_target, commands=commands) == 0
+    newest, original = verification._verify_receipts(tmp_target)
+    assert "reused_from" not in newest
+    assert newest["commands"][0]["stdout_summary"] == "ran"
+    assert newest["tree_fingerprint"] == localio.tree_fingerprint(tmp_target) != old_tree
+    assert original["tree_fingerprint"] == old_tree
+    assert {path.name for path in Path(newest["path"]).parent.iterdir()} == {newest["run_id"], original["run_id"]}
+
+
+def test_verify_does_not_reuse_a_run_that_changed_the_tree(tmp_target, monkeypatch):
+    from brigade.work_cmd import verification
+
+    _init_verify_target_with_head(tmp_target)
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
+    commands = [[sys.executable, "-c", "from pathlib import Path; Path('newfile.txt').touch()"]]
+    assert verification.verify_run(target=tmp_target, commands=commands) == 0
+    assert verification._verify_receipts(tmp_target)[0]["tree_stable"] is False
+    (tmp_target / "newfile.txt").unlink()
+
+    assert verification.verify_run(target=tmp_target, commands=commands) == 0
+    assert (tmp_target / "newfile.txt").is_file()
+
+
 def test_verify_dirty_tree_not_reused(tmp_target, monkeypatch):
     from brigade.work_cmd import verification
 
@@ -1718,6 +1756,7 @@ def test_work_verify_receipt_compacts_prior_nested_evidence(tmp_path, capsys, mo
         "status": "completed",
         "path": str(prior_dir),
         "digest": prior_digest,
+        "command_count": 0,
     }
     assert "evidence" not in receipt["evidence"]["latest_verify"]
 
@@ -2741,7 +2780,7 @@ def test_work_verify_run_cli_passes_graphtrail_timeout_override(tmp_path, monkey
 
 
 def test_work_closeout_writes_ready_receipt(tmp_path, capsys):
-    _init_git_repo(tmp_path)
+    _init_git_repo_with_head(tmp_path)
     task = {
         "id": "task-one",
         "text": "Ship feature",
@@ -2751,10 +2790,10 @@ def test_work_closeout_writes_ready_receipt(tmp_path, capsys):
         "acceptance": ["Tests pass."],
     }
     assert work_cmd.start(target=tmp_path, title="Ship feature", force=False, task_snapshot=task) == 0
+    commands = [[sys.executable, "-c", "print('first')"], [sys.executable, "-c", "print('second')"]]
+    assert work_cmd.verify_run(target=tmp_path, commands=commands, timeout=30) == 0
     capsys.readouterr()
     assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
-    capsys.readouterr()
-    assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('verified')\""], timeout=30) == 0
     capsys.readouterr()
 
     assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == 0
@@ -2763,14 +2802,15 @@ def test_work_closeout_writes_ready_receipt(tmp_path, capsys):
     assert payload["status"] == "ready"
     assert payload["acceptance_criteria"] == ["Tests pass."]
     assert payload["verification"]["status"] == "completed"
+    assert payload["verification"]["command_count"] == 2
     assert Path(payload["path"]).is_file()
-    assert Path(payload["path"]).with_name("closeout.md").is_file()
+    assert "commands=2" in Path(payload["path"]).with_name("closeout.md").read_text()
     session = json.loads((Path(payload["session_path"]) / "session.json").read_text())
     assert session["closeout"]["closeout_id"] == payload["closeout_id"]
 
 
 def test_work_closeout_blocks_failed_verification(tmp_path, capsys):
-    _init_git_repo(tmp_path)
+    _init_git_repo_with_head(tmp_path)
     task = {
         "id": "task-one",
         "text": "Ship feature",
@@ -2780,10 +2820,9 @@ def test_work_closeout_blocks_failed_verification(tmp_path, capsys):
         "acceptance": ["Tests pass."],
     }
     assert work_cmd.start(target=tmp_path, title="Ship feature", force=False, task_snapshot=task) == 0
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-c", "raise SystemExit(3)"]]) == 3
     capsys.readouterr()
     assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
-    capsys.readouterr()
-    assert work_cmd.verify_run(target=tmp_path, commands=['python3 -c "raise SystemExit(3)"'], timeout=30) == 3
     capsys.readouterr()
 
     assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == 1
@@ -2791,6 +2830,67 @@ def test_work_closeout_blocks_failed_verification(tmp_path, capsys):
     assert payload["ready"] is False
     assert payload["status"] == "blocked"
     assert "latest verification did not complete" in payload["blockers"][0]
+
+
+@pytest.mark.parametrize(
+    ("case", "blocker"),
+    [
+        ("other session", "no verification receipt for this session"),
+        ("unbound", "no verification receipt for this session"),
+        ("other harness session", "no verification receipt for this session"),
+        ("stale tree", "latest verification receipt for this session covers a different tree"),
+        ("unstable tree", "tree changed during the verification run"),
+    ],
+)
+def test_work_closeout_rejects_mismatched_verification(tmp_path, capsys, monkeypatch, case, blocker):
+    _init_git_repo_with_head(tmp_path)
+    monkeypatch.setenv("BRIGADE_CLAUDE_SESSION", "0000000000000001")
+    if case != "unbound":
+        assert work_cmd.start(target=tmp_path, title="First session", force=False) == 0
+    if case == "other harness session":
+        monkeypatch.setenv("BRIGADE_CLAUDE_SESSION", "0000000000000002")
+    code = "from pathlib import Path; Path('newfile.txt').touch()" if case == "unstable tree" else "print('ok')"
+    capsys.readouterr()
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-c", code]], json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    if case == "unstable tree":
+        assert receipt["tree_stable"] is False
+        (tmp_path / "newfile.txt").unlink()
+        assert localio.tree_fingerprint(tmp_path) == receipt["tree_fingerprint"]
+    if case != "unbound":
+        assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
+    if case in {"other session", "unbound"}:
+        assert work_cmd.start(target=tmp_path, title="Next session", force=False) == 0
+        assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
+    if case == "stale tree":
+        (tmp_path / "newfile.txt").touch()
+        assert localio.tree_fingerprint(tmp_path) != receipt["tree_fingerprint"]
+    capsys.readouterr()
+
+    assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == 1
+    assert json.loads(capsys.readouterr().out)["blockers"] == [blocker]
+
+
+@pytest.mark.parametrize("harness_only", [False, True])
+def test_work_closeout_selects_matching_receipt_behind_newer_unbound_receipt(
+    tmp_path, capsys, monkeypatch, harness_only
+):
+    _init_git_repo_with_head(tmp_path)
+    monkeypatch.setenv("BRIGADE_CLAUDE_SESSION", "0000000000000001")
+    commands = [[sys.executable, "-c", "print('ok')"]]
+    assert work_cmd.start(target=tmp_path, title="Finish work", force=False) == 0
+    capsys.readouterr()
+    assert work_cmd.verify_run(target=tmp_path, commands=commands, json_output=True) == 0
+    bound = json.loads(capsys.readouterr().out)
+    if harness_only:
+        del bound["producer_work_session_id"]
+        _write_json(Path(bound["path"]) / "receipt.json", bound)
+    assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
+    assert work_cmd.verify_run(target=tmp_path, commands=commands, reuse=False) == 0
+    capsys.readouterr()
+
+    assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["verification"]["run_id"] == bound["run_id"]
 
 
 def test_work_verify_and_closeout_cli(tmp_path, monkeypatch):
