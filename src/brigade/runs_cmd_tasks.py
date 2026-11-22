@@ -11,6 +11,7 @@ retained-copy proof, ``collect`` recovers an interrupted collection, and
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import math
@@ -23,10 +24,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import run_journal, run_lifecycle, run_task_journal
+from . import runguard, run_journal, run_lifecycle, run_task_journal
 from . import run_tasks as tasks
 
 RUN_TASKS_SCHEMA = "brigade.runs_tasks.v1"
+RUN_TASKS_NEXT_SCHEMA = "brigade.runs_tasks_next.v1"
+RUN_TASKS_ACK_SCHEMA = "brigade.runs_tasks_ack.v1"
 POLL_INTERVAL_SECONDS = 0.5
 # A refusal that persists this many polls is reported instead of waited out.
 MAX_CONSECUTIVE_READ_ERRORS = 20
@@ -90,6 +93,7 @@ def _pending_cancel_reasons(run_dir: Path) -> dict[str, str]:
     reasons: dict[str, str] = {}
     for request in pending.requests:
         if request.kind == run_task_inbox.KIND_CANCEL:
+            assert request.reason is not None
             reasons.setdefault(request.task_id, request.reason)
     return reasons
 
@@ -104,13 +108,16 @@ def _cancel_state(result: tasks.TaskResult, pending: dict[str, str]) -> dict[str
     return {"requested": False, "queued": False, "reason": None}
 
 
-def _row(result: tasks.TaskResult, pending: dict[str, str] | None = None) -> TaskRow:
+def _row(
+    result: tasks.TaskResult, pending: dict[str, str] | None = None, acknowledged: set[tuple[str, str]] | None = None
+) -> TaskRow:
     return TaskRow(
         task_id=result.handle.spec.task_id,
         status=result.status,
         attempt_id=result.handle.attempt_id,
         terminal=result.status in run_task_journal.TERMINAL,
-        acknowledged=result.acknowledged,
+        acknowledged=result.acknowledged
+        or (result.handle.spec.task_id, result.result_id or "") in (acknowledged or set()),
         containment=result.containment,
         result_id=result.result_id,
         artifact_kind=result.artifact_kind,
@@ -139,6 +146,32 @@ def _journal_path(run_dir: Path) -> Path:
 
 def _journal_present(run_dir: Path) -> bool:
     return run_journal.bound_is_file(_journal_path(run_dir))
+
+
+def _pending_acks(run_dir: Path) -> set[tuple[str, str]]:
+    from . import run_task_inbox
+
+    # Fail closed: an unreadable inbox could hide a queued acknowledgement, so
+    # the caller refuses instead of re-offering a result already consumed.
+    requests = run_task_inbox.pending(run_dir).requests
+    return {
+        (request.task_id, request.result_id)
+        for request in requests
+        if request.kind == run_task_inbox.KIND_ACK and request.result_id is not None
+    }
+
+
+def _terminal_order(run_dir: Path) -> dict[str, int]:
+    """Return the first terminal observation position, preserving journal order."""
+    try:
+        with run_task_journal.transaction(run_dir) as (_run_dir, events):
+            order: dict[str, int] = {}
+            for position, event in enumerate(events):
+                if event.event_type == "task.observed" and event.payload.get("status") in run_task_journal.TERMINAL:
+                    order.setdefault(event.payload["task_id"], position)
+            return order
+    except run_task_journal.TaskJournalError:
+        return {}
 
 
 def _resolve(run: str | Path, *, cwd: Path, runs_dir: Path | None) -> Path | None:
@@ -326,7 +359,8 @@ def list_tasks(
     if results is None:
         return 2
     pending = _pending_cancel_reasons(run_dir)
-    rows = [_row(result, pending) for result in results]
+    acks = _pending_acks(run_dir)
+    rows = [_row(result, pending, acks) for result in results]
     if json_output:
         _emit(
             {
@@ -357,7 +391,7 @@ def show_task(
     by_id = {result.handle.spec.task_id: result for result in results}
     if task_id not in by_id:
         return _unknown(task_id, by_id)
-    row = _row(by_id[task_id], _pending_cancel_reasons(run_dir))
+    row = _row(by_id[task_id], _pending_cancel_reasons(run_dir), _pending_acks(run_dir))
     result_ref, result_sha256 = _result_sidecar(run_dir, task_id)
     artifact_ref, artifact_sha256 = _artifact_sidecar(run_dir, task_id)
     selection = _selection(run_dir, task_id)
@@ -464,6 +498,168 @@ def wait_tasks(
             return 3
         delay = interval if deadline is None else min(interval, max(0.0, deadline - now))
         sleep(delay)
+
+
+def next_task(
+    run: str | Path,
+    *,
+    cwd: Path,
+    runs_dir: Path | None = None,
+    timeout: float | None = None,
+    json_output: bool = False,
+    interval: float = POLL_INTERVAL_SECONDS,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int:
+    """Pull the oldest unacknowledged terminal result without mutating the run."""
+    from . import run_task_inbox
+
+    # Multiple parents can be added here by giving each consumer its own cursor.
+    if timeout is not None and (not math.isfinite(timeout) or timeout < 0):
+        return _fail("invalid-timeout", "timeout must not be negative")
+    run_dir = _resolve(run, cwd=cwd, runs_dir=runs_dir)
+    if run_dir is None:
+        return 2
+    if not _journal_present(run_dir):
+        return _fail("no-task-journal", f"no task journal in run {run_dir.name}")
+    deadline = None if timeout is None else monotonic() + timeout
+    while True:
+        try:
+            results = tasks.read_tasks(run_dir)
+        except tasks.TaskJournalError as exc:
+            if timeout is None or deadline is None or monotonic() >= deadline:
+                return _fail("task-journal-unreadable", str(exc))
+            sleep(min(interval, max(0.0, deadline - monotonic())))
+            continue
+        try:
+            acks = _pending_acks(run_dir)
+        except run_task_inbox.TaskInboxError as exc:
+            return _fail(exc.code, exc.detail)
+        order = _terminal_order(run_dir)
+        terminal = [r for r in results if r.status in run_task_journal.TERMINAL and r.result_id is not None]
+        offered = [r for r in terminal if not r.acknowledged and (r.handle.spec.task_id, r.result_id or "") not in acks]
+        offered.sort(key=lambda r: order.get(r.handle.spec.task_id, 2**63))
+        task = _row(offered[0], acknowledged=acks) if offered else None
+        done = len(terminal) == len(results) and not offered
+        remaining = sum(
+            1
+            for result in terminal
+            if not result.acknowledged and (result.handle.spec.task_id, result.result_id or "") not in acks
+        )
+        if task is not None or done:
+            payload = {
+                "schema": RUN_TASKS_NEXT_SCHEMA,
+                "run_id": run_dir.name,
+                "task": None if task is None else task.to_dict(),
+                "remaining": remaining,
+                "done": done,
+            }
+            if json_output:
+                _emit(payload)
+            elif task is None:
+                print(f"run: {run_dir.name}\ndone: yes\nremaining: 0")
+            else:
+                _print_detail(task, *_result_sidecar(run_dir, task.task_id), *_artifact_sidecar(run_dir, task.task_id))
+            return 0
+        now = monotonic()
+        if deadline is not None and now >= deadline:
+            payload = {
+                "schema": RUN_TASKS_NEXT_SCHEMA,
+                "run_id": run_dir.name,
+                "task": None,
+                "remaining": remaining,
+                "done": False,
+                "timed_out": True,
+            }
+            if json_output:
+                _emit(payload)
+            else:
+                _fail("next-timeout", "no unacknowledged terminal result became available")
+            return 3
+        delay = interval if deadline is None else min(interval, max(0.0, deadline - now))
+        sleep(delay)
+
+
+def ack_task(
+    run: str | Path,
+    task_id: str,
+    result_id: str,
+    *,
+    cwd: Path,
+    runs_dir: Path | None = None,
+    json_output: bool = False,
+) -> int:
+    """Submit an acknowledgement through the inbox, then journal only as lock owner."""
+    from . import run_task_inbox
+
+    run_dir = _resolve(run, cwd=cwd, runs_dir=runs_dir)
+    if run_dir is None:
+        return 2
+    try:
+        results = tasks.read_tasks(run_dir)
+    except tasks.TaskJournalError as exc:
+        return _fail("journal-unreadable", str(exc))
+    state = next((item for item in results if item.handle.spec.task_id == task_id), None)
+    outcome = "unknown-task"
+    if state is not None:
+        try:
+            # Resolve everything that can refuse before the request is written,
+            # so a refusal never leaves a durable acknowledgement behind it.
+            workspace = _workspace_for_run(run_dir)
+            pending_acks = _pending_acks(run_dir)
+        except run_task_inbox.TaskInboxError as exc:
+            return _fail(exc.code, exc.detail)
+        if state.status not in run_task_journal.TERMINAL or state.result_id is None:
+            outcome = "no-result"
+        elif state.result_id != result_id:
+            outcome = "result-mismatch"
+        elif state.acknowledged:
+            outcome = "already-acknowledged"
+        else:
+            # A request already queued is retried below, so a later call can
+            # still journal an acknowledgement a busy batch never drained.
+            if (task_id, result_id) not in pending_acks:
+                try:
+                    run_task_inbox.submit(run_dir, run_task_inbox.KIND_ACK, task_id, result_id=result_id)
+                except run_task_inbox.TaskInboxError as exc:
+                    return _fail(exc.code, exc.detail)
+            outcome = "queued"
+            held = contextlib.ExitStack()
+            try:
+                held.enter_context(runguard.run_lock(workspace, run_dir=run_dir, stale_action="claim"))
+            except (runguard.RunLockError, OSError):
+                held.close()
+            else:
+                with held:
+                    try:
+                        run_task_inbox.drain(run_dir, workspace)
+                        journaled = next(
+                            (r for r in tasks.read_tasks(run_dir) if r.handle.spec.task_id == task_id), None
+                        )
+                    except (run_task_inbox.TaskInboxError, tasks.TaskJournalError) as exc:
+                        # The request stays queued and `next` treats it as
+                        # consumed; the refusal says it is not journaled yet.
+                        return _fail(getattr(exc, "code", "journal-unreadable"), str(exc))
+                if journaled is not None and journaled.acknowledged:
+                    outcome = "acknowledged"
+    payload = {
+        "schema": RUN_TASKS_ACK_SCHEMA,
+        "run_id": run_dir.name,
+        "task_id": task_id,
+        "result_id": result_id,
+        "outcome": outcome,
+    }
+    if json_output:
+        _emit(payload)
+    else:
+        print(f"task {task_id}: {outcome}")
+    return 0 if outcome in {"acknowledged", "queued", "already-acknowledged"} else 2
+
+
+def _workspace_for_run(run_dir: Path) -> Path:
+    from . import run_task_inbox
+
+    return run_task_inbox._workspace(run_dir, None)
 
 
 def integrate_tasks(
@@ -624,6 +820,10 @@ def dispatch(args, *, cwd: Path, runs_dir: Path | None) -> int:
             timeout=args.timeout,
             json_output=args.json,
         )
+    if args.tasks_command == "next":
+        return next_task(args.run, cwd=cwd, runs_dir=runs_dir, timeout=args.timeout, json_output=args.json)
+    if args.tasks_command == "ack":
+        return ack_task(args.run, args.task_id, args.result_id, cwd=cwd, runs_dir=runs_dir, json_output=args.json)
     if args.tasks_command == "integrate":
         return integrate_tasks(
             args.run,

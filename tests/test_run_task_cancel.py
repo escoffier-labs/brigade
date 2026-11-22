@@ -268,11 +268,14 @@ def test_duplicate_cancel_is_one_fact_and_one_file(run_site, capsys):
     assert [event.payload["reason"] for event in facts(run_dir, "task.cancel-requested")] == ["operator"]
 
 
-def test_ack_kind_is_refused_until_it_is_read(run_site):
+def test_ack_kind_publishes_a_closed_request(run_site):
     run_dir, _workspace = run_site
-    with pytest.raises(inbox.TaskInboxError) as refused:
-        inbox.submit(run_dir, "ack", "a", result_id="c" * 64)
-    assert refused.value.code == "ack-unsupported"
+    assert inbox.submit(run_dir, "ack", "a", result_id="c" * 64) == "created"
+    request = inbox.pending(run_dir).requests[0]
+    assert request.kind == "ack"
+    assert request.task_id == "a"
+    assert request.result_id == "c" * 64
+    assert request.reason is None
 
 
 def test_malformed_inbox_files_are_skipped(run_site):

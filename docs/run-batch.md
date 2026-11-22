@@ -833,8 +833,8 @@ requests cancellation of the selected assignments. Each request targets one
 task. `--reason` accepts the tokens shown above.
 
 The journal records intent as `task.cancel-requested` and the worker outcome
-separately as `task.observed`. The inbox reserves the `ack` kind and refuses it
-with `ack-unsupported`.
+separately as `task.observed`. Result acknowledgement is a third fact,
+`task.acknowledged`, and never changes a task's terminal status.
 
 A task journal may only be written by the active run owner. A cancel request
 often comes from another process, so it never journals directly. It is first
@@ -894,6 +894,31 @@ it as `prerequisite-cancelled` and leaves it `queued` in the journal.
 
 An unknown task reports `unknown-task`, and a task that is already terminal
 when the command reads it reports `already-terminal`. Neither writes a request.
+
+## Parent result delivery
+
+`brigade runs tasks next <run> [--timeout SECONDS] [--json]` pulls the oldest
+terminal task result that has not been acknowledged. It reads the journal and
+inbox without writing either. The same result is offered on every call until
+`brigade runs tasks ack <run> <task_id> --result-id <id>` succeeds. A parent
+should deduplicate work by `result_id`, then acknowledge after consuming it.
+Results and their sidecars remain readable with `runs tasks show` after
+acknowledgement.
+
+Acknowledgement requests use the same closed, exclusive inbox publication as
+cancellation. A second process never writes task facts: the active run-lock
+owner drains `ack` and appends `task.acknowledged`. A request queued behind a
+live owner already counts as consumed for `next`. The owner records it later,
+and running `ack` again once the run lock is free journals it at once. If the
+inbox cannot be read, `next` and `ack` refuse with exit 2, so neither offers a
+result whose acknowledgement may be queued. Stale result ids are ignored during
+drain. A timeout exits 3, writes nothing,
+and never cancels the run. `done: true` means every accepted task has a terminal
+result and all such results are acknowledged.
+
+This contract supports one requesting parent per run. Multiple consumers and
+consumer-specific acknowledgement state are deferred. A per-consumer cursor is
+the place to add that support.
 
 The inbox is bounded: at most 1024 request files of at most 4 KiB each. Exceeding
 either bound refuses with `inbox-overflow`. Malformed request files are skipped
