@@ -2,7 +2,10 @@
 
 from datetime import datetime, timedelta, timezone
 import json
+import os
+from pathlib import Path
 import subprocess
+import sys
 
 from scripts import workflow_approval_digest, workflow_guard
 
@@ -16,6 +19,7 @@ FILES = {
     13: "docs/readme.md",
     14: ".github/workflows/hostile|`name.yml",
 }
+HOSTILE_TITLE = "evil </table><h1>x</h1> [click](https://example.com)"
 PULLS = [
     {
         "number": number,
@@ -26,6 +30,10 @@ PULLS = [
     }
     for number in (11, 12, 13, 14)
 ]
+PULLS[-1]["title"] = HOSTILE_TITLE
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "scripts" / "workflow_approval_digest.py"
 
 
 def approval_status(number: int) -> dict[str, object]:
@@ -93,11 +101,20 @@ def test_digest_includes_approved_and_missing_and_omits_unprotected(monkeypatch,
     assert "Example 11" in output and "yes" in output and "2026-11-22T13:14:15Z" in output
     assert "Example 12" in output and "no" in output
     assert "Example 13" not in output
-    assert "Example 14" in output and "2026-11-22T13:14:15Z" in output
+    assert "2026-11-22T13:14:15Z" in output
+    rows = {
+        number: next(line for line in output.splitlines() if line.startswith(f"| {number} |"))
+        for number in (11, 12, 14)
+    }
+    assert rows[11].endswith("| yes |")
+    assert rows[12].endswith("| no |")
+    assert rows[14].endswith("| no |")
     assert "Label present" in output
-    assert "yes" in output and "no" in output
     assert "\\u007c" in output and "\\u0060" in output
     assert "hostile|`name" not in output
+    assert r"\u003c" in rows[14] and r"\u005b" in rows[14]
+    for token in ("<", ">", "[", "]("):
+        assert token not in rows[14]
 
 
 def test_api_failure_exits_two_without_partial_digest(monkeypatch, capsys):
@@ -121,3 +138,69 @@ def test_days_excludes_older_merged_pull_requests(monkeypatch, capsys):
         assert "Example 11" not in capsys.readouterr().out
     finally:
         PULLS[0]["merged_at"] = original
+
+
+def test_cutoff_excludes_pre_guard_pull_requests_and_counts_them(monkeypatch, capsys):
+    fake_gh(monkeypatch)
+    old_dates = [PULLS[number - 11]["merged_at"] for number in (11, 12)]
+    PULLS[0]["merged_at"] = (
+        (workflow_approval_digest.GUARD_START - timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+    )
+    PULLS[1]["merged_at"] = (
+        (workflow_approval_digest.GUARD_START + timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
+    )
+    try:
+        assert workflow_approval_digest.main(["--repo", "example/project"]) == 0
+        output = capsys.readouterr().out
+        assert "Excluded 1 merged protected pull request(s)" in output
+        assert "predate the cutoff" in output
+        assert "Example 11" not in output
+        assert "Example 12" in output
+    finally:
+        PULLS[0]["merged_at"], PULLS[1]["merged_at"] = old_dates
+
+
+def test_script_path_help_works_from_another_directory(tmp_path):
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--help"],
+        cwd=tmp_path,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "usage:" in result.stdout
+    assert "--since" in result.stdout
+
+
+def test_script_path_runs_with_fake_gh_from_another_directory(tmp_path):
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(
+        "#!/bin/sh\n"
+        'case "$2" in\n'
+        "  repos/example/project) printf '%s\\n' '{\"default_branch\":\"main\"}' ;;\n"
+        "  repos/example/project/pulls*) printf '%s\\n' '[[]]' ;;\n"
+        "  *) exit 1 ;;\n"
+        "esac\n",
+        encoding="utf-8",
+    )
+    fake_gh.chmod(0o755)
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+    env["PATH"] = str(fake_bin) + os.pathsep + env.get("PATH", "")
+
+    result = subprocess.run(
+        [sys.executable, str(SCRIPT), "--repo", "example/project"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert "# Workflow approval digest:" in result.stdout
+    assert "0 with a success approval status" in result.stdout

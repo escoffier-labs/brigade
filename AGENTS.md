@@ -46,7 +46,7 @@ python -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
 
 Format: trigger, then the rule, then what to do instead.
 
-For protected CI changes, the author does not approve the change and a builder that wrote it never applies the label. The pull request conductor applies `workflow-change-approved` only after an independent security review of the protected-path changes at the current head says to ship, with a comment naming the commit and protected files. Each head gets one review; protected-file changes need a new review and label, while unchanged protected files may cite the earlier review in the new comment, and no pull request gets more than two reviews without operator agreement. Approval is recorded and audited after the fact, not supplied by a separate account; see [the workflow guard](docs/workflow-guard.md).
+For protected CI changes, the author does not approve the change and a builder that wrote it never applies the label. The pull request conductor applies `workflow-change-approved` only after an independent security review of the protected-path changes at the current head says to ship, with a comment naming the commit and protected files. A new head needs the label again; it needs a new review only when the protected files changed. No pull request gets more than two reviews without operator agreement. Approval is recorded and audited after the fact, not supplied by a separate account; see [the workflow guard](docs/workflow-guard.md).
 
 - Before opening a PR or reporting a code change complete: run focused
   verification through `brigade work verify run` with `./scripts/verify-focused`
