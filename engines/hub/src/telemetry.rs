@@ -2,6 +2,7 @@
 use crate::writer::WriterStats;
 use std::{
     collections::BTreeMap,
+    fmt,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -334,6 +335,8 @@ pub struct RequestLog {
     pub telemetry: std::sync::Arc<Telemetry>,
     pub id: u64,
     pub family: &'static str,
+    pub method: &'static str,
+    pub route: &'static str,
     pub status: u16,
     pub credential_kind: &'static str,
     /// The phase the request had reached. A cancelled request keeps the phase
@@ -414,8 +417,41 @@ pub fn mark(parts: &axum::http::request::Parts, stage: Stage) {
 }
 impl RequestLog {
     /// The one request line this log writes, before it is emitted.
-    pub fn line(&self) -> serde_json::Value {
-        serde_json::json!({"event":"request","request_id":self.id,"family":self.family,"status":self.status,"latency_seconds":self.start.elapsed().as_secs_f64(),"credential_kind":self.credential_kind,"stage":self.stage.get().label(),"request_bytes":self.request_bytes.load(Ordering::Relaxed),"response_bytes":self.response_bytes})
+    pub fn line(&self) -> RequestLine<'_> {
+        RequestLine {
+            log: self,
+            latency_seconds: self.start.elapsed().as_secs_f64(),
+        }
+    }
+}
+
+pub struct RequestLine<'a> {
+    log: &'a RequestLog,
+    latency_seconds: f64,
+}
+impl fmt::Display for RequestLine<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let log = self.log;
+        // The method, route and stage classifiers return JSON-safe literals.
+        // Write them directly so the new fields need no owned strings.
+        write!(
+            f,
+            concat!(
+                r#"{{"event":"request","request_id":{},"family":{},"method":"{}","route":"{}","#,
+                r#""status":{},"latency_seconds":{:?},"credential_kind":{},"stage":"{}","#,
+                r#""request_bytes":{},"response_bytes":{}}}"#
+            ),
+            log.id,
+            serde_json::json!(log.family),
+            log.method,
+            log.route,
+            log.status,
+            self.latency_seconds,
+            serde_json::json!(log.credential_kind),
+            log.stage.get().label(),
+            log.request_bytes.load(Ordering::Relaxed),
+            log.response_bytes,
+        )
     }
 }
 impl Drop for RequestLog {
@@ -423,11 +459,8 @@ impl Drop for RequestLog {
         let line = self.line();
         // The histogram reads the same latency the line carries, so the metric
         // and the log never disagree.
-        self.telemetry.request(
-            self.family,
-            self.status,
-            line["latency_seconds"].as_f64().unwrap_or_default(),
-        );
+        self.telemetry
+            .request(self.family, self.status, line.latency_seconds);
         eprintln!("{line}");
     }
 }
@@ -471,6 +504,8 @@ mod tests {
             telemetry: Arc::new(Telemetry::default()),
             id: 7,
             family: "status",
+            method: "GET",
+            route: "/status",
             status: 500,
             credential_kind: "unchecked",
             stage: slot.clone(),
@@ -478,7 +513,8 @@ mod tests {
             response_bytes: 0,
             start: Instant::now(),
         };
-        assert_eq!(log.line()["stage"], "received");
+        let line = || serde_json::from_str::<serde_json::Value>(&log.line().to_string()).unwrap();
+        assert_eq!(line()["stage"], "received");
         for (stage, label) in [
             (Stage::CredentialLookup, "credential-lookup"),
             (Stage::Handler, "handler"),
@@ -487,11 +523,13 @@ mod tests {
             (Stage::Replying, "replying"),
         ] {
             slot.set(stage);
-            assert_eq!(log.line()["stage"], label);
+            assert_eq!(line()["stage"], label);
             assert_eq!(slot.get(), stage);
         }
         // The earlier fields keep their meaning and stay on the line.
-        let line = log.line();
+        let line = line();
+        assert_eq!(line["method"], "GET");
+        assert_eq!(line["route"], "/status");
         assert_eq!(line["credential_kind"], "unchecked");
         assert_eq!(line["family"], "status");
         assert_eq!(line["status"], 500);

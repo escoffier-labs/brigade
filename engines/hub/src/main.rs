@@ -542,14 +542,13 @@ fn bearer_token(req: &Request<Body>) -> Option<&str> {
 }
 async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     use brigade_hub::{
-        modes::{Mode, family},
+        modes::{Mode, family, method_label, route_label},
         shadow,
         telemetry::{RequestLog, Stage, StageSlot},
     };
     let started = std::time::Instant::now();
     let f = family(req.method().as_str(), req.uri().path(), "");
-    // A request that carries its own slot keeps it, so a test can read the
-    // stage an abandoned request reached.
+    // Keep a caller-provided slot available to cancellation tests.
     let stage = req
         .extensions()
         .get::<StageSlot>()
@@ -560,6 +559,8 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
         telemetry: app.telemetry.clone(),
         id: app.telemetry.id(),
         family: f,
+        method: method_label(req.method().as_str()),
+        route: route_label(req.uri().path()),
         status: 500,
         credential_kind: "anonymous",
         stage: stage.clone(),
@@ -690,8 +691,6 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     }
     log.status = response.status().as_u16();
     stage.set(Stage::Replying);
-    // The label is final here, before the body streams. Tests read the same
-    // line the request log emits, keyed by this app's telemetry.
     #[cfg(test)]
     request_lines::record(Arc::as_ptr(&log.telemetry) as usize, log.line());
     let (parts, body) = response.into_parts();
@@ -2475,7 +2474,8 @@ mod tests_verifier;
 mod request_lines {
     use std::sync::Mutex;
     static LINES: Mutex<Vec<(usize, serde_json::Value)>> = Mutex::new(Vec::new());
-    pub fn record(key: usize, line: serde_json::Value) {
+    pub fn record(key: usize, line: impl std::fmt::Display) {
+        let line = serde_json::from_str(&line.to_string()).expect("valid request log JSON");
         LINES.lock().unwrap().push((key, line));
     }
     /// The lines one app logged for one family, oldest first.

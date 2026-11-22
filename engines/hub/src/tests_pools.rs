@@ -12,6 +12,7 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     mpsc as std_mpsc,
 };
+use tokio::net::TcpListener;
 
 const ADMIN: &str = "pool-admin-token-0123456789";
 const NODE_TOKEN: &str = "pool-node-token-0123456789";
@@ -195,6 +196,101 @@ async fn answer(app: &App, request: Request<Body>) -> (u16, serde_json::Value) {
 
 fn logged(app: &App, family: &str) -> Option<String> {
     request_lines::credential_kind(Arc::as_ptr(&app.telemetry) as usize, family)
+}
+
+fn log_test_app(upstream: String) -> App {
+    App::new(
+        upstream,
+        Client::builder(TokioExecutor::new()).build_http(),
+        false,
+        false,
+    )
+}
+
+async fn log_request(app: &App, method: &str, uri: &str, family: &str) -> serde_json::Value {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _) = answer(app, request).await;
+    let line = request_lines::entries(Arc::as_ptr(&app.telemetry) as usize, family)
+        .pop()
+        .expect("request log line");
+    assert_eq!(line["status"], status);
+    line
+}
+
+#[tokio::test]
+async fn request_log_labels_native_health_and_drops_query() {
+    let app = log_test_app(String::new());
+    let line = log_request(&app, "GET", "/health?fixture_query=fixture_value", "health").await;
+    assert_eq!(line["status"], 200);
+    assert_eq!(line["method"], "GET");
+    assert_eq!(line["route"], "/health");
+    assert!(!line.to_string().contains("fixture_query"));
+    assert!(!line.to_string().contains("fixture_value"));
+}
+
+#[tokio::test]
+async fn request_log_labels_proxied_cold_policy() {
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let app = log_test_app(format!("http://{}", listener.local_addr().unwrap()));
+    let upstream = Router::new().route(
+        "/policy",
+        axum::routing::post(|| async { StatusCode::NO_CONTENT }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let line = log_request(&app, "POST", "/policy", "cold").await;
+    server.abort();
+    assert_eq!(line["status"], 204);
+    assert_eq!(line["method"], "POST");
+    assert_eq!(line["route"], "/policy");
+}
+
+#[tokio::test]
+async fn request_log_labels_immediate_admission_refusal() {
+    let app = log_test_app(String::new());
+    let _slots: Vec<_> = (0..8)
+        .map(|_| app.budgets.admit(None, "/nodes", "", None).unwrap())
+        .collect();
+    let line = log_request(&app, "GET", "/nodes", "registration").await;
+    assert_eq!(line["status"], 503);
+    assert_eq!(line["stage"], "replying");
+    assert_eq!(line["method"], "GET");
+    assert_eq!(line["route"], "/nodes");
+}
+
+#[tokio::test]
+async fn request_log_replaces_ids_with_placeholders() {
+    let app = log_test_app(String::new());
+    let line = log_request(
+        &app,
+        "DELETE",
+        "/work/items/fixture-item/links/fixture-link",
+        "cold",
+    )
+    .await;
+    assert_eq!(line["method"], "DELETE");
+    assert_eq!(line["route"], "/work/items/:id/links/:link");
+    assert!(!line.to_string().contains("fixture-item"));
+    assert!(!line.to_string().contains("fixture-link"));
+}
+
+#[tokio::test]
+async fn request_log_masks_unknown_path_and_method() {
+    let app = log_test_app(String::new());
+    let line = log_request(
+        &app,
+        "FIXTURE-METHOD",
+        "/work/items/fixture-item/fixture-unknown",
+        "cold",
+    )
+    .await;
+    assert_eq!(line["method"], "other");
+    assert_eq!(line["route"], "other");
+    assert!(!line.to_string().contains("FIXTURE-METHOD"));
+    assert!(!line.to_string().contains("fixture-unknown"));
 }
 
 /// The read-only audit records the hundreds of `PRAGMA table_xinfo` and
