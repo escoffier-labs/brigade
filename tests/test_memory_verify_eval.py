@@ -245,6 +245,51 @@ def test_feedback_packet_becomes_a_private_labeled_case(verify_hub, resolver, ca
     assert len(json.loads((target / gate.FEEDBACK).read_bytes())["cases"]) == 1
 
 
+def test_feedback_retains_nested_claim_with_its_markdown_parent(verify_hub, resolver, monkeypatch):
+    from brigade import memory_verify_feedback as feedback
+    from brigade import memory_verify_run as verify_run
+    from brigade import memory_verify_show as show
+    from types import SimpleNamespace
+
+    target, _, _, _ = verify_hub
+    value = case()
+    value["card"]["text"] = f"---\nevidence: []\n---\n- Sibling context.\n- Parent context.\n    - {CLAIM} ^{BLOCK}\n"
+    card, assembly = evaluation.inputs(value)
+    nested_fixed = "- " + FIXED
+    operation = {"type": "replace_block", "block_id": BLOCK, "text": nested_fixed}
+    proposal = SimpleNamespace(
+        ops=[SimpleNamespace(type="replace_block", block_id=BLOCK, text=nested_fixed)],
+        payload_ops=lambda: [operation],
+    )
+    result = SimpleNamespace(proposal=proposal, outcomes=[], prompt_sha256="a" * 64)
+    built = verify_run.review(
+        card,
+        result,
+        assembly,
+        SimpleNamespace(records=[{"role": "propose", "reply": json.dumps(block_entry()), "prompt": "fixture"}]),
+        [seat("propose", "test-small"), seat("confirm", "test-large")],
+    )
+    manifest, packet = built.manifest, built.packet
+    monkeypatch.setattr(show, "_local", lambda *args: (manifest, packet))
+    shown = {"verifier_manifests": [{"artifact_sha256": io.sha256(manifest)}]}
+
+    feedback.retain_case(target, "nested-claim", "applied", shown)
+
+    saved = json.loads((target / gate.FEEDBACK).read_bytes())
+    assert len(saved["cases"]) == 1
+    assert saved["cases"][0]["expected"] == "correct"
+    assert "Sibling context." not in saved["cases"][0]["card"]["text"]
+    assert "- Parent context.\n    - " in saved["cases"][0]["card"]["text"]
+    replay = evaluation.evaluate(
+        saved["cases"],
+        propose=FakeSeat(block_entry(replacement=nested_fixed)),
+        confirm=FakeSeat(block_entry(replacement=nested_fixed)),
+        resolve_commit=RESOLVER.get,
+        repeats=2,
+    )
+    assert replay["classes"]["correct"]["recall"] == 1, replay
+
+
 def test_failed_run_never_attempts_automatic_application(verify_hub, capsys, monkeypatch):
     from brigade import memory_verify_auto as automatic
     from tests.test_memory_verify_run import verify

@@ -582,7 +582,7 @@ def review(
                 "card_id": card.card_id,
                 "revision": card.revision,
                 "updated_ms": card.updated_ms,
-                "text": "\n\n".join(block.text for block in card.blocks),
+                "text": card.evaluation_text(op_blocks),
             },
             "evidence": [
                 {

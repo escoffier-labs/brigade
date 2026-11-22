@@ -1,0 +1,1 @@
+- Retain verification feedback for nested Markdown claims with the parent list context needed to replay them.
