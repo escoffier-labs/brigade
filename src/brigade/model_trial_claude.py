@@ -77,7 +77,9 @@ EXIT_GRACE = 10.0
 GROUP_DRAIN_SECONDS = proc.GROUP_DRAIN_SECONDS
 # A process the arm left outside its group and session gets this long to disappear after SIGKILL.
 STRAY_DRAIN_SECONDS = 2.0
-# A drain failure is a cell failure with a fixed reason, never a crash of the whole trial.
+# A drain failure is a cell failure with a fixed reason, never a crash of the whole trial. It also
+# covers a cleanup that could not be verified, such as an unreadable process table or a leader that
+# outlived the final bounded wait.
 DRAIN_FAILURE = "process_group_drain_failed"
 # A descendant that kept the arm's pipe open past the deadline: the trial goes on with the next cell.
 DESCENDANT_PIPES_FAILURE = "descendant_held_pipes"
@@ -893,6 +895,9 @@ def _run_process(
     scanning = drain_supported() and bool(cell_token)
     cell_started = process_start_time(child.pid) if scanning else None
     pipes = _pipe_inodes(child) if scanning else frozenset()
+    # Linux always exposes /proc. Without it the cell cannot prove a quiet cleanup, so it fails
+    # closed rather than passing with no leftover check at all.
+    unverifiable = bool(cell_token) and sys.platform.startswith("linux") and not scanning
     timed_out = threading.Event()
     # Every kill, and every reap, holds this lock: a signal is never sent for a pid that was just reaped.
     expiry = threading.Lock()
@@ -989,7 +994,12 @@ def _run_process(
             with expiry:
                 signal_arm()
                 drain_once()
-                code = child.wait()
+            # Every wait is bounded: a leader stuck in uninterruptible sleep must not hold the trial.
+            try:
+                code = child.wait(timeout=EXIT_GRACE)
+            except (OSError, subprocess.TimeoutExpired):
+                code = None
+                cleanup_failed = True
     except BaseException as exc:
         primary = exc
         raise
@@ -997,13 +1007,16 @@ def _run_process(
         timer.cancel()
         kill()
         drain_once()
-        cleanup_failed = drain_failure is not None
+        cleanup_failed = cleanup_failed or drain_failure is not None
         if scanning and cell_token:
             # After the drain, anything still carrying the cell's token escaped both group and session.
             stray, quiet = _stop_strays(
                 CELL_TOKEN_ENV, cell_token, cell_started, pipes, Path(os.path.realpath(root or cwd))
             )
             cleanup_failed = cleanup_failed or not quiet
+        elif unverifiable:
+            # No process table to scan: the cell cannot prove a quiet cleanup, so it must not pass.
+            cleanup_failed = True
         try:
             drainer.join(timeout=EXIT_GRACE)
         finally:

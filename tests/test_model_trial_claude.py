@@ -1417,6 +1417,57 @@ def test_a_drain_failure_fails_only_its_cell_and_keeps_its_work_dir(tmp_path, mo
             shutil.rmtree(path, ignore_errors=True)
 
 
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux always exposes a process table")
+def test_a_cell_with_no_process_table_fails_and_keeps_its_work_dir(tmp_path, monkeypatch):
+    """A Linux cell that cannot scan /proc has no leftover check, so it must not pass silently."""
+    exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS)
+    work_dirs = _track_work_dirs(monkeypatch)
+    monkeypatch.setattr(model_trial_claude, "drain_supported", lambda: False)
+    try:
+        result = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        assert _failures(result) == [model_trial_claude.DRAIN_FAILURE]
+        assert len(work_dirs) == 2 and all(path.is_dir() for path in work_dirs)
+    finally:
+        for path in work_dirs:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def test_a_leader_that_never_reports_exit_is_not_waited_on_forever(monkeypatch, tmp_path):
+    """After a bounded reap, the second wait is bounded too, so an unkillable leader cannot block."""
+    children = []
+    real_wait = subprocess.Popen.wait
+
+    class SpyPopen(subprocess.Popen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            children.append(self)
+
+    def blocked_wait(self, timeout=None):
+        if timeout is None:
+            raise AssertionError("unbounded wait on a leader that will not exit")
+        time.sleep(min(timeout, 0.05))
+        raise subprocess.TimeoutExpired(self.args, timeout)
+
+    def expired_reap(process, timeout, *, drain=None):
+        raise subprocess.TimeoutExpired(process.args, timeout)
+
+    monkeypatch.setattr(model_trial_claude.subprocess, "Popen", SpyPopen)
+    monkeypatch.setattr(model_trial_claude, "_reap", expired_reap)
+    monkeypatch.setattr(model_trial_claude, "EXIT_GRACE", 0.2)
+    monkeypatch.setattr(subprocess.Popen, "wait", blocked_wait)
+    observer = _Observer(expected_model="m", session_id="s", version="v", cwd=tmp_path)
+    env = {key: os.environ[key] for key in ENV_PASSTHROUGH if key in os.environ}
+    try:
+        started = time.monotonic()
+        run = _run_process([sys.executable, "-c", "pass"], env, tmp_path, "", 30, observer, "tok")
+        elapsed = time.monotonic() - started
+    finally:
+        for child in children:
+            real_wait(child, timeout=10)
+    assert elapsed < 2, f"the bounded waits took {elapsed:.2f}s"
+    assert run.timed_out is True and run.cleanup_failed is True and run.code is None
+
+
 def test_the_bounded_drain_re_signals_members_on_every_poll(monkeypatch):
     calls = []
     alive = [True, True, False]

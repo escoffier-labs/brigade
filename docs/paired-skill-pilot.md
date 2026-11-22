@@ -273,9 +273,13 @@ cannot be read is never signalled. It fails the cell as
 `process_group_drain_failed` only when it started during the cell and either runs
 in the work dir or holds one of the cell's pipes. Unrelated same-user processes
 keep their environment unreadable by design, as sshd does, so they are skipped.
-Windows behavior is unchanged, and there is no cgroup or PID-namespace
-containment yet, so a descendant that clears its own environment can still escape
-the scan.
+On Linux a cell that cannot scan `/proc` at all fails as
+`process_group_drain_failed` and keeps its work dir, so a missing process table
+never lets a cell pass unchecked. Every wait on the leader is bounded as well, so
+a leader stuck in uninterruptible sleep records a cleanup failure instead of
+holding the trial. Windows behavior is unchanged, and there is no cgroup or
+PID-namespace containment yet, so a descendant that clears its own environment
+can still escape the scan.
 
 #### Size caps
 
