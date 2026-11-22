@@ -8,7 +8,7 @@
       },
       {
         "sha256": "5810fae8290e436eb842ee98a8705f49decd8ae785cbe05dbfb099eea759561c",
-        "tag": null
+        "tag": "v0.32.0"
       }
     ],
     "runbook:.brigade/memory-care/runbooks/daily-observability.json": [
@@ -26,7 +26,7 @@
     "runbook:.brigade/memory-care/runbooks/lesson-review.json": [
       {
         "sha256": "6100e49cc606d35a8aa776121d61553521c68c5951ffe33f823225d5006673cd",
-        "tag": null
+        "tag": "v0.32.0"
       }
     ],
     "runbook:.brigade/memory-care/runbooks/memory-closeout.json": [
@@ -45,15 +45,15 @@
         "tag": "v0.26.1"
       },
       {
+        "sha256": "b158835ecad7e5ef0739bb48fc0a8e2426a6e86c899572d63d87ae571c32f0f8",
+        "tag": "v0.32.0"
+      },
+      {
         "sha256": "1ba29b5de264aebfb9937e7f123d0ace227da6108eeb99d88908599fcff0a295",
         "tag": null
       },
       {
         "sha256": "f7ca3f9660c085016bb14238d3da55169438646ae204122c3a82db0b5b00892d",
-        "tag": null
-      },
-      {
-        "sha256": "b158835ecad7e5ef0739bb48fc0a8e2426a6e86c899572d63d87ae571c32f0f8",
         "tag": null
       }
     ],
@@ -85,6 +85,10 @@
         "tag": "v0.31.0"
       },
       {
+        "sha256": "ce22acce7b3f3008b609fcab9c19384324dcdb4b3c4921f29a4195f460a5399d",
+        "tag": "v0.32.0"
+      },
+      {
         "sha256": "8714a7470bcb1f7ef8a85f0879559fdeb30e45855666c4784334a7c92579bbf0",
         "tag": null
       },
@@ -94,10 +98,6 @@
       },
       {
         "sha256": "c16d74d1b8c5d0cf9faef3857c44f611046f548541dea5ba2abd4eadf580c10c",
-        "tag": null
-      },
-      {
-        "sha256": "ce22acce7b3f3008b609fcab9c19384324dcdb4b3c4921f29a4195f460a5399d",
         "tag": null
       }
     ],
@@ -114,7 +114,7 @@
       },
       {
         "sha256": "f826fb1a8fb4085f62b4db2f003169d0ecaf30e17a95919291d95627fe138e44",
-        "tag": null
+        "tag": "v0.32.0"
       }
     ]
   }
