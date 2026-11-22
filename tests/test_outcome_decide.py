@@ -1,5 +1,6 @@
 import datetime as dt
 import json
+import os
 
 import pytest
 
@@ -121,6 +122,8 @@ def test_equal_plan_tracks_no_new_decision_on_unrelated_main_commit(seeded, writ
     plan, _previous, _ = writer_script.verify_artifact(seeded.ev, main, artifact, WRITER_NOW)
     assert plan.state == "equal"
     monkeypatch.setattr(writer_script.Publisher, "auto", lambda *_: pytest.fail("equal plan tried to publish"))
+    monkeypatch.setattr(writer_script.Publisher, "_decision", lambda *_: ("create", None))
+    monkeypatch.setattr(writer_script.Publisher, "_gh", lambda *_: pytest.fail("no obsolete PR to close"))
     writer_script.publish(seeded.ev, main, artifact, WRITER_NOW)
 
 
@@ -184,23 +187,26 @@ def test_queued_automatic_pull_has_no_side_effects(seeded, writer_script, monkey
     assert "in the merge queue" in capsys.readouterr().out
 
 
-def test_automatic_pull_pushes_dispatches_and_enables_auto_merge(seeded, writer_script, monkeypatch):
+@pytest.mark.parametrize("existing", [False, True], ids=["create", "update"])
+def test_automatic_pull_pushes_dispatches_and_enables_auto_merge(seeded, writer_script, monkeypatch, existing):
     publisher = writer_script.Publisher(seeded.ev, seeded.c0)
     calls = []
-    monkeypatch.setattr(publisher, "_decision", lambda _: ("create", None))
+    pull = {"number": 6} if existing else None
+    monkeypatch.setattr(publisher, "_decision", lambda _: ("update" if existing else "create", pull))
     monkeypatch.setattr(publisher, "_push", lambda *args: calls.append(("push", *args)))
-    monkeypatch.setattr(publisher, "_open", lambda *args: {"number": 6})
+    monkeypatch.setattr(publisher, "_open", lambda *args: calls.append(("open", args[0])) or {"number": 6})
     monkeypatch.setattr(publisher, "_gh", lambda *args: calls.append(args))
     publisher.auto(seeded.c0)
     assert calls == [
-        ("push", writer.AUTO_BRANCH, seeded.c0, None),
+        ("push", writer.AUTO_BRANCH, seeded.c0, pull),
+        *([] if existing else [("open", writer.AUTO_BRANCH)]),
         ("workflow", "run", "ci.yml", "--repo", seeded.ev.slug, "--ref", writer.AUTO_BRANCH),
         ("pr", "merge", "6", "--repo", seeded.ev.slug, "--auto", "--squash", "--match-head-commit", seeded.c0),
     ]
 
 
-def qualifying(world):
-    first = world.commit({SUBJECT: WORSE}, T % (21, "03:00:00Z"))
+def qualifying(world, skill_text=WORSE):
+    first = world.commit({SUBJECT: skill_text}, T % (21, "03:00:00Z"))
     second = world.touch_skill_json(1, T % (21, "04:00:00Z"))
     world.gh.passed(first, done=T % (21, "03:10:00Z"))
     world.gh.passed(second, done=T % (21, "04:10:00Z"))
@@ -316,16 +322,21 @@ def test_cli_dry_run_only_reads_main(seeded, monkeypatch, capsys):
     assert (seeded.root / outcome_ledger.LEDGER_PATH).read_bytes() == before
 
 
-def test_work_brief_summarizes_committed_ledger_only(seeded, monkeypatch, capsys):
+@pytest.mark.parametrize("origin", [None, "https://github.com/example/ledger-fork.git"])
+def test_work_brief_summarizes_committed_ledger_only(seeded, monkeypatch, capsys, origin):
     from brigade import ci_attestation
     from brigade.work_cmd.session import briefing
 
     qualifying(seeded)
+    if origin:
+        seeded.git("remote", "add", "origin", origin)
     (seeded.root / outcome_ledger.LEDGER_PATH).write_text("uncommitted content\n", encoding="utf-8")
     monkeypatch.setattr(ci_attestation, "default_gh_api", lambda *_: pytest.fail("work brief looked up GitHub"))
     assert briefing.brief(target=seeded.root) == 0
     [line] = [line for line in capsys.readouterr().out.splitlines() if line.startswith("ledger:")]
     assert line.startswith("ledger: note candidate (2 helped), 1 awaiting owner (https://github.com/")
+    slug = "example/ledger-fork" if origin else writer.REPO_SLUG
+    assert f"https://github.com/{slug}/pulls?" in line
     assert "ledger%2Fapprove%2Fnote-" in line
 
 
@@ -351,3 +362,157 @@ def test_existing_current_approval_recovers_a_missing_ci_dispatch(seeded, writer
     publisher.approval(raw, proposed, approval, WRITER_NOW + dt.timedelta(minutes=3))
     assert len(api_calls) == 1 and f"head_sha={head}" in api_calls[0]
     assert dispatched == [approval.branch]
+
+
+@pytest.mark.parametrize("contents", [None, "{broken"], ids=["absent", "malformed"])
+def test_existing_approval_rebuilds_unreadable_head(seeded, writer_script, monkeypatch, contents):
+    main, raw, proposed = qualifying(seeded)
+    [approval] = writer.approvals(proposed)
+    head = seeded.commit({outcome_ledger.LEDGER_PATH: contents}, T % (21, "06:19:00Z"))
+    pull = {"number": 13, "head": {"sha": head}}
+    publisher = writer_script.Publisher(seeded.ev, main)
+    monkeypatch.setattr(publisher, "_decision", lambda _: ("update", pull))
+    pushes = []
+    calls = []
+    monkeypatch.setattr(publisher, "_push", lambda *args: pushes.append(args))
+    monkeypatch.setattr(publisher, "_gh", lambda *args, **kwargs: calls.append(args))
+    assert not publisher.approval(raw, proposed, approval, WRITER_NOW + dt.timedelta(minutes=2))
+    [(branch, new_head, old_pull)] = pushes
+    assert branch == approval.branch and old_pull == pull
+    candidate = outcome_ledger.parse_ledger(seeded.repo.show(new_head, outcome_ledger.LEDGER_PATH))
+    assert candidate["subjects"]["skill:note"]["approved"][-1]["pr"] == 13
+    assert [call[:2] for call in calls] == [("api", "--method"), ("workflow", "run")]
+
+
+def test_existing_approval_retries_missing_commit(seeded, writer_script):
+    publisher = writer_script.Publisher(seeded.ev, seeded.c0)
+    approval = writer.Approval("skill:note", FP)
+    with pytest.raises(writer_script.RetryPublication, match="head commit is missing locally"):
+        publisher._refresh_approval({"head": {"sha": MAIN}}, b"", approval, WRITER_NOW)
+
+
+def test_approval_body_identifies_truncated_diff(seeded, writer_script):
+    main, _, proposed = qualifying(seeded, skill_text=WORSE + ("long line\n" * 2500) + "end of diff\n")
+    [approval] = writer.approvals(proposed)
+    body = writer_script.approval_body(seeded.ev, proposed, approval)
+    link = f"https://github.com/{seeded.ev.slug}/compare/{seeded.c0}...{main}"
+    assert f"Diff truncated. See the [full comparison]({link})." in body
+    assert f"Changed files\n\n    {SUBJECT}\n" in body
+    assert f"fingerprint `{approval.fingerprint}`" in body
+    assert "end of diff" not in body
+
+
+def test_publish_equal_closes_auto_and_opens_approval(seeded, writer_script, tmp_path, monkeypatch):
+    main, _, proposed = qualifying(seeded)
+    [approval] = writer.approvals(proposed)
+    now = WRITER_NOW + dt.timedelta(minutes=2)
+    artifact = tmp_path / "plan"
+    writer_script.compute(seeded.ev, main, artifact, now)
+    publisher = writer_script.Publisher
+    auto = {"number": 9}
+    monkeypatch.setattr(
+        publisher, "_decision", lambda _, branch: ("update", auto) if branch == writer.AUTO_BRANCH else ("create", None)
+    )
+    monkeypatch.setattr(publisher, "_check_main", lambda self: None)
+    monkeypatch.setattr(
+        publisher,
+        "_open",
+        lambda _, branch, *_args: {"number": 13} if branch == approval.branch else pytest.fail("unexpected PR"),
+    )
+    calls = []
+    pushes = []
+    monkeypatch.setattr(publisher, "_gh", lambda _, *args: calls.append(args))
+    monkeypatch.setattr(publisher, "_push", lambda _, *args: pushes.append(args))
+    writer_script.publish(seeded.ev, main, artifact, now)
+    assert calls == [
+        (
+            "pr",
+            "close",
+            "9",
+            "--repo",
+            seeded.ev.slug,
+            "--comment",
+            "Closing this automatic proposal because the recomputed ledger matches main.",
+        ),
+        ("workflow", "run", "ci.yml", "--repo", seeded.ev.slug, "--ref", approval.branch),
+    ]
+    assert [branch for branch, _, _ in pushes] == [approval.branch, approval.branch]
+    raw = seeded.repo.show(pushes[-1][1], outcome_ledger.LEDGER_PATH)
+    assert outcome_ledger.parse_ledger(raw)["subjects"][approval.key]["approved"][-1]["pr"] == 13
+
+
+def test_publish_creates_one_approval_and_skips_invalid_subject(seeded, writer_script, monkeypatch, tmp_path, capsys):
+    main, raw, proposed = qualifying(seeded)
+    body = proposed["subjects"]["skill:note"]
+    proposed["subjects"].update({"skill:Bad.Name": body, "skill:other": body})
+    plan = writer.Plan(main, "equal", "test plan", proposed)
+    monkeypatch.setattr(writer_script, "verify_artifact", lambda *_: (plan, raw, None))
+    publisher = writer_script.Publisher
+    monkeypatch.setattr(publisher, "close_obsolete_auto", lambda _: None)
+    monkeypatch.setattr(publisher, "_decision", lambda *_: ("create", None))
+    opened = []
+    monkeypatch.setattr(publisher, "_open", lambda _, branch, *_args: opened.append(branch) or {"number": 13})
+    monkeypatch.setattr(publisher, "_push", lambda *_: None)
+    monkeypatch.setattr(publisher, "_dispatch", lambda *_: None)
+    writer_script.publish(seeded.ev, main, tmp_path, WRITER_NOW)
+    assert opened == [writer.approval_branch("skill:note", body["current"]["fingerprint"])]
+    assert "LedgerError: subject 'skill:Bad.Name' cannot be encoded" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("damage", ["extra", "metadata", "missing"])
+def test_verify_artifact_rejects_changed_file_set_or_plan(seeded, writer_script, tmp_path, damage):
+    main = seeded.commit({SUBJECT: WORSE}, T % (21, "04:00:00Z"))
+    seeded.gh.failed(main, done=T % (21, "04:10:00Z"))
+    artifact = tmp_path / "artifact"
+    writer_script.compute(seeded.ev, main, artifact, WRITER_NOW)
+    message = "artifact files disagree"
+    if damage == "extra":
+        (artifact / "extra").touch()
+    elif damage == "metadata":
+        (artifact / "plan.json").write_text(json.dumps({"main": main, "state": "equal"}))
+        message = "plan state disagrees"
+    else:
+        (artifact / SUBJECT).unlink()
+    with pytest.raises(writer_script.PublicationError, match=message):
+        writer_script.verify_artifact(seeded.ev, main, artifact, WRITER_NOW)
+
+
+@pytest.mark.parametrize("race", [None, "queue", "lease"])
+def test_push_real_lease_and_queue_recheck(seeded, writer_script, tmp_path, monkeypatch, race):
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    remote = tmp_path / "origin.git"
+    seeded.git("init", "--bare", str(remote))
+    seeded.git("remote", "add", "origin", str(remote))
+    main = seeded.repo.resolve("HEAD")
+    old = seeded.c0
+    ref = f"refs/heads/{writer.AUTO_BRANCH}"
+    seeded.git("push", "origin", f"{main}:refs/heads/main", f"{old}:{ref}")
+    publisher = writer_script.Publisher(seeded.ev, main)
+    pull = {"number": 9, "head": {"sha": old}, "node_id": "test-node"}
+    monkeypatch.setattr(publisher, "_ref", lambda branch: main if branch == "main" else old)
+    monkeypatch.setattr(writer, "branch_prs", lambda *_: [{**pull, "state": "open"}])
+    queue_checks = []
+
+    def graphql(*args):
+        assert args[:2] == ("api", "graphql")
+        queue_checks.append(args)
+        if race == "lease" and len(queue_checks) == 2:
+            seeded.git("push", "origin", f"{main}:{ref}")
+        row = {"state": "OPEN", "headRefOid": old, "isInMergeQueue": race == "queue" and len(queue_checks) == 2}
+        return json.dumps({"data": {"node": row}}).encode()
+
+    monkeypatch.setattr(publisher, "_gh", graphql)
+    action, live_pull = publisher._decision(writer.AUTO_BRANCH)
+    assert action == "update"
+    if race == "queue":
+        with pytest.raises(writer_script.RetryPublication, match="in the merge queue"):
+            publisher._push(writer.AUTO_BRANCH, main, live_pull)
+    elif race == "lease":
+        # The candidate would rewind the concurrently advanced branch without the lease.
+        with pytest.raises(writer_script.PublicationError, match="stale info"):
+            publisher._push(writer.AUTO_BRANCH, old, live_pull)
+    else:
+        publisher._push(writer.AUTO_BRANCH, main, live_pull)
+    assert len(queue_checks) == 2
+    assert seeded.git("ls-remote", "origin", ref).split()[0] == (old if race == "queue" else main)

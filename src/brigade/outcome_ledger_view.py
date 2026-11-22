@@ -44,7 +44,8 @@ def brief_line(target: Path) -> str:
             subjects.append(f"{remaining} more")
         awaiting = planner.approvals(payload)
         if awaiting:
-            url = planner.approval_search(planner.REPO_SLUG, awaiting[0].branch)
+            slug = ci_attestation.repo_slug(target) or planner.REPO_SLUG
+            url = planner.approval_search(slug, awaiting[0].branch)
             subjects.append(f"{len(awaiting)} awaiting owner ({url})")
         return "ledger: " + ", ".join(subjects)
     except GitError:

@@ -39,3 +39,20 @@ def test_outcome_decide_actions_are_pinned_and_shell_runs_are_inert():
     assert all("python3 -I -S scripts/ledger_decide.py" in command for command in runs)
     assert "scripts/ledger_decide.py compute" in runs[0]
     assert "scripts/ledger_decide.py publish" in runs[1]
+
+
+def test_outcome_decide_artifact_handoff_matches():
+    settings = []
+    for job_name, action in (("compute", "upload"), ("publish", "download")):
+        job = _workflow_job_section(WORKFLOW, job_name)
+        [pairs] = re.findall(
+            rf"^      - uses: actions/{action}-artifact@[^\n]+\n"
+            r"        with:\n"
+            r"          name: ([^\n]+)\n"
+            r"          path: ([^\n]+)$",
+            job,
+            re.MULTILINE,
+        )
+        settings.append(pairs)
+        assert '--artifact "$RUNNER_TEMP/ledger-plan"' in job
+    assert settings[0] == settings[1] == ("outcome-ledger-plan", "${{ runner.temp }}/ledger-plan/")

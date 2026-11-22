@@ -301,14 +301,39 @@ class Publisher:
             commit,
         )
 
+    def close_obsolete_auto(self) -> None:
+        branch = planner.AUTO_BRANCH
+        _, pull = self._decision(branch)
+        if pull is None:
+            return
+        self._check_main()
+        self._gh(
+            "pr",
+            "close",
+            str(pull["number"]),
+            "--repo",
+            self.ev.slug,
+            "--comment",
+            "Closing this automatic proposal because the recomputed ledger matches main.",
+        )
+
     def _refresh_approval(
         self, pull: dict[str, Any], previous_raw: bytes, approval: planner.Approval, now: dt.datetime
     ) -> bool:
         # Full-history checkout fetches the existing approval branches from origin.
-        raw = self.ev.repo.show(pull["head"]["sha"], ledger.LEDGER_PATH)
+        try:
+            head = self.ev.repo.resolve(pull["head"]["sha"])
+        except GitError:
+            raise RetryPublication("the approval head commit is missing locally") from None
+        raw = self.ev.repo.show(head, ledger.LEDGER_PATH)
         if raw is None:
-            raise RetryPublication("the existing approval head is not available in this checkout")
-        prior = ledger.parse_ledger(raw)
+            say("the approval head has no ledger. Rebuilding the branch.")
+            return True
+        try:
+            prior = ledger.parse_ledger(raw)
+        except ledger.LedgerError:
+            say("the approval head has an unreadable ledger. Rebuilding the branch.")
+            return True
         cutoff = parse_time(prior["covers"]["cutoff_at"])
         approved = prior["subjects"].get(approval.key, {}).get("approved", [])
         has_row = any(
@@ -322,18 +347,31 @@ class Publisher:
         )
 
     def approval(
-        self, previous_raw: bytes, proposed: dict[str, Any], approval: planner.Approval, now: dt.datetime
-    ) -> None:
-        branch = approval.branch
+        self,
+        previous_raw: bytes,
+        proposed: dict[str, Any],
+        approval: planner.Approval,
+        now: dt.datetime,
+        *,
+        allow_create: bool = True,
+    ) -> bool:
+        """Publish or refresh an approval and report whether a new PR was opened."""
+        try:
+            branch = approval.branch
+        except ledger.LedgerError as exc:
+            say(f"LedgerError: {exc}")
+            return False
         title = f"chore(outcome): approve {approval.key.removeprefix('skill:')} {approval.fingerprint[:12]}"
         action, pull = self._decision(branch)
         if action in {"closed", "queued"}:
             say(f"{branch} is {action}. Leaving its branch alone.")
-            return
+            return False
         if pull is not None and not self._refresh_approval(pull, previous_raw, approval, now):
             say(f"{branch} already has a current approval pull request")
             self._dispatch_if_missing(branch, pull["head"]["sha"])
-            return
+            return False
+        if pull is None and not allow_create:
+            return False
         body = approval_body(self.ev, proposed, approval)
 
         def build(number: int) -> str:
@@ -369,6 +407,7 @@ class Publisher:
             )
         say(f"owner approval requested in pull request #{pull['number']}")
         self._dispatch(branch)
+        return not existing
 
 
 def approval_body(ev: ledger.Evidence, proposed: dict[str, Any], approval: planner.Approval) -> str:
@@ -380,8 +419,18 @@ def approval_body(ev: ledger.Evidence, proposed: dict[str, Any], approval: plann
         "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", source, target, "--", directory
     ).stdout.decode("utf-8", "replace")
     # Indentation keeps all bundle text inside a Markdown code block.
-    diff = "\n".join(f"    {line}" for line in change[:22000].splitlines())
+    diff_limit = 22000
+    diff = "\n".join(f"    {line}" for line in change[:diff_limit].splitlines())
     compare = f"https://github.com/{ev.slug}/compare/{source}...{target}"
+    comparison = (
+        f"Diff truncated. See the [full comparison]({compare})."
+        if len(change) > diff_limit
+        else f"[Full comparison]({compare})"
+    )
+    names = ev.repo._run(
+        "--literal-pathspecs", "diff", "--name-only", "--no-renames", source, target, "--", directory
+    ).stdout.decode("utf-8", "replace")
+    files = "\n".join(f"    {path}" for path in names.splitlines())
     rows = ["| Commit | Verdict | Jobs |", "| --- | --- | --- |"]
     for trial in subject["trials"]:
         if trial["fingerprint"] != approval.fingerprint:
@@ -400,7 +449,9 @@ def approval_body(ev: ledger.Evidence, proposed: dict[str, Any], approval: plann
         f"Requests owner approval for `{approval.key}` at fingerprint `{approval.fingerprint}`.\n\n"
         "Review the final head, then rerun failed CI jobs after submitting the approval if recompute ran before the review. "
         "Once CI passes, add this pull request to the merge queue.\n\n"
-        f"## Bundle diff\n\n[Full comparison]({compare})\n\n{diff}\n\n## Attest trials\n\n{trials}\n"
+        "## Bundle diff\n\n"
+        f"Changed files\n\n{files}\n\n"
+        f"{comparison}\n\n{diff}\n\n## Attest trials\n\n{trials}\n"
     )
 
 
@@ -415,9 +466,12 @@ def publish(ev: ledger.Evidence, main: str, artifact: Path, now: dt.datetime) ->
         publisher.auto(commit)
         return
     say("the automatic ledger matches main")
+    publisher.close_obsolete_auto()
     assert previous_raw is not None
+    created = False
     for approval in planner.approvals(plan.proposed):
-        publisher.approval(previous_raw, plan.proposed, approval, now)
+        if publisher.approval(previous_raw, plan.proposed, approval, now, allow_create=not created):
+            created = True
 
 
 def main() -> int:

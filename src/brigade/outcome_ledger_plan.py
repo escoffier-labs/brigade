@@ -42,8 +42,10 @@ class Approval:
 
 
 def approval_branch(key: str, fingerprint: str) -> str:
-    if not re.fullmatch(r"skill:[a-z0-9][a-z0-9_-]*", key) or not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
-        raise ledger.LedgerError("invalid subject or fingerprint for an approval branch")
+    if not re.fullmatch(r"skill:[a-z0-9][a-z0-9_-]*", key):
+        raise ledger.LedgerError(f"subject {key!r} cannot be encoded in an approval branch")
+    if not re.fullmatch(r"[0-9a-f]{64}", fingerprint):
+        raise ledger.LedgerError(f"subject {key!r} has an invalid approval fingerprint")
     return f"ledger/approve/{key.removeprefix('skill:')}-{fingerprint[:12]}"
 
 

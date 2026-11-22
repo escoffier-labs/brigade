@@ -1,2 +1,2 @@
-- Run the CI outcome ledger writer daily to promote approved skill text, roll back regressions, and request owner approval for qualifying new text.
+- Run the CI outcome ledger writer daily to promote approved skill text, roll back regressions, and request owner approval for qualifying new text. Open at most one new approval pull request per run and close obsolete automatic proposals when the ledger matches main.
 - Add `brigade outcome ledger` with a read-only dry run and summarize the tracked ledger in the work brief.
