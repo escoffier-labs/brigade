@@ -1211,10 +1211,11 @@ def test_reservation_cli_lifecycle_requires_selected_target(tmp_path, monkeypatc
         for auth, expected in [(None, 401), (ADMIN_TOKEN, 403), (other, 403)]:
             status, refused = _request(hub, "POST", "/policy", token=auth, body={"action": "reservation-accept", **ids})
             assert status == expected, refused
-        for action in ("reservation-renew", "reservation-release"):
-            status, refused = _request(hub, "POST", "/policy", token=token, body={"action": action, **ids})
-            assert status == 403, refused
-            assert refused["error"]["code"] == "auth-failed"
+        for auth in (token, ADMIN_TOKEN):
+            for action in ("reservation-renew", "reservation-release"):
+                status, refused = _request(hub, "POST", "/policy", token=auth, body={"action": action, **ids})
+                assert status == 403, (action, refused)
+                assert refused["error"]["code"] == "auth-failed"
 
         def configured_transport(*, admin):
             assert admin is False
@@ -1234,10 +1235,11 @@ def test_reservation_cli_lifecycle_requires_selected_target(tmp_path, monkeypatc
         assert accepted["reservation_id"] == ids["reservation_id"]
         assert run_reservation("accept") == accepted
 
-        for action in ("reservation-renew", "reservation-release"):
-            status, refused = _request(hub, "POST", "/policy", token=other, body={"action": action, **ids})
-            assert status == 403, refused
-            assert refused["error"]["code"] == "auth-failed"
+        for auth in (other, ADMIN_TOKEN):
+            for action in ("reservation-renew", "reservation-release"):
+                status, refused = _request(hub, "POST", "/policy", token=auth, body={"action": action, **ids})
+                assert status == 403, (action, refused)
+                assert refused["error"]["code"] == "auth-failed"
 
         renewed = run_reservation("renew")
         assert renewed["reservation_id"] == ids["reservation_id"]
