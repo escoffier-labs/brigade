@@ -266,6 +266,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet policy pr-rules`
 - `brigade fleet policy preview`
 - `brigade fleet policy quota ingest`
+- `brigade fleet policy reservation accept`
 - `brigade fleet policy reservation release`
 - `brigade fleet policy reservation renew`
 - `brigade fleet policy resolve`

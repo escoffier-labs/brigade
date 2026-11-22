@@ -1,0 +1,1 @@
+- Add a fleet policy reservation accept command so target nodes can accept reservations before renewing or releasing them.

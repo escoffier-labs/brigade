@@ -42,6 +42,63 @@ def test_help_lists_required_subcommands_and_flags(monkeypatch):
         "status",
     ):
         assert name in text
+    assert "Accept, renew, or release a routing reservation." in text
+
+
+def test_reservation_accept_calls_helper_with_ids_and_emits_json(monkeypatch):
+    captured: dict[str, object] = {}
+
+    def _accept(**kwargs: object) -> dict[str, object]:
+        captured.update(kwargs)
+        return {"reservation_id": "reservation-1", "state": "accepted"}
+
+    monkeypatch.setattr("brigade.fleet_client_policy.accept_reservation", _accept)
+    rc, out, err = _run(
+        monkeypatch,
+        [
+            "reservation",
+            "accept",
+            "--reservation-id",
+            "reservation-1",
+            "--decision-id",
+            "decision-1",
+            "--session-id",
+            "session-1",
+            "--json",
+        ],
+    )
+    assert rc == 0
+    assert err == ""
+    assert json.loads(out) == {"reservation_id": "reservation-1", "state": "accepted"}
+    assert captured == {
+        "reservation_id": "reservation-1",
+        "decision_id": "decision-1",
+        "session_id": "session-1",
+    }
+
+
+def test_reservation_accept_json_and_exit_code_on_hub_refusal(monkeypatch):
+    def _refuse(**_kwargs: object) -> dict[str, object]:
+        raise FleetPolicyClientError("auth-failed", "hub returned HTTP 403")
+
+    monkeypatch.setattr("brigade.fleet_client_policy.accept_reservation", _refuse)
+    rc, out, err = _run(
+        monkeypatch,
+        [
+            "reservation",
+            "accept",
+            "--reservation-id",
+            "reservation-1",
+            "--decision-id",
+            "decision-1",
+            "--session-id",
+            "session-1",
+            "--json",
+        ],
+    )
+    assert rc != 0
+    body = json.loads(out or err)
+    assert body["error"] == {"code": "auth-failed", "message": "hub returned HTTP 403"}
 
 
 def test_resolve_json_and_structured_auth_error(monkeypatch):
