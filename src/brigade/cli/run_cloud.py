@@ -47,6 +47,9 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     p_launch.add_argument("--target", type=Path, default=Path("."), help="Workspace with .brigade/cloud state.")
     p_launch.add_argument("--provider", required=True, choices=("codex-cloud", "cursor-cloud", "claude-cloud"))
     p_launch.add_argument("--repo", required=True, help="GitHub owner/repo or https://github.com/owner/repo URL.")
+    p_launch.add_argument(
+        "--branch", help="Codex Cloud base branch. Defaults to the GitHub repository's default branch."
+    )
     p_launch.add_argument("--label", required=True, help="Registry label. Prompt text is never stored.")
     p_launch.add_argument(
         "--prompt-file",
@@ -733,7 +736,7 @@ def _dispatch_launch(args, target: Path) -> int:
             as_json=args.json,
             exit_code=2,
         )
-    if provider == "codex-cloud" and args.auto_create_pr:
+    if (provider == "codex-cloud" and args.auto_create_pr) or (provider != "codex-cloud" and args.branch is not None):
         return _emit_launch_payload(
             {"ok": False, "provider": provider, "label": label, "reason": "unsupported-flag"},
             as_json=args.json,
@@ -763,7 +766,9 @@ def _dispatch_launch(args, target: Path) -> int:
         from .. import codex_cloud
 
         try:
-            codex_result = codex_cloud.launch_task(prompt, target=target, repo=args.repo, label=label)
+            codex_result = codex_cloud.launch_task(
+                prompt, target=target, repo=args.repo, label=label, branch=args.branch
+            )
         except (ValueError, OSError) as exc:
             return _emit_launch_payload(
                 {"ok": False, "provider": provider, "label": label, "reason": str(exc)},
