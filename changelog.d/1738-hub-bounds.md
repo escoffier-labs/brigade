@@ -1,3 +1,0 @@
-- Raise the Worklore import body limit (`POST /work/imports`) from 1 MiB to 5 MiB so a contract-shaped 500-observation batch (about 4.27 MB) is accepted. Other Worklore routes keep 256 KiB, and bodies above 5 MiB still return HTTP 413 with the same error shape (#1738).
-- Filter `list_cloud_leases` active rows and the Grok Bot deck projection in SQLite instead of fetching whole tables, with identical rows and order (#1738).
-- Stop the Hub boards from linking to a `next` page beyond the maximum offset: a page at offset 1,000,000 no longer emits `offset=1000200` (#1738).

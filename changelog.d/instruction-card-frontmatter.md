@@ -1,1 +1,0 @@
-- Restore moved instruction cards whose frontmatter uses a byte-order mark or CRLF line endings.

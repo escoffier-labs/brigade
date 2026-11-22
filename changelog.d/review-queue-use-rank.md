@@ -1,1 +1,0 @@
-- Add `brigade memory review` to order unreviewed cards by interactive open sessions, open days, recent reads and locally cached hub counts. Text and JSON output show the score inputs without changing cards.

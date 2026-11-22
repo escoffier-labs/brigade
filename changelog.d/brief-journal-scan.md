@@ -1,1 +1,0 @@
-- Read the memory-care journal once per metadata plan so health and session briefs avoid repeated decision-file scans while preserving undone-fix refusals.

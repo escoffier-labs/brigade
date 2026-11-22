@@ -1,1 +1,0 @@
-- Stop an `events/subscribe` refresh from recreating or re-keying a subscription when the row it read is dropped by the dispatcher, rotated, or lapsed before the write transaction opens. A stale refresh now issues a fresh verification challenge and retries, so a replacement subscription is never stored without one.
