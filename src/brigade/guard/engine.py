@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import ast
 import bisect
+import io
 import re
+import token as python_token
+import tokenize
 from collections.abc import Iterator
 from typing import NamedTuple
 
@@ -58,6 +62,8 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
     root_index = _SpanSet()
     expanded_secret_spans: set[tuple[int, int]] = set()
     js_fields: set[int] | None = None
+    fstrings = _SpanSet()
+    fstring_fields: set[tuple[int, int]] = set()
 
     pem_searched = False
     pem_closing: re.Match[str] | None = None
@@ -88,7 +94,10 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
                 if js_fields is None:
                     js_fields = set()
                     _js_template_code_position(text, field_positions=js_fields)
-                if not _hostname_context(text, start, end, js_fields):
+                    _index_fstring_hosts(text, line_starts, fstrings, fstring_fields)
+                if (start, end) in fstring_fields:
+                    continue
+                if not fstrings.encloses(start, end) and not _hostname_context(text, start, end, js_fields):
                     continue
             if _inside_ranges(start, end, skipped_ranges):
                 continue
@@ -410,29 +419,11 @@ def _line_at(text: str, start: int, end: int) -> str:
     return text[line_start:] if line_end == -1 else text[line_start:line_end]
 
 
-# An f-string opening quote with no other quote between it and the field.
-_FSTRING_OPEN = re.compile(r"""(?<!\w)(?:[rR]?[fF]|[fF][rR])(?:\"\"\"|'''|"|')[^"'\n]*$""")
-# A second, deliberately small grammar admits completed earlier fields with a
-# quoted subscript key (#1983). Quotes remain forbidden in literal text, and
-# fields must close before the candidate host's field starts. Unsupported
-# expressions keep the existing hostname detection rather than guessing.
-_FSTRING_EARLIER_FIELD = (
-    r"\{\s*[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*"
-    r"""(?:\[\s*(?:'(?:[^'\\\n]|\\[^\n])*'|"(?:[^"\\\n]|\\[^\n])*")\s*\])?\s*\}"""
-)
-_FSTRING_QUOTED_FIELD_OPEN = re.compile(
-    r"""(?<!\w)(?:[rR]?[fF]|[fF][rR])(?:\"\"\"|'''|"|')"""
-    + r"""(?:[^"'{}\\\n]|\\[^"'{}\n]|\{\{|\}\}|"""
-    + _FSTRING_EARLIER_FIELD
-    + r")*$"
-)
+_FSTRING_START = re.compile(r"""(?<!\w)(?:rf|fr|f)(?:\"\"\"|'''|"|')""", re.IGNORECASE)
 # Positions where prose does not put an f-string: line start, '=', a
 # `return` statement, a call paren right after a name, or a bracket opened
 # after '=' or '('.
 _FSTRING_POSITION = re.compile(r"(?:^|=|(?:^|;)\s*return|\w\(|[=(]\s*[\[{])\s*$")
-# The rest of a field after its expression: '=', a conversion, a format spec
-# with at most simple nested fields, then the closing brace.
-_FIELD_CLOSE = re.compile(r"""\s*=?\s*(?:![rsa])?(?::(?:[^{}"'\n]|\{[A-Za-z_][\w.]*\})*)?\}""")
 _HOSTNAME_KEY = r"(?:[a-z][a-z0-9]*[_-])*(?:host|hostname|server|endpoint|domain|url|address)"
 # Receivers whose dotted members are code in practice and implausible as host
 # labels. Words that double as device or service names (context, input, ctx,
@@ -441,25 +432,115 @@ _HOSTNAME_KEY = r"(?:[a-z][a-z0-9]*[_-])*(?:host|hostname|server|endpoint|domain
 _JS_RECEIVER = r"(?:(?:args|argv|options|opts|params|props|this|globalThis)|process\.env)"
 
 
-def _whole_fstring_field(before: str, after: str) -> bool:
-    """Whether a match is the entire expression of one f-string field."""
-    opener = before.rstrip()
-    braces = len(opener) - len(opener.rstrip("{"))
-    # '{{' is a literal brace, so only an odd run opens a replacement field.
-    if braces % 2 == 0:
-        return False
-    stem = opener[:-braces]
-    match = _FSTRING_OPEN.search(stem) or _FSTRING_QUOTED_FIELD_OPEN.search(stem)
-    # The prefix must start a literal in an expression position, not in prose,
-    # another string, or a comment, and the literal must still be open at the brace.
-    if match is None or not _FSTRING_POSITION.search(stem[: match.start()]):
-        return False
-    # `_quote_at` stops at '#' and '//' comments but not at a trailing '/*'.
-    if "/*" in stem[: match.start()]:
-        return False
-    if stem.lstrip().startswith(_LINE_START_COMMENT_PREFIXES) or _quote_at(stem, match.start(), None) is not None:
-        return False
-    return _quote_at(stem, len(stem), None) is not None and bool(_FIELD_CLOSE.match(after))
+def _fstring_operands(tree: ast.Expression) -> Iterator[ast.expr]:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.FormattedValue):
+            yield node.value
+        elif isinstance(node, ast.Call):
+            arguments = [*node.args, *(keyword.value for keyword in node.keywords)]
+            # A separate URL in the call keeps the existing hostname detection.
+            if not any(
+                isinstance(arg, ast.Constant) and isinstance(arg.value, str) and "://" in arg.value for arg in arguments
+            ):
+                yield from arguments
+        elif isinstance(node, ast.Subscript):
+            yield node.slice
+        elif isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            yield node.left
+            yield node.right
+        elif isinstance(node, ast.Compare):
+            yield from node.comparators
+        elif isinstance(node, ast.BoolOp):
+            yield from node.values[1:]
+
+
+def _fstring_expression_spans(source: str, offset: int) -> Iterator[tuple[int, int]]:
+    try:
+        tree = ast.parse(source, mode="eval")
+    except (SyntaxError, RecursionError, UnicodeError):
+        return
+    if isinstance(tree.body, ast.JoinedStr):
+        text_parts = [
+            part.value for part in tree.body.values if isinstance(part, ast.Constant) and isinstance(part.value, str)
+        ]
+        # Quoted URL examples in literal text can have their own braces.
+        if any("://" in part for part in text_parts) and any('"' in part or "'" in part for part in text_parts):
+            return
+    lines = source.split("\n")
+    starts = _line_starts(source)
+    columns: dict[int, list[int]] = {}
+    for operand in _fstring_operands(tree):
+        # Require the whole operand span. A quoted host is a Constant and
+        # a host-shaped substring of a larger expression cannot match here.
+        if not isinstance(operand, (ast.Attribute, ast.BinOp)) or operand.lineno != operand.end_lineno:
+            continue
+        row = operand.lineno - 1
+        start, end = operand.col_offset, operand.end_col_offset
+        assert end is not None
+        if not lines[row].isascii():
+            # AST columns count UTF-8 bytes. The guard matches character offsets.
+            if row not in columns:
+                columns[row] = [index for index, char in enumerate(lines[row]) for _ in char.encode("utf-8")] + [
+                    len(lines[row])
+                ]
+            start, end = columns[row][start], columns[row][end]
+        yield offset + starts[row] + start, offset + starts[row] + end
+
+
+def _index_fstring_hosts(
+    text: str, line_starts: list[int], literals: _SpanSet, expressions: set[tuple[int, int]]
+) -> None:
+    """Index complete Python f-strings once, including nested and multiline fields."""
+    if _FSTRING_START.search(text) is None or re.search(r"\r(?!\n)", text):
+        return
+    outer: tokenize.TokenInfo | None = None
+    depth = 0
+    comment_line = 0
+    try:
+        for item in tokenize.generate_tokens(io.StringIO(text).readline):
+            kind = python_token.tok_name[item.type]
+            line, column = item.start
+            if kind == "FSTRING_START":
+                if depth == 0:
+                    outer = item
+                depth += 1
+                continue
+            if depth:
+                if kind != "FSTRING_END":
+                    continue
+                depth -= 1
+                if depth:
+                    continue
+            elif item.type == python_token.STRING and _FSTRING_START.match(item.string):
+                # Python 3.11 emits the whole f-string as one string token.
+                outer = item
+            else:
+                if item.type == python_token.ERRORTOKEN and not item.string.isspace():
+                    # An unknown delimiter can enclose the remaining source.
+                    return
+                if item.type == python_token.OP:
+                    offset = line_starts[line - 1] + column
+                    if text.startswith(("/*", "<!--", "`"), offset):
+                        return
+                    if item.string == "//":
+                        comment_line = line
+                continue
+
+            assert outer is not None
+            line, column = outer.start
+            prefix = outer.line[:column]
+            if (
+                line != comment_line
+                and not prefix.lstrip().startswith(_LINE_START_COMMENT_PREFIXES)
+                and _FSTRING_POSITION.search(prefix)
+            ):
+                start = line_starts[line - 1] + column
+                end = line_starts[item.end[0] - 1] + item.end[1]
+                literals.add(start, end, "")
+                expressions.update(_fstring_expression_spans(text[start:end], start))
+    except (tokenize.TokenError, SyntaxError, UnicodeError):
+        # Mixed-language text may end lexing early. Keep detection in that tail.
+        return
 
 
 _JS_WORD = re.compile(r"[A-Za-z_$][\w$]*")
@@ -1145,17 +1226,17 @@ def _hostname_context(text: str, start: int, end: int, js_fields: set[int] | Non
     column = start - (text.rfind("\n", 0, start) + 1)
     before, after = line[:column], line[column + end - start :]
     if re.search(r"[a-z][a-z0-9+.-]*://[^\s]*$", before, re.IGNORECASE):
-        # A replacement field holding only the host is an expression even in a
-        # formatted URL (#1918). Any other URL context keeps matching.
-        if _whole_fstring_field(before, after):
-            return False
         if js_fields is not None:
             return not (start in js_fields and bool(re.match(r"\s*\}", after)))
         return not _whole_js_template_field(text[:start], after)
     # These delimiters introduce expressions, including expressions inside
     # interpolated strings. Check them before accepting a surrounding quote.
-    if re.search(r"\bf[\"'][^\n]*\{[^}]*$", _normalized_shell_assignments(before), re.IGNORECASE):
-        return False
+    normalized = _normalized_shell_assignments(before)
+    interpolation = re.search(r"\b(?:rf|fr|f)[\"'][^\n]*\{[^}]*$", normalized, re.IGNORECASE)
+    if interpolation:
+        # A Python-shaped opener absent from the token index may be an example
+        # inside an enclosing multiline string. Retain detection there.
+        return bool(_FSTRING_POSITION.search(normalized[: interpolation.start()]))
     if before.rstrip().endswith(("[", "{")):
         return False
     if _quote_at(line, column, None) is not None:
