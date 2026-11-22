@@ -96,7 +96,11 @@ def list_base_manifests(target: Path, base: BaseResolution) -> list[Path]:
         if not record:
             continue
         _, raw_path = record.split(b"\t", 1)
-        name = raw_path.decode("utf-8", "strict")
+        try:
+            name = raw_path.decode("utf-8", "strict")
+        except UnicodeDecodeError:
+            # A file name that is not UTF-8 cannot be a manifest. Skip it and keep the rest.
+            continue
         if Path(name).parent.as_posix() == "verify/manifests" and name.endswith(".json"):
             paths.append(target / name)
     return sorted(paths)

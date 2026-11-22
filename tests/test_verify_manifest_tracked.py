@@ -246,3 +246,72 @@ def test_origin_master_is_used_when_origin_head_is_dangling(scoreable_target):
     assert error is None
     assert manifest is not None
     assert manifest.manifest_base_reference == "refs/remotes/origin/master"
+
+
+def _git(target: Path, *args: str) -> str:
+    identity = ["-c", "user.name=Test User", "-c", "user.email=test@example.invalid"]
+    return subprocess.run(
+        ["git", *identity, *args], cwd=target, check=True, text=True, capture_output=True
+    ).stdout.strip()
+
+
+def _publish_to_real_origin(target: Path) -> str:
+    """Push HEAD to a bare repository as ``main`` so ``origin/main`` is a real tracking ref."""
+    bare = target.parent / "published.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+    _git(target, "remote", "add", "origin", str(bare))
+    _git(target, "push", "-q", "origin", "HEAD:refs/heads/main")
+    _git(target, "fetch", "-q", "origin")
+    return _git(target, "rev-parse", "refs/remotes/origin/main")
+
+
+def test_manifest_weakened_in_a_commit_ahead_of_origin_main_still_runs_the_base_version(scoreable_target):
+    payload = _write_patch_manifest(scoreable_target, manifest_id="published")
+    published = _publish_to_real_origin(scoreable_target)
+    payload["checks"][0]["command"] = f'{sys.executable} -c "raise SystemExit(0)"'
+    verify_manifest.write_workspace_manifest(scoreable_target, payload)
+    _git(scoreable_target, "commit", "-qam", "weaken the check on the branch")
+    assert _git(scoreable_target, "rev-parse", "HEAD") != published
+    assert _git(scoreable_target, "status", "--porcelain") == ""
+
+    manifest, error = verify_manifest.resolve_manifest(scoreable_target, "published")
+
+    assert error is None
+    assert manifest is not None
+    assert "print('ok')" in str(manifest.checks[0].command)
+    assert manifest.manifest_base_commit == published
+    assert manifest.manifest_base_source == "default_branch"
+    assert manifest.manifest_worktree_modified is True
+
+
+def test_manifest_deleted_or_renamed_on_the_branch_stays_registered(scoreable_target):
+    payload = _write_patch_manifest(scoreable_target, manifest_id="published")
+    subject = payload["subject"]["subject_path"]
+    _publish_to_real_origin(scoreable_target)
+    rel = f"{_WORKSPACE_MANIFESTS_REL.as_posix()}/published.json"
+
+    for change in (
+        ["mv", rel, f"{_WORKSPACE_MANIFESTS_REL.as_posix()}/renamed.json"],
+        ["rm", "-q", "--cached", "-f", "--ignore-unmatch", f"{_WORKSPACE_MANIFESTS_REL.as_posix()}/renamed.json"],
+    ):
+        _git(scoreable_target, *change)
+        _git(scoreable_target, "commit", "-qm", "move or drop the manifest on the branch")
+
+        assert "published" in verify_manifest.registered_manifest_ids(scoreable_target)
+        assert [m.manifest_id for m in verify_manifest.manifests_matching_paths(scoreable_target, [subject])] == [
+            "published"
+        ]
+        manifest, error = verify_manifest.resolve_manifest(scoreable_target, "published")
+        assert error is None
+        assert manifest is not None
+        assert "print('ok')" in str(manifest.checks[0].command)
+        assert "renamed" not in verify_manifest.registered_manifest_ids(scoreable_target)
+
+
+def test_manifest_selector_accepts_a_dot_slash_path(scoreable_target):
+    _write_patch_manifest(scoreable_target, manifest_id="local-patch")
+    manifest, error = verify_manifest.resolve_manifest(
+        scoreable_target, f"./{_WORKSPACE_MANIFESTS_REL.as_posix()}/local-patch.json"
+    )
+    assert error is None
+    assert manifest is not None

@@ -493,7 +493,7 @@ def resolve_manifest(target: Path, manifest_id: str) -> tuple[VerifyManifest | N
         if matches:
             return (matches[0], None) if len(matches) == 1 else (None, f"verify manifest id is ambiguous: {selector}")
         return None, f"{exc.reason}: {exc}"
-    selector_path = selector.replace("\\", "/")
+    selector_path = _normalize_repo_path(selector)
     for path in workspace_paths:
         relative_path = path.relative_to(target).as_posix()
         try:
