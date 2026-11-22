@@ -294,7 +294,7 @@ Synthesis is described in [explicit task batches](run-batch.md#synthesis).
 | `subject_binding` | object | no | Verifier-authored scoreable subject metadata (manifest runs only) |
 | `failure_class` | string | no | Receipt-level #474-style failure class when status is not completed |
 | `failure_kind` | string | no | Receipt-level failure kind paired with `failure_class` |
-| `inherited_test_env` | object | no (additive) | Values of inherited `PYTEST_ADDOPTS` and `PYTEST_PLUGINS` when set, each cut at 2048 characters, plus `pythonpath_set` without exposing `PYTHONPATH`. The values are stored as given, so they can contain local paths. A reused receipt copies this field from the run it reuses |
+| `inherited_test_env` | object | no (additive) | Values of inherited `PYTEST_ADDOPTS` and `PYTEST_PLUGINS` when set, each cut at 2048 characters, plus `pythonpath_set` without exposing `PYTHONPATH`. With plan coverage enabled, `py_set` is true when `PY` was set. A reused receipt copies this field from the run it reuses |
 | `bookkeeping_error` | boolean | no (additive) | Present and `true` when writing logs or the receipt raised. Such a receipt is never `completed`, and its `failure_kind` is `receipt_incomplete` |
 | `verification_contract` | object | no | Declared `brigade.verification_contract.v1` when the verify manifest carried one (#500) |
 | `budget_use` | object | no | Observed latency/token use against the declared verification budget (#500). Hard wall-clock / worker-dispatch enforcement is #593 (`run_budget.*` lifecycle events). |
@@ -326,10 +326,26 @@ boolean `no_tests_ran`. The parser uses the full captured standard output.
 | `declaration_sha256` | string | SHA-256 of the original declaration bytes, present when the declaration was loaded |
 | `base_commit` | string | Commit that supplied the declaration, present when loaded from a Git commit |
 | `fallback_source` | string | Present when the Git base could not be resolved. `default_branch_tip` uses the fetched default branch, `head` uses local HEAD, `worktree` uses the working tree, and `none` means no fallback contained a declaration |
-| `plan_coverage` | string | `not_checked`. The verdict evaluates the recorded command and its results. |
+| `plan_coverage` | string | Legacy field with the value `not_checked`. |
+| `plan` | object | Present when the declaration enables plan coverage. Included in the receipt digest. |
+
+**`gating.plan` object**
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `schema_version` | integer | `1` |
+| `mode` | string | `selective`, `ci_required`, `unconfigured`, `error`, or `not_checked` |
+| `base_commit` | string or null | Commit that supplied the resolved planner configuration |
+| `snapshot_tree` | string or null | Verified Git tree object used as the planner head |
+| `required_files` | array | Sorted repository-relative test file paths |
+| `missing_files` | array | Sorted required paths missing from contributing commands |
+| `run_argv` | array | Full declared argv for a selective plan, otherwise empty |
+| `reason` | string | Detail when the plan requires CI, is unconfigured, or failed |
 
 A reused receipt copies its source verdict when the policy mode, declaration
-digest, and fallback source match. Stop treats a mismatched policy identity
+digest, and fallback source match. With plan coverage enabled, the plan must
+also match the current base and tree, and a planning error prevents reuse.
+Stop treats a mismatched policy identity
 like a missing verdict and accepts those receipts only in audit-only mode.
 See [the verify gate](verify-gate.md) for the declaration and eligibility rules.
 

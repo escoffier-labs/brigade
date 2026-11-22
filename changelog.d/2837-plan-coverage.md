@@ -1,0 +1,1 @@
+- Add opt-in coverage of planned test files to the local verify gate and closeout. Use `brigade work verify required --worktree` to plan against the current Git tree.

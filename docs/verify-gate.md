@@ -36,8 +36,32 @@ The prefix cannot contain backticks, line breaks, or control characters.
 `needs_passed_tests` requires a pytest summary with at least one passed test,
 zero failed, zero errors, and `no_tests_ran` false. Stop prints a suggested
 `--argv-json` invocation for a POSIX shell. When a recent run was stamped
-ineligible, Stop can explain why that run did not count. Receipts record
-`plan_coverage: "not_checked"`.
+ineligible, Stop can explain why that run did not count.
+
+Set `needs_plan_coverage` to `true` to require the tests selected for the
+change. Both `needs_arguments` and `needs_passed_tests` must also be true.
+The flag defaults to false.
+
+A fresh, completed run on a stable tree computes the plan once, when it
+writes the receipt. The planner and its settings come from the resolved
+base. The planner sees the verified tree, including tracked edits and
+untracked files that Git does not ignore. Use
+`brigade work verify required --worktree --json` to preview that plan.
+
+For a selective plan of up to 20 test files, one receipt must cover every
+required file. It can cover them across multiple commands. Each contributing
+command starts with the declared prefix and specifies whole, repository-relative
+test files. The only allowed options are `-q`, `-v`, `-vv`, `-p xdist`,
+`-n`, `--timeout`, `--durations`, and `--tb`, with their required values.
+The command must report at least one pass and zero failures, errors, or
+deselections. Setting `PYTEST_ADDOPTS`, `PYTEST_PLUGINS`, `PYTHONPATH`,
+or `PY` in the environment or on the command prevents it from contributing.
+
+The basic declared check still applies if the plan is full, selects every
+discovered test file, selects more than 20 files, or has no planner configured.
+For broad plans, the stamp identifies required CI on the head commit as the
+check for the change. A planner error leaves the command status intact and
+makes the stamp ineligible. The next run computes a fresh plan.
 
 Without a declaration, a completed receipt can satisfy the gate if it meets
 the session and tree checks, regardless of its stamp. A declared check requires
@@ -47,6 +71,12 @@ used. Verify runs the commands again when a candidate for reuse has a different
 identity. A legacy receipt can be reused in audit-only mode if it otherwise
 meets the reuse checks.
 
+When coverage is enabled, Stop, closeout, and reuse read the saved plan and
+require its base and snapshot tree to match the current ones. A commit that
+preserves both keeps the stamp current. An unresolved base leaves the plan
+unchecked. When files are missing, Stop and closeout give one command with
+all the planned files, since coverage belongs to a single receipt.
+
 Work closeout applies the same policy to the newest applicable receipt for
 the session and current tree. If that receipt fails the policy, closeout
 reports why and shows the `--argv-json` command when it reads a valid declaration.
@@ -54,11 +84,15 @@ Closeout allows up to 60 seconds for policy lookup and blocks if lookup times ou
 
 ## Limits
 
-- A completed manifest run on a stable tree counts whatever the manifest checks,
-  because manifests are read from the trusted base.
-- Any selector passed to the declared command counts once at least one test passes
+- With plan coverage off, a completed manifest run on a stable tree counts
+  whatever the manifest checks, because manifests are read from the trusted base.
+- With plan coverage off, any selector passed to the declared command counts once at least one test passes
   with no failures or errors. A narrow or unrelated selector can satisfy the gate.
   Required CI on the head commit is the backstop.
 - Brigade runs the declared command from the working tree. The gate does not
   compare the script with the copy on the base.
 - With no remote, the base is local `HEAD`.
+- Policy lookup runs the first `git` on `PATH`, so a declared repository
+  reads as undeclared if a stand-in fails the remote and `HEAD` probes and
+  the working-tree declaration is deleted. Required CI on the head commit
+  checks the change independently.
