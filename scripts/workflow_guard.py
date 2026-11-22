@@ -26,6 +26,7 @@ PROTECTED_PATTERNS = (
     "scripts/ci_*",
     "scripts/download_metrics.py",
     "scripts/generate_component_manifest.py",
+    "scripts/ledger_recompute.py",
     "scripts/managed_snapshot.py",
     "scripts/memory_scan_bundle.py",
     "scripts/memory_scan_unicode14_unassigned.ranges",

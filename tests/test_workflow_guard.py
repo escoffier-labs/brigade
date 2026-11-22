@@ -27,6 +27,7 @@ CLI_ARGS = ["--repo", "example/project", "--pr", "42"]
         ".github/workflows/ci.yml",
         ".github/actions/setup/action.yml",
         "scripts/ci_docs_only.py",
+        "scripts/ledger_recompute.py",
         "scripts/pr_test_tiers.json",
         "scripts/pr_tier_selection.py",
         "scripts/workflow_guard.py",
@@ -626,6 +627,22 @@ WORKFLOW_PATH = re.compile(
 )
 
 
+def _extract_workflow_paths(value, directory="."):
+    paths = []
+    for match in WORKFLOW_PATH.finditer(value):
+        raw_path = match["path"].replace("\\", "/").rstrip(".,;:)'\"")
+        root = "." if match["workspace"] or directory == "${{ github.workspace }}" else directory
+        path = normpath(f"{root}/{raw_path}")
+        if path.split("/", 1)[0] in {"scripts", "tests", "registry", "npm"}:
+            is_directory = raw_path.endswith("/") or (ROOT / path).is_dir()
+            paths.append(path + "/" if is_directory else path)
+    return paths
+
+
+def test_workflow_path_extraction_strips_trailing_sentence_punctuation():
+    assert _extract_workflow_paths("no scripts/ledger_recompute.py. The check") == ["scripts/ledger_recompute.py"]
+
+
 @pytest.mark.parametrize(
     "workflow", sorted((*WORKFLOWS.glob("*.yml"), *WORKFLOWS.glob("*.yaml"))), ids=lambda p: p.name
 )
@@ -640,13 +657,7 @@ def test_workflow_referenced_repository_paths_are_protected(workflow):
             inputs.extend((str(value), ".") for value in step.get("with", {}).values())
             inputs.append((step.get("run", ""), step.get("working-directory", job_directory)))
         for value, directory in inputs:
-            for match in WORKFLOW_PATH.finditer(value):
-                raw_path = match["path"].replace("\\", "/")
-                root = "." if match["workspace"] or directory == "${{ github.workspace }}" else directory
-                path = normpath(f"{root}/{raw_path}")
-                if path.split("/", 1)[0] in {"scripts", "tests", "registry", "npm"}:
-                    is_directory = raw_path.endswith("/") or (ROOT / path).is_dir()
-                    paths.add(path + "/" if is_directory else path)
+            paths.update(_extract_workflow_paths(value, directory))
 
     missing = paths - WORKFLOW_PATH_EXEMPTIONS.keys() - set(workflow_guard.protected_paths(list(paths)))
     assert not missing, f"{workflow.name} uses unprotected paths: {', '.join(sorted(missing))}"
