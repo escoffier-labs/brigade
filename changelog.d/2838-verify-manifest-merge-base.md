@@ -1,0 +1,2 @@
+- Load tracked workspace verify manifests from the default branch merge base and stamp receipts when the working copy differs.
+- Allow a new workspace manifest only after it reaches the default branch. Refuse checkouts that have a remote but no resolved default-branch ref. Receipts created before this change may no longer match because the payload hash now covers the base blob bytes.

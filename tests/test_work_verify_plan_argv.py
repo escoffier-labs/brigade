@@ -45,6 +45,13 @@ def _write_manifest(target: Path, commands: list[str | list[str]]) -> None:
         "from pathlib import Path\nPath('verifier-executed').write_text('ran')\n", encoding="utf-8"
     )
     subprocess.run(["git", "add", "verify/manifests/argv-plan.json"], cwd=target, check=True, capture_output=True)
+    # A manifest counts only once it is committed: the loader reads it from the Git base.
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "add manifest"],
+        cwd=target,
+        check=True,
+        capture_output=True,
+    )
 
 
 def _verify(target: Path, *, operation: str = "plan", json_output: bool = True) -> subprocess.CompletedProcess[str]:
