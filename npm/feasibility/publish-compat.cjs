@@ -10,7 +10,7 @@ const path=require('node:path');
 const crypto=require('node:crypto');
 const assert=require('node:assert/strict');
 const {spawnSync}=require('node:child_process');
-const {resolveNpmCli,createVerifier,publishingIdentity}=require('./provenance.cjs');
+const {resolveNpmCli,createVerifier,publishingIdentity,publishingPackageRepositoryUrl,assertPublishingArchiveRepository}=require('./provenance.cjs');
 const {readbackDelays}=require('./readback.cjs');
 function option(name) {
   const index=process.argv.indexOf(name);
@@ -27,6 +27,7 @@ assert.ok(fs.lstatSync(tarball).isFile() && !fs.lstatSync(tarball).isSymbolicLin
 const bytes=fs.readFileSync(tarball);
 const sha512=crypto.createHash('sha512').update(bytes).digest();
 const integrity='sha512-'+sha512.toString('base64');
+assertPublishingArchiveRepository(tarball,publishingPackageRepositoryUrl(process.env));
 const npmCli=resolveNpmCli();
 const tufCache=fs.mkdtempSync(path.join(os.tmpdir(),'brigade-compat-tuf-'));
 const verifier=createVerifier(npmCli,tufCache);
