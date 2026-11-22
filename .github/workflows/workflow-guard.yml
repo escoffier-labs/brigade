@@ -1,5 +1,6 @@
 # Run the pull request check from the default branch so a PR cannot change its own guard.
 # Live test of the guard. This line is not meant to merge.
+# Second commit of the live test.
 # Never check out, import, or execute anything from the pull request.
 name: Workflow guard
 
