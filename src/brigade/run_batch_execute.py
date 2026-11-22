@@ -416,7 +416,7 @@ class BatchExecution:
         if error is None and agent is not None:
             error = read_only_cloud_mutation_error(agent)
         if error is None and agent is not None:
-            error = _read_only_enforcement_error("synthesis", agent, roster, read_only=True)
+            error = read_only_enforcement_error("synthesis", agent, roster, read_only=True)
         if error is None and agent is not None:
             # Exactly the admission the runtime orchestrator call applies, so a
             # seat that would be rejected there refuses before any task launches.
