@@ -1577,25 +1577,60 @@ def _run_stable_update(tmp_path, channel="stable"):
     return result, commands
 
 
-def _migrate(tmp_path, monkeypatch, channel, runner, *, windows=False, venv_entries=()):
-    """Run an update of a brigade-cli pipx app and return (result, paths) with a fake pipx layout."""
+def _make_env(venvs, venv_entries=(), metadata="brigadestack"):
+    """A fake brigadestack pipx environment under ``venvs``; ``metadata`` is the package pipx_metadata.json names."""
+    env = venvs / "brigadestack"
+    venv_bin = update_cmd._venv_bin_dir(venvs)  # bin on POSIX, Scripts on Windows
+    venv_bin.mkdir(parents=True)
+    for name in venv_entries:
+        (venv_bin / name).write_text("#!/bin/sh\n")
+    if metadata == "garbage":
+        (env / "pipx_metadata.json").write_text("not json")
+    elif metadata is not None:
+        (env / "pipx_metadata.json").write_text(json.dumps({"main_package": {"package": metadata}}))
+    return env
+
+
+def _migrate(
+    tmp_path,
+    monkeypatch,
+    channel,
+    runner,
+    *,
+    windows=False,
+    venv_entries=(),
+    metadata="brigadestack",
+    reported=None,
+    capture=None,
+    venvs=None,
+    make_env=True,
+):
+    """Run an update of a brigade-cli pipx app and return (result, paths) with a fake pipx layout.
+
+    By default the venvs directory is configured explicitly. Pass ``capture`` (what `pipx environment` prints)
+    to make the update ask pipx instead, with ``venvs`` as the directory the environment is built under.
+    """
     monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
     monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: windows)
     (tmp_path / "bin").mkdir()
+    venvs = venvs or tmp_path / "venvs"
     paths = update_cmd.UpdatePaths(
         data_root=tmp_path / "data",
         cache_root=tmp_path / "cache",
         brigade_executable=tmp_path / "bin" / "brigade",
-        pipx_venvs=tmp_path / "venvs",
+        pipx_venvs=None if capture is not None else venvs,
     )
-    venv_bin = update_cmd._venv_bin_dir(paths)  # bin on POSIX, Scripts on Windows
-    venv_bin.mkdir(parents=True)
-    for name in venv_entries:
-        (venv_bin / name).write_text("#!/bin/sh\n")
+    if make_env:
+        _make_env(venvs, venv_entries, metadata)
     manifest = _manifest()
     http = _Http(_release(manifest), manifest) if channel == "stable" else _PypiHttp(_release(manifest), manifest)
     result = update_cmd.run_update(
-        channel=channel, paths=paths, http=http, runner=runner, now=lambda: "2026-07-20T12:00:00+00:00"
+        channel=channel,
+        paths=paths,
+        http=http,
+        runner=runner,
+        now=lambda: "2026-07-20T12:00:00+00:00",
+        capture=capture,
     )
     return result, paths
 
@@ -1617,7 +1652,7 @@ def test_update_migrates_a_brigade_cli_install_and_runs_setup_from_the_new_envir
     install = ["pipx", "install", "--force", f"brigadestack=={_version(channel)}"]
     assert commands[:3] == [install, ["pipx", "uninstall", "brigade-cli"], install]
     # Setup runs from the brigadestack environment, not the bin-directory link the removal may have taken.
-    expected = update_cmd._venv_bin_dir(paths) / ("brigade.exe" if os.name == "nt" else "brigade")
+    expected = update_cmd._venv_bin_dir(tmp_path / "venvs") / ("brigade.exe" if os.name == "nt" else "brigade")
     assert commands[3][:2] == [str(expected), "setup"]
     assert str(paths.brigade_executable) not in commands[3]
     assert len(commands) == 4
@@ -1662,7 +1697,7 @@ def test_failed_second_install_relinks_the_launchers_locally_and_records_nothing
     for name in entries:
         link = paths.brigade_executable.parent / name
         assert link.is_symlink()
-        assert link.resolve() == (update_cmd._venv_bin_dir(paths) / name).resolve()
+        assert link.resolve() == (update_cmd._venv_bin_dir(tmp_path / "venvs") / name).resolve()
     assert not list((tmp_path / "bin").glob(".*update-link"))
     err = capsys.readouterr().err
     assert "relinked to the existing brigadestack environment" in err
@@ -1712,30 +1747,8 @@ def test_stable_update_upgrades_a_brigadestack_install_under_its_own_name(tmp_pa
     assert commands[0] == ["pipx", "install", "--force", "brigadestack==1.2.3"]
 
 
-def test_beta_update_resolves_and_installs_brigadestack_even_on_a_brigade_cli_install(tmp_path, monkeypatch):
+def test_beta_update_resolves_brigadestack_wheels_even_on_a_brigade_cli_install():
     # Development wheels are published only for the real package.
-    monkeypatch.setattr(update_cmd, "installed_pypi_project", lambda: "brigade-cli")
-    monkeypatch.setattr(update_cmd, "_pipx_copies_apps", lambda: False)
-    manifest = _manifest()
-    commands = []
-    http = _PypiHttp(_release(manifest), manifest)
-    result = update_cmd.run_update(
-        channel="beta",
-        paths=update_cmd.UpdatePaths(
-            data_root=tmp_path / "data", cache_root=tmp_path / "cache", brigade_executable=tmp_path / "bin" / "brigade"
-        ),
-        http=http,
-        runner=lambda argv: commands.append(argv) or 0,
-        now=lambda: "2026-07-20T12:00:00+00:00",
-    )
-    assert result == 0
-    assert commands[0] == ["pipx", "install", "--force", f"brigadestack=={BETA_VERSION}"]
-    # Install, remove the old app, install again (older pipx removes launchers by name), then
-    # setup; state is written only after all of them.
-    install = ["pipx", "install", "--force", f"brigadestack=={BETA_VERSION}"]
-    assert commands[:3] == [install, ["pipx", "uninstall", "brigade-cli"], install]
-    assert commands[3][1] == "setup"
-    assert len(commands) == 4
     assert update_cmd.PYPI_PROJECT_JSON_URL == "https://pypi.org/pypi/brigadestack/json"
 
 
@@ -1754,6 +1767,123 @@ def test_beta_update_of_a_brigadestack_install_removes_nothing(tmp_path, monkeyp
     )
     assert result == 0
     assert all(command[1] != "uninstall" for command in commands)
+
+
+PIPX_QUERY = ["pipx", "environment", "--value", "PIPX_LOCAL_VENVS"]
+
+
+def _setup_executable(venvs):
+    return update_cmd._venv_bin_dir(venvs) / ("brigade.exe" if os.name == "nt" else "brigade")
+
+
+def _ok(commands):
+    return lambda argv: commands.append(argv) or 0
+
+
+def test_the_pipx_reported_venvs_directory_is_used_and_the_environment_variable_is_ignored(tmp_path, monkeypatch):
+    # pipx derives its venvs directory from PIPX_HOME only; PIPX_LOCAL_VENVS is not an input to it.
+    reported, stale = tmp_path / "reported" / "venvs", tmp_path / "stale" / "venvs"
+    monkeypatch.setenv("PIPX_LOCAL_VENVS", str(stale))
+    _make_env(stale)  # a perfectly valid environment, in the wrong place
+    queries, commands = [], []
+
+    def capture(argv):
+        queries.append(argv)
+        return f"{reported}\n"
+
+    result, _ = _migrate(tmp_path, monkeypatch, "stable", _ok(commands), capture=capture, venvs=reported)
+    assert result == 0
+    assert queries == [PIPX_QUERY]  # an argument list, asked of the configured pipx executable
+    assert commands[3][0] == str(_setup_executable(reported))
+    assert str(stale) not in " ".join(commands[3])
+
+
+def test_the_environment_variable_never_chooses_the_venvs_directory_when_pipx_cannot_be_asked(tmp_path, monkeypatch):
+    home, stale = tmp_path / "home", tmp_path / "stale" / "venvs"
+    monkeypatch.setenv("PIPX_HOME", str(home))
+    monkeypatch.setenv("PIPX_LOCAL_VENVS", str(stale))
+    _make_env(stale)
+    commands = []
+    result, _ = _migrate(
+        tmp_path, monkeypatch, "stable", _ok(commands), capture=lambda argv: None, venvs=home / "venvs"
+    )
+    assert result == 0
+    assert commands[3][0] == str(_setup_executable(home / "venvs"))
+
+
+@pytest.mark.parametrize("reported", ["relative/venvs", "venvs", "./venvs", "", "/a/venvs\n/b/venvs"])
+def test_a_relative_or_malformed_pipx_report_is_rejected(tmp_path, monkeypatch, reported):
+    home = tmp_path / "home"
+    monkeypatch.setenv("PIPX_HOME", str(home))
+    commands = []
+    result, _ = _migrate(
+        tmp_path, monkeypatch, "stable", _ok(commands), capture=lambda argv: reported, venvs=home / "venvs"
+    )
+    assert result == 0
+    # The report is ignored, so the fallback directory is the one setup runs from.
+    assert commands[3][0] == str(_setup_executable(home / "venvs"))
+
+
+def test_the_default_capture_returns_none_when_the_command_cannot_run(tmp_path):
+    assert update_cmd._default_capture([str(tmp_path / "no-such-pipx"), "environment"]) is None
+
+
+@pytest.mark.parametrize("metadata", [None, "garbage", "something-else", "brigade-cli"])
+@pytest.mark.parametrize("channel", ["stable", "beta"])
+def test_an_unverified_environment_is_never_executed_and_nothing_is_recorded(
+    tmp_path, monkeypatch, capsys, channel, metadata
+):
+    commands = []
+    result, paths = _migrate(
+        tmp_path, monkeypatch, channel, _ok(commands), metadata=metadata, venv_entries=("brigade", "brigadestack")
+    )
+    assert result == 1
+    assert all(command[1] != "setup" for command in commands)  # setup was not run from the venv
+    assert str(_setup_executable(tmp_path / "venvs")) not in [command[0] for command in commands]
+    assert _no_state(tmp_path)
+    err = capsys.readouterr().err
+    assert "not running setup from" in err and "pipx_metadata.json" in err
+    assert "no update was recorded" in err
+    assert not (paths.brigade_executable.parent / "brigade").exists()
+
+
+@pytest.mark.parametrize("metadata", [None, "garbage", "something-else"])
+def test_an_unverified_environment_is_not_relinked_after_a_failed_second_install(
+    tmp_path, monkeypatch, capsys, metadata
+):
+    commands = []
+
+    def runner(argv):
+        commands.append(argv)
+        return 1 if len(commands) == 3 else 0
+
+    entries = ("brigade", "brigadestack", "brigade-hook")
+    result, paths = _migrate(tmp_path, monkeypatch, "stable", runner, venv_entries=entries, metadata=metadata)
+    assert result == 1
+    assert len(commands) == 3 and _no_state(tmp_path)
+    for name in entries:
+        assert not (paths.brigade_executable.parent / name).exists()
+        assert not (paths.brigade_executable.parent / name).is_symlink()
+    assert "no brigadestack environment could be relinked" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(os.name == "nt", reason="symbolic links need privileges on Windows")
+def test_a_symlinked_environment_directory_is_not_trusted(tmp_path, monkeypatch, capsys):
+    (tmp_path / "venvs").mkdir()
+    # A complete, valid-looking environment that is reached through a link.
+    real = _make_env(tmp_path / "real")
+    (tmp_path / "venvs" / "brigadestack").symlink_to(real, target_is_directory=True)
+    commands = []
+    result, _ = _migrate(tmp_path, monkeypatch, "stable", _ok(commands), make_env=False)
+    assert result == 1
+    assert all(command[1] != "setup" for command in commands) and _no_state(tmp_path)
+    assert "is a symbolic link" in capsys.readouterr().err
+
+
+def test_env_verification_accepts_only_a_brigadestack_environment(tmp_path):
+    assert update_cmd._brigadestack_env_problem(tmp_path / "venvs") is not None  # nothing there
+    _make_env(tmp_path / "venvs")
+    assert update_cmd._brigadestack_env_problem(tmp_path / "venvs") is None
 
 
 @pytest.mark.parametrize("package", ["brigade-cli", "brigadestack"])

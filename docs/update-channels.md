@@ -45,8 +45,13 @@ it over a working CLI. Development wheels are published only as `brigadestack`, 
 why the beta channel never installs `brigade-cli`. On a machine whose pipx app is named
 `brigade-cli`, the update installs `brigadestack`, removes the `brigade-cli` app, installs
 `brigadestack` again (older pipx removes launchers by name), and only then runs setup, from the
-`brigadestack` pipx environment, and records the update. The update is recorded only when the old
-app is gone:
+`brigadestack` pipx environment, and records the update, and it records only when the old
+app is gone. The `brigadestack` environment is found by asking the configured pipx
+(`pipx environment --value PIPX_LOCAL_VENVS`, which must be an absolute path), falling back to
+`PIPX_HOME/venvs` and the default locations; the `PIPX_LOCAL_VENVS` environment variable is not
+read, because pipx ignores it. Setup is run from, and launchers are relinked to, that environment
+only when its `pipx_metadata.json` names `brigadestack` as the main package and the directory is not
+a symbolic link; otherwise the update stops without running or linking anything and records nothing.
 
 - If removing the old app fails, the update does not run setup and records nothing. It prints the
   commands to finish (`pipx uninstall brigade-cli ; pipx install --force brigadestack==<version>`)

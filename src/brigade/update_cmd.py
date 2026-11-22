@@ -89,8 +89,8 @@ class UpdatePaths:
     cache_root: Path
     brigade_executable: Path
     pipx_executable: str = "pipx"
-    # pipx's local venvs directory. Only the brigade-cli migration reads it, to run setup from and
-    # relink to the new brigadestack environment; None means the pipx default for this machine.
+    # pipx's local venvs directory. Only the brigade-cli migration uses it, to run setup from and
+    # relink to the new brigadestack environment. None asks the configured pipx executable.
     pipx_venvs: Path | None = None
 
 
@@ -225,10 +225,18 @@ def default_paths() -> UpdatePaths:
     return UpdatePaths(data_root=Path(roots), cache_root=Path(cache), brigade_executable=executable)
 
 
-def _default_pipx_venvs() -> Path:
-    explicit = os.environ.get("PIPX_LOCAL_VENVS")
-    if explicit:
-        return Path(explicit)
+def _default_capture(argv: list[str]) -> str | None:
+    """Run a read-only query (argument list, no shell) and return its stdout, or None when it fails."""
+    try:
+        result = subprocess.run(argv, check=False, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def _fallback_pipx_venvs() -> Path:
+    # PIPX_LOCAL_VENVS is deliberately not read: pipx derives its venvs directory from PIPX_HOME only
+    # and ignores that variable as an input, so a stale or attacker-set value would name an unrelated tree.
     home = os.environ.get("PIPX_HOME")
     if home:
         return Path(home) / "venvs"
@@ -236,21 +244,55 @@ def _default_pipx_venvs() -> Path:
     return legacy if legacy.is_dir() else Path.home() / ".local" / "share" / "pipx" / "venvs"
 
 
-def _venv_bin_dir(paths: UpdatePaths) -> Path:
+def _resolve_pipx_venvs(paths: UpdatePaths, capture: Callable[[list[str]], str | None]) -> Path:
+    """Where pipx keeps its environments: the configured value, else what pipx itself reports.
+
+    Falls back to PIPX_HOME/venvs and then the default locations when pipx cannot be asked or reports
+    something that is not an absolute path.
+    """
+    if paths.pipx_venvs is not None:
+        return paths.pipx_venvs
+    reported = capture([paths.pipx_executable, "environment", "--value", "PIPX_LOCAL_VENVS"])
+    lines = reported.strip().splitlines() if reported else []
+    if len(lines) == 1 and Path(lines[0].strip()).is_absolute():
+        return Path(lines[0].strip())
+    return _fallback_pipx_venvs()
+
+
+def _venv_bin_dir(venvs: Path) -> Path:
     """The ``bin`` (``Scripts`` on Windows) directory of the brigadestack pipx environment."""
-    return (paths.pipx_venvs or _default_pipx_venvs()) / PYPI_PROJECT / ("Scripts" if os.name == "nt" else "bin")
+    return venvs / PYPI_PROJECT / ("Scripts" if os.name == "nt" else "bin")
 
 
-def _restore_launchers(paths: UpdatePaths) -> bool:
+def _brigadestack_env_problem(venvs: Path) -> str | None:
+    """Why the brigadestack environment under ``venvs`` must not be executed or linked to, or None.
+
+    The directory only counts when pipx made it for the brigadestack package: a real directory whose
+    pipx_metadata.json names brigadestack as its main package.
+    """
+    env_dir = venvs / PYPI_PROJECT
+    if env_dir.is_symlink():
+        return f"{env_dir} is a symbolic link"
+    metadata = env_dir / "pipx_metadata.json"
+    try:
+        package = json.loads(metadata.read_text(encoding="utf-8"))["main_package"]["package"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return f"{metadata} is missing or unreadable"
+    if package != PYPI_PROJECT:
+        return f"{metadata} names {package!r} as its main package, not {PYPI_PROJECT!r}"
+    return None
+
+
+def _restore_launchers(paths: UpdatePaths, venvs: Path) -> bool:
     """Relink brigade, brigadestack and brigade-hook to the brigadestack environment without the network.
 
     These are the links pipx makes. They are all that is left to restore when the install that follows
-    removing the old brigade-cli app fails, so the user keeps a working `brigade`. Returns False when
-    the environment has no `brigade` entry to link to.
+    removing the old brigade-cli app fails, so the user keeps a working `brigade`. Returns False, linking
+    nothing, when the environment is not a verified brigadestack environment or has no `brigade` entry.
     """
-    venv_bin = _venv_bin_dir(paths)
+    venv_bin = _venv_bin_dir(venvs)
     bin_dir = paths.brigade_executable.parent
-    if _pipx_copies_apps() or not (venv_bin / "brigade").is_file():
+    if _pipx_copies_apps() or _brigadestack_env_problem(venvs) or not (venv_bin / "brigade").is_file():
         return False
     for name in ("brigade", "brigadestack", "brigade-hook"):
         source = venv_bin / name
@@ -806,6 +848,7 @@ def run_update(
     runner: Callable[[list[str]], Any] | None = None,
     now: Callable[[], str] = localio.utc_now_iso,
     pid_alive: Callable[[int], bool] | None = None,
+    capture: Callable[[list[str]], str | None] | None = None,
 ) -> int:
     """Update CLI, then publish state after native component setup succeeds."""
     if distribution.is_npm():
@@ -820,6 +863,7 @@ def run_update(
     selected_paths = paths or default_paths()
     selected_http = http or _DefaultHttp()
     selected_runner = runner or _default_runner
+    selected_capture = capture or _default_capture
     state_path = Path(component_paths.update_state_path(str(selected_paths.data_root)))
     lock_path = Path(component_paths.update_lock_path(str(selected_paths.data_root)))
     try:
@@ -875,9 +919,10 @@ def run_update(
             )
             # A migration runs setup from the brigadestack environment itself, not from whichever
             # `brigade` link the pipx bin directory holds after the old app's removal.
+            venvs = _resolve_pipx_venvs(selected_paths, selected_capture) if retire_legacy else None
             setup_executable = (
-                _venv_bin_dir(selected_paths) / ("brigade.exe" if os.name == "nt" else "brigade")
-                if retire_legacy
+                _venv_bin_dir(venvs) / ("brigade.exe" if os.name == "nt" else "brigade")
+                if venvs is not None
                 else selected_paths.brigade_executable
             )
             setup_command = [str(setup_executable), "setup", "--manifest", str(cached_manifest_path)]
@@ -902,6 +947,13 @@ def run_update(
             for command in commands:
                 if retire_failed and command is setup_command:
                     break  # only the restoring install ran; the migration is not finished
+                if command is setup_command and venvs is not None:
+                    problem = _brigadestack_env_problem(venvs)
+                    if problem:
+                        raise UpdateError(
+                            f"not running setup from {setup_executable}: {problem}. Setup was not run and no "
+                            "update was recorded; check where pipx keeps its environments and run brigade update again"
+                        )
                 if _returncode(selected_runner(command)) == 0:
                     if command is retire_command:
                         retired = True
@@ -911,7 +963,7 @@ def run_update(
                     retire_failed = True
                     continue
                 if retired and command is install_command:
-                    restored = _restore_launchers(selected_paths)
+                    restored = _restore_launchers(selected_paths, venvs) if venvs is not None else False
                     raise UpdateError(
                         f"update command failed: {' '.join(command)}. The old {LEGACY_PYPI_PROJECT} app is already "
                         + (
