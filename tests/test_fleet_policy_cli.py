@@ -43,6 +43,11 @@ def test_help_lists_required_subcommands_and_flags(monkeypatch):
     ):
         assert name in text
     assert "Accept, renew, or release a routing reservation." in text
+    rc, reservation_help, reservation_err = _run(monkeypatch, ["reservation", "--help"])
+    assert rc == 0
+    assert "Accept a routing reservation. Its slot stays held until release." in " ".join(
+        (reservation_help + reservation_err).split()
+    )
 
 
 def test_reservation_accept_calls_helper_with_ids_and_emits_json(monkeypatch):
@@ -50,7 +55,13 @@ def test_reservation_accept_calls_helper_with_ids_and_emits_json(monkeypatch):
 
     def _accept(**kwargs: object) -> dict[str, object]:
         captured.update(kwargs)
-        return {"reservation_id": "reservation-1", "state": "accepted"}
+        return {
+            "schema": "brigade.fleet_reservation.v1",
+            "reservation_id": "reservation-1",
+            "decision_id": "decision-1",
+            "state": "accepted",
+            "expires_at": "2030-01-01T00:00:00+00:00",
+        }
 
     monkeypatch.setattr("brigade.fleet_client_policy.accept_reservation", _accept)
     rc, out, err = _run(
@@ -69,7 +80,13 @@ def test_reservation_accept_calls_helper_with_ids_and_emits_json(monkeypatch):
     )
     assert rc == 0
     assert err == ""
-    assert json.loads(out) == {"reservation_id": "reservation-1", "state": "accepted"}
+    assert json.loads(out) == {
+        "schema": "brigade.fleet_reservation.v1",
+        "reservation_id": "reservation-1",
+        "decision_id": "decision-1",
+        "state": "accepted",
+        "expires_at": "2030-01-01T00:00:00+00:00",
+    }
     assert captured == {
         "reservation_id": "reservation-1",
         "decision_id": "decision-1",
