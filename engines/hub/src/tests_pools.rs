@@ -4,14 +4,56 @@
 //! them.
 use super::*;
 use brigade_hub::read::{HubPools, ReaderPool};
-use brigade_hub::telemetry::{Stage, StageSlot};
+use brigade_hub::telemetry::{RequestLog, Stage, StageSlot};
 use sha2::Digest;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
     mpsc as std_mpsc,
 };
+use tokio::net::TcpListener;
+
+static REQUEST_LINES: Mutex<Vec<(usize, &'static str, String)>> = Mutex::new(Vec::new());
+
+/// Capture the same formatter stderr uses when the log is dropped, including
+/// when a request is cancelled before producing a response.
+pub(super) struct CapturedLog(pub RequestLog);
+
+impl Deref for CapturedLog {
+    type Target = RequestLog;
+
+    fn deref(&self) -> &RequestLog {
+        &self.0
+    }
+}
+
+impl DerefMut for CapturedLog {
+    fn deref_mut(&mut self) -> &mut RequestLog {
+        &mut self.0
+    }
+}
+
+impl Drop for CapturedLog {
+    fn drop(&mut self) {
+        let line = self.line().to_string();
+        let key = Arc::as_ptr(&self.telemetry) as usize;
+        REQUEST_LINES.lock().unwrap().push((key, self.family, line));
+    }
+}
+
+fn take_request_line(app: &App, family: &str) -> Option<(serde_json::Value, String)> {
+    let key = Arc::as_ptr(&app.telemetry) as usize;
+    let mut lines = REQUEST_LINES.lock().unwrap();
+    let index = lines
+        .iter()
+        .rposition(|(app, f, _)| *app == key && *f == family)?;
+    let (_, _, text) = lines.remove(index);
+    drop(lines);
+    let fields = serde_json::from_str(&text).expect("valid request log JSON");
+    Some((fields, text))
+}
 
 const ADMIN: &str = "pool-admin-token-0123456789";
 const NODE_TOKEN: &str = "pool-node-token-0123456789";
@@ -194,7 +236,150 @@ async fn answer(app: &App, request: Request<Body>) -> (u16, serde_json::Value) {
 }
 
 fn logged(app: &App, family: &str) -> Option<String> {
-    request_lines::credential_kind(Arc::as_ptr(&app.telemetry) as usize, family)
+    take_request_line(app, family)
+        .and_then(|(line, _)| line["credential_kind"].as_str().map(str::to_owned))
+}
+
+fn log_test_app(upstream: String) -> App {
+    App::new(
+        upstream,
+        Client::builder(TokioExecutor::new()).build_http(),
+        false,
+        false,
+    )
+}
+
+async fn log_request(
+    app: &App,
+    method: &str,
+    uri: &str,
+    family: &str,
+) -> (serde_json::Value, String) {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _) = answer(app, request).await;
+    let (line, text) = take_request_line(app, family).expect("request log line");
+    assert_eq!(line["status"], status);
+    (line, text)
+}
+
+#[tokio::test]
+async fn request_log_labels_native_health_and_drops_query() {
+    let app = log_test_app(String::new());
+    let (line, text) =
+        log_request(&app, "GET", "/health?fixture_query=fixture_value", "health").await;
+    assert_eq!(line["status"], 200);
+    assert_eq!(line["method"], "GET");
+    assert_eq!(line["route"], "/health");
+    assert!(!text.contains("fixture_query"));
+    assert!(!text.contains("fixture_value"));
+}
+
+#[tokio::test]
+async fn request_log_labels_proxied_cold_policy() {
+    let listener = TcpListener::bind((Ipv4Addr::from([127, 0, 0, 1]), 0))
+        .await
+        .unwrap();
+    let app = log_test_app(format!("http://{}", listener.local_addr().unwrap()));
+    let upstream = Router::new().route(
+        "/policy",
+        axum::routing::post(|| async { StatusCode::NO_CONTENT }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let (line, _) = log_request(&app, "POST", "/policy", "cold").await;
+    server.abort();
+    assert_eq!(line["status"], 204);
+    assert_eq!(line["method"], "POST");
+    assert_eq!(line["route"], "/policy");
+}
+
+#[tokio::test]
+async fn request_log_labels_immediate_admission_refusal() {
+    let app = log_test_app(String::new());
+    let _slots: Vec<_> = (0..8)
+        .map(|_| app.budgets.admit(None, "/policy", "", None).unwrap())
+        .collect();
+    let (line, _) = log_request(&app, "POST", "/policy", "cold").await;
+    assert_eq!(line["status"], 503);
+    assert_eq!(line["stage"], "replying");
+    assert_eq!(line["method"], "POST");
+    assert_eq!(line["route"], "/policy");
+}
+
+#[tokio::test]
+async fn request_log_labels_refusals_before_admission() {
+    let app = log_test_app(String::new());
+    let (invalid, _) = log_request(&app, "OPTIONS", "*", "cold").await;
+    assert_eq!(invalid["status"], 400);
+    assert_eq!(invalid["method"], "OPTIONS");
+    assert_eq!(invalid["route"], "other");
+
+    let (refused, text) =
+        log_request(&app, "GET", "/policy?token=fixture-query-value", "cold").await;
+    assert_eq!(refused["status"], 401);
+    assert_eq!(refused["method"], "GET");
+    assert_eq!(refused["route"], "/policy");
+    assert!(!text.contains("token="));
+    assert!(!text.contains("fixture-query-value"));
+}
+
+#[tokio::test]
+async fn request_log_labels_proxied_route_templates() {
+    let app = log_test_app(String::new());
+    for (path, family, label) in [
+        (
+            "/deck/actions/aa_fixture-id",
+            "browser",
+            "/deck/actions/:id",
+        ),
+        ("/deck/actions/aa_", "browser", "other"),
+        (
+            "/deck/observed/fixture-id",
+            "browser",
+            "/deck/observed/:group",
+        ),
+        ("/work/campaigns/fixture-id", "cold", "/work/campaigns/:key"),
+    ] {
+        let (line, text) = log_request(&app, "GET", path, family).await;
+        assert_eq!(line["method"], "GET", "{path}");
+        assert_eq!(line["route"], label, "{path}");
+        assert!(!text.contains("fixture-id"));
+    }
+}
+
+#[tokio::test]
+async fn request_log_replaces_ids_with_placeholders() {
+    let app = log_test_app(String::new());
+    let (line, text) = log_request(
+        &app,
+        "DELETE",
+        "/work/items/fixture-item/links/fixture-link",
+        "cold",
+    )
+    .await;
+    assert_eq!(line["method"], "DELETE");
+    assert_eq!(line["route"], "/work/items/:id/links/:link");
+    assert!(!text.contains("fixture-item"));
+    assert!(!text.contains("fixture-link"));
+}
+
+#[tokio::test]
+async fn request_log_masks_unknown_path_and_method() {
+    let app = log_test_app(String::new());
+    let (line, text) = log_request(
+        &app,
+        "FIXTURE-METHOD",
+        "/work/items/fixture-item/fixture-unknown",
+        "cold",
+    )
+    .await;
+    assert_eq!(line["method"], "other");
+    assert_eq!(line["route"], "other");
+    assert!(!text.contains("FIXTURE-METHOD"));
+    assert!(!text.contains("fixture-unknown"));
 }
 
 /// The read-only audit records the hundreds of `PRAGMA table_xinfo` and
@@ -366,9 +551,14 @@ async fn abandoned_route_lookup_keeps_the_credential_lookup_stage() {
     // The client gives up: no reply is ever written, so the stage is the whole
     // record of where the request was.
     task.abort();
-    let _ = task.await;
+    assert!(task.await.unwrap_err().is_cancelled());
     assert_eq!(stage.get(), Stage::CredentialLookup);
     held.release().await;
+    let (line, _) =
+        take_request_line(&app, "heartbeat").expect("request log line for the cancelled request");
+    assert_eq!(line["stage"], "credential-lookup");
+    assert_eq!(line["method"], "GET");
+    assert_eq!(line["route"], "/status");
 }
 
 /// The memory route's credential read is `Store::authenticate`. Its harness
