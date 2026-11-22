@@ -5,7 +5,7 @@
 # last stage, is the Python-only image the Quadlet recipe and the container
 # smoke build.
 #
-# Every stage defaults to the same ref and archive digest as compose.yaml, so
+# Every stage defaults to the same ref and source tree digest as compose.yaml, so
 # `--target dogfood` builds with no build args. A ref older than the Rust hub
 # (no engines/hub) builds only the default target, and only with a builder
 # that skips stages the target does not use: BuildKit and buildah do, the
@@ -15,16 +15,20 @@
 FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e AS source
 
 ARG BRIGADE_REF=a7746b6da2eec257890674de30635ca5036a2115
-ARG BRIGADE_SHA256=5a0cd597e970d17eedf3597cfd33d1a909c1e8f33f9077184abb421cedf3e67f
+ARG BRIGADE_SHA256=886090adadf2ad00870d9c535f820ec468655573851da56fd09159ede242d2b2
 
-# The archive URL names escoffier-labs/brigade, which GitHub redirects once the repository is
-# renamed to escoffier-labs/brigadestack. The archive's top folder is named after the repository,
-# so the same commit's tarball has a different sha256 after the rename: a rebuild after the
-# rename needs a new BRIGADE_SHA256 (the pinned digest here is for the pre-rename archive).
-RUN python -c "import hashlib, urllib.request; data = urllib.request.urlopen('https://github.com/escoffier-labs/brigade/archive/${BRIGADE_REF}.tar.gz').read(); assert hashlib.sha256(data).hexdigest() == '${BRIGADE_SHA256}', 'Brigade source archive checksum mismatch'; open('/tmp/brigade.tar.gz', 'wb').write(data)" \
+# The repository rename changes the archive's top folder. The source tree
+# digest ignores that folder and the archive's compression.
+COPY ops/fleet-hub/bin/source-tree-digest.py /tmp/source-tree-digest.py
+RUN python -c "import sys, urllib.request; urllib.request.urlretrieve(sys.argv[1], '/tmp/brigade.tar.gz')" \
+        "https://github.com/escoffier-labs/brigadestack/archive/${BRIGADE_REF}.tar.gz" \
+    && actual="$(python /tmp/source-tree-digest.py /tmp/brigade.tar.gz)" \
+    && if [ "$actual" != "$BRIGADE_SHA256" ]; then \
+        echo "Brigade source tree digest mismatch: expected $BRIGADE_SHA256, got $actual; compute pins with ops/fleet-hub/bin/source-tree-digest.py --ref <sha>" >&2; \
+        exit 1; \
+    fi \
     && mkdir /src \
-    && tar -xzf /tmp/brigade.tar.gz -C /src --strip-components=1 \
-    && rm /tmp/brigade.tar.gz
+    && tar -xzf /tmp/brigade.tar.gz -C /src --strip-components=1
 
 # The hub crate's minimum Rust version, which the hub CI job also builds.
 FROM rust:1.85.0-slim-bookworm@sha256:1829c432be4a592f3021501334d3fcca24f238432b13306a4e62669dec538e52 AS hub-build
@@ -39,17 +43,17 @@ RUN cargo build --locked --release --bin brigade-hub \
 FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e AS python-hub
 
 ARG BRIGADE_REF=a7746b6da2eec257890674de30635ca5036a2115
-ARG BRIGADE_SHA256=5a0cd597e970d17eedf3597cfd33d1a909c1e8f33f9077184abb421cedf3e67f
+ARG BRIGADE_SHA256=886090adadf2ad00870d9c535f820ec468655573851da56fd09159ede242d2b2
 # The CLI version at BRIGADE_REF.
 ARG BRIGADE_VERSION=0.31.0
-LABEL org.opencontainers.image.source="https://github.com/escoffier-labs/brigade" \
+LABEL org.opencontainers.image.source="https://github.com/escoffier-labs/brigadestack" \
       org.opencontainers.image.version="${BRIGADE_VERSION}" \
       org.opencontainers.image.revision="${BRIGADE_REF}" \
       org.opencontainers.image.description="Brigade Fleet Hub"
 
-# Same archive URL and rename caveat as the `source` stage above.
+# Install from the same verified archive that supplies the Rust build.
+COPY --from=source /tmp/brigade.tar.gz /tmp/brigade.tar.gz
 RUN python -m pip install --no-cache-dir setuptools==75.8.0 wheel==0.45.1 \
-    && python -c "import hashlib, urllib.request; data = urllib.request.urlopen('https://github.com/escoffier-labs/brigade/archive/${BRIGADE_REF}.tar.gz').read(); assert hashlib.sha256(data).hexdigest() == '${BRIGADE_SHA256}', 'Brigade source archive checksum mismatch'; open('/tmp/brigade.tar.gz', 'wb').write(data)" \
     && python -m pip install --no-cache-dir --no-build-isolation /tmp/brigade.tar.gz \
     && rm /tmp/brigade.tar.gz \
     && groupadd --gid 10001 brigade \
