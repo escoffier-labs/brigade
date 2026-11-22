@@ -100,6 +100,8 @@ def test_digest_ref_matches_the_archive_of_the_same_commit(tmp_path):
     # Plumbing writes the exact blob and symlink entries; a working-tree symlink and
     # `git add` store something else on Windows (core.symlinks, autocrlf).
     git("init", "-q")
+    # A Windows checkout often sets this; the pin must not depend on it.
+    git("config", "core.autocrlf", "true")
     file_blob = git("hash-object", "-w", "--stdin", data=b"hello\n")
     link_blob = git("hash-object", "-w", "--stdin", data=b"file")
     git("update-index", "--add", "--cacheinfo", f"100644,{file_blob},file")
