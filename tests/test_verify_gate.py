@@ -5,14 +5,16 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+import shlex
 import subprocess
 import sys
+import time
 
 import pytest
 
-from brigade import code_graph_delta, localio
+from brigade import code_graph_delta, localio, verify_manifest_git
 from brigade.claude_hooks import runtime
-from brigade.work_cmd import verification, verify_runtime
+from brigade.work_cmd import verification, verify_gate, verify_runtime
 
 from tests.test_claude_hooks_runtime import _git_wired_claude, _unverified_write_stop, _write_session_receipt
 
@@ -26,13 +28,13 @@ def _git(target, *args):
     return subprocess.run(["git", *args], cwd=target, check=True, capture_output=True, text=True).stdout.strip()
 
 
-def _declaration(argv_prefix=PREFIX):
+def _declaration(argv_prefix=PREFIX, *, needs_arguments=True, needs_passed_tests=True):
     return json.dumps(
         {
             "schema": "brigade.verify_required_check.v1",
             "argv_prefix": argv_prefix,
-            "needs_arguments": True,
-            "needs_passed_tests": True,
+            "needs_arguments": needs_arguments,
+            "needs_passed_tests": needs_passed_tests,
         }
     ).encode()
 
@@ -125,7 +127,7 @@ def test_required_check_stop(repo, monkeypatch, capsys, argv, stdout, exit_code,
     result = runtime.handle_payload("Stop", stop)
     assert (result is None or result.get("decision") != "block") == eligible
     if not eligible:
-        assert "python focused.py <selector>" in result["reason"]
+        assert "--argv-json" in result["reason"]
     _verdict(receipt, "required_check", eligible, reason)
     assert receipt["gating"]["base_commit"] == _git(repo, "rev-parse", "HEAD")
     assert receipt["gating"]["declaration_sha256"] == hashlib.sha256(raw).hexdigest()
@@ -160,24 +162,79 @@ def test_missing_declaration_audits_and_explains(repo, monkeypatch, capsys):
     _verdict(receipt, "audit_only", True, "audit_only")
 
 
-def test_unresolved_default_branch_blocks(repo, monkeypatch, capsys):
+@pytest.mark.parametrize("topology", ["unborn", "upstream", "custom_default", "no_merge_base"])
+def test_unresolved_base_without_declaration_audits(repo, monkeypatch, capsys, topology):
+    if topology != "unborn":
+        _commit(repo)
+        remote = "upstream" if topology == "upstream" else "origin"
+        _git(repo, "remote", "add", remote, "../remote.git")
+        if topology == "custom_default":
+            _git(repo, "update-ref", "refs/remotes/origin/trunk", "HEAD")
+        if topology == "no_merge_base":
+            unrelated = _git(repo, "commit-tree", "HEAD^{tree}", "-m", "unrelated")
+            _git(repo, "update-ref", "refs/remotes/origin/main", unrelated)
+    stop, _ = _start(repo, monkeypatch)
+    receipt = _run(repo, monkeypatch, capsys, ["true"])
+
+    _verdict(receipt, "audit_only", True, "audit_only")
+    assert receipt["gating"]["fallback_source"] == "none"
+    result = runtime.handle_payload("Stop", stop)
+    assert result.get("decision") != "block"
+    notice = result["hookSpecificOutput"]["additionalContext"]
+    assert "Git base was unresolved" in notice
+    assert "either local HEAD or the working tree" in notice
+    if topology in {"upstream", "custom_default"}:
+        assert "git remote set-head origin -a" in notice
+    elif topology == "no_merge_base":
+        assert "no merge base with HEAD" in notice
+    else:
+        assert "no commit at HEAD" in notice
+
+
+@pytest.mark.parametrize("source", ["head", "worktree"])
+def test_unresolved_base_enforces_local_declaration(repo, monkeypatch, capsys, source):
+    raw = _declaration()
+    if source == "head":
+        (repo / DECLARATION).write_bytes(raw)
     _commit(repo)
+    (repo / DECLARATION).write_bytes(_declaration(["true"]) if source == "head" else raw)
     _git(repo, "remote", "add", "origin", "../origin.git")
     stop, _ = _start(repo, monkeypatch)
-    receipt = _run(repo, monkeypatch, capsys, ["true"])
 
-    assert runtime.handle_payload("Stop", stop)["decision"] == "block"
-    _verdict(receipt, "unresolved", False, "base_unresolved")
+    wrong = _run(repo, monkeypatch, capsys, ["true", SELECTOR], stdout="1 passed in 0.01s")
+    _verdict(wrong, "required_check", False, "not_the_required_check")
+    assert wrong["gating"]["fallback_source"] == source
+    result = runtime.handle_payload("Stop", stop)
+    assert result["decision"] == "block"
+    assert "Git base was unresolved" in result["reason"]
+    assert ("HEAD" if source == "head" else "working tree") in result["reason"]
+
+    right = _run(repo, monkeypatch, capsys, PREFIX + [SELECTOR], stdout="1 passed in 0.01s")
+    _verdict(right, "required_check", True, "passed_required_check")
+    assert right["gating"]["declaration_sha256"] == hashlib.sha256(raw).hexdigest()
+    assert runtime.handle_payload("Stop", stop).get("decision") != "block"
 
 
-def test_invalid_declaration_is_unresolved(repo, monkeypatch, capsys):
-    (repo / DECLARATION).write_bytes(b'{"schema": "brigade.verify_required_check.v1", "argv_prefix": []}')
-    _commit(repo)
+@pytest.mark.parametrize("source", ["base", "head", "worktree"])
+def test_invalid_declaration_is_unresolved(repo, monkeypatch, capsys, source):
+    if source == "worktree":
+        _commit(repo)
+    (repo / DECLARATION).write_bytes(b'{"schema":')
+    if source != "worktree":
+        _commit(repo)
+    if source != "base":
+        _git(repo, "remote", "add", "origin", "../origin.git")
     stop, _ = _start(repo, monkeypatch)
     receipt = _run(repo, monkeypatch, capsys, ["true"])
 
-    assert runtime.handle_payload("Stop", stop)["decision"] == "block"
+    result = runtime.handle_payload("Stop", stop)
+    assert result["decision"] == "block"
+    assert DECLARATION in result["reason"]
+    assert "Expecting value" in result["reason"]
     _verdict(receipt, "unresolved", False, "declaration_invalid")
+    if source != "base":
+        assert "Git base was unresolved" in result["reason"]
+        assert receipt["gating"]["fallback_source"] == source
 
 
 @pytest.mark.parametrize("declared", [False, True])
@@ -238,7 +295,7 @@ def test_reused_receipt_inherits_source_verdict(repo, monkeypatch, capsys, eligi
 
 
 @pytest.mark.parametrize("declared", [False, True])
-def test_reused_legacy_receipt_does_not_invent_a_required_check_pass(repo, monkeypatch, capsys, declared):
+def test_legacy_receipt_reuses_only_in_audit_mode(repo, monkeypatch, capsys, declared):
     if declared:
         (repo / DECLARATION).write_bytes(_declaration())
     _commit(repo)
@@ -250,10 +307,167 @@ def test_reused_legacy_receipt_does_not_invent_a_required_check_pass(repo, monke
     first["digests"]["receipt_sha256"] = localio.canonical_json_digest(first, exclude_keys={"digests"})
     path.write_text(json.dumps(first), encoding="utf-8")
 
-    reused = _run(repo, monkeypatch, capsys, argv)
+    result = _run(repo, monkeypatch, capsys, argv)
 
-    assert reused["reused_from"] == first["run_id"]
     if declared:
-        _verdict(reused, "required_check", False, "missing_gating")
+        assert "reused_from" not in result
+        _verdict(result, "required_check", False, "no_tests_passed")
     else:
-        _verdict(reused, "audit_only", True, "audit_only")
+        assert result["reused_from"] == first["run_id"]
+        _verdict(result, "audit_only", True, "audit_only")
+
+
+@pytest.mark.parametrize("was_declared", [False, True])
+@pytest.mark.parametrize("transition", ["stop", "reuse"])
+def test_policy_change_invalidates_receipt(repo, monkeypatch, capsys, was_declared, transition):
+    if was_declared:
+        (repo / DECLARATION).write_bytes(_declaration())
+    _commit(repo)
+    old_base = _git(repo, "rev-parse", "HEAD")
+    (repo / DECLARATION).write_bytes(_declaration(PREFIX + ["--updated"]))
+    _commit(repo)
+    _git(repo, "remote", "add", "origin", "../origin.git")
+    _git(repo, "update-ref", "refs/remotes/origin/main", old_base)
+    stop, _ = _start(repo, monkeypatch)
+    argv = PREFIX + [SELECTOR]
+    first = _run(repo, monkeypatch, capsys, argv, stdout="1 passed in 0.01s")
+    assert first["gating"]["eligible"] is True
+
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+    assert localio.tree_fingerprint(repo) == first["tree_fingerprint"]
+    if transition == "stop":
+        assert runtime.handle_payload("Stop", stop)["decision"] == "block"
+    else:
+        rerun = _run(repo, monkeypatch, capsys, argv, stdout="2 passed in 0.01s")
+        assert "reused_from" not in rerun
+        assert rerun["commands"][0]["test_outcomes"]["passed"] == 2
+        _verdict(rerun, "required_check", False, "not_the_required_check")
+
+
+@pytest.mark.parametrize("head_available", [True, False])
+def test_stop_policy_git_timeout_is_bounded(repo, monkeypatch, head_available):
+    (repo / DECLARATION).write_bytes(_declaration())
+    _commit(repo)
+    stop, _ = _start(repo, monkeypatch)
+    real_run = subprocess.run
+    timeouts = []
+    monkeypatch.setattr(verify_gate, "STOP_POLICY_BUDGET_SECONDS", 0.4)
+    monkeypatch.setattr(verify_gate, "_HEAD_FALLBACK_BUDGET_SECONDS", 0.3)
+
+    def slow_git(args, **kwargs):
+        policy_probe = args[:2] == ["git", "remote"] or (
+            not head_available and args[:4] == ["git", "rev-parse", "--verify", "--quiet"]
+        )
+        if not policy_probe:
+            return real_run(args, **kwargs)
+        timeout = kwargs["timeout"]
+        timeouts.append(timeout)
+        time.sleep(min(timeout, 0.4))
+        raise subprocess.TimeoutExpired(args, timeout)
+
+    monkeypatch.setattr(verify_manifest_git.subprocess, "run", slow_git)
+    result = runtime.handle_payload("Stop", stop)
+
+    assert timeouts and max(timeouts) <= 0.4
+    if head_available:
+        assert result["decision"] == "block"
+        assert "Git base was unresolved" in result["reason"]
+        assert "HEAD" in result["reason"]
+    else:
+        assert result.get("decision") != "block"
+        assert "timed out" in result["hookSpecificOutput"]["additionalContext"]
+
+
+def test_stop_guidance_round_trips_argv(repo, monkeypatch):
+    prefix = ["python", "folder with spaces/check.py", "a'b", 'a"b', r"a"]
+    (repo / DECLARATION).write_bytes(_declaration(prefix))
+    _commit(repo)
+    stop, _ = _start(repo, monkeypatch)
+
+    reason = runtime.handle_payload("Stop", stop)["reason"]
+    command = reason.split("`")[1]
+    words = shlex.split(command)
+    assert "POSIX shell" in reason
+    assert json.loads(words[words.index("--argv-json") + 1]) == prefix + ["tests/test_example.py"]
+
+
+@pytest.mark.parametrize(
+    ("flags", "argv", "stdout"),
+    [
+        ({"needs_arguments": False}, PREFIX, "1 passed in 0.01s"),
+        ({"needs_passed_tests": False}, PREFIX + [SELECTOR], ""),
+    ],
+)
+def test_optional_required_check_constraints(repo, monkeypatch, capsys, flags, argv, stdout):
+    (repo / DECLARATION).write_bytes(_declaration(**flags))
+    _commit(repo)
+    stop, _ = _start(repo, monkeypatch)
+    receipt = _run(repo, monkeypatch, capsys, argv, stdout=stdout)
+
+    _verdict(receipt, "required_check", True, "passed_required_check")
+    assert runtime.handle_payload("Stop", stop).get("decision") != "block"
+
+
+def test_safe_finalize_stamps_fallback_verdict(repo, monkeypatch):
+    (repo / DECLARATION).write_bytes(_declaration())
+    _commit(repo)
+    _git(repo, "remote", "add", "origin", "../origin.git")
+    now = localio.utc_now()
+    receipt = {"status": "completed", "commands": []}
+
+    def broken_finalize(*args, **kwargs):
+        raise OSError("fixture finalization failure")
+
+    monkeypatch.setattr(verification, "_finalize_verify_receipt", broken_finalize)
+    finalized, rc = verification._safe_finalize_verify_receipt(repo, repo, receipt, started=now, rc=0, canceled=False)
+
+    assert rc != 0
+    _verdict(finalized, "required_check", False, "not_completed")
+    assert finalized["gating"]["fallback_source"] == "head"
+    assert json.loads((repo / "receipt.json").read_text())["gating"] == finalized["gating"]
+
+
+@pytest.mark.parametrize("valid", [True, False])
+def test_non_git_target_uses_worktree_declaration(repo, monkeypatch, capsys, valid):
+    (repo / DECLARATION).write_bytes(_declaration() if valid else b"{")
+    (repo / ".git").rename(repo.parent / "saved-git")
+    stop, _ = _start(repo, monkeypatch)
+
+    receipt = _run(repo, monkeypatch, capsys, ["true"])
+    _verdict(
+        receipt,
+        "required_check" if valid else "unresolved",
+        False,
+        "not_the_required_check" if valid else "declaration_invalid",
+    )
+    assert receipt["gating"]["fallback_source"] == "worktree"
+    assert runtime.handle_payload("Stop", stop)["decision"] == "block"
+
+
+def test_stop_explains_latest_ineligible_run(repo, monkeypatch, capsys):
+    (repo / DECLARATION).write_bytes(_declaration())
+    _commit(repo)
+    stop, _ = _start(repo, monkeypatch)
+    _run(repo, monkeypatch, capsys, PREFIX)
+    _run(repo, monkeypatch, capsys, PREFIX + [SELECTOR])
+
+    reason = runtime.handle_payload("Stop", stop)["reason"]
+    assert "The last run passed no tests or reported test failures or errors." in reason
+    assert "The last run had no test selector." not in reason
+
+
+def test_policy_source_change_invalidates_same_declaration(repo, monkeypatch, capsys):
+    (repo / DECLARATION).write_bytes(_declaration())
+    _commit(repo)
+    _git(repo, "remote", "add", "origin", "../origin.git")
+    stop, _ = _start(repo, monkeypatch)
+    argv = PREFIX + [SELECTOR]
+    first = _run(repo, monkeypatch, capsys, argv, stdout="1 passed in 0.01s")
+    assert first["gating"]["fallback_source"] == "head"
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+    assert runtime.handle_payload("Stop", stop)["decision"] == "block"
+    rerun = _run(repo, monkeypatch, capsys, argv, stdout="1 passed in 0.01s")
+    assert "reused_from" not in rerun
+    assert rerun["gating"]["declaration_sha256"] == first["gating"]["declaration_sha256"]
+    assert "fallback_source" not in rerun["gating"]

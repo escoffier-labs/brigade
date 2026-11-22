@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from brigade import aboyeur, outcome_cmd, receipt_schema, runguard
-from brigade.work_cmd import helpers, verification as verify_mod
+from brigade.work_cmd import helpers, verification as verify_mod, verify_gate
 
 
 def _init_git_repo(path: Path) -> None:
@@ -112,6 +112,12 @@ def test_verify_receipt_emits_schema_version(tmp_path, capsys):
     assert receipt["schema_version"] == receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION
     stored = json.loads((Path(receipt["path"]) / "receipt.json").read_text())
     assert stored["schema_version"] == receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION
+    assert stored["gating"] == {
+        "mode": "audit_only",
+        "eligible": True,
+        "reason": "audit_only",
+        "plan_coverage": "not_checked",
+    }
 
 
 def test_verify_receipt_legacy_without_schema_version_still_loads(tmp_path):
@@ -444,11 +450,15 @@ def test_verify_receipt_emits_tree_fingerprint_head_inside_git(tmp_path, capsys,
 
 
 def test_write_reused_receipt_omits_reused_from_without_source_run_id(tmp_path):
+    source = {"commands": [], "status": "completed"}
+    gating = verify_gate.reuse_gating(tmp_path, source)
+    assert gating is not None
     receipt, rc = verify_mod._write_reused_receipt(
         tmp_path,
-        {"commands": [], "status": "completed"},
+        source,
         ["true"],
         60,
+        gating=gating,
     )
     assert rc == 0
     assert "reused_from" not in receipt
@@ -456,6 +466,7 @@ def test_write_reused_receipt_omits_reused_from_without_source_run_id(tmp_path):
     assert receipt["tree_fingerprint"] is None
     assert receipt["tree_fingerprint_head"] is None
     assert receipt["changes_patch_sha256"] is None
+    assert receipt["gating"]["fallback_source"] == "none"
 
 
 def test_work_closeout_emits_schema_version(tmp_path, monkeypatch):

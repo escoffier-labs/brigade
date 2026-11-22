@@ -1878,7 +1878,7 @@ def exercised_artifact_for_fingerprint(target: Path, session_fingerprint: str) -
 
 def _verify_replacement(
     target: Path,
-    command: str,
+    command: str | list[str],
     session_fingerprint: str,
     *,
     capture_artifact_id: str | None = None,
@@ -1892,10 +1892,11 @@ def _verify_replacement(
         or exercised_artifact_for_fingerprint(target, session_fingerprint)
         or outcome_attribution.AUTO_CAPTURE
     )
+    option, value = ("--command", command) if isinstance(command, str) else ("--argv-json", json.dumps(command))
     return (
         f"{_verify_env_prefix(session_fingerprint, hook_target)}"
         f"brigade work verify run --target {shlex.quote(str(target))} "
-        f"--command {shlex.quote(command)} --capture {shlex.quote(artifact_id)}"
+        f"{option} {shlex.quote(value)} --capture {shlex.quote(artifact_id)}"
     )
 
 
@@ -2454,11 +2455,13 @@ def _handle_event(
     if event == "Stop":
         if payload.get("stop_hook_active") is True:
             return None
-        from ..work_cmd.verify_gate import StopGate
+        from ..work_cmd.verify_gate import STOP_POLICY_BUDGET_SECONDS, StopGate
 
+        policy_deadline = time.monotonic() + STOP_POLICY_BUDGET_SECONDS
         blocking_failures: list[str] = []
         manifest_failures: list[str] = []
         shared_tree_notes: list[str] = []
+        policy_notes: list[str] = []
         handoff_target: Path | None = None
         unverified_handoff: Path | None = None
         context_target: Path | None = None
@@ -2485,7 +2488,11 @@ def _handle_event(
                 or stop_state.get("last_write_at")
                 or stop_state.get("started_at")
             )
-            gate = StopGate(stop_target)
+            gate = StopGate(stop_target, deadline=policy_deadline)
+            if notice := gate.notice():
+                policy_notes.append(notice)
+            if gate.timed_out:
+                continue
             if not _receipt_since(stop_target, receipt_threshold, session_fingerprint=fingerprint, gate=gate):
                 if _shared_tree_block_is_foreign(stop_target, session_id, stop_state, gate):
                     # Another session owns the live tree. A hard block here is
@@ -2505,7 +2512,7 @@ def _handle_event(
                     fingerprint,
                     capture_artifact_id=exercised if isinstance(exercised, str) else None,
                 )
-                blocking_failures.append(gate.block_guidance(replacement))
+                blocking_failures.append(gate.block_guidance(replacement, receipt_threshold))
             elif not _handoff_since(stop_target, stop_state.get("started_at")):
                 handoff_target = stop_target
             manifest_failures += manifest_loop.stop_failures(
@@ -2515,7 +2522,8 @@ def _handle_event(
                 is_foreign=functools.partial(_shared_tree_block_is_foreign, stop_target, session_id, stop_state, gate),
             )
         if blocking_failures or manifest_failures:
-            return {"decision": "block", "reason": manifest_loop.block_reason(blocking_failures, manifest_failures)}
+            reason = manifest_loop.block_reason(blocking_failures, manifest_failures)
+            return {"decision": "block", "reason": "\n".join([reason, *policy_notes])}
         if closed_without_handoff:
             handoff_target = None
         if shared_tree_notes:
@@ -2523,6 +2531,7 @@ def _handle_event(
                 "Verification is recorded for this session. Closeout is not blocked because a concurrent "
                 "session changed the shared worktree.",
                 *shared_tree_notes,
+                *policy_notes,
             ]
             if handoff_target is not None:
                 records.append(_handoff_stop_note(handoff_target))
@@ -2533,13 +2542,15 @@ def _handle_event(
                 session_id=session_id,
                 records=records,
             )
-        if handoff_target is not None:
+        if handoff_target is not None or policy_notes:
+            if handoff_target is not None:
+                policy_notes.append(_handoff_stop_record(handoff_target, verified=handoff_target != unverified_handoff))
             return _additional_context(
                 "Stop",
                 "",
-                target=handoff_target,
+                target=handoff_target or target,
                 session_id=session_id,
-                records=[_handoff_stop_record(handoff_target, verified=handoff_target != unverified_handoff)],
+                records=policy_notes,
             )
     return None
 

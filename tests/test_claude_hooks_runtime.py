@@ -810,10 +810,8 @@ def test_stop_keeps_prior_receipt_when_interleaved_foreign_write_lags_fingerprin
     handoff = target / ".claude" / "memory-handoffs" / "handoff.md"
     handoff.parent.mkdir(parents=True, exist_ok=True)
     handoff.write_text("durable finding\n")
-    assert (
-        runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader_session, stop_hook_active=False))
-        is None
-    )
+    result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader_session, stop_hook_active=False))
+    _assert_only_policy_fallback_notice(result)
 
 
 def _write_session_receipt(target: Path, session_id: str, *, tree_fingerprint: str | None = None) -> dict:
@@ -1375,9 +1373,8 @@ def test_final_bash_handoff_write_does_not_require_verification_again(tmp_path: 
     updated = runtime.read_session_state(target, session_id)
     assert updated["last_write_at"] >= updated["last_verification_write_at"]
     assert updated["last_verification_write_at"] == state["last_verification_write_at"]
-    assert (
-        runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False)) is None
-    )
+    result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False))
+    _assert_only_policy_fallback_notice(result)
 
 
 @pytest.mark.parametrize(
@@ -2020,9 +2017,8 @@ def test_final_handoff_write_does_not_require_verification_again(tmp_path: Path,
 
     updated = runtime.read_session_state(target, session_id)
     assert updated["last_write_at"] >= updated["last_verification_write_at"]
-    assert (
-        runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False)) is None
-    )
+    result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False))
+    _assert_only_policy_fallback_notice(result)
 
 
 @pytest.mark.parametrize("wrapper", ["tokenjuice", "token-glace"])
@@ -3280,6 +3276,14 @@ def _stop_text(result) -> str:
     if result is None:
         return ""
     return json.dumps(result)
+
+
+def _assert_only_policy_fallback_notice(result) -> None:
+    assert result is not None and "decision" not in result
+    context = result["hookSpecificOutput"]["additionalContext"]
+    assert "Git base was unresolved" in context
+    assert "Memory Handoff" not in context
+    assert "Verification is recorded" not in context
 
 
 def test_stop_advises_handoff_by_judgment_when_no_close_line(tmp_path: Path, monkeypatch):

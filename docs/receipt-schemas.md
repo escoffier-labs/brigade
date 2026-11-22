@@ -260,16 +260,18 @@ boolean `no_tests_ran`. The parser uses the full captured standard output.
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `mode` | string | `required_check` when the declaration was loaded from the Git base, `audit_only` when the base has no declaration, or `unresolved` when the base or declaration cannot be read |
+| `mode` | string | `required_check` when a declaration was loaded, `audit_only` when there is no declaration, or `unresolved` when the declaration is invalid or unreadable |
 | `eligible` | boolean | Whether the receipt can satisfy the Stop gate, subject to the hook's session, target, time, and tree checks |
-| `reason` | string | Machine-readable verdict such as `passed_required_check`, `no_tests_passed`, or `base_unresolved` |
+| `reason` | string | Machine-readable verdict such as `passed_required_check`, `no_tests_passed`, or `declaration_invalid` |
 | `declaration_sha256` | string | SHA-256 of the original declaration bytes, present when the declaration was loaded |
-| `base_commit` | string | Commit that supplied the declaration, present when the declaration was loaded |
+| `base_commit` | string | Commit that supplied the declaration, present when loaded from the Git base or local HEAD |
+| `fallback_source` | string | Present when the Git base could not be resolved. `head` uses local HEAD, `worktree` uses the working tree, and `none` means neither contains a declaration |
 | `plan_coverage` | string | `not_checked`. The verdict evaluates the recorded command and its results. |
 
-A reused receipt copies its source verdict. The Stop hook accepts a legacy
-receipt without a verdict only in audit-only mode. See [the verify gate](verify-gate.md)
-for the declaration format and eligibility rules.
+A reused receipt copies its source verdict when the policy mode, declaration
+digest, and fallback source match. Stop treats a mismatched policy identity
+like a missing verdict and accepts those receipts only in audit-only mode.
+See [the verify gate](verify-gate.md) for the declaration and eligibility rules.
 
 **`verification_contract` object** (`brigade.verification_contract.v1`)
 

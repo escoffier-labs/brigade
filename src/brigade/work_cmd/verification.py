@@ -1696,6 +1696,7 @@ def _write_reused_receipt(
     planned_display: list[str],
     timeout: int,
     *,
+    gating: dict[str, Any],
     capture: str | None = None,
     capture_kind: str = "skill",
     capture_meta: dict[str, Any] | None = None,
@@ -1734,7 +1735,7 @@ def _write_reused_receipt(
     reused_from = latest.get("run_id")
     if isinstance(reused_from, str) and reused_from:
         receipt["reused_from"] = reused_from
-    verify_gate.stamp_gating(target, receipt, reused=latest)
+    receipt["gating"] = gating
     git = _receipt_git_snapshot(target)
     if git is not None:
         receipt["git"] = git
@@ -2032,12 +2033,17 @@ def verify_run(
             if reuse and manifest is None:
                 fingerprint = localio.tree_fingerprint(target)
                 latest = _latest_verify_receipt(target)
-                if verify_argv_files.reusable_receipt(target, planned, planned_display, fingerprint, latest):
+                if (
+                    latest is not None
+                    and verify_argv_files.reusable_receipt(target, planned, planned_display, fingerprint, latest)
+                    and (gating := verify_gate.reuse_gating(target, latest)) is not None
+                ):
                     receipt, rc = _write_reused_receipt(
                         target,
-                        latest or {},
+                        latest,
                         planned_display,
                         timeout,
+                        gating=gating,
                         capture=capture,
                         capture_kind=capture_kind,
                         capture_meta=capture_meta,
