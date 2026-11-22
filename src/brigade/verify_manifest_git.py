@@ -3,6 +3,7 @@
 from __future__ import annotations
 import hashlib
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,10 +39,22 @@ class ManifestGitError(ValueError):
         self.reason = reason
 
 
+def trusted_git_env() -> dict[str, str]:
+    """Drop inherited Git overrides for local repository inspection."""
+    return {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+
+
 def _git(target: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
     command = ["git", *args]
     try:
-        return subprocess.run(command, cwd=target, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+        return subprocess.run(
+            command,
+            cwd=target,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+            env=trusted_git_env(),
+        )
     except (OSError, subprocess.TimeoutExpired):
         # No git, or a hung git, means no trusted base. Callers treat a non-zero code as that.
         return subprocess.CompletedProcess(command, 127, b"", b"")

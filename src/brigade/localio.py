@@ -21,6 +21,7 @@ from typing import Any
 
 TREE_FINGERPRINT_EVIDENCE_PATHS = (
     ".brigade/work/verify-runs",
+    ".brigade/work/verify-required",
     "memory/outcome/records.jsonl",
     "memory/outcome/.records.lock",
     ".brigade/work/miseledger-export-cursor.json",
@@ -53,7 +54,7 @@ def read_json_dict(path: Path) -> dict[str, Any] | None:
 
 
 def tree_fingerprint_with_head(
-    target: Path, *, extra_evidence_paths: tuple[str, ...] = ()
+    target: Path, *, extra_evidence_paths: tuple[str, ...] = (), git_env: dict[str, str] | None = None
 ) -> tuple[str | None, str | None]:
     """Return the Git tree for the live workspace and the HEAD commit that fed it.
 
@@ -61,12 +62,13 @@ def tree_fingerprint_with_head(
     over the excluded evidence paths, and ``write-tree``. The excluded paths
     therefore carry the content of the HEAD commit that was checked out when the
     fingerprint was taken; returning that HEAD makes the normalization base
-    provable later. Callers can also exclude their own generated evidence.
+    provable later. Callers can also exclude their own generated evidence or
+    supply the environment for Git. The fingerprint always uses its own index.
     """
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             index_file = Path(tmpdir) / "index"
-            env = {**os.environ, "GIT_INDEX_FILE": str(index_file)}
+            env = {**(os.environ if git_env is None else git_env), "GIT_INDEX_FILE": str(index_file)}
 
             def git(*args: str) -> subprocess.CompletedProcess[str]:
                 return subprocess.run(
@@ -100,9 +102,9 @@ def tree_fingerprint_with_head(
         return None, None
 
 
-def tree_fingerprint(target: Path) -> str | None:
+def tree_fingerprint(target: Path, *, git_env: dict[str, str] | None = None) -> str | None:
     """Return the Git tree for the live workspace, excluding generated evidence."""
-    return tree_fingerprint_with_head(target)[0]
+    return tree_fingerprint_with_head(target, git_env=git_env)[0]
 
 
 def _active_bound_target(path: Path) -> tuple[Any, tuple[str, ...], str] | None:
