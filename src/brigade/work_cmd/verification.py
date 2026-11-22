@@ -34,7 +34,7 @@ from ..claude_hooks import producer_session as hook_producer
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
-from . import verify_argv_files, verify_ci, verify_ranking, verify_runtime
+from . import verify_argv_files, verify_ci, verify_ranking, verify_receipt_details, verify_runtime
 from .verify_scoreability import _print_graph_impact, _print_scoreability_notice, _scoreability_notice
 
 
@@ -505,13 +505,8 @@ def _finalize_verify_receipt(
         receipt.setdefault("interruption", verify_runtime._verify_interruption_record())
         rc = verify_runtime._VERIFY_CANCELED_RC
     else:
-        command_statuses = [c.get("status") for c in receipt["commands"] if isinstance(c, dict)]
-        if rc == 0:
-            receipt["status"] = "completed"
-        elif any(status in ("failed", "timed_out") for status in command_statuses):
-            receipt["status"] = "failed"
-        else:
-            receipt["status"] = "rejected"
+        receipt["status"], rc = verify_receipt_details.terminal_status(receipt, rc)
+        verify_receipt_details.stamp_tree_after(target, receipt)
     commands = receipt.get("commands")
     if isinstance(commands, list):
         for command in commands:
@@ -611,8 +606,11 @@ def _safe_finalize_verify_receipt(
                 verify_runtime._verify_interruption_record(),
             )
             rc = verify_runtime._VERIFY_CANCELED_RC
-        elif receipt.get("status") == "running":
-            receipt["status"] = "failed"
+        else:
+            rc = verify_receipt_details.fail_closed_fallback(receipt, rc)
+            # The status changed after these were stamped, so stamp them again.
+            verify_trial.stamp_verify_receipt_failure_taxonomy(receipt)
+            _stamp_verification_contract_outcomes(receipt)
         receipt.setdefault("completed_at", helpers._now().isoformat())
         # Keep a valid digest/signature if fallback did not change the payload.
         # A completed digest must never authenticate a newly canceled receipt.
@@ -1127,7 +1125,8 @@ def _verify_receipt_has_outcome_capture(target: Path, receipt: dict[str, Any]) -
 
 def _find_uncaptured_failed_verify_receipt(target: Path, planned_identity: list[str]) -> dict[str, Any] | None:
     for receipt in _verify_receipts(target):
-        if _receipt_planned_commands_identity(receipt) != planned_identity:
+        # A busy run did not test anything, so it does not clear an older uncaptured failure.
+        if _receipt_planned_commands_identity(receipt) != planned_identity or receipt.get("status") == "busy":
             continue
         if receipt.get("status") != "failed":
             return None
@@ -1553,6 +1552,7 @@ def _run_verify_commands(
             "commands": [],
             "planned_commands": _planned_commands_display(commands),
             "argv_file_hashes": verify_argv_files.argv_file_hashes(target, commands),
+            "inherited_test_env": verify_receipt_details.inherited_test_env(),
         }
         receipt.update(identity)
         state = verify_runtime._ACTIVE_VERIFY_CANCEL.get()
@@ -1600,6 +1600,7 @@ def _run_verify_commands(
                             "stdout_summary": "",
                             "stdout_log_path": str(stdout_path),
                             "stderr_log_path": str(stderr_path),
+                            "test_outcomes": None,
                         }
                     )
                     stdout_path.write_text("")
@@ -1618,15 +1619,13 @@ def _run_verify_commands(
                     env=run_env,
                     timeout=timeout,
                 )
-                # A first signal in the return-to-bookkeeping bytecode window
-                # can still omit this finished command before deferral begins.
                 with verify_runtime._defer_verify_signal():
                     command_completed = helpers._now()
-                    stdout_path.write_text(stdout)
-                    stderr_path.write_text(stderr)
                     command_result.update(
                         {
-                            "status": status,
+                            "status": "busy"
+                            if verify_receipt_details.is_busy_exit(exit_code, stderr, stdout)
+                            else status,
                             "exit_code": exit_code,
                             "completed_at": command_completed.isoformat(),
                             "duration_seconds": (command_completed - command_started).total_seconds(),
@@ -1635,12 +1634,15 @@ def _run_verify_commands(
                             "stderr_summary": scanners_mod._scanner_run_summary(stderr),
                             "stdout_log_path": str(stdout_path),
                             "stderr_log_path": str(stderr_path),
+                            "test_outcomes": verify_receipt_details.pytest_outcomes(stdout),
                         }
                     )
+                    receipt["commands"].append(command_result)
+                    stdout_path.write_text(stdout)
+                    stderr_path.write_text(stderr)
                     if status == verify_runtime._VERIFY_INTERRUPTED_COMMAND_STATUS:
                         canceled = True
                         rc = verify_runtime._VERIFY_CANCELED_RC
-                        receipt["commands"].append(command_result)
                         break
                     if status == "timed_out":
                         rc = 124
@@ -1648,7 +1650,6 @@ def _run_verify_commands(
                         rc = exit_code
                     elif status == "failed" and rc == 0:
                         rc = 127
-                    receipt["commands"].append(command_result)
                     state = verify_runtime._ACTIVE_VERIFY_CANCEL.get()
                     if state is not None and state.received is not None:
                         state.raised = True
@@ -1673,6 +1674,11 @@ def _run_verify_commands(
                 verify_runtime._verify_interruption_record(),
             )
             _cancel_verify_graph(receipt, run_dir)
+    except Exception:
+        if receipt is None:
+            raise
+        receipt["bookkeeping_error"] = True
+        rc = rc or 1
     finally:
         if receipt is not None:
             receipt, rc = _commit_verify_receipt(
@@ -1711,8 +1717,10 @@ def _write_reused_receipt(
         "commands": copy.deepcopy(latest.get("commands", [])),
         "planned_commands": planned_display,
         "argv_file_hashes": copy.deepcopy(latest.get("argv_file_hashes", {})),
+        "inherited_test_env": copy.deepcopy(latest.get("inherited_test_env")),
     }
     receipt.update(identity)
+    verify_receipt_details.stamp_reused_tree(receipt, identity)
     state = verify_runtime._ACTIVE_VERIFY_CANCEL.get()
     if state is not None:
         state.owned_receipt = (target, run_dir, receipt, started)

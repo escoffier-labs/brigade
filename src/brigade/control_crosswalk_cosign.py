@@ -238,7 +238,7 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
         return _observation(relpath, "incomplete", **verified_trust, reason="planned_commands_mismatch")
     terminal_command_statuses = {"completed"}
     if receipt_status in {"failed", "rejected"}:
-        terminal_command_statuses.update({"failed", "timed_out", "rejected"})
+        terminal_command_statuses.update({"failed", "timed_out", "rejected", "busy"})
     if any(
         not isinstance(command.get("status"), str)
         or command.get("status") not in terminal_command_statuses

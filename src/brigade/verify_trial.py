@@ -53,6 +53,8 @@ class TrialProjection:
 def classify_verify_failure(status: object, exit_code: object) -> tuple[str, str]:
     """Map a verify command outcome to the #474-style failure taxonomy."""
     normalized_status = str(status or "")
+    if normalized_status == "busy":
+        return "infrastructure", "busy"
     if normalized_status == "timed_out":
         return "infrastructure", "timeout"
     if normalized_status == "interrupted":
@@ -90,12 +92,23 @@ def stamp_verify_receipt_failure_taxonomy(receipt: dict[str, Any]) -> None:
         receipt["failure_class"] = "infrastructure"
         receipt["failure_kind"] = "canceled"
         return
+    if status == "busy":
+        receipt["failure_class"] = "infrastructure"
+        receipt["failure_kind"] = "busy"
+        return
     commands = receipt.get("commands")
     if isinstance(commands, list):
         for command in commands:
             if isinstance(command, dict):
                 stamp_verify_command_failure_taxonomy(command)
     if status == "failed":
+        planned = receipt.get("planned_commands")
+        if receipt.get("bookkeeping_error") or (
+            isinstance(planned, list) and isinstance(commands, list) and len(planned) != len(commands)
+        ):
+            receipt["failure_class"] = "infrastructure"
+            receipt["failure_kind"] = "receipt_incomplete"
+            return
         receipt["failure_class"] = "verification"
         receipt["failure_kind"] = "receipt_failed"
         return
