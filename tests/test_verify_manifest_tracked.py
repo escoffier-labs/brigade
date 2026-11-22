@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -24,8 +25,20 @@ def _workspace_manifest_paths() -> list[Path]:
     return sorted(path for path in root.glob("*.json") if path.is_file())
 
 
-def test_every_workspace_verify_manifest_resolves_by_id_and_path():
-    paths = _workspace_manifest_paths()
+def test_every_workspace_verify_manifest_resolves_by_id_and_path(tmp_path: Path):
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main"], cwd=repository, check=True)
+    destination = repository / _WORKSPACE_MANIFESTS_REL
+    destination.parent.mkdir(parents=True)
+    shutil.copytree(_REPO_ROOT / _WORKSPACE_MANIFESTS_REL, destination)
+    subprocess.run(["git", "add", "."], cwd=repository, check=True)
+    subprocess.run(
+        ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qm", "manifests"],
+        cwd=repository,
+        check=True,
+    )
+    paths = sorted(destination.glob("*.json"))
     assert paths, "expected tracked manifests under verify/manifests/"
     seen_ids: set[str] = set()
     for path in paths:
@@ -41,14 +54,14 @@ def test_every_workspace_verify_manifest_resolves_by_id_and_path():
         subject_path = subject.get("subject_path")
         assert isinstance(subject_path, str) and subject_path.strip()
 
-        by_id, id_error = verify_manifest.resolve_manifest(_REPO_ROOT, manifest_id)
+        by_id, id_error = verify_manifest.resolve_manifest(repository, manifest_id)
         assert id_error is None, (manifest_id, id_error)
         assert by_id is not None
         assert by_id.manifest_id == manifest_id
         assert by_id.subject_path == subject_path
 
-        rel = path.relative_to(_REPO_ROOT).as_posix()
-        by_path, path_error = verify_manifest.resolve_manifest(_REPO_ROOT, rel)
+        rel = path.relative_to(repository).as_posix()
+        by_path, path_error = verify_manifest.resolve_manifest(repository, rel)
         assert path_error is None, (rel, path_error)
         assert by_path is not None
         assert by_path.manifest_id == manifest_id
@@ -75,6 +88,11 @@ def test_resolve_manifest_accepts_tracked_workspace_source_path(scoreable_target
 
 
 def _set_origin_default(target: Path, branch: str, commit: str) -> None:
+    remotes = subprocess.run(["git", "remote"], cwd=target, check=True, text=True, capture_output=True).stdout.split()
+    if "origin" not in remotes:
+        bare = target.parent / "origin.git"
+        subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+        subprocess.run(["git", "remote", "add", "origin", str(bare)], cwd=target, check=True)
     subprocess.run(["git", "update-ref", f"refs/remotes/origin/{branch}", commit], cwd=target, check=True)
     subprocess.run(
         ["git", "symbolic-ref", "refs/remotes/origin/HEAD", f"refs/remotes/origin/{branch}"],
@@ -139,7 +157,8 @@ def test_resolve_manifest_rejects_untracked_workspace_source_path(scoreable_targ
     rel = written.resolve().relative_to(scoreable_target.resolve()).as_posix()
     manifest, error = verify_manifest.resolve_manifest(scoreable_target, rel)
     assert manifest is None
-    assert error == "verify manifest not tracked: untracked-path"
+    assert error is not None
+    assert "not on the default branch yet" in error
 
 
 def test_suggested_manifest_command_names_matching_tracked_manifest(scoreable_target):
@@ -181,3 +200,49 @@ def test_suggested_manifest_command_matches_scope_glob_prefix(scoreable_target):
     )
     assert command == ('brigade work verify run --manifest "verify/manifests/scoped-patch.json" --capture brigade-work')
     assert verify_manifest.suggested_manifest_command(scoreable_target, ["docs/readme.md"]) is None
+
+
+def test_remote_without_default_branch_ref_is_refused(scoreable_target):
+    bare = scoreable_target.parent / "empty-origin.git"
+    subprocess.run(["git", "init", "--bare", "-q", str(bare)], check=True)
+    subprocess.run(["git", "remote", "add", "origin", str(bare)], cwd=scoreable_target, check=True)
+
+    manifest, error = verify_manifest.resolve_manifest(scoreable_target, "missing")
+
+    assert manifest is None
+    assert error is not None
+    assert error.startswith("unresolved_default_branch:")
+    assert "git fetch origin <branch>" in error
+    assert "git remote set-head origin -a" in error
+
+
+def test_no_remote_binding_records_source_and_reference(scoreable_target):
+    _write_patch_manifest(scoreable_target, manifest_id="local-source")
+
+    manifest, error = verify_manifest.resolve_manifest(scoreable_target, "local-source")
+
+    assert error is None
+    assert manifest is not None
+    binding = verify_manifest.build_manifest_binding(scoreable_target, manifest)
+    assert binding["base_source"] == "no_remote"
+    assert binding["base_reference"] == "HEAD"
+    assert binding["base_commit"]
+
+
+def test_origin_master_is_used_when_origin_head_is_dangling(scoreable_target):
+    _write_patch_manifest(scoreable_target, manifest_id="master-base")
+    base = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=scoreable_target, check=True, text=True, capture_output=True
+    ).stdout.strip()
+    _set_origin_default(scoreable_target, "master", base)
+    subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/gone"],
+        cwd=scoreable_target,
+        check=True,
+    )
+
+    manifest, error = verify_manifest.resolve_manifest(scoreable_target, "master-base")
+
+    assert error is None
+    assert manifest is not None
+    assert manifest.manifest_base_reference == "refs/remotes/origin/master"

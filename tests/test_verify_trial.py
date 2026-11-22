@@ -234,7 +234,8 @@ def test_resolve_manifest_rejects_untracked_workspace_manifest(scoreable_target)
 
     manifest, error = verify_manifest.resolve_manifest(scoreable_target, "untracked-patch")
     assert manifest is None
-    assert error == "verify manifest not tracked: untracked-patch"
+    assert error is not None
+    assert "not on the default branch yet" in error
     assert "untracked-patch" not in verify_manifest.registered_manifest_ids(scoreable_target)
 
 

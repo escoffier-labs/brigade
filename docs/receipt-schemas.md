@@ -271,7 +271,7 @@ explicit command and use `source: manifest_checks` (the manifest's own checks).
 | `artifact_kind` | string | `skill` or `card` |
 | `artifact_id` | string | Verifier-owned subject id |
 | `content_fingerprint` | string | Subject content fingerprint at verify time |
-| `manifest_binding` | object | `{manifest_id, payload_sha256, source_path?, manifest_worktree_modified?, base_commit?, base_payload_sha256?}` for the exact tracked verifier manifest. Workspace manifests include the modification flag and identify the default-branch merge-base payload that was executed. Built-in manifests omit the base fields. |
+| `manifest_binding` | object | `{manifest_id, payload_sha256, source_path?, manifest_worktree_modified?, manifest_worktree_missing?, base_source?, base_reference?, base_commit?, base_payload_sha256?}` for the exact tracked verifier manifest. Workspace manifests identify whether the trusted base came from `default_branch` or `no_remote`, name its reference and commit, and report whether the working copy is modified or missing. The payload hashes cover the exact base blob bytes. Built-in manifests omit the base fields. |
 | `patch_source` | string | `worktree` or `generated` (patch-backed only) |
 | `generated_patch_quarantine` | object | Required for scoreable `patch_source: generated` receipts (#507). See below. |
 | `producer_binding` | object | `{work_session_id, owned_delta_sha256, subject_clean_at_start, start_git}` for patch-backed runs |

@@ -388,31 +388,11 @@ def discover_trusted_opt_in_manifests(
 ) -> tuple[list[TrustedOptInEntry], list[dict[str, Any]]]:
     grouped: dict[str, dict[ManifestRole, list[tuple[verify_manifest.VerifyManifest, str]]]] = {}
     rejections: list[dict[str, Any]] = []
-    for path in verify_manifest._discover_manifest_files(target, tracked_only=True):
-        payload = verify_manifest._load_manifest_file(path)
-        if not isinstance(payload, dict):
-            continue
-        try:
-            manifest = verify_manifest.manifest_from_payload(payload, path=path)
-        except ValueError:
-            artifact_id = _artifact_id_from_payload(payload)
-            if artifact_id and _route_opted_raw_payload(
-                payload,
-                route_manifest=route_manifest,
-                route_class=route_class,
-            ):
-                scope_globs_raw = payload.get("scope_globs", [])
-                if isinstance(scope_globs_raw, list):
-                    scope_reason = verify_manifest.validate_scope_globs(scope_globs_raw)
-                    if scope_reason is not None:
-                        rejections.append(
-                            {
-                                "artifact_id": artifact_id,
-                                "accepted": False,
-                                "reason": scope_reason,
-                            }
-                        )
-            continue
+    try:
+        trusted = verify_manifest.trusted_workspace_manifests(target)
+    except ValueError:
+        trusted = []
+    for manifest in trusted:
         if not _manifest_opts_into_route(manifest, route_manifest=route_manifest, route_class=route_class):
             continue
         manifest_path = verify_manifest.manifest_source_path(target, manifest)
@@ -463,14 +443,11 @@ def _fixture_eval_manifest_for_skill(
     artifact_id: str,
 ) -> tuple[verify_manifest.VerifyManifest | None, str | None]:
     matches: list[tuple[verify_manifest.VerifyManifest, str]] = []
-    for path in verify_manifest._discover_manifest_files(target, tracked_only=True):
-        payload = verify_manifest._load_manifest_file(path)
-        if not isinstance(payload, dict):
-            continue
-        try:
-            manifest = verify_manifest.manifest_from_payload(payload, path=path)
-        except ValueError:
-            continue
+    try:
+        trusted = verify_manifest.trusted_workspace_manifests(target)
+    except ValueError:
+        trusted = []
+    for manifest in trusted:
         if manifest.binding_mode != "fixture_eval":
             continue
         if manifest.artifact_id != artifact_id:
