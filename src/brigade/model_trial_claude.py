@@ -457,6 +457,7 @@ class _Observer:
         self.init_event: dict[str, Any] | None = None
         self.init_ok = False
         self.failure: str | None = None
+        self.process_diagnostics: list[str] = []
         self.observed: list[dict[str, Any]] = []
         self.controls: list[dict[str, Any]] = []
         self.result: dict[str, Any] | None = None
@@ -772,7 +773,9 @@ def _run_windows_process(
     stdin, stdout, stderr = child.stdin, child.stdout, child.stderr
     capture = _StderrCapture(token)
     stopping = threading.Event()
+    stdin_closed = threading.Event()
     output: queue.Queue[bytes | OSError] = queue.Queue(maxsize=1)
+    stdout_bytes = 0
     poll_interval = 0.01
     stopped = timed_out = cleanup_failed = False
     drain_deadline = deadline
@@ -793,6 +796,9 @@ def _run_windows_process(
                 stdin.write(message.encode("utf-8"))
         except OSError:
             pass
+        finally:
+            if stdin.closed:
+                stdin_closed.set()
 
     def publish(item: bytes | OSError) -> None:
         while not stopping.is_set():
@@ -803,10 +809,12 @@ def _run_windows_process(
                 continue
 
     def read_stdout() -> None:
+        nonlocal stdout_bytes
         try:
             with stdout:
                 # Bounded even if the child never writes a newline.
                 while not stopping.is_set() and (line := stdout.readline(MAX_LINE_BYTES + 1)):
+                    stdout_bytes += len(line)
                     publish(line)
             publish(b"")
         except OSError as exc:
@@ -820,7 +828,8 @@ def _run_windows_process(
         nonlocal timed_out, cleanup_failed
         eof = False
         while True:
-            exited = child.poll() is not None
+            exit_code = child.poll()
+            exited = exit_code is not None
             if exited:
                 # A descendant can hold the write ends open after the leader exits.
                 stop_tree()
@@ -829,6 +838,21 @@ def _run_windows_process(
             remaining = drain_deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = not exited
+                # Snapshot a live job before finally terminates it and releases the handle.
+                observer.process_diagnostics.append(
+                    "windows_process_deadline:"
+                    + json.dumps(
+                        {
+                            "leader_exited": exited,
+                            "exit_code": exit_code,
+                            "stdin_closed": stdin_closed.is_set(),
+                            "stdout_bytes": stdout_bytes,
+                            "stderr_bytes": capture.total,
+                            "active_processes": job.active_processes(),
+                        },
+                        sort_keys=True,
+                    )
+                )
                 # An exited leader can still leave unread output at the deadline.
                 cleanup_failed = cleanup_failed or exited
                 return
@@ -1145,7 +1169,9 @@ def run_cell(
         failure = f"claude_exit:{code}" if code else "no_result"
     elif failure is None and result is not None and result.get("is_error"):
         failure = f"model_error:{result.get('subtype')}"
-    diagnostics = [] if server_failure is None else [server_failure]
+    diagnostics = observer.process_diagnostics.copy()
+    if server_failure is not None:
+        diagnostics.append(server_failure)
     failure = failure or server_failure
     if drain_failed:
         failure = DRAIN_FAILURE

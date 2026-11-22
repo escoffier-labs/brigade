@@ -51,6 +51,7 @@ FIXTURES = Path(__file__).parents[1] / "src/brigade/fixtures/paired-brigade-work
 LIVE = FIXTURES / "live-claude.json"
 SECRET_TOKEN = "sentinel-oauth-token-value"
 LAUNCH = (sys.executable,)  # The fake is a script; a launcher prefix runs it the same way on every platform.
+LIVE_TEST_TIMEOUT = 20 if os.name == "nt" else 60
 WINDOWS_BASICS = {
     k: os.environ[k] for k in ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT") if k in os.environ
 }
@@ -127,7 +128,15 @@ def clean_temp_root():
 
 def _live(tmp_path, fake_dir="fake", output="evidence", **scenario):
     exe = make_fake(tmp_path / fake_dir, **scenario)
-    result = execute_live(LIVE, tmp_path / output, claude_bin=str(exe), environ=ENVIRON, timeout=60)
+    result = execute_live(LIVE, tmp_path / output, claude_bin=str(exe), environ=ENVIRON, timeout=LIVE_TEST_TIMEOUT)
+    deadline_details = [
+        f"{attempt['cell']['arm']} {diagnostic}"
+        for attempt in result["attempts"]
+        for diagnostic in attempt["live"]["diagnostics"]
+        if diagnostic.startswith("windows_process_deadline:")
+    ]
+    if deadline_details:
+        pytest.fail(" | ".join(deadline_details), pytrace=False)
     return result, tmp_path / fake_dir, tmp_path / output
 
 
@@ -403,20 +412,27 @@ def test_resume_appends_only_with_the_reviewed_digest_and_refuses_any_identity_c
     first, fake_dir, output = _live(tmp_path, init={"model": "wrong"})
     exe = fake_dir / "claude"
     again = execute_live(
-        LIVE, output, claude_bin=str(exe), environ=ENVIRON, timeout=60, resume_digest=first["evidence_sha256"]
+        LIVE,
+        output,
+        claude_bin=str(exe),
+        environ=ENVIRON,
+        timeout=LIVE_TEST_TIMEOUT,
+        resume_digest=first["evidence_sha256"],
     )
     assert len(again["attempts"]) == 4 and again["attempts"][:2] == first["attempts"]
     reviewed = again["evidence_sha256"]
     make_fake(fake_dir, init={"model": "wrong"}, version="2.1.400")
     with pytest.raises(ValueError, match="identity changed"):
-        execute_live(LIVE, output, claude_bin=str(exe), environ=ENVIRON, timeout=60, resume_digest=reviewed)
+        execute_live(
+            LIVE, output, claude_bin=str(exe), environ=ENVIRON, timeout=LIVE_TEST_TIMEOUT, resume_digest=reviewed
+        )
     make_fake(fake_dir, init={"model": "wrong"})
     with pytest.raises(ValueError, match="identity changed"):
         execute_live(LIVE, output, claude_bin=str(exe), environ=ENVIRON, timeout=61, resume_digest=reviewed)
     copy = tmp_path / "pkg"
     shutil.copytree(FIXTURES, copy)
     first_copy = execute_live(
-        copy / "live-claude.json", tmp_path / "out3", claude_bin=str(exe), environ=ENVIRON, timeout=60
+        copy / "live-claude.json", tmp_path / "out3", claude_bin=str(exe), environ=ENVIRON, timeout=LIVE_TEST_TIMEOUT
     )
     assert len(first_copy["attempts"]) == 2
     skill = copy / "candidate/SKILL.md"
@@ -427,7 +443,7 @@ def test_resume_appends_only_with_the_reviewed_digest_and_refuses_any_identity_c
             tmp_path / "out3",
             claude_bin=str(exe),
             environ=ENVIRON,
-            timeout=60,
+            timeout=LIVE_TEST_TIMEOUT,
             resume_digest=first_copy["evidence_sha256"],
         )
 
@@ -449,7 +465,7 @@ def test_a_stored_digest_cannot_vouch_for_rewritten_attempts(tmp_path):
     forged = tmp_path / "forged"
     forged_digest = _forge_one_attempt_away(output, forged)
     # The file beside the evidence says the forged tree is intact. Without the operator's digest nothing is reused.
-    fresh = execute_live(LIVE, forged, claude_bin=str(exe), environ=ENVIRON, timeout=60)
+    fresh = execute_live(LIVE, forged, claude_bin=str(exe), environ=ENVIRON, timeout=LIVE_TEST_TIMEOUT)
     assert len(fresh["attempts"]) == 2 and all(a["attempt_id"].endswith("-1") for a in fresh["attempts"])
     moved = sorted(path.name for path in forged.glob("superseded-*"))
     assert len(moved) == 1
@@ -464,7 +480,7 @@ def test_a_stored_digest_cannot_vouch_for_rewritten_attempts(tmp_path):
             forged_again,
             claude_bin=str(exe),
             environ=ENVIRON,
-            timeout=60,
+            timeout=LIVE_TEST_TIMEOUT,
             resume_digest=first["evidence_sha256"],
         )
     assert len(json.loads((forged_again / "evidence.json").read_text())["attempts"]) == 1
@@ -474,7 +490,14 @@ def test_a_stored_digest_cannot_vouch_for_rewritten_attempts(tmp_path):
 def test_resume_digest_without_evidence_is_refused(tmp_path):
     exe = make_fake(tmp_path / "f")
     with pytest.raises(ValueError, match="no evidence to resume"):
-        execute_live(LIVE, tmp_path / "empty", claude_bin=str(exe), environ=ENVIRON, timeout=60, resume_digest="0" * 64)
+        execute_live(
+            LIVE,
+            tmp_path / "empty",
+            claude_bin=str(exe),
+            environ=ENVIRON,
+            timeout=LIVE_TEST_TIMEOUT,
+            resume_digest="0" * 64,
+        )
     assert records(tmp_path / "f") == []
 
 
@@ -570,7 +593,7 @@ def test_an_arm_mcp_server_leaves_no_update_refresh_in_its_home(tmp_path):
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        timeout=60,
+        timeout=LIVE_TEST_TIMEOUT,
         check=True,
     )
     cache = arm / "home" / ".cache" / "brigade"
@@ -793,6 +816,8 @@ def test_windows_arm_has_a_deadline_even_when_a_descendant_holds_the_pipes(
 
     class HeldPipe(io.BytesIO):
         def readline(self, size=-1):
+            if line := super().readline(size):
+                return line
             reading.set()
             released.wait(2)
             return b""
@@ -807,8 +832,8 @@ def test_windows_arm_has_a_deadline_even_when_a_descendant_holds_the_pipes(
 
         def __init__(self):
             self.stdin = io.BytesIO()
-            self.stdout = HeldPipe()
-            self.stderr = HeldPipe()
+            self.stdout = HeldPipe(b" \n")
+            self.stderr = HeldPipe(b"diagnostic\n")
 
         def poll(self):
             nonlocal code
@@ -828,6 +853,12 @@ def test_windows_arm_has_a_deadline_even_when_a_descendant_holds_the_pipes(
             code = 125
 
     class Job:
+        def active_processes(self):
+            if leader_exited:
+                return None
+            assert code is None  # Query before terminating the leader and descendant.
+            return 2
+
         def terminate(self):
             nonlocal code
             actions.append("terminate")
@@ -837,8 +868,9 @@ def test_windows_arm_has_a_deadline_even_when_a_descendant_holds_the_pipes(
                 code = 125
             if releases_pipes:
                 released.set()
-                for worker in workers:
-                    worker.join(timeout=1)
+                if not leader_exited:
+                    for worker in workers:
+                        worker.join(timeout=1)
             return True
 
         def close(self):
@@ -896,6 +928,19 @@ def test_windows_arm_has_a_deadline_even_when_a_descendant_holds_the_pipes(
         assert outcomes == [(code, not leader_exited, drain_failed)] * 2
         assert actions == ["create", ("launch", 4), "bind", "terminate", "close"] * 2
         assert len(work_dirs) == 2 and all(work.is_dir() == drain_failed for work in work_dirs)
+        if not leader_exited:
+            for attempt in result["attempts"]:
+                diagnostic = next(
+                    value for value in attempt["live"]["diagnostics"] if value.startswith("windows_process_deadline:")
+                )
+                assert json.loads(diagnostic.split(":", 1)[1]) == {
+                    "leader_exited": False,
+                    "exit_code": None,
+                    "stdin_closed": True,
+                    "stdout_bytes": 2,
+                    "stderr_bytes": 11,
+                    "active_processes": 2,
+                }
         if drain_failed:
             assert _failures(result) == [model_trial_claude.DRAIN_FAILURE]
     finally:
@@ -961,9 +1006,19 @@ def test_windows_arm_declares_all_win32_job_and_thread_prototypes(monkeypatch, t
         entry._obj.th32ThreadID = 777
         return True
 
+    def query_job(_job, info_class, info, size, returned_length):
+        assert info_class == 1 and size == 48 and returned_length is None
+        info._obj.ActiveProcesses = 2
+        return True
+
     signatures = {
         "CreateJobObjectW": ([wintypes.LPVOID, wintypes.LPCWSTR], handle, lambda *_: job_handle),
         "SetInformationJobObject": ([handle, ctypes.c_int, wintypes.LPVOID, dword], boolean, lambda *_: True),
+        "QueryInformationJobObject": (
+            [handle, ctypes.c_int, wintypes.LPVOID, dword, wintypes.LPDWORD],
+            boolean,
+            query_job,
+        ),
         "AssignProcessToJobObject": ([handle, handle], boolean, lambda _, process: process == process_handle),
         "TerminateJobObject": ([handle, wintypes.UINT], boolean, lambda *_: True),
         "CloseHandle": ([handle], boolean, lambda *_: True),
@@ -1010,6 +1065,12 @@ def test_windows_arm_declares_all_win32_job_and_thread_prototypes(monkeypatch, t
         ("TerminateJobObject", job_handle),
         ("CloseHandle", job_handle),
     ]
+    job = proc_windows_job.create_windows_child_job()
+    assert job is not None
+    assert job.active_processes() == 2
+    job.close()
+    assert job.active_processes() is None
+    assert calls[-2:] == [("QueryInformationJobObject", job_handle), ("CloseHandle", job_handle)]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="exercises native Windows job and inherited pipes")
@@ -1098,7 +1159,12 @@ def test_adapter_identity_records_the_executable_hash_and_a_changed_file_refuses
         handle.write("\n# replaced\n")
     with pytest.raises(ValueError, match="identity changed"):
         execute_live(
-            LIVE, output, claude_bin=str(exe), environ=ENVIRON, timeout=60, resume_digest=first["evidence_sha256"]
+            LIVE,
+            output,
+            claude_bin=str(exe),
+            environ=ENVIRON,
+            timeout=LIVE_TEST_TIMEOUT,
+            resume_digest=first["evidence_sha256"],
         )
     stripped = json.loads((output / "evidence.json").read_text())
     stripped["plan"]["adapter"].pop("executable")
@@ -1128,7 +1194,7 @@ def test_the_bound_executable_is_rechecked_before_every_launch(tmp_path, monkeyp
 
     monkeypatch.setattr(model_trial_claude, "run_cell", run_after_a_swap)
     with pytest.raises(ValueError, match="changed after it was hashed"):
-        execute_live(LIVE, tmp_path / "out", claude_bin=str(swapped), environ=ENVIRON, timeout=60)
+        execute_live(LIVE, tmp_path / "out", claude_bin=str(swapped), environ=ENVIRON, timeout=LIVE_TEST_TIMEOUT)
     assert calls == [1] and records(fake_dir) == []  # the swapped file never received the token
 
 
@@ -1305,7 +1371,7 @@ def test_a_proxy_url_with_credentials_refuses_the_run_without_naming_the_secret(
     exe = make_fake(tmp_path / "px")
     environ = {**ENVIRON, key: "http://proxyuser:hunter2-proxy-secret@proxy.example:3128"}
     with pytest.raises(ValueError, match=key) as caught:
-        execute_live(LIVE, tmp_path / "out", claude_bin=str(exe), environ=environ, timeout=60)
+        execute_live(LIVE, tmp_path / "out", claude_bin=str(exe), environ=environ, timeout=LIVE_TEST_TIMEOUT)
     assert "hunter2-proxy-secret" not in str(caught.value) and "proxyuser" not in str(caught.value)
     assert not (tmp_path / "px" / "record.jsonl").exists()  # No model was launched.
 
@@ -1442,7 +1508,9 @@ def test_a_finished_cell_stops_a_descendant_that_left_its_process_group(tmp_path
     exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS, escaped_writer={"code": writer, "ready": str(ready_base)})
     leaked = []
     try:
-        result = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        result = execute_live(
+            LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=LIVE_TEST_TIMEOUT
+        )
         assert all(a["failure"] is None for a in result["attempts"])
         pids = [int(line) for line in pid_log.read_text().splitlines() if line.strip()]
         assert pids, "the escaped writer never published its pid"
@@ -1527,7 +1595,9 @@ def test_a_drain_failure_fails_only_its_cell_and_keeps_its_work_dir(tmp_path, mo
 
     monkeypatch.setattr(model_trial_claude, "_drain_arm_group", failing_drain)
     try:
-        result = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        result = execute_live(
+            LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=LIVE_TEST_TIMEOUT
+        )
         assert _failures(result) == ["process_group_drain_failed"]
         assert len(result["attempts"]) == 2  # the trial kept going after the first failed cell
         assert len(work_dirs) == 2 and all(path.is_dir() for path in work_dirs)
@@ -1581,7 +1651,7 @@ def test_a_stream_error_with_a_failed_drain_keeps_the_work_dir(tmp_path, monkeyp
     monkeypatch.setattr(model_trial_claude, "_drain_arm_group", failing_drain)
     try:
         with pytest.raises(ValueError, match="stream boom"):
-            execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+            execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=LIVE_TEST_TIMEOUT)
         assert work_dirs and work_dirs[0].is_dir()  # the primary error still won, and the dir was kept
     finally:
         for path in work_dirs:
@@ -1607,7 +1677,9 @@ def test_a_drainer_that_outlives_the_join_keeps_the_work_dir(tmp_path, monkeypat
     monkeypatch.setattr(model_trial_claude, "_StderrCapture", BlockedCapture)
     monkeypatch.setattr(model_trial_claude, "EXIT_GRACE", 0.05)
     try:
-        result = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        result = execute_live(
+            LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=LIVE_TEST_TIMEOUT
+        )
         assert _failures(result) == ["process_group_drain_failed"]
         assert len(work_dirs) == 2 and all(path.is_dir() for path in work_dirs)
     finally:
