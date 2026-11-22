@@ -1021,7 +1021,10 @@ def _reflect(
                         isinstance(checks, list)
                         and any(isinstance(check, dict) and check.get("state") == "held" for check in checks)
                     )
-                    if not decisive_hold:
+                    if not decisive_hold and withdrawal.get("state") in ("rejected", "applied"):
+                        # A closed proposal holds nothing back, so a later run proposes the
+                        # anchor again. A failed withdrawal keeps its proposal id and failure
+                        # count, so the bounded retry still gives up after three attempts.
                         previous.pop(digest, None)
                     _save(target, state)
                 proposals.append(proposal)

@@ -49,18 +49,40 @@ def test_non_clean_non_live_and_unverifiable_cards_are_skipped():
     os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
     reason="safe directory descriptors unavailable",
 )
-def test_budget_and_status(setup, capsys):
+def test_budget_and_status(setup, capsys, monkeypatch):
+    from brigade import memory_reflect_policy as policy
+
     target, hub, _ = setup
+    policy.set_enabled(target, True)
     for i in range(30):
         hub._commit("card.put", "fleet", f"unanchored-{i:02}", card_text(f"Unique claim {i}.", None), "live", str(i))
-    code, report = run(target, capsys, "run", "--limit", "100")
+    opened = {}
+    propose = hub.do_propose
+
+    def record(body):
+        code, payload = propose(body)
+        opened[payload["proposal_id"]] = body["ops"]
+        return code, payload
+
+    def apply_anchor(body):
+        # The real hub writes the block suffix, so the next run sees these cards anchored.
+        for op in opened[body["proposal_id"]]:
+            text = hub.cards[("fleet", op["card_id"])]["text"].replace(".\n", ". ^c-abcdef\n")
+            hub._commit("proposal.apply", "fleet", op["card_id"], text, "live", op["card_id"])
+        return 200, {"state": "applied"}
+
+    monkeypatch.setattr(hub, "do_propose", record)
+    monkeypatch.setattr(hub, "do_auto_apply", apply_anchor, raising=False)
+    # Chains of applied anchors need no pacing here: this test is about the per-run budget.
+    monkeypatch.setattr(policy.AutoApplyPacer, "wait", lambda self: None)
+    code, report = run(target, capsys, "run", "--apply", "--limit", "100")
     assert code == 0
     assert (
         len([call for call in writes(hub) if call["action"] == "propose" and call["ops"][0]["type"] == "anchor_blocks"])
         == 25
     )
     assert report["skipped_reasons"]["anchor_deferred"] == 5
-    code, second = run(target, capsys, "run", "--limit", "100")
+    code, second = run(target, capsys, "run", "--apply", "--limit", "100")
     assert code == 0
     assert len([op for op in second["ops"] if op["type"] == "anchor_blocks"]) == 5
     code, status = run(target, capsys, "status")
@@ -164,7 +186,10 @@ def test_status_does_not_take_write_lock(setup, capsys, monkeypatch):
     reason="safe directory descriptors unavailable",
 )
 def test_anchor_no_delta_is_successful_skip(setup, capsys, monkeypatch, hub_code, expected):
+    from brigade import memory_reflect_policy as policy
+
     target, hub, _ = setup
+    policy.set_enabled(target, True)
     hub.cards.clear()
     hub._commit("card.put", "fleet", "unique", card_text("Unique.", None), "live", "unique")
     monkeypatch.setattr(
@@ -180,7 +205,7 @@ def test_anchor_no_delta_is_successful_skip(setup, capsys, monkeypatch, hub_code
             },
         ),
     )
-    code, report = run(target, capsys, "run")
+    code, report = run(target, capsys, "run", "--apply")
     assert code == expected
     assert report["status"] == ("completed" if expected == 0 else "failed")
 
@@ -270,7 +295,10 @@ def test_human_heads_do_not_starve_automated_heads(setup, capsys, monkeypatch):
     reason="safe directory descriptors unavailable",
 )
 def test_no_delta_does_not_hide_a_real_refusal(setup, capsys, monkeypatch):
+    from brigade import memory_reflect_policy as policy
+
     target, hub, _ = setup
+    policy.set_enabled(target, True)
     hub.cards.clear()
     for ident in ("already", "refused"):
         hub._commit("card.put", "fleet", ident, card_text(f"Claim {ident}.", None), "live", ident)
@@ -290,7 +318,7 @@ def test_no_delta_does_not_hide_a_real_refusal(setup, capsys, monkeypatch):
         }
 
     monkeypatch.setattr(hub, "do_propose", refuse)
-    code, report = run(target, capsys, "run")
+    code, report = run(target, capsys, "run", "--apply")
     assert code == 1
     assert report["error"] == "all_ops_refused"
 
@@ -371,7 +399,11 @@ def test_history_strips_anchor_before_final_newline(ending):
     reason="safe directory descriptors unavailable",
 )
 def test_anchor_quota_reserves_four_repair_slots(setup, capsys, monkeypatch):
+    from brigade import memory_reflect_policy as policy
+
     target, hub, _ = setup
+    policy.set_enabled(target, True)
+    monkeypatch.setattr(policy, "attempt", lambda *args, **kwargs: {"state": "pending"})
     hub._commit("card.put", "fleet", "robot", card_text("Unique.", None), "live", "robot")
     status = hub.do_status
 
@@ -381,7 +413,7 @@ def test_anchor_quota_reserves_four_repair_slots(setup, capsys, monkeypatch):
         return code, payload
 
     monkeypatch.setattr(hub, "do_status", full)
-    code, report = run(target, capsys, "run", "--limit", "100")
+    code, report = run(target, capsys, "run", "--apply", "--limit", "100")
     assert code == 0
     assert report["skipped_reasons"]["anchor_quota_reserve"] == 1
     assert [call["ops"][0]["type"] for call in writes(hub)] == ["merge_exact_duplicates"]
@@ -392,7 +424,11 @@ def test_anchor_quota_reserves_four_repair_slots(setup, capsys, monkeypatch):
     reason="safe directory descriptors unavailable",
 )
 def test_hub_anchor_reserve_refusal_is_back_pressure_not_a_failure(setup, capsys, monkeypatch):
+    from brigade import memory_reflect_policy as policy
+
     target, hub, _ = setup
+    policy.set_enabled(target, True)
+    monkeypatch.setattr(policy, "attempt", lambda *args, **kwargs: {"state": "pending"})
     hub._commit("card.put", "fleet", "robot", card_text("Unique robot claim.", None), "live", "robot")
     propose = hub.do_propose
 
@@ -402,7 +438,7 @@ def test_hub_anchor_reserve_refusal_is_back_pressure_not_a_failure(setup, capsys
         return propose(body)
 
     monkeypatch.setattr(hub, "do_propose", reserve)
-    code, report = run(target, capsys, "run", "--limit", "100")
+    code, report = run(target, capsys, "run", "--apply", "--limit", "100")
     assert code == 0
     assert report["status"] == "completed"
     assert report["skipped_reasons"] == {"anchor_quota_reserve": 1}
@@ -709,9 +745,9 @@ def test_failed_withdrawal_is_recorded_and_never_fails_the_run(setup, capsys, mo
     assert len(decisions) == 2
     replayed = decisions[0]["client_event_id"] == decisions[1]["client_event_id"]
     assert replayed == (failure == "unavailable")
-    [closed] = json.loads(path.read_text())["submissions"].values()
-    assert "anchor_review_only" in closed
-    assert "withdrawal_event_id" not in closed
+    # Nothing was applied, so the closed withdrawal is forgotten rather than held back for
+    # the seven-day window: a later run proposes the anchor again.
+    assert json.loads(path.read_text())["submissions"] == {}
 
 
 @pytest.mark.skipif(
@@ -750,16 +786,16 @@ def test_withdrawal_after_a_lost_answer_treats_an_already_rejected_proposal_as_w
     assert second["proposals"][0]["withdrawal"] == {"state": "rejected", "reason": "anchor_already_decided"}
     decisions = _decisions(hub)
     assert decisions[1]["client_event_id"] != decisions[0]["client_event_id"]
-    [closed] = json.loads(path.read_text())["submissions"].values()
-    assert "anchor_review_only" in closed
-    assert "withdrawal_event_id" not in closed
+    # The read confirmed a withdrawal, so the record is forgotten instead of holding the
+    # anchor back for the seven-day window.
+    assert json.loads(path.read_text())["submissions"] == {}
 
 
 @pytest.mark.parametrize(
-    "decided, expected, suppressed",
+    "decided, expected, forgotten",
     [
         ("rejected", {"state": "rejected", "reason": "anchor_already_decided"}, True),
-        ("applied", {"state": "applied", "reason": "anchor_already_applied"}, False),
+        ("applied", {"state": "applied", "reason": "anchor_already_applied"}, True),
         ("pending", {"state": "failed", "code": "memory_proposal_state"}, False),
         ("held", {"state": "failed", "code": "memory_proposal_state"}, False),
         ("stale", {"state": "failed", "code": "memory_proposal_state"}, False),
@@ -770,7 +806,7 @@ def test_withdrawal_after_a_lost_answer_treats_an_already_rejected_proposal_as_w
     reason="safe directory descriptors unavailable",
 )
 def test_a_decided_withdrawal_reads_the_proposal_before_recording(
-    setup, capsys, monkeypatch, decided, expected, suppressed
+    setup, capsys, monkeypatch, decided, expected, forgotten
 ):
     import json
 
@@ -790,8 +826,16 @@ def test_a_decided_withdrawal_reads_the_proposal_before_recording(
     assert code == 0
     assert report["status"] == "completed"
     assert report["proposals"][0]["withdrawal"] == expected
-    [record] = json.loads(path.read_text())["submissions"].values()
-    assert ("anchor_review_only" in record) is suppressed
+    records = list(json.loads(path.read_text())["submissions"].values())
+    # Nothing is suppressed for a non-decisive result. A closed proposal is forgotten so a
+    # later run proposes the anchor again, and a failed withdrawal keeps its id and count.
+    assert not any("anchor_review_only" in record for record in records)
+    if forgotten:
+        assert records == []
+    else:
+        [record] = records
+        assert record["proposal_id"] == report["proposals"][0]["proposal_id"]
+        assert record["withdrawal_failures"] == 1
 
 
 @pytest.mark.skipif(
@@ -873,6 +917,6 @@ def test_a_single_failed_withdrawal_does_not_give_up(setup, capsys, monkeypatch)
     code, report = run(target, capsys, "run", "--apply", "--limit", "1")
     assert code == 0
     assert report["proposals"][0]["withdrawal"] == {"state": "rejected", "reason": "anchor_withdrawn"}
-    [record] = json.loads(path.read_text())["submissions"].values()
-    assert "withdrawal_failures" not in record
-    assert "anchor_review_only" in record
+    # One failed attempt is not a give-up: the proposal closed on the retry, so its record is
+    # forgotten with no abandonment marker and a later run proposes the anchor again.
+    assert json.loads(path.read_text())["submissions"] == {}
