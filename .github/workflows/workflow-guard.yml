@@ -1,0 +1,37 @@
+# Run the pull request check from the base branch so a PR cannot change its own guard.
+# Never check out, import, or execute anything from the pull request.
+name: Workflow guard
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+  merge_group:
+
+permissions:
+  contents: read
+  pull-requests: read
+
+concurrency:
+  group: workflow-guard-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  workflow-guard:
+    # This name is the required status check contract.
+    name: workflow-guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the base branch
+        if: github.event_name == 'pull_request_target'
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Check changed CI files
+        if: github.event_name == 'pull_request_target'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.number }}
+        run: python3 scripts/workflow_guard.py --repo "$GITHUB_REPOSITORY" --pr "$PR_NUMBER"
+      - name: Report merge queue result
+        if: github.event_name == 'merge_group'
+        run: echo "Pull requests passed the workflow guard before entering the merge queue."
