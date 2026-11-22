@@ -366,11 +366,19 @@ def test_stream_disagreeing_with_the_server_row_is_trace_mismatch(tmp_path, step
     assert all(a["trace"] == [] and a["grade"]["passed"] is False for a in result["attempts"])
 
 
-def test_timeout_and_cli_errors_are_recorded_not_retried(tmp_path):
+def test_timeout_and_cli_errors_are_recorded_not_retried(tmp_path, monkeypatch):
     exe = make_fake(tmp_path / "hang", hang=True)
-    result = execute_live(LIVE, tmp_path / "out", claude_bin=str(exe), environ=ENVIRON, timeout=3)
-    assert _failures(result) == ["model_timeout"]
-    assert len(records(tmp_path / "hang")) == 2
+    work_dirs = _track_work_dirs(monkeypatch)
+    try:
+        result = execute_live(LIVE, tmp_path / "out", claude_bin=str(exe), environ=ENVIRON, timeout=3)
+        allowed = {"model_timeout", model_trial_claude.DRAIN_FAILURE} if os.name == "nt" else {"model_timeout"}
+        assert len(result["attempts"]) == len(work_dirs) == len(records(tmp_path / "hang")) == 2
+        for attempt, work in zip(result["attempts"], work_dirs, strict=True):
+            assert attempt["failure"] in allowed
+            assert work.exists() == (attempt["failure"] == model_trial_claude.DRAIN_FAILURE)
+    finally:
+        for work in work_dirs:
+            model_trial_claude.remove_work_dir(work)
     result, _, _ = _live(
         tmp_path,
         fake_dir="err",
@@ -763,16 +771,24 @@ def test_revalidation_checks_the_stored_cwd_against_init(good, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "leader_exited, releases_pipes",
-    [(True, True), (False, True), (True, False)],
-    ids=["leader-exited", "leader-times-out", "pipe-outlives-job"],
+    "leader_exited, releases_pipes, reaps",
+    [(True, True, True), (False, True, True), (True, False, True), (False, False, True), (False, True, False)],
+    ids=[
+        "leader-exited",
+        "leader-times-out",
+        "pipe-outlives-job",
+        "timeout-with-held-pipes",
+        "timeout-with-live-leader",
+    ],
 )
 def test_windows_arm_has_a_deadline_even_when_a_descendant_holds_the_pipes(
-    monkeypatch, tmp_path, leader_exited, releases_pipes
+    monkeypatch, tmp_path, leader_exited, releases_pipes, reaps
 ):
     released = threading.Event()
     actions = []
     code = 0 if leader_exited else None
+    workers = []
+    outcomes = []
 
     class HeldPipe(io.BytesIO):
         def readline(self, size=-1):
@@ -785,10 +801,12 @@ def test_windows_arm_has_a_deadline_even_when_a_descendant_holds_the_pipes(
     class Child:
         args = ["fake"]
         pid = 4242
-        stdin = io.BytesIO()
-        stdout = HeldPipe()
-        stderr = HeldPipe()
         returncode = None
+
+        def __init__(self):
+            self.stdin = io.BytesIO()
+            self.stdout = HeldPipe()
+            self.stderr = HeldPipe()
 
         def poll(self):
             self.returncode = code
@@ -808,46 +826,74 @@ def test_windows_arm_has_a_deadline_even_when_a_descendant_holds_the_pipes(
         def terminate(self):
             nonlocal code
             actions.append("terminate")
-            if code is None:
+            if code is None and reaps:
                 code = 125
             if releases_pipes:
                 released.set()
+                for worker in workers:
+                    worker.join(timeout=1)
             return True
 
         def close(self):
             actions.append("close")
 
-    job = Job()
-    child = Child()
+    class TrackedThread(threading.Thread):
+        def start(self):
+            workers.append(self)
+            super().start()
 
-    def launch(*args, **kwargs):
+    def launch(command, **kwargs):
+        nonlocal code
+        code = 0 if leader_exited else None
+        released.clear()
         actions.append(("launch", kwargs.get("creationflags")))
+        child = Child()
+        child.args = command
         return child
 
     def bind(actual_job, actual_child, argv):
-        assert (actual_job, actual_child, argv) == (job, child, child.args)
+        assert isinstance(actual_job, Job)
+        assert actual_child.args == argv
         actions.append("bind")
 
     def create_job():
         actions.append("create")
-        return job
+        return Job()
 
-    monkeypatch.setattr(model_trial_claude, "os", types.SimpleNamespace(name="nt"))
+    def run_and_record(*args, **kwargs):
+        start = time.monotonic()
+        result = _run_process(*args, **kwargs)
+        assert time.monotonic() - start < 1
+        outcomes.append(result[2:])
+        return result
+
+    exe = make_fake(tmp_path / "fake")
+    work_dirs = _track_work_dirs(monkeypatch)
+    monkeypatch.setattr(model_trial_claude, "os", types.SimpleNamespace(name="nt", path=os.path))
+    monkeypatch.setattr(
+        model_trial_claude, "threading", types.SimpleNamespace(Thread=TrackedThread, Event=threading.Event)
+    )
+    monkeypatch.setattr(model_trial_claude, "_probe_version", lambda *_: "2.1.327")
+    monkeypatch.setattr(model_trial_claude, "_run_process", run_and_record)
     monkeypatch.setattr(proc_windows_job, "create_windows_child_job", create_job)
     monkeypatch.setattr(proc, "suspended_process_group_kwargs", lambda: {"creationflags": 4})
     monkeypatch.setattr(proc_windows_job, "bind_suspended_windows_child", bind)
     monkeypatch.setattr(model_trial_claude.subprocess, "Popen", launch)
-    observer = _Observer(expected_model="m", session_id="s", version="v", cwd=tmp_path)
-    start = time.monotonic()
     try:
-        _, _, exit_code, timed_out, drain_failed = _run_process(child.args, {}, tmp_path, "", 0.15, observer, "tok")
-        assert time.monotonic() - start < 1
-        assert exit_code == (0 if leader_exited else 125)
-        assert timed_out is not leader_exited
-        assert drain_failed is not releases_pipes
-        assert actions == ["create", ("launch", 4), "bind", "terminate", "close"]
+        result = execute_live(LIVE, tmp_path / "out", claude_bin=str(exe), environ=ENVIRON, timeout=0.15)
+        code = 0 if leader_exited else (125 if reaps else None)
+        drain_failed = not releases_pipes or not reaps
+        assert outcomes == [(code, not leader_exited, drain_failed)] * 2
+        assert actions == ["create", ("launch", 4), "bind", "terminate", "close"] * 2
+        assert len(work_dirs) == 2 and all(work.is_dir() == drain_failed for work in work_dirs)
+        if drain_failed:
+            assert _failures(result) == [model_trial_claude.DRAIN_FAILURE]
     finally:
         released.set()
+        for worker in workers:
+            worker.join(timeout=1)
+        for work in work_dirs:
+            model_trial_claude.remove_work_dir(work)
 
 
 def test_windows_arm_declares_all_win32_job_and_thread_prototypes(monkeypatch, tmp_path):

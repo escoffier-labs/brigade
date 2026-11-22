@@ -870,11 +870,10 @@ def _run_windows_process(
             pipe.close()
         for worker, _ in workers[:started]:
             worker.join(timeout=max(0.0, deadline - time.monotonic()))
-            if not timed_out and worker.is_alive():
+            if worker.is_alive():
                 cleanup_failed = True
-        # At the deadline, a successfully terminated job may still be releasing its pipes.
         code = child.poll()
-        if not timed_out and code is None:
+        if code is None:
             try:
                 code = child.wait(timeout=max(0.0, deadline - time.monotonic()))
             except (OSError, subprocess.TimeoutExpired):
