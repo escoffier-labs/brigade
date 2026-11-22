@@ -43,29 +43,53 @@ def test_documented_orca_commands_and_flags_exist_in_cli_parser():
     assert ORCA_VERBS <= documented_verbs
 
 
+SKILL_RULES = (
+    "reuse the same `--retry-request`",
+    "never start a new orca run or task to get around the circuit breaker",
+    "`inbox --full`, never `check`",
+    "`worker-show` alone is not",
+    "brief may not have been submitted",
+    "report every receipt to brigade, including refusals",
+    "start-refused",
+    "circuit-broken",
+    "start-failed",
+    "return a `result_id`",
+    "awaiting-ack",
+    "abandoned-unknown",
+    "frees no slot",
+    "operator must follow up",
+    "stop_unknown",
+    "outcome_unknown",
+    "same printed argv",
+    "do not use `hold-resolve` to settle a worker stop",
+    "orca-unsupported",
+    "release-unverified",
+    "accept-conflict",
+    "--transcript-json",
+)
+DOC_RULES = (
+    "reuse the same `--retry-request`",
+    "`inbox --full`, never `check`",
+    "`worker-show` alone is not acceptance",
+    "report every receipt to brigade, refusals included",
+    "`hold-resolve` cannot settle a stop",
+    "abandoned-unknown",
+    "release-unverified",
+)
+
+
+def _normalized(path: Path) -> str:
+    return " ".join(path.read_text(encoding="utf-8").lower().split())
+
+
 def test_skill_documents_orca_lifecycle_safety_rules():
-    text = " ".join("\n".join((SKILL.read_text(encoding="utf-8"), DOC.read_text(encoding="utf-8"))).lower().split())
-    required = (
-        "reuse the same `--retry-request`",
-        "never start a new orca run or task to get around the circuit breaker",
-        "`inbox --full`, never `check`",
-        "`worker-show` alone is not acceptance",
-        "brief may not have been submitted",
-        "report every receipt to brigade, refusals included",
-        "start-refused",
-        "circuit-broken",
-        "start-failed",
-        "return a `result_id`",
-        "awaiting-ack",
-        "abandoned-unknown",
-        "frees no slot",
-        "operator must follow up",
-        "stop_unknown",
-        "outcome_unknown",
-        "same printed argv",
-        "hold-resolve` cannot settle a stop",
-        "orca-unsupported",
-        "release-unverified",
-        "accept-conflict",
-    )
-    assert all(phrase in text for phrase in required)
+    # SKILL.md is what a coordinator reads, so each rule must be in it on its own, not only in the doc.
+    skill = _normalized(SKILL)
+    missing = [phrase for phrase in SKILL_RULES if phrase not in skill]
+    assert not missing, f"SKILL.md is missing safety rules: {missing}"
+
+
+def test_doc_documents_orca_lifecycle_safety_rules():
+    doc = _normalized(DOC)
+    missing = [phrase for phrase in DOC_RULES if phrase not in doc]
+    assert not missing, f"docs/orca-governed-delegation.md is missing safety rules: {missing}"

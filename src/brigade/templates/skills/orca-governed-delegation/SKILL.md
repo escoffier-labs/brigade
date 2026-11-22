@@ -42,7 +42,7 @@ receipts; `<result-id>` comes from a Brigade terminal result.
    `transcript_argv`. Run those exact Orca argv, save their JSON, then run
    `brigade orca observe <run> <task> --native-json <show.json> --worker-done-json <inbox.json> --transcript-json <transcript.json> --target <workspace>`.
    The transcript argv is for
-   `orca-ide orchestration worker-read --dispatch <id> --source transcript --json`.
+   `orca-ide orchestration worker-read --environment local --dispatch <id> --source transcript --json`.
    Do not hand-build these Orca commands: the printed `inbox_argv` includes
    the required `--run` and `--limit` arguments. Read mail with `inbox --full`,
    never `check`, because `check` marks mail read. `worker-show` alone is not

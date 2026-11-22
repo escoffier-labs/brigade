@@ -34,7 +34,7 @@ That result prints the exact `observe_argv`, `inbox_argv` and
 `transcript_argv`. Run those printed Orca argv without reconstructing them.
 The inbox argv carries `--run` and `--limit`; a hand-built
 `orca-ide orchestration inbox --full --json` omits them. The transcript argv
-uses `orca-ide orchestration worker-read --dispatch <id> --source transcript --json`.
+uses `orca-ide orchestration worker-read --environment local --dispatch <id> --source transcript --json`.
 Then submit all evidence with
 `brigade orca observe <run> <task> --native-json <show.json> --worker-done-json <inbox.json> --transcript-json <transcript.json> --target <workspace>`.
 Without both the matching worker_done report and a complete transcript,
