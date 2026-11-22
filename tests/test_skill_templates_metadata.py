@@ -16,6 +16,7 @@ BUNDLED_TEMPLATES = (
     "forward-plan",
     "fleet-hub-upgrade",
     "t3-governed-delegation",
+    "orca-governed-delegation",
 )
 
 
