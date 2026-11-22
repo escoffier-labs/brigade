@@ -56,6 +56,8 @@ receipts; `<result-id>` comes from a Brigade terminal result.
    printed `observe_argv`, then repeat `observe` with that show, the matching
    worker_done report and transcript. Finalize only after this post-release
    observation proves release; otherwise `release-unverified` blocks closeout.
+   A cancelled worker sends no worker_done report: after a confirmed stop,
+   repeat `observe` with the fresh show alone.
    Then close the settled run explicitly:
    `brigade orca finalize <run> --target <workspace>`.
 

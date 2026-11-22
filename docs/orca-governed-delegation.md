@@ -54,7 +54,9 @@ After acknowledging a terminal result, wait for Orca to release its worker.
 Run a fresh full `worker-show` using the printed `observe_argv`, then repeat
 `observe` with the fresh show and the matching worker_done report and
 transcript. Finalization is blocked by `release-unverified` until this
-post-release observation proves release.
+post-release observation proves release. A cancelled worker sends no
+worker_done report, so after a confirmed stop the post-release `observe` takes
+the fresh show alone.
 
 ## Cancellation and recovery
 
