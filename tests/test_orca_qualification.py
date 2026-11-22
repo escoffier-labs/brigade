@@ -120,8 +120,12 @@ def batch(tmp_path):
                         },
                     )
                     artifact = {
-                        "artifact_kind": "receipt",
-                        "artifact_digest": hashlib.sha256(worker_path.read_bytes()).hexdigest(),
+                        "artifact_kind": "commit" if actual.get("commit_artifact") and task == "beta" else "receipt",
+                        "artifact_digest": (
+                            "d" * 64
+                            if actual.get("commit_artifact") and task == "beta"
+                            else hashlib.sha256(worker_path.read_bytes()).hexdigest()
+                        ),
                     }
                 attempt = run_tasks.prepare_attempt(run_dir, workspace=tmp_path, task_id=task, native_governed=is_orca)
                 run_tasks.observe_task(
@@ -171,6 +175,15 @@ def batch(tmp_path):
                 "usage": {"input_tokens": 100, "credentials": "fixture-secret"},
                 "prompt": "fixture-secret",
                 "path": str(tmp_path),
+            },
+        )
+        write_json(
+            tmp_path / "pre-batch-roster.json",
+            {
+                "schema": "brigade.orca_qualification_roster.v1",
+                "arm": arm,
+                "seat": {"model": "gpt-6.2-sol", "effort": "medium"},
+                "limits": {"max_workers": 3, "sandbox": "read-only"},
             },
         )
         return run_dir, status, measurements
@@ -245,7 +258,8 @@ def test_retained_configuration_mismatch(batch, arm, field, value, target_field)
     assert field in record["mismatched_fields"]
     assert record["configuration_mismatch"] is True
     assert record["verified_completion_seconds"] is None
-    assert record[field] == value
+    pre_batch = {"model": "gpt-6.2-sol", "effort": "medium", "concurrency": 3}
+    assert record[field] == pre_batch.get(field, value)
 
 
 def test_orca_marker_must_match_retained_target(batch):
@@ -303,3 +317,91 @@ def test_cli_bounds_journal_errors(batch, monkeypatch, capsys):
     with pytest.raises(SystemExit, match="2"):
         orca_qualification.main()
     assert capsys.readouterr().err == "Qualification evidence is missing or invalid. Check the local inputs.\n"
+
+
+@pytest.mark.parametrize("arm", ["orca", "run-batch"])
+def test_pre_batch_roster_is_required(batch, tmp_path, arm):
+    paths = batch(arm)
+    (tmp_path / "pre-batch-roster.json").unlink()
+    record = orca_qualification.collect(arm, *paths)
+    assert {"concurrency", "model", "effort"} <= set(record["mismatched_fields"])
+    assert record["configuration_mismatch"] is True
+    assert record["verified_completion_seconds"] is None
+
+
+def test_roster_limit_restored_after_batch_is_a_mismatch(batch, tmp_path):
+    paths = batch("run-batch")
+    snapshot_path = tmp_path / "pre-batch-roster.json"
+    snapshot = json.loads(snapshot_path.read_bytes())
+    snapshot["limits"]["max_workers"] = 1
+    write_json(snapshot_path, snapshot)
+    record = orca_qualification.collect("run-batch", *paths)
+    assert record["concurrency"] == 1
+    assert record["slot_check_passed"] is True
+    assert record["mismatched_fields"] == ["concurrency"]
+    assert record["verified_completion_seconds"] is None
+
+
+def test_commit_digest_does_not_bind_worker_receipt(batch):
+    record = orca_qualification.collect("run-batch", *batch("run-batch", actual={"commit_artifact": True}))
+    assert record["mismatched_fields"] == ["model", "effort"]
+    assert record["model"] is None and record["effort"] is None
+    assert record["verified_completion_seconds"] is None
+
+
+def test_orca_terminal_row_requires_explicit_hold_state(batch):
+    run_dir, status, measurements = batch("orca")
+    receipt = json.loads(status.read_bytes())
+    del receipt["tasks"][0]["held_reason"]
+    write_json(status, receipt)
+    record = orca_qualification.collect("orca", run_dir, status, measurements)
+    assert record["all_tasks_terminal"] is False
+    assert record["verified_completion_seconds"] is None
+
+
+def test_baseline_requires_read_only_policy_for_every_task(batch):
+    paths = batch("run-batch")
+    request_path = paths[0] / "batch-request.json"
+    request = json.loads(request_path.read_bytes())
+    del request["tasks"][0]["read_only"]
+    write_json(request_path, request)
+    record = orca_qualification.collect("run-batch", *paths)
+    assert record["mismatched_fields"] == ["read_only_enforcement"]
+    assert record["configuration_mismatch"] is True
+    assert record["verified_completion_seconds"] is None
+
+
+@pytest.mark.parametrize(
+    ("arm", "model", "effort"),
+    [
+        ("orca", "gpt-6.2-sol", "medium"),
+        ("run-batch", "gpt-6-luna", "low"),
+    ],
+)
+def test_snapshot_roster_projects_selected_target(tmp_path, arm, model, effort):
+    path = tmp_path / "roster.toml"
+    path.write_bytes(b"""
+orchestrator = "worker"
+
+[limits]
+max_workers = 3
+sandbox = "read-only"
+
+[agents.worker]
+role = "qualification worker"
+cli = "codex"
+model = "gpt-6-luna"
+reasoning = "low"
+
+[orca_targets.worker]
+agent = "codex"
+model = "gpt-6.2-sol"
+effort = "medium"
+""")
+    snapshot = orca_qualification.snapshot_roster(arm, path, "worker")
+    assert snapshot == {
+        "schema": "brigade.orca_qualification_roster.v1",
+        "arm": arm,
+        "seat": {"model": model, "effort": effort},
+        "limits": {"max_workers": 3, "sandbox": "read-only"},
+    }

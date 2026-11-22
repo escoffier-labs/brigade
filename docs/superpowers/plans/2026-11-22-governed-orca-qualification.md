@@ -105,6 +105,18 @@ brigade roster ready --route brigade --worker worker --concurrency 3 --isolation
 
 ## Task 2: Execute each matched pair
 
+Immediately before each batch, save the roster's worker limit, sandbox and
+selected seat's model and effort outside the timed interval. Set `arm` to
+`orca` or `run-batch`. Use the same roster as the launch, keep it fixed until
+the post-batch status is saved, and leave the pre-batch file beside that status.
+The snapshot helper writes only the qualification fields. If it fails, stop
+before launching.
+
+```bash
+python -m brigade.orca_qualification snapshot-roster "$arm" "$ws/.brigade/roster.toml" worker > "$out/pre-batch-roster.json"
+```
+
+
 ### Arm A: Governed Orca
 
 Start the batch clock immediately before `open`. Set `run` from its
@@ -243,9 +255,12 @@ task outcomes and the saved Orca status, plus the coordinator measurements.
 It compares the sheet's model, effort, revision, concurrency and isolation
 with local run evidence. If any field disagrees or lacks corroboration,
 `configuration_mismatch` is true, `mismatched_fields` names those fields,
-and verified completion time is null. Concurrency comes from the saved
-workspace worker limit. Check the coordinator's per-seat limit and dispatch
-order in the local evidence as well. Arm B also needs a successful terminal
+and verified completion time is null. The pre-batch roster is required.
+Its worker limit must agree with the sheet and post-batch status, and its
+model and effort must agree with the sheet and retained Orca targets or
+journal-bound Brigade worker receipts. The post-batch status supplies the
+slot and Orca settlement checks. Check the coordinator's per-seat limit
+and dispatch order in the local evidence as well. Arm B also needs a successful terminal
 run status.
 It emits a closed record of aggregate counts, timings and pinned settings.
 Only the projected record may leave the machine. It includes no prompt

@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from . import native_orca_enrollment, native_orca_host, run_batch, run_journal, run_task_journal, run_tasks
+from . import native_orca_enrollment, native_orca_host, roster, run_batch, run_journal, run_task_journal, run_tasks
 from .native_child_host import NativeChildCustodyError, NativeChildError
 
 TASKS = frozenset({"alpha", "beta", "gamma"})
@@ -22,6 +22,39 @@ PHASES = ("queue", "startup", "planning", "execution", "synthesis", "delivery")
 COUNTERS = ("input_tokens", "output_tokens", "cached_input_tokens")
 REVISION = r"[0-9a-f]{40}|[0-9a-f]{64}"
 ISOLATIONS = ("worktree", "shared")
+ROSTER_SNAPSHOT = "pre-batch-roster.json"
+ROSTER_SCHEMA = "brigade.orca_qualification_roster.v1"
+
+
+def snapshot_roster(arm: str, path: Path, seat: str) -> dict[str, Any]:
+    """Project the qualification limits and selected target before launch."""
+    configured = roster.load_roster(path)
+    agent = configured.agents[seat]
+    if arm == "orca":
+        target = configured.orca_targets[seat]
+        model, effort = target.get("model"), target.get("effort")
+    else:
+        model, effort = agent.model, agent.reasoning
+    if model not in MODELS or effort not in EFFORTS:
+        raise ValueError("invalid qualification roster model or effort")
+    return {
+        "schema": ROSTER_SCHEMA,
+        "arm": arm,
+        "seat": {"model": model, "effort": effort},
+        "limits": {"max_workers": configured.max_workers, "sandbox": configured.sandbox},
+    }
+
+
+def _pre_batch_configuration(path: Path, arm: str) -> dict[str, Any]:
+    try:
+        snapshot = _read(path)
+        if snapshot.get("schema") == ROSTER_SCHEMA and snapshot.get("arm") == arm:
+            seat = _object(snapshot.get("seat"))
+            limits = _object(snapshot.get("limits"))
+            return {"model": seat.get("model"), "effort": seat.get("effort"), "concurrency": limits.get("max_workers")}
+    except (FileNotFoundError, ValueError):
+        pass
+    return {}
 
 
 def _object(value: object) -> dict[str, Any]:
@@ -65,7 +98,7 @@ def _batch_evidence(run_dir: Path, tasks: list[run_tasks.TaskResult]) -> dict[st
             raw = None
         worker = {}
         if raw is not None and (
-            task.artifact_kind != "receipt" or hashlib.sha256(raw).hexdigest() == task.artifact_digest
+            task.artifact_kind == "receipt" and hashlib.sha256(raw).hexdigest() == task.artifact_digest
         ):
             worker = _object(json.loads(raw))
         evidence["model"].append(worker.get("requested_model"))
@@ -102,6 +135,7 @@ def _matched_configuration(
     tasks: list[run_tasks.TaskResult],
     measurements: dict[str, Any],
     capacity: dict[str, Any],
+    pre_batch: dict[str, Any],
 ) -> tuple[dict[str, Any], list[str]]:
     evidence = _orca_evidence(run_dir, tasks) if arm == "orca" else _batch_evidence(run_dir, tasks)
     evidence["concurrency"] = [capacity.get("max_workers")]
@@ -118,9 +152,11 @@ def _matched_configuration(
     observed = {}
     mismatches = []
     for key, values in evidence.items():
-        first = values[0]
-        agreed = allowed[key](first) and all(type(value) is type(first) and value == first for value in values)
-        observed[key] = first if agreed else None
+        first = pre_batch.get(key) if key in ("model", "effort", "concurrency") else values[0]
+        valid = allowed[key](first)
+        corroborated = all(allowed[key](value) for value in values)
+        agreed = valid and corroborated and all(type(value) is type(first) and value == first for value in values)
+        observed[key] = first if valid and corroborated and (agreed or key in pre_batch) else None
         if not agreed or first != measurements[key] or (key == "isolation" and first != "worktree"):
             mismatches.append(key)
     return observed, mismatches
@@ -163,21 +199,35 @@ def collect(arm: str, run_dir: Path, status_path: Path, measurements_path: Path)
         for task_id, task in results.items()
         if task.status in run_task_journal.TERMINAL
         and task.result_id is not None
-        and (arm == "run-batch" or (rows[task_id].get("terminal") is True and rows[task_id].get("held_reason") is None))
+        and (
+            arm == "run-batch"
+            or (
+                rows[task_id].get("terminal") is True
+                and "held_reason" in rows[task_id]
+                and rows[task_id]["held_reason"] is None
+            )
+        )
     }
     failed = sum(results[task_id].status != "completed" for task_id in terminals)
     if arm == "run-batch":
         settled = _read(run_dir / "run.json").get("status") == "ok"
         request = _read(run_dir / "batch-request.json")
+        request_tasks = [_object(row) for row in request["tasks"]]
         hard_read_only = (
             request.get("schema") == run_batch.SCHEMA
-            and {row["task_id"] for row in map(_object, request["tasks"]) if row.get("read_only") is True} == TASKS
+            and len(request_tasks) == len(TASKS)
+            and {row["task_id"] for row in request_tasks if row.get("read_only") is True} == TASKS
         )
         enforcement = "brigade-read-only-policy" if hard_read_only else "unverified"
     else:
         enforcement = "prompt-only"
         settled = receipt.get("status") == "completed" and all(row.get("acked") is True for row in rows.values())
-    configuration, mismatches = _matched_configuration(arm, run_dir, list(results.values()), measurements, capacity)
+    pre_batch = _pre_batch_configuration(status_path.with_name(ROSTER_SNAPSHOT), arm)
+    configuration, mismatches = _matched_configuration(
+        arm, run_dir, list(results.values()), measurements, capacity, pre_batch
+    )
+    if enforcement == "unverified":
+        mismatches.append("read_only_enforcement")
     safe = measurements["circuit_breaker_routed_around"] is False
     verified_time = _seconds(measurements["verified_completion_seconds"])
     timings = _object(measurements["timings_seconds"])
@@ -222,6 +272,17 @@ def collect(arm: str, run_dir: Path, status_path: Path, measurements_path: Path)
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
+    if sys.argv[1:2] == ["snapshot-roster"]:
+        parser.add_argument("arm", choices=ARMS)
+        parser.add_argument("roster", type=Path)
+        parser.add_argument("seat")
+        args = parser.parse_args(sys.argv[2:])
+        try:
+            snapshot = snapshot_roster(args.arm, args.roster, args.seat)
+        except (OSError, ValueError, KeyError):
+            parser.exit(2, "Qualification roster is missing or invalid. Check the local inputs.\n")
+        print(json.dumps(snapshot, sort_keys=True))
+        return
     parser.add_argument("arm", choices=ARMS)
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("orca_status", type=Path)
