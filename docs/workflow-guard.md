@@ -26,10 +26,14 @@ Transitive inputs are covered only where listed in
 
 When protected files change, a maintainer applies the
 `workflow-change-approved` label after reviewing the change. The workflow
-writes a success status with that context to the head commit in the label
-event. Removing the label manually writes a failure status to the event's
-head commit. For the current head, the guard uses the newest status in this
-context from GitHub Actions.
+writes a success status to the head commit in the label event if the label
+is still present when the writer checks. Removing the label records a failure
+status on the event's head commit, and a delayed approval event also records
+failure if it finds the label absent. The writer runs one job at a time per
+pull request. The guard uses the newest matching status from GitHub Actions
+for the pull request and its current head.
+
+Approval applies to one pull request targeting the default branch.
 
 A push to a new commit needs a fresh label event. The workflow tries to clear
 the label on push so the pull request shows that approval needs to be renewed.

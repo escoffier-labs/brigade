@@ -36,14 +36,20 @@ jobs:
     # Re-running a check must not replay a past approval or revocation.
     if: >-
       github.run_attempt == '1' && github.event.label.name == 'workflow-change-approved' &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch &&
       (github.event.action == 'labeled' || github.event.action == 'unlabeled')
     permissions:
+      pull-requests: read
       statuses: write
+    concurrency:
+      group: workflow-guard-record-approval-${{ github.event.number }}
+      cancel-in-progress: false
     runs-on: ubuntu-latest
     steps:
       - name: Record approval for the event's head commit
         env:
           GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.number }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           PR_ACTION: ${{ github.event.action }}
         run: |
@@ -51,13 +57,32 @@ jobs:
             echo "Invalid pull request head commit." >&2
             exit 1
           fi
+          if [[ ! $PR_NUMBER =~ ^[0-9]+$ ]]; then
+            echo "Invalid pull request number." >&2
+            exit 2
+          fi
+          state=failure
+          description="pull request $PR_NUMBER approval removed"
           case "$PR_ACTION" in
-            labeled) state=success ;;
-            unlabeled) state=failure ;;
+            labeled)
+              labels=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels?per_page=100" --paginate --slurp) || exit 2
+              present=$(jq -er '
+                if type == "array" and length > 0 and all(.[]; type == "array") then
+                  [ .[][] | if (.name | type) == "string" then .name else error("Invalid label") end ]
+                  | any(. == "workflow-change-approved") | tostring
+                else error("Invalid label pages")
+                end
+              ' <<< "$labels") || exit 2
+              if [[ $present == true ]]; then
+                state=success
+                description="pull request $PR_NUMBER approved"
+              fi
+              ;;
+            unlabeled) ;;
             *) exit 1 ;;
           esac
           gh api --silent -X POST "repos/$GITHUB_REPOSITORY/statuses/$PR_HEAD_SHA" \
-            -f context=workflow-change-approved -f state="$state" -f description="Workflow change approval"
+            -f context=workflow-change-approved -f state="$state" -f description="$description" || exit 2
 
   workflow-guard:
     # This name is the required status check contract.

@@ -16,7 +16,6 @@ from tests.test_publish_workflow import _load_workflow_yaml
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github/workflows"
 APPROVAL = "workflow-change-approved"
-PULL = "repos/example/project/pulls/42"
 HEAD = "a" * 40
 STATUSES = f"repos/example/project/commits/{HEAD}/statuses?per_page=100"
 CLI_ARGS = ["--repo", "example/project", "--pr", "42"]
@@ -79,14 +78,23 @@ def pull_request_event(monkeypatch):
 @pytest.fixture
 def fake_gh(monkeypatch):
     def install(
-        pages, *, labels=(), changed_files=None, fail=False, statuses=([],), heads=(HEAD, HEAD), fail_statuses=False
+        pages,
+        *,
+        labels=(),
+        changed_files=None,
+        fail=False,
+        statuses=([],),
+        heads=(HEAD, HEAD),
+        fail_statuses=False,
+        number=42,
     ):
+        pull = f"repos/example/project/pulls/{number}"
         live_heads = iter(heads)
 
         def run(args, **kwargs):
             assert args[:2] == ["gh", "api"]
             assert kwargs.get("shell", False) is False
-            if args[2] == f"{PULL}/files?per_page=100":
+            if args[2] == f"{pull}/files?per_page=100":
                 assert args[3:] == ["--paginate", "--slurp"]
                 if fail:
                     raise subprocess.CalledProcessError(1, args, stderr="API unavailable")
@@ -101,7 +109,7 @@ def fake_gh(monkeypatch):
                     raise subprocess.CalledProcessError(1, args, stderr="API unavailable")
                 payload = statuses
             else:
-                assert args[2:] == [PULL]
+                assert args[2:] == [pull]
                 payload = {
                     "changed_files": sum(map(len, pages)) if changed_files is None else changed_files,
                     "head": {"sha": next(live_heads)},
@@ -115,8 +123,15 @@ def fake_gh(monkeypatch):
     return install
 
 
-def approval_status(state="success", *, login="github-actions[bot]", creator_type="Bot", context=APPROVAL):
-    return {"context": context, "state": state, "creator": {"login": login, "type": creator_type}}
+def approval_status(
+    state="success", *, login="github-actions[bot]", creator_type="Bot", creator_id=41898282, context=APPROVAL
+):
+    return {
+        "context": context,
+        "state": state,
+        "description": "pull request 42 approval removed" if state == "failure" else "pull request 42 approved",
+        "creator": {"login": login, "type": creator_type, "id": creator_id},
+    }
 
 
 @pytest.mark.parametrize(
@@ -129,8 +144,10 @@ def approval_status(state="success", *, login="github-actions[bot]", creator_typ
         ([[approval_status(login="reviewer"), approval_status(creator_type="User")]], 1),
         ([[approval_status(context="other-check"), approval_status(login="reviewer")], [approval_status()]], 0),
         ([[approval_status("failure", login="reviewer"), approval_status()]], 0),
-        ([[{"context": APPROVAL, "state": "success"}]], 2),
-        ([[{"context": APPROVAL, "state": True, "creator": {"login": "github-actions[bot]", "type": "Bot"}}]], 2),
+        ([[approval_status(creator_id=7)]], 1),
+        ([[approval_status(creator_id=None)]], 2),
+        ([[dict(approval_status(), creator=None)]], 2),
+        ([[approval_status(True)]], 2),
         ([{"unexpected": []}], 2),
     ],
 )
@@ -143,7 +160,48 @@ def test_commit_status_decision(fake_gh, capsys, statuses, exit_code):
     assert path in output
     if exit_code == 1:
         assert APPROVAL in output
-        assert "maintainer" in output and "this commit" in output
+        assert "maintainer" in output and "this pull request at its current head" in output
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        None,
+        "Workflow change approval",
+        "pull request approved",
+        "pull request 43 approved",
+        "pull request 42 approved\n",
+    ],
+)
+def test_status_without_a_matching_pr_number_is_ignored(fake_gh, description):
+    status = approval_status()
+    if description is None:
+        del status["description"]
+    else:
+        status["description"] = description
+    files = [[{"filename": ".github/workflows/ci.yml"}]]
+    fake_gh(files, statuses=[[status]])
+    assert workflow_guard.main(CLI_ARGS) == 1
+    fake_gh(files, statuses=[[dict(status, state="failure"), approval_status()]])
+    assert workflow_guard.main(CLI_ARGS) == 0
+
+
+def test_shared_head_approval_applies_to_one_pull_request(fake_gh):
+    files = [[{"filename": ".github/workflows/ci.yml"}]]
+    statuses = [[approval_status()]]
+    fake_gh(files, statuses=statuses)
+    assert workflow_guard.main(CLI_ARGS) == 0
+    fake_gh(files, statuses=statuses, number=43)
+    assert workflow_guard.main([*CLI_ARGS[:-1], "43"]) == 1
+
+
+def test_retarget_after_nondefault_base_label_requires_approval(fake_gh, monkeypatch):
+    # The writer is skipped on the non-default base, as pinned by the job contract test.
+    monkeypatch.setenv("PR_BASE_REF", "other-branch")
+    fake_gh([[{"filename": ".github/workflows/ci.yml"}]], labels=[APPROVAL])
+    assert workflow_guard.main(CLI_ARGS) == 2
+    monkeypatch.setenv("PR_BASE_REF", "main")
+    assert workflow_guard.main(CLI_ARGS) == 1
 
 
 def test_unprotected_changes_do_not_read_statuses(fake_gh):
@@ -299,13 +357,32 @@ if [[ ! $PR_HEAD_SHA =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
   echo "Invalid pull request head commit." >&2
   exit 1
 fi
+if [[ ! $PR_NUMBER =~ ^[0-9]+$ ]]; then
+  echo "Invalid pull request number." >&2
+  exit 2
+fi
+state=failure
+description="pull request $PR_NUMBER approval removed"
 case "$PR_ACTION" in
-  labeled) state=success ;;
-  unlabeled) state=failure ;;
+  labeled)
+    labels=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels?per_page=100" --paginate --slurp) || exit 2
+    present=$(jq -er '
+      if type == "array" and length > 0 and all(.[]; type == "array") then
+        [ .[][] | if (.name | type) == "string" then .name else error("Invalid label") end ]
+        | any(. == "workflow-change-approved") | tostring
+      else error("Invalid label pages")
+      end
+    ' <<< "$labels") || exit 2
+    if [[ $present == true ]]; then
+      state=success
+      description="pull request $PR_NUMBER approved"
+    fi
+    ;;
+  unlabeled) ;;
   *) exit 1 ;;
 esac
 gh api --silent -X POST "repos/$GITHUB_REPOSITORY/statuses/$PR_HEAD_SHA" \\
-  -f context=workflow-change-approved -f state="$state" -f description="Workflow change approval"
+  -f context=workflow-change-approved -f state="$state" -f description="$description" || exit 2
 """
 
 
@@ -320,13 +397,20 @@ def test_write_jobs_only_run_the_expected_scripts(guard_workflow):
     assert clear["if"] == "github.run_attempt == '1' && github.event.action == 'synchronize'"
     assert record["if"] == (
         "github.run_attempt == '1' && github.event.label.name == 'workflow-change-approved' && "
+        "github.event.pull_request.base.ref == github.event.repository.default_branch && "
         "(github.event.action == 'labeled' || github.event.action == 'unlabeled')"
     )
-    for job, permission, script, env in (
-        (clear, "pull-requests", CLEAR_APPROVAL_SCRIPT, {"PR_NUMBER": "${{ github.event.number }}"}),
+    assert set(clear) == {"if", "permissions", "runs-on", "steps"}
+    assert set(record) == {*clear, "concurrency"}
+    assert record["concurrency"] == {
+        "group": "workflow-guard-record-approval-${{ github.event.number }}",
+        "cancel-in-progress": False,
+    }
+    for job, permissions, script, env in (
+        (clear, {"pull-requests": "write"}, CLEAR_APPROVAL_SCRIPT, {}),
         (
             record,
-            "statuses",
+            {"statuses": "write", "pull-requests": "read"},
             RECORD_APPROVAL_SCRIPT,
             {
                 "PR_HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
@@ -334,12 +418,15 @@ def test_write_jobs_only_run_the_expected_scripts(guard_workflow):
             },
         ),
     ):
-        assert set(job) == {"if", "permissions", "runs-on", "steps"}
         assert job["runs-on"] == "ubuntu-latest"
-        assert job["permissions"] == {permission: "write"}
+        assert job["permissions"] == permissions
         (step,) = job["steps"]
         assert set(step) == {"name", "env", "run"}
-        assert step["env"] == {"GH_TOKEN": "${{ github.token }}", **env}
+        assert step["env"] == {
+            "GH_TOKEN": "${{ github.token }}",
+            "PR_NUMBER": "${{ github.event.number }}",
+            **env,
+        }
         assert step["run"] == script
 
 
@@ -383,37 +470,60 @@ exec 3>&1
 
 
 @pytest.mark.parametrize(
-    ("sha", "action", "api_exit", "job_exit", "state"),
+    ("sha", "number", "action", "labels", "api_exit", "job_exit", "read_labels", "state"),
     [
-        (HEAD, "labeled", 0, 0, "success"),
-        ("B" * 64, "unlabeled", 0, 0, "failure"),
-        (HEAD, "unlabeled", 1, 1, "failure"),
-        ("a" * 39, "labeled", 0, 1, None),
-        ("G" * 40, "labeled", 0, 1, None),
-        ("a" * 41, "labeled", 0, 1, None),
-        (HEAD, "edited", 0, 1, None),
+        (HEAD, "42", "labeled", [[{"name": APPROVAL}]], 0, 0, True, "success"),
+        (HEAD, "42", "labeled", [[], [{"name": APPROVAL}]], 0, 0, True, "success"),
+        (HEAD, "42", "labeled", [[{"name": "other"}]], 0, 0, True, "failure"),
+        (HEAD, "42", "labeled", [[{"name": APPROVAL}, {}]], 0, 2, True, None),
+        (HEAD, "42", "labeled", [[]], 1, 2, True, None),
+        ("B" * 64, "42", "unlabeled", [[{"name": APPROVAL}]], 0, 0, False, "failure"),
+        (HEAD, "42", "unlabeled", [[]], 1, 2, False, "failure"),
+        ("a" * 39, "42", "labeled", [[]], 0, 1, False, None),
+        ("G" * 40, "42", "labeled", [[]], 0, 1, False, None),
+        ("a" * 41, "42", "labeled", [[]], 0, 1, False, None),
+        (HEAD, "42/../43", "labeled", [[]], 0, 2, False, None),
+        (HEAD, "42", "edited", [[]], 0, 1, False, None),
     ],
 )
-def test_record_approval_posts_once_to_the_event_commit(guard_workflow, sha, action, api_exit, job_exit, state):
+def test_record_approval_checks_live_label_and_posts_once_to_the_event_commit(
+    guard_workflow, sha, number, action, labels, api_exit, job_exit, read_labels, state
+):
     script = guard_workflow["jobs"]["record-approval"]["steps"][0]["run"]
-    fake_gh = 'gh() { printf "%s\\n" "$*"; return "$API_EXIT"; }\n'
+    fake_gh = """
+gh() {
+  printf '%s\\n' "$*" >&3
+  if [[ $2 == */labels?per_page=100 ]]; then
+    printf '%s\\n' "$LABELS"
+  fi
+  return "$API_EXIT"
+}
+exec 3>&1
+"""
     result = subprocess.run(
         _workflow_bash_command(fake_gh + script, "-e"),
         env=dict(
-            os.environ, GITHUB_REPOSITORY="example/project", PR_HEAD_SHA=sha, PR_ACTION=action, API_EXIT=str(api_exit)
+            os.environ,
+            GITHUB_REPOSITORY="example/project",
+            PR_HEAD_SHA=sha,
+            PR_NUMBER=number,
+            PR_ACTION=action,
+            API_EXIT=str(api_exit),
+            LABELS=json.dumps(labels),
         ),
         capture_output=True,
         text=True,
     )
     assert result.returncode == job_exit, result.stderr
-    calls = (
-        []
-        if state is None
-        else [
+    calls = []
+    if read_labels:
+        calls.append("api repos/example/project/issues/42/labels?per_page=100 --paginate --slurp")
+    if state is not None:
+        description = "approved" if state == "success" else "approval removed"
+        calls.append(
             f"api --silent -X POST repos/example/project/statuses/{sha} "
-            f"-f context={APPROVAL} -f state={state} -f description=Workflow change approval"
-        ]
-    )
+            f"-f context={APPROVAL} -f state={state} -f description=pull request 42 {description}"
+        )
     assert result.stdout.splitlines() == calls
 
 

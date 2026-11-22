@@ -21,6 +21,7 @@ PROTECTED_PATTERNS = (
     "registry/skills/verify-brigade/control-brigade.py",
     "scripts/benchmark-guard-native.py",
     "scripts/changelog_fragments.py",
+    "scripts/check_cli_upgrade.py",
     "scripts/check_size_ratchet_baseline.py",
     "scripts/ci_*",
     "scripts/download_metrics.py",
@@ -36,6 +37,7 @@ PROTECTED_PATTERNS = (
     "scripts/published-artifact-acceptance.py",
     "scripts/retired_engine_names.py",
     "scripts/shipped_file_history.py",
+    "scripts/stamp_brigade_cli.py",
     "scripts/template_profile_snapshot.py",
     "scripts/verify-engine-rename-installer",
     "scripts/verify-focused",
@@ -73,6 +75,8 @@ PROTECTED_PATTERNS = (
     "verify/*",
 )
 APPROVAL_LABEL = "workflow-change-approved"
+APPROVAL_DESCRIPTION = re.compile(r"pull request ([0-9]+) (approved|approval removed)")
+GITHUB_ACTIONS_BOT_ID = 41898282
 COMMIT_SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 
 
@@ -134,7 +138,7 @@ def read_pull_request(repo: str, number: int, default_branch: str) -> tuple[list
     return paths, head_sha
 
 
-def has_approval(repo: str, head_sha: str) -> bool:
+def has_approval(repo: str, head_sha: str, number: int) -> bool:
     statuses = paginated_entries(f"repos/{repo}/commits/{head_sha}/statuses")
     # The API returns statuses newest first. Only Actions can record approval.
     for status in statuses:
@@ -142,15 +146,25 @@ def has_approval(repo: str, head_sha: str) -> bool:
             raise ValueError("Invalid commit status.")
         if status["context"] != APPROVAL_LABEL:
             continue
+        description = status.get("description")
+        match = APPROVAL_DESCRIPTION.fullmatch(description) if isinstance(description, str) else None
+        if match is None or int(match[1]) != number:
+            continue
         creator = status.get("creator")
         if not isinstance(creator, dict) or any(not isinstance(creator.get(key), str) for key in ("login", "type")):
             raise ValueError("Invalid commit status creator.")
-        if creator["login"] != "github-actions[bot]" or creator["type"] != "Bot":
+        if type(creator.get("id")) is not int:
+            raise ValueError("Invalid commit status creator id.")
+        if (
+            creator["login"] != "github-actions[bot]"
+            or creator["type"] != "Bot"
+            or creator["id"] != GITHUB_ACTIONS_BOT_ID
+        ):
             continue
         state = status.get("state")
         if state not in ("success", "failure", "pending", "error"):
             raise ValueError("Invalid commit status state.")
-        return state == "success"
+        return state == "success" and match[2] == "approved"
     return False
 
 
@@ -185,14 +199,14 @@ def main(argv: list[str] | None = None) -> int:
         # Keep each untrusted path on one line so it cannot emit workflow commands.
         print(f"  {json.dumps(path)}")
     try:
-        if has_approval(args.repo, head_sha):
-            print("A maintainer approved this commit.")
+        if has_approval(args.repo, head_sha, args.pr):
+            print("A maintainer approved this pull request at its current head.")
             return 0
     except (OSError, ValueError, subprocess.SubprocessError):
         print("Could not read the workflow approval status for the pull request head.", file=sys.stderr)
         return 2
 
-    print(f"A maintainer must apply the {json.dumps(APPROVAL_LABEL)} label to this commit.")
+    print(f"A maintainer must apply the {json.dumps(APPROVAL_LABEL)} label to this pull request at its current head.")
     return 1
 
 
