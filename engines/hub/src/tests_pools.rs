@@ -121,6 +121,49 @@ impl Fixture {
         app.lookup = Some(admission::Lookup::new(self.lookups.clone(), ADMIN));
         app
     }
+    fn native_app(&self) -> App {
+        let mut app = self.app();
+        app.registration = Some(registration::Registration {
+            readers: self.readers.clone(),
+            lookups: self.lookups.clone(),
+            writer: self.writer.clone(),
+            admin: self.admin(),
+            clock: None,
+            memory: None,
+        });
+        app.claims = Some(claims_route::Claims {
+            readers: self.readers.clone(),
+            lookups: self.lookups.clone(),
+            writer: self.writer.clone(),
+            admin: self.admin(),
+            clock: None,
+            allow_admin_writes: true,
+            events: false,
+        });
+        app.heartbeat = Some(heartbeat::Heartbeat {
+            readers: self.readers.clone(),
+            lookups: self.lookups.clone(),
+            writer: self.writer.clone(),
+            admin: self.admin(),
+            clock: None,
+            allow_admin_writes: true,
+            events: false,
+            stale_after: 900,
+        });
+        app.messages = Some(messages_route::Messages::new(
+            self.readers.clone(),
+            self.lookups.clone(),
+            self.writer.clone(),
+            self.admin(),
+            None,
+            true,
+            brigade_hub::messages::Policy::from_env(|_| None, false).unwrap(),
+            Arc::new(brigade_hub::messages::wake::Wake::new(
+                brigade_hub::messages::wake::Limits::for_connections(64),
+            )),
+        ));
+        app
+    }
     fn admin(&self) -> String {
         registration::digest(ADMIN)
     }
@@ -269,8 +312,13 @@ async fn log_request(
 #[tokio::test]
 async fn request_log_labels_native_health_and_drops_query() {
     let app = log_test_app(String::new());
-    let (line, text) =
-        log_request(&app, "GET", "/health?fixture_query=fixture_value", "health").await;
+    let (line, text) = log_request(
+        &app,
+        "GET",
+        "//health?fixture_query=fixture_value",
+        "health",
+    )
+    .await;
     assert_eq!(line["status"], 200);
     assert_eq!(line["method"], "GET");
     assert_eq!(line["route"], "/health");
@@ -286,10 +334,21 @@ async fn request_log_labels_proxied_cold_policy() {
     let app = log_test_app(format!("http://{}", listener.local_addr().unwrap()));
     let upstream = Router::new().route(
         "/policy",
-        axum::routing::post(|| async { StatusCode::NO_CONTENT }),
+        axum::routing::post(|uri: axum::http::Uri| async move {
+            assert_eq!(uri.query(), Some("fixture_query=fixture%2Bvalue&empty="));
+            StatusCode::NO_CONTENT
+        }),
     );
     let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
-    let (line, _) = log_request(&app, "POST", "/policy", "cold").await;
+    let (line, text) = log_request(
+        &app,
+        "POST",
+        "//policy?fixture_query=fixture%2Bvalue&empty=",
+        "cold",
+    )
+    .await;
+    assert!(!text.contains("fixture_query"));
+    assert!(!text.contains("fixture%2Bvalue"));
     server.abort();
     assert_eq!(line["status"], 204);
     assert_eq!(line["method"], "POST");
@@ -336,6 +395,14 @@ async fn request_log_labels_proxied_route_templates() {
             "/deck/actions/:id",
         ),
         ("/deck/actions/aa_", "browser", "other"),
+        (
+            "//deck/actions/aa_fixture-id",
+            "browser",
+            "/deck/actions/:id",
+        ),
+        ("///work//items", "cold", "/work/items"),
+        ("//unknown", "cold", "other"),
+        ("//", "browser", "/"),
         (
             "/deck/observed/fixture-id",
             "browser",
@@ -413,46 +480,7 @@ async fn a_checked_pool_checks_its_schema_at_open_not_on_its_first_job() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_route_auth_never_waits_on_a_held_handler_pool() {
     let fixture = Fixture::new("native-route-auth");
-    let mut app = fixture.app();
-    app.registration = Some(registration::Registration {
-        readers: fixture.readers.clone(),
-        lookups: fixture.lookups.clone(),
-        writer: fixture.writer.clone(),
-        admin: fixture.admin(),
-        clock: None,
-        memory: None,
-    });
-    app.claims = Some(claims_route::Claims {
-        readers: fixture.readers.clone(),
-        lookups: fixture.lookups.clone(),
-        writer: fixture.writer.clone(),
-        admin: fixture.admin(),
-        clock: None,
-        allow_admin_writes: true,
-        events: false,
-    });
-    app.heartbeat = Some(heartbeat::Heartbeat {
-        readers: fixture.readers.clone(),
-        lookups: fixture.lookups.clone(),
-        writer: fixture.writer.clone(),
-        admin: fixture.admin(),
-        clock: None,
-        allow_admin_writes: true,
-        events: false,
-        stale_after: 900,
-    });
-    app.messages = Some(messages_route::Messages::new(
-        fixture.readers.clone(),
-        fixture.lookups.clone(),
-        fixture.writer.clone(),
-        fixture.admin(),
-        None,
-        true,
-        brigade_hub::messages::Policy::from_env(|_| None, false).unwrap(),
-        Arc::new(brigade_hub::messages::wake::Wake::new(
-            brigade_hub::messages::wake::Limits::for_connections(64),
-        )),
-    ));
+    let app = fixture.native_app();
     let held = hold_every(&fixture.readers, brigade_hub::read::hub_threads());
     let node = bearer(NODE_TOKEN);
     let requests = [
@@ -508,6 +536,131 @@ async fn native_route_auth_never_waits_on_a_held_handler_pool() {
         refused.is_empty(),
         "route auth read a held handler pool: {refused:#?}"
     );
+}
+
+#[tokio::test]
+async fn leading_slashes_preserve_route_mode_and_credentials() {
+    let fixture = Fixture::new("leading-slash-modes");
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let upstream_address = format!("http://{}", listener.local_addr().unwrap());
+    let upstream = Router::new().fallback(|uri: axum::http::Uri| async move {
+        (
+            StatusCode::ACCEPTED,
+            axum::Json(serde_json::json!({"path": uri.path()})),
+        )
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let mut python = fixture.app();
+    python.modes = brigade_hub::modes::Modes::parse(&["health=proxy".into()]).unwrap();
+
+    for (is_native, app) in [(true, fixture.native_app()), (false, python)] {
+        *app.upstream.write().unwrap() = upstream_address.clone();
+        for (method, path, family) in [
+            ("GET", "/status", "heartbeat"),
+            ("POST", "/events", "heartbeat"),
+            ("POST", "/sessions", "heartbeat"),
+            ("GET", "/claims", "claims"),
+            ("POST", "/messages", "messages"),
+            ("GET", "/nodes", "registration"),
+            ("GET", "/health", "health"),
+        ] {
+            for token in [None, Some(NODE_TOKEN), Some(ADMIN)] {
+                let request = |uri: &str| {
+                    let mut builder = Request::builder().method(method).uri(uri);
+                    if let Some(token) = token {
+                        builder = builder.header("authorization", bearer(token));
+                    }
+                    let body = if method == "POST" {
+                        builder = builder.header("content-length", 2);
+                        Body::from("{}")
+                    } else {
+                        Body::empty()
+                    };
+                    builder.body(body).unwrap()
+                };
+                let single = answer(&app, request(path)).await;
+                let (single_log, _) = take_request_line(&app, family).unwrap();
+                let doubled = answer(&app, request(&format!("/{path}"))).await;
+                assert_eq!(single, doubled, "{method} {path}, native={is_native}");
+                let (doubled_log, _) = take_request_line(&app, family).expect(path);
+                assert_eq!(doubled_log["route"], path);
+                assert_eq!(
+                    single_log["credential_kind"],
+                    doubled_log["credential_kind"]
+                );
+                assert_eq!(single.0 == 202, !is_native, "{method} {path}");
+                if !is_native {
+                    assert_eq!(single.1["path"], path);
+                }
+            }
+        }
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn leading_slashes_use_the_same_admission_lane() {
+    let fixture = Fixture::new("leading-slash-admission");
+    let app = fixture.app();
+
+    for (token, capacity) in [(None, 4), (Some(NODE_TOKEN), 64), (Some(ADMIN), 64)] {
+        let authorization = token.map(bearer);
+        let credential = app
+            .lookup
+            .as_ref()
+            .unwrap()
+            .credential(authorization.as_deref())
+            .await
+            .unwrap()
+            .key;
+        let slots: Vec<_> = (0..capacity)
+            .map(|_| {
+                app.budgets
+                    .admit(credential.clone(), "/deck", "", None)
+                    .unwrap()
+            })
+            .collect();
+        for path in ["/deck", "//deck"] {
+            let mut request = Request::builder().uri(path);
+            if let Some(value) = &authorization {
+                request = request.header("authorization", value);
+            }
+            let (status, body) = answer(&app, request.body(Body::empty()).unwrap()).await;
+            assert_eq!(status, 503, "{path}");
+            assert_eq!(body["reason"], "credential-inflight-full", "{path}");
+        }
+        drop(slots);
+    }
+}
+
+#[tokio::test]
+async fn leading_slashes_keep_event_and_session_disk_guards() {
+    let fixture = Fixture::new("leading-slash-disk");
+    let mut app = fixture.native_app();
+    let storage = brigade_hub::maintenance::Maintenance::start(
+        &fixture.db,
+        &fixture.dir.join("unused-memory.db"),
+        Arc::new(HubSweeps {
+            memory: None,
+            messages: Arc::default(),
+            last: Mutex::new(None),
+        }),
+    )
+    .unwrap();
+    storage.disk.update(0, Some(0));
+    app.storage = Some(Arc::new(storage));
+
+    for path in ["/events", "//events", "/sessions", "//sessions"] {
+        let request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("authorization", bearer(NODE_TOKEN))
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = answer(&app, request).await;
+        assert_eq!(status, 503, "{path}");
+        assert_eq!(body["reason"], "disk-pressure", "{path}");
+    }
 }
 
 /// A request the client abandons while a native route's own credential lookup

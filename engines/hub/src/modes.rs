@@ -143,7 +143,7 @@ macro_rules! route_labels {
 const OTHER_ROUTE: &str = "other";
 
 route_labels! {
-    /// Native and Python dispatch paths, classified independently of method.
+    /// Effective native and Python dispatch paths, classified independently of method.
     pub fn route_label(path: &str);
     FRONT_ROUTE_LABELS;
     match path;
@@ -351,7 +351,6 @@ mod tests {
             ("/healthcheck", "other"),
             ("/policyX", "other"),
             ("/health/", "other"),
-            ("//health", "other"),
             // The Python Worklore dispatcher discards empty path segments.
             ("/work/campaigns/", "/work/campaigns"),
             ("/work/campaigns//fixture", "/work/campaigns/:key"),

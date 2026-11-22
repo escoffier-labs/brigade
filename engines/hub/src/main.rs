@@ -540,13 +540,31 @@ fn bearer_token(req: &Request<Body>) -> Option<&str> {
         .and_then(|v| v.strip_prefix("Bearer "))
         .filter(|v| !v.is_empty())
 }
-async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
+async fn handle(State(app): State<App>, mut req: Request<Body>) -> Response<Body> {
     use brigade_hub::{
         modes::{Mode, family, method_label, route_label},
         shadow,
         telemetry::{RequestLog, Stage, StageSlot},
     };
     let started = std::time::Instant::now();
+    // Match Python's request parser (gh-87389) before logging, admission,
+    // dispatch, or proxying. Rebuild only the URI with extra leading slashes.
+    if let Some(target) = req
+        .uri()
+        .path_and_query()
+        .filter(|p| p.path().starts_with("//"))
+    {
+        let raw = target.as_str();
+        let leading = raw.len() - raw.trim_start_matches('/').len();
+        let mut parts = req.uri().clone().into_parts();
+        parts.path_and_query = Some(
+            raw[leading - 1..]
+                .parse()
+                .expect("removing leading slashes preserves a valid path and query"),
+        );
+        *req.uri_mut() =
+            axum::http::Uri::from_parts(parts).expect("normalization preserves valid URI parts");
+    }
     let f = family(req.method().as_str(), req.uri().path(), "");
     // Keep a caller-provided slot available to cancellation tests.
     let stage = req
