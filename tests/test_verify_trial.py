@@ -17,6 +17,27 @@ from brigade.work_cmd import verification as verify_mod
 from tests.work_cmd_test_helpers import _init_git_repo
 
 
+@pytest.mark.parametrize(
+    ("platform", "command", "identity"),
+    [
+        ("nt", r"python -m pytest tests\test_x.py", r"python -m pytest 'tests\test_x.py'"),
+        ("nt", r'python -m pytest "tests\with spaces\test_x.py"', r"python -m pytest 'tests\with spaces\test_x.py'"),
+        ("posix", r'python  -m pytest tests\test_x.py "space value"', "python -m pytest teststest_x.py 'space value'"),
+    ],
+)
+def test_manifest_command_matches_receipt_identity(monkeypatch, platform, command, identity):
+    with monkeypatch.context() as context:
+        context.setattr(os, "name", platform)
+        argv = verify_mod._verification_split_command(command)
+        manifest_identity = verify_trial._normalize_manifest_command(command)
+        receipt_identity = verify_trial._normalize_command_identity({"argv": argv})
+        text_receipt_identity = verify_trial._normalize_command_identity({"command": command})
+
+    assert receipt_identity == identity
+    assert manifest_identity == receipt_identity
+    assert text_receipt_identity == receipt_identity
+
+
 def _init_verify_git_repo(path: Path) -> None:
     _init_git_repo(path)
     (path / ".gitignore").write_text(".brigade/\n")
