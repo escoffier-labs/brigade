@@ -2,5 +2,6 @@
   "schema": "brigade.verify_required_check.v1",
   "argv_prefix": ["./scripts/verify-focused"],
   "needs_arguments": true,
-  "needs_passed_tests": true
+  "needs_passed_tests": true,
+  "needs_plan_coverage": true
 }

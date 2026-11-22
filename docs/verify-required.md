@@ -4,7 +4,7 @@ Run `brigade work verify required` from the Git repository root, or pass that ro
 
 Use `brigade work verify required --worktree --json` to plan the current Git
 tree, including tracked edits and untracked files that Git does not ignore.
-This uses the same snapshot and planner as an opted-in [local gate](verify-gate.md).
+This repository's [local gate](verify-gate.md) uses the same snapshot and planner.
 Git and the planner share a 60-second deadline in this mode.
 
 The base is the merge base of `HEAD` and the local remote-tracking ref for the default branch. Fetch the default branch if its ref is missing. The record identifies the base and its source. The `base_trusted` field is true only when the base comes from that remote-tracking ref. In a repository without remotes, the base is local `HEAD` and `base_trusted` is false. The human output warns that the local planner and configuration come from the same commit being checked.
@@ -13,13 +13,17 @@ The base is resolved from local Git state. `base_trusted` is true when the base 
 
 The command reads `verify/required-tests.json` from the base tree. It copies each regular file listed in `planner_files` from that tree into a fresh directory, keeps the relative paths, and runs `planner_argv` there without a shell. Brigade hashes the paths and exact file bytes. Its `planner_digest` is independent of the optional `planner_reported_digest`.
 
+Planning passes through only executable search paths, home paths, locale
+settings, temporary directory paths, and Windows system settings. Brigade
+sets the Git variables needed to read the copied tree.
+
 Planner placeholders are whole arguments. Use `{python}` for the running Python interpreter, `{base}` and `{head}` for commit IDs, `{output}` for the plan file, `{planner_dir}` for the planner directory, and `{repo}` for the target root. An argument may start with `{planner_dir}/` followed by a relative path. Planners that inspect source files can use `{head_dir}` for a temporary copy of regular files from the committed head tree, with Git history available for read operations. The bundled planner uses this copy so uncommitted source edits cannot change its selection.
 
 In worktree mode, `{head}` is the snapshot tree ID. Both `{repo}` and
 `{head_dir}` point to the temporary copy of its regular files. The planner's
 configuration and executable files still come from the base commit.
 
-Use `--json` to print one JSON object. The command also writes the object atomically to `.brigade/work/verify-required/<head>.<base-first-12>.json`. Unavailable commit IDs use `unknown` in the filename. The JSON record path is null when the target directory does not exist or the record cannot be written. The `covers_worktree` field compares the committed tree with tracked files and untracked files that Git does not ignore, excluding generated Brigade evidence. Ignored untracked files can affect test collection even when this field is true. A plan describes requirements for the committed diff. Verification evidence comes from running the selected checks or observing required CI.
+Use `--json` to print one JSON object. The command also writes the object atomically to `.brigade/work/verify-required/<head>.<base-first-12>.json`. Unavailable commit IDs use `unknown` in the filename. The JSON record path is null when the target directory does not exist or the record cannot be written. The `covers_worktree` field compares the committed tree with tracked files and untracked files that Git does not ignore, excluding generated Brigade evidence. Ignored untracked files can affect test collection even when this field is true. Verification evidence comes from running the selected checks or observing required CI.
 
 Worktree plans are recorded as `<tree>.<base-first-12>.worktree.json` in the
 same directory. A worktree plan identifies the snapshot with `tree_id` and

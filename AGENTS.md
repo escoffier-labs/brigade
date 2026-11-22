@@ -12,7 +12,11 @@ developing Brigade itself; the contributor policy lives in `CONTRIBUTING.md`.
 
 ## Definition of Done
 
-Before opening a PR, run relevant focused checks through Brigade:
+Run `brigade work verify required --worktree` first. For a selective plan of up
+to 20 files, run the listed files together in one verify run. For a broader
+plan, run one relevant focused check and rely on required CI for the full check.
+
+Before opening a PR, run the focused check through Brigade:
 
 ```bash
 brigade work verify run --target . --argv-json '["./scripts/verify-focused","<pytest-selector>"]' --capture brigade-work
