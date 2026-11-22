@@ -1,0 +1,1 @@
+- Add an offline collector and a matched-batch plan for qualifying governed Orca against explicit Brigade batch execution.
