@@ -11,7 +11,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from brigade import cli, localio
+from brigade import cli, localio, proc
 from brigade.claude_hooks import classify, runtime
 from brigade.work_cmd import (
     closeout_receipt,
@@ -392,17 +392,22 @@ def test_git_and_planner_share_deadline(repo, monkeypatch):
     base = _setup(repo)
     tree = localio.tree_fingerprint(repo)
     run = subprocess.run
+    run_planner = proc.run
     now = 100.0
     timeouts = []
 
-    def advance(*args, **kwargs):
-        nonlocal now
-        timeouts.append(kwargs["timeout"])
-        now += 5
-        return run(*args, **kwargs)
+    def observe(call):
+        def advance(*args, **kwargs):
+            nonlocal now
+            timeouts.append(kwargs["timeout"])
+            now += 5
+            return call(*args, **kwargs)
+
+        return advance
 
     monkeypatch.setattr(verify_required, "monotonic", lambda: now)
-    monkeypatch.setattr(subprocess, "run", advance)
+    monkeypatch.setattr(subprocess, "run", observe(run))
+    monkeypatch.setattr(proc, "run", observe(run_planner))
     fields, _, _ = verify_required.plan_snapshot(repo, base, tree, deadline=160.0)
     assert fields["mode"] == "selective"
     assert timeouts[:-1] == [min(30, 60 - i * 5) for i in range(len(timeouts) - 1)]
@@ -599,23 +604,26 @@ def test_symlink_in_verified_tree_cannot_cover_its_target(repo, monkeypatch, cap
 def test_hung_process_during_planning_preserves_command_status(repo, monkeypatch, capsys, process):
     _setup(repo)
     run = subprocess.run
+    run_planner = proc.run
     calls = []
     monkeypatch.setattr(verify_gate, "monotonic", lambda: 200.0)
     monkeypatch.setattr(verify_required, "PLANNER_TIMEOUT_SECONDS", 0.25)
     monkeypatch.setattr(verify_required, "monotonic", lambda: 200.0)
 
-    def timeout(argv, *args, **kwargs):
-        match = (
-            argv[:3] == ["git", "--no-replace-objects", "--literal-pathspecs"]
-            if process == "git"
-            else (argv[1:3] == ["-E", "-S"])
-        )
-        if match:
+    def timeout_git(argv, *args, **kwargs):
+        if process == "git" and argv[:3] == ["git", "--no-replace-objects", "--literal-pathspecs"]:
             calls.append(kwargs["timeout"])
             raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
         return run(argv, *args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", timeout)
+    def timeout_planner(argv, **kwargs):
+        if process == "planner" and argv[1:3] == ["-E", "-S"]:
+            calls.append(kwargs["timeout"])
+            return proc.Result(code=124, stdout="", stderr="", timed_out=True)
+        return run_planner(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", timeout_git)
+    monkeypatch.setattr(proc, "run", timeout_planner)
     stop, _ = _start(repo, monkeypatch)
     receipt = _run(repo, monkeypatch, capsys, [[A, B]])
     assert calls == [0.25]

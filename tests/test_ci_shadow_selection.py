@@ -1,6 +1,8 @@
 """Contracts for shadow-mode Linux test selection: fail-open selection, escape accounting, evaluation."""
 
 import json
+import pickle
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path
 
 import pytest
@@ -138,6 +140,22 @@ def test_dynamic_import_with_a_computed_name_reaches_the_modules_the_file_names(
     assert plan["selected"]["tests/test_lazy.py"] == ["closure:1"]
 
 
+def assert_same_graph(actual, expected):
+    assert vars(actual) == vars(expected)
+    for attribute in ("paths", "is_package", "text", "test_nodes", "top", "lazy"):
+        assert list(getattr(actual, attribute)) == list(getattr(expected, attribute))
+    assert actual.parse_errors == expected.parse_errors
+
+
+@pytest.fixture
+def large_repo(repo):
+    for index in range(128):
+        write(repo, f"tests/test_filler_{index:03}.py", "from brigade import a\n")
+    write(repo, "tests/test_aaa_bad_syntax.py", "def (:\n")
+    (repo / "tests/test_zzz_bad_encoding.py").write_bytes(b"\xff")
+    return repo
+
+
 def test_parallel_graph_matches_serial_on_repository_sources(monkeypatch):
     project = Path(__file__).resolve().parents[1]
     serial = selector.Graph(project, {}, parallel=False)
@@ -145,10 +163,68 @@ def test_parallel_graph_matches_serial_on_repository_sources(monkeypatch):
     def unexpected_serial(self):
         pytest.fail("the parallel graph must use the process pool")
 
+    monkeypatch.setattr(selector, "_worker_count", lambda: 2)
     monkeypatch.setattr(selector.Graph, "_read_serial", unexpected_serial)
     parallel = selector.Graph(project, {})
 
-    assert vars(parallel) == vars(serial)
+    assert_same_graph(parallel, serial)
+
+
+def test_parallel_graph_preserves_parse_error_order(large_repo, monkeypatch):
+    serial = selector.Graph(large_repo, {}, parallel=False)
+    monkeypatch.setattr(selector, "_worker_count", lambda: 2)
+    monkeypatch.setattr(selector.Graph, "_read_serial", lambda self: pytest.fail("expected to use the process pool"))
+    assert_same_graph(selector.Graph(large_repo, {}), serial)
+    assert serial.parse_errors == [
+        "test_aaa_bad_syntax.py: SyntaxError",
+        "test_zzz_bad_encoding.py: UnicodeDecodeError",
+    ]
+
+
+@pytest.mark.parametrize("failure", [OSError, AssertionError, pickle.PicklingError, BrokenProcessPool])
+def test_pool_failure_falls_back_to_serial_graph(large_repo, monkeypatch, failure):
+    serial = selector.Graph(large_repo, {}, parallel=False)
+    attempts = []
+
+    class FailingPool:
+        def __init__(self, **kwargs):
+            attempts.append(kwargs["max_workers"])
+            if failure is not BrokenProcessPool:
+                raise failure("pool unavailable")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            pass
+
+        def map(self, *args):
+            yield {"partial": {"edge"}}, {}, {}, ["partial error"]
+            raise BrokenProcessPool("worker died")
+
+    monkeypatch.setattr(selector, "_worker_count", lambda: 2)
+    monkeypatch.setattr(selector, "ProcessPoolExecutor", FailingPool)
+    assert_same_graph(selector.Graph(large_repo, {}), serial)
+    assert attempts == [2]
+
+
+def test_pool_is_skipped_below_threshold(repo, monkeypatch):
+    monkeypatch.setattr(selector, "_worker_count", lambda: pytest.fail("small trees need no workers"))
+    assert_same_graph(selector.Graph(repo, {}), selector.Graph(repo, {}, parallel=False))
+
+
+def test_pool_is_skipped_with_single_cpu(large_repo, monkeypatch):
+    monkeypatch.setattr(selector.os, "sched_getaffinity", lambda pid: {0}, raising=False)
+    monkeypatch.setattr(selector, "ProcessPoolExecutor", lambda **kwargs: pytest.fail("expected serial extraction"))
+    assert_same_graph(selector.Graph(large_repo, {}), selector.Graph(large_repo, {}, parallel=False))
+
+
+def test_worker_count_uses_available_cpus_and_caps_at_six(monkeypatch):
+    monkeypatch.delattr(selector.os, "sched_getaffinity", raising=False)
+    monkeypatch.setattr(selector.os, "cpu_count", lambda: 3)
+    assert selector._worker_count() == 3
+    monkeypatch.setattr(selector.os, "sched_getaffinity", lambda pid: set(range(20)), raising=False)
+    assert selector._worker_count() == 6
 
 
 def test_cli_entry_main_writes_a_plan_even_when_git_fails(tmp_path, repo):

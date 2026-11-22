@@ -13,7 +13,7 @@ from pathlib import Path, PureWindowsPath
 from time import monotonic
 from typing import Any
 
-from .. import localio, shell_quote, verify_manifest_git
+from .. import localio, proc, shell_quote, verify_manifest_git
 
 CONFIG_PATH = "verify/required-tests.json"
 CONFIG_SCHEMA = "brigade.verify_required_config.v1"
@@ -265,20 +265,18 @@ def _run_planner(
         if tokens[0] == "{python}":
             # Keep imports beside the copied script while ignoring PYTHONPATH and site startup code.
             argv[1:1] = ["-E", "-S"]
-        try:
-            proc = subprocess.run(
-                argv,
-                cwd=directory,
-                env=env,
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.DEVNULL,
-                stderr=subprocess.DEVNULL,
-                timeout=_remaining(deadline, PLANNER_TIMEOUT_SECONDS),
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise ValueError("planner timed out") from exc
-        if proc.returncode:
-            raise ValueError(f"planner exited with status {proc.returncode}")
+        result = proc.run(
+            argv,
+            cwd=directory,
+            env=env,
+            timeout=_remaining(deadline, PLANNER_TIMEOUT_SECONDS),
+            supervise_group=True,
+            discard_output=True,
+        )
+        if result.timed_out:
+            raise ValueError("planner timed out")
+        if result.code:
+            raise ValueError(f"planner exited with status {result.code}")
         return _json_object(output.read_bytes(), "planner output"), digest
 
 

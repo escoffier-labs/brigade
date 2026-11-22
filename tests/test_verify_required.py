@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shlex
+import signal
 import subprocess
 from pathlib import Path
+from time import monotonic, sleep
 
 import pytest
 
-from brigade import cli, verify_manifest_git
+from brigade import cli, proc, verify_manifest_git
 from brigade.work_cmd import verify_gate, verify_required
 
 
@@ -239,6 +242,7 @@ def test_missing_planner_file_at_base(repo, capsys):
     ("body", "timeout", "reason"),
     [
         ("raise SystemExit(7)", False, "status 7"),
+        ("raise SystemExit(124)", False, "status 124"),
         ("import missing_planner_dependency", False, "status 1"),
         ("time.sleep(1)", True, "timed out"),
         ("out.write_text('not json')", False, "UTF-8 JSON"),
@@ -252,6 +256,49 @@ def test_planner_failures_are_errors(repo, capsys, monkeypatch, body, timeout, r
     if timeout:
         monkeypatch.setattr(verify_required, "PLANNER_TIMEOUT_SECONDS", 0.01)
     assert reason in error(target, capsys)["reason"]
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").is_file(), reason="requires Linux process status")
+@pytest.mark.parametrize("timeout", [True, False])
+def test_planner_reaps_child_on_timeout_and_normal_exit(repo, capsys, monkeypatch, tmp_path, timeout):
+    target, _ = repo
+    child_file = tmp_path / "child-pid"
+    planner(
+        target,
+        "import subprocess\n"
+        f"child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'])\n"
+        f"pathlib.Path({str(child_file)!r}).write_text(str(child.pid))\n"
+        + (
+            "time.sleep(10)"
+            if timeout
+            else "out.write_text(json.dumps(dict(mode='selective', selected=['tests/a.py'])))"
+        ),
+    )
+    commit(target, "planner with child")
+    monkeypatch.setattr(verify_required, "PLANNER_TIMEOUT_SECONDS", 1.0)
+
+    def child_is_live(pid):
+        try:
+            return Path(f"/proc/{pid}/stat").read_bytes().rpartition(b")")[2].split()[0] != b"Z"
+        except FileNotFoundError:
+            return False
+
+    try:
+        if timeout:
+            assert "planner timed out" in error(target, capsys)["reason"]
+        else:
+            assert run(target, capsys)["tests"] == ["tests/a.py"]
+        pid = int(child_file.read_text())
+        deadline = monotonic() + 1.0
+        while child_is_live(pid) and monotonic() < deadline:
+            sleep(0.01)
+        assert not child_is_live(pid)
+    finally:
+        if child_file.is_file() and child_is_live(pid := int(child_file.read_text())):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 @pytest.mark.parametrize(
@@ -351,9 +398,10 @@ def test_git_subprocesses_use_target_environment(repo, capsys, monkeypatch, tmp_
         for name in caller_only:
             monkeypatch.setenv(name, "caller-value")
     original_run = subprocess.run
+    original_planner_run = proc.run
     planner_environments = []
 
-    def check_environment(argv, *args, **kwargs):
+    def check_environment(argv, kwargs):
         env = kwargs.get("env")
         assert env is not None
         assert "PATH" in env
@@ -371,9 +419,17 @@ def test_git_subprocesses_use_target_environment(repo, capsys, monkeypatch, tmp_
             else:
                 assert git_keys == set()
             planner_environments.append(git_keys)
+
+    def run_git(argv, *args, **kwargs):
+        check_environment(argv, kwargs)
         return original_run(argv, *args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", check_environment)
+    def run_planner(argv, **kwargs):
+        check_environment(argv, kwargs)
+        return original_planner_run(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run_git)
+    monkeypatch.setattr(proc, "run", run_planner)
     if entry_point == "resolve_base":
         assert verify_manifest_git.resolve_base(target).commit == head
     else:
