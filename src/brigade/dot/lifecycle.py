@@ -549,6 +549,17 @@ def doctor(target: Path, *, pack_id: str = c.PACK_ID) -> list[dict[str, str]]:
     )
     record("hub-token", lambda: read_message_token_file(str(runtime.hub.message_token_file)))
 
+    if profile.pack_id == c.PACK_ID:
+
+        def node_credential_check() -> bool:
+            from brigade import fleet_client
+
+            settings = fleet_client.load_fleet_settings(strict=True)
+            node_id = fleet_client.resolve_node_id()
+            return bool(settings.get("node_token")) and node_id != "unknown" and node_id == runtime.hub.node_id
+
+        record("node-credential", node_credential_check)
+
     def fleet_check() -> bool:
         tools, state, _ = build_tools(runtime)
         try:

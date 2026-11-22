@@ -1697,7 +1697,14 @@ def _dispatch_work_show(args: argparse.Namespace) -> int:
 def _dispatch_work_list(args: argparse.Namespace) -> int:
     from .. import worklore_client
 
-    return _run_work(args, lambda: worklore_client.list_items(source=args.source))
+    return _run_work(
+        args,
+        lambda: worklore_client.list_items(
+            source=args.source,
+            limit=getattr(args, "limit", None),
+            cursor=getattr(args, "cursor", None),
+        ),
+    )
 
 
 def _dispatch_work_burn(args: argparse.Namespace) -> int:
