@@ -94,7 +94,8 @@ def gh_api(endpoint: str, *flags: str) -> object:
 
 
 def paginated_entries(endpoint: str) -> list[object]:
-    pages = gh_api(f"{endpoint}?per_page=100", "--paginate", "--slurp")
+    separator = "&" if "?" in endpoint else "?"
+    pages = gh_api(f"{endpoint}{separator}per_page=100", "--paginate", "--slurp")
     if not isinstance(pages, list) or not pages or any(not isinstance(page, list) for page in pages):
         raise ValueError("Invalid paginated response.")
     return [entry for page in pages for entry in page]
@@ -139,7 +140,7 @@ def read_pull_request(repo: str, number: int, default_branch: str) -> tuple[list
     return paths, head_sha
 
 
-def has_approval(repo: str, head_sha: str, number: int) -> bool:
+def matching_approval_status(repo: str, head_sha: str, number: int) -> dict[str, object] | None:
     statuses = paginated_entries(f"repos/{repo}/commits/{head_sha}/statuses")
     # The API returns statuses newest first. Only Actions can record approval.
     for status in statuses:
@@ -165,8 +166,17 @@ def has_approval(repo: str, head_sha: str, number: int) -> bool:
         state = status.get("state")
         if state not in ("success", "failure", "pending", "error"):
             raise ValueError("Invalid commit status state.")
-        return state == "success" and match[2] == "approved"
-    return False
+        return status
+    return None
+
+
+def has_approval(repo: str, head_sha: str, number: int) -> bool:
+    status = matching_approval_status(repo, head_sha, number)
+    return (
+        status is not None
+        and status["state"] == "success"
+        and status["description"] == f"pull request {number} approved"
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

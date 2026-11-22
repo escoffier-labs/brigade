@@ -46,6 +46,8 @@ python -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
 
 Format: trigger, then the rule, then what to do instead.
 
+For protected CI changes, the author does not approve the change and a builder that wrote it never applies the label. The pull request conductor applies `workflow-change-approved` only after an independent security review of the protected-path changes at the current head says to ship, with a comment naming the commit and protected files. Each head gets one review; protected-file changes need a new review and label, while unchanged protected files may cite the earlier review in the new comment, and no pull request gets more than two reviews without operator agreement. Approval is recorded and audited after the fact, not supplied by a separate account; see [the workflow guard](docs/workflow-guard.md).
+
 - Before opening a PR or reporting a code change complete: run focused
   verification through `brigade work verify run` with `./scripts/verify-focused`
   and the relevant pytest selector. Required `ci-gate` on the exact head commit
@@ -98,7 +100,7 @@ Format: trigger, then the rule, then what to do instead.
 ## Orientation
 
 - The process entry point is `brigade.cli:process_main` (`[project.scripts]` in `pyproject.toml`). `brigade.cli:main` remains the integer-returning library API.
-  Command families live in `src/brigade/cli/` — one module per group (e.g. `doctor.py`,
+  Command families live in `src/brigade/cli/`, one module per group (e.g. `doctor.py`,
   `operator.py`, `init.py`, `work/`); `__init__.py` builds the parser and dispatches
   to each module's `register`/`dispatch`.
 - New harness adapter? Follow the step list in `CONTRIBUTING.md` (manifest,
@@ -123,7 +125,7 @@ no file. A code or config edit alone is not a reason.
 
 ## Cursor Cloud specific instructions
 
-Brigade is a zero-runtime-dependency Python CLI — there is no long-running
+Brigade is a zero-runtime-dependency Python CLI. There is no long-running
 server or web UI to start. "Run the application" means exercising the CLI
 against a temp directory (never the operator home or this checkout).
 
@@ -133,7 +135,7 @@ against a temp directory (never the operator home or this checkout).
 |---|---|---|
 | Python CLI (`brigade` via `.venv`) | Required | `source .venv/bin/activate` then use `brigade` / `python -m brigade` |
 | Native engines (`brigade setup`) | Optional | Code graph / evidence binaries; not needed for unit tests or init+doctor |
-| Model seats / `brigade run` | Out of scope here | No seat credentials in this VM — do not run `brigade run` |
+| Model seats / `brigade run` | Out of scope here | No seat credentials in this VM. Do not run `brigade run`. |
 | Rust/Go engines under `engines/` | Optional | Built in CI only when those paths change |
 
 ### Standard commands
@@ -166,7 +168,7 @@ initialized yet); `0 failed` is the success signal.
 Pinned during environment setup to **bd 1.1.2**
 (`bd version 1.1.2 (20e493e56: HEAD@20e493e569c9)`), fetched from the
 `steveyegge/beads` → `gastownhall/beads` release assets. Beads is young and
-schema-mobile — if `bd` commands fail after an upstream release, re-check the
+schema-mobile. If `bd` commands fail after an upstream release, re-check the
 installed pin before assuming a Brigade bug.
 
 Session-scratch rule: treat bd as planning scratch. Nothing tracked only in bd
