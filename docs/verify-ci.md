@@ -5,7 +5,7 @@ Use `--target` to select a different checkout, `--check` to look at a check
 other than `ci-gate`, and `--json` for machine-readable output. Authenticate the GitHub CLI (`gh`) for the checkout's
 GitHub origin before running the command.
 
-Brigade records the newest run of `ci-gate` for the exact commit in
+Brigade records the newest run of `ci-gate` that was not cancelled, for the exact commit, in
 `.brigade/work/verify-ci/<head-sha>.json`. A run with `--check` is recorded in
 its own file next to it. The record includes the commit and
 tree IDs, the check run ID, and the time Brigade fetched the result. A dirty
@@ -17,6 +17,12 @@ checkout is refused before contacting GitHub or writing a record.
 | `failed` | 1 | The check completed with any other conclusion. |
 | `pending` | 2 | The check is queued or in progress. |
 | `unknown` | 2 | Brigade could not obtain a matching check result. |
+
+A cancelled run is ignored, because it says nothing about the commit. Brigade
+takes the newest run that was not cancelled, so a passed merge-queue run still
+counts after a later run for the same commit is cancelled, and a failed run is
+not hidden by a cancelled retry. When every run was cancelled the state is
+`unknown`.
 
 A checkout or record-writing error also returns 2 and reports the error on
 standard error. Only `passed` for the required check on the exact head commit
