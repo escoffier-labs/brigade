@@ -427,6 +427,7 @@ class Result:
     descendants_reaped: bool = False
     stdout_bytes: int = 0
     stderr_bytes: int = 0
+    timed_out: bool = False
 
     @property
     def decode_failed(self) -> bool:
@@ -1194,6 +1195,7 @@ def _collect_process_output(
             descendants_reaped=result.descendants_reaped,
             stdout_bytes=result.stdout_bytes,
             stderr_bytes=result.stderr_bytes,
+            timed_out=timed_out,
         )
     return result
 
@@ -1330,10 +1332,12 @@ def run(
     process_registry: ProcessRegistry | None = None,
     supervise_group: bool = False,
     group_drain_seconds: float = 0.0,
+    *,
+    discard_output: bool = False,
 ) -> Result:
     return _launch_and_collect(
         args,
-        subprocess.PIPE,
+        subprocess.DEVNULL if discard_output else subprocess.PIPE,
         timeout=timeout,
         env=env,
         cwd=cwd,
@@ -1341,6 +1345,7 @@ def run(
         process_registry=process_registry,
         supervise_group=supervise_group,
         group_drain_seconds=group_drain_seconds,
+        stderr_target=subprocess.DEVNULL if discard_output else subprocess.PIPE,
     )
 
 
@@ -1627,6 +1632,7 @@ def _launch_and_collect(
     supervise_group: bool = False,
     group_drain_seconds: float = 0.0,
     pass_fds: tuple[int, ...] = (),
+    stderr_target: Any = subprocess.PIPE,
 ) -> Result:
     _check_launch_allowed(process_registry)
     windows_launch = os.name == "nt"
@@ -1650,7 +1656,7 @@ def _launch_and_collect(
         process = subprocess.Popen(
             args,
             stdout=stdout_target,
-            stderr=subprocess.PIPE,
+            stderr=stderr_target,
             stdin=subprocess.DEVNULL if stdin is None else subprocess.PIPE,
             env=env,
             cwd=cwd,

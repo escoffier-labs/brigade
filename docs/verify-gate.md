@@ -51,11 +51,11 @@ untracked files that Git does not ignore. Preview the plan with
 `brigade work verify required --worktree --json`, then pass its complete
 `run_argv` array to one `brigade work verify run`.
 
-Planning takes about ten seconds in this repository, with about nine seconds
-spent parsing Python files. Previewing and then verifying computes the plan
-twice, for about twenty seconds of planning in all. You can skip the preview
-and run your focused tests directly. If the run misses planned files, Stop and
-closeout reject the receipt and show the full command to run.
+A one-file source edit took about two and a half seconds to plan in a
+local benchmark. Previewing and then verifying computes the plan twice.
+You can skip the preview and run your focused tests directly. If the run
+misses planned files, Stop and closeout reject the receipt and show the
+full command to run.
 
 For a selective plan of up to 20 test files, one receipt must cover every
 required file. It can cover them across multiple commands. Each contributing
