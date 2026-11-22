@@ -134,6 +134,36 @@ def test_manifest_round_trip_preserves_missing_verdict_from_old_pin(world, base,
     assert accepted(world, base, raw, covers, name="restored-pin") == []
 
 
+@pytest.mark.parametrize("finish", ["before-restart", "after-restart"])
+def test_a_failure_from_the_old_pin_survives_a_manifest_round_trip(world, base, finish):
+    path = "verify/manifests/skill-note.json"
+    manifest_a = (world.root / path).read_text()
+    manifest_b = json.loads(manifest_a)
+    manifest_b["checks"][0]["command"] = "true"
+    c1 = world.touch_skill_json(1, T % (22, "23:10:00Z"))
+    # The failure finishes either before the pin change or while the old cohort is already superseded.
+    done = T % (22, "23:15:00Z") if finish == "before-restart" else T % (23, "01:00:00Z")
+    world.gh.failed(c1, done=done)
+    world.commit({path: json.dumps(manifest_b)}, T % (22, "23:20:00Z"), branch="main")
+    covers = world.commit({path: manifest_a}, T % (22, "23:30:00Z"), branch="main")
+
+    raw = world.build(prev_raw=base["genesis"], covers=covers, approved=base["approved"])
+    rows = summary(raw)
+    assert [(sha, outcome) for sha, outcome, _reason in rows] == [(c1, "hurt")]
+    assert accepted(world, base, raw, covers, name=f"old-pin-failure-{finish}") == []
+
+
+def test_a_helped_verdict_from_the_old_pin_does_not_carry_into_the_new_cohort(world, base):
+    path = "verify/manifests/skill-note.json"
+    manifest = json.loads((world.root / path).read_text())
+    c1 = world.touch_skill_json(1, T % (22, "23:10:00Z"))
+    world.gh.passed(c1, done=T % (22, "23:15:00Z"))
+    manifest["checks"][0]["command"] = "true"
+    covers = world.commit({path: json.dumps(manifest)}, T % (22, "23:20:00Z"), branch="main")
+    raw = world.build(prev_raw=base["genesis"], covers=covers, approved=base["approved"])
+    assert all(sha != c1 for sha, _outcome, _reason in summary(raw))
+
+
 def test_a_manifest_restart_carries_forward_recorded_missing_evidence(world, base):
     c1 = world.touch_skill_json(1, T % (22, "00:00:00Z"))
     first = world.build(prev_raw=base["genesis"], covers=c1, approved=base["approved"], cutoff=T % (22, "03:00:00Z"))

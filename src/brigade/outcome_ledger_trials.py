@@ -104,6 +104,11 @@ def is_missing_trial(row: Mapping[str, Any]) -> bool:
     return row.get("outcome") == "hurt" and row.get("reason") == MISSING
 
 
+def is_hurt_trial(row: Mapping[str, Any]) -> bool:
+    """Any hurt verdict. Hurt evidence survives a cohort restart whatever its reason."""
+    return row.get("outcome") == "hurt"
+
+
 def _missing_trial(sha: str) -> dict[str, Any]:
     return {"sha": sha, "outcome": "hurt", "reason": MISSING, "jobs": []}
 
@@ -140,7 +145,7 @@ def plan_trials(
     ref: dt.datetime,
     fingerprint_at: Callable[[str], str | None],
 ) -> TrialPlan:
-    """Plan per-commit verdicts as of ref, retaining missing evidence across pin changes."""
+    """Plan per-commit verdicts as of ref, retaining every hurt verdict across pin changes."""
     scope = scope_history(repo, chain, manifest)
     trials: list[dict[str, Any]] = []
     pending: list[Pending] = []
@@ -152,6 +157,7 @@ def plan_trials(
                 pending.append(result)
                 continue
             result = _missing_trial(commit.sha)
-        if not superseded or is_missing_trial(result):
+        # A pin change must not discard a failure, including one that finished after the change.
+        if not superseded or is_hurt_trial(result):
             trials.append({"fingerprint": fingerprint_at(commit.sha), **result})
     return TrialPlan(tuple(trials), tuple(pending), scope.restart_at is not None)

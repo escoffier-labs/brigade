@@ -168,7 +168,7 @@ def test_the_honest_ledger_that_carries_an_expired_failure_verifies(world, hurt_
     assert errors == []
 
 
-def test_a_manifest_edit_stops_old_trials_from_carrying_forward(world, hurt_history):
+def test_a_manifest_edit_keeps_old_hurt_trials_and_drops_nothing_else(world, hurt_history):
     manifest = json.loads((world.root / "verify/manifests/skill-note.json").read_text())
     manifest["checks"][0]["command"] = "true"
     c3 = world.commit(
@@ -180,7 +180,11 @@ def test_a_manifest_edit_stops_old_trials_from_carrying_forward(world, hurt_hist
     raw = world.build(
         prev_raw=hurt_history["first"], covers=c3, approved=hurt_history["approved"], cutoff=T % (23, "13:00:00Z")
     )
-    assert [row["sha"] for row in json.loads(raw)["subjects"]["skill:note"]["trials"]] == [c3]
+    rows = json.loads(raw)["subjects"]["skill:note"]["trials"]
+    # A pin change restarts the cohort, but an earlier hurt verdict is never dropped (security review round 4).
+    assert [row["sha"] for row in rows][-1] == c3
+    carried = rows[:-1]
+    assert carried and all(row["outcome"] == "hurt" for row in carried)
 
 
 # ---------------------------------------------------------------------------
