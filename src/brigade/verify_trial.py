@@ -22,6 +22,7 @@ from . import (
     verify_manifest,
 )
 from .claude_hooks import producer_session as hook_producer
+from .verify_command import split_verify_command
 
 VERIFY_INFRASTRUCTURE_FAILURE_CLASSES = frozenset(
     {
@@ -572,10 +573,7 @@ def _normalize_command_identity(command: dict[str, Any]) -> str | None:
         return shlex.join(str(item) for item in argv)
     value = command.get("command")
     if isinstance(value, str) and value:
-        try:
-            return shlex.join(shlex.split(value))
-        except ValueError:
-            return value
+        return _normalize_manifest_command(value)
     return None
 
 
@@ -583,7 +581,7 @@ def _normalize_manifest_command(command: str | list[str]) -> str:
     if isinstance(command, list):
         return shlex.join(command)
     try:
-        return shlex.join(shlex.split(command))
+        return shlex.join(split_verify_command(command))
     except ValueError:
         return command
 

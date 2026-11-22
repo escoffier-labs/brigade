@@ -5,7 +5,8 @@ The durable facts live in the run journal and are read through
 never append, cancel or reconcile anything, and a wait timeout records nothing.
 The explicit actions are the exceptions, and each one lives in its own module:
 ``integrate`` cuts a new local ref, ``dispose`` removes a worktree after a
-retained-copy proof, and ``collect`` recovers an interrupted collection.
+retained-copy proof, ``collect`` recovers an interrupted collection, and
+``cancel`` records a cancellation intent through the per-run command inbox.
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ _COLUMNS = (
     ("attempt", "attempt_id", 12),
     ("terminal", "terminal", 8),
     ("ack", "acknowledged", 5),
+    ("cancel", "cancel", 21),
     ("containment", "containment", 11),
     ("result", "result_id", 12),
     ("artifact", "artifact_kind", 11),
@@ -59,6 +61,7 @@ class TaskRow:
     result_id: str | None
     artifact_kind: str | None
     artifact_digest: str | None
+    cancel: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         """The closed row schema. JSON emission sorts keys for stable output."""
@@ -72,10 +75,36 @@ class TaskRow:
             "result_id": self.result_id,
             "artifact_kind": self.artifact_kind,
             "artifact_digest": self.artifact_digest,
+            "cancel": self.cancel,
         }
 
 
-def _row(result: tasks.TaskResult) -> TaskRow:
+def _pending_cancel_reasons(run_dir: Path) -> dict[str, str]:
+    """Cancel reasons whose request is still only in the inbox, bounded."""
+    from . import run_task_inbox
+
+    try:
+        pending = run_task_inbox.pending(run_dir)
+    except run_task_inbox.TaskInboxError:
+        return {}
+    reasons: dict[str, str] = {}
+    for request in pending.requests:
+        if request.kind == run_task_inbox.KIND_CANCEL:
+            reasons.setdefault(request.task_id, request.reason)
+    return reasons
+
+
+def _cancel_state(result: tasks.TaskResult, pending: dict[str, str]) -> dict[str, Any]:
+    """Journaled intent wins; an inbox-only request is reported as queued."""
+    if result.cancel_requested:
+        return {"requested": True, "queued": False, "reason": result.cancel_reason}
+    reason = pending.get(result.handle.spec.task_id)
+    if reason is not None:
+        return {"requested": False, "queued": True, "reason": reason}
+    return {"requested": False, "queued": False, "reason": None}
+
+
+def _row(result: tasks.TaskResult, pending: dict[str, str] | None = None) -> TaskRow:
     return TaskRow(
         task_id=result.handle.spec.task_id,
         status=result.status,
@@ -86,6 +115,7 @@ def _row(result: tasks.TaskResult) -> TaskRow:
         result_id=result.result_id,
         artifact_kind=result.artifact_kind,
         artifact_digest=result.artifact_digest,
+        cancel=_cancel_state(result, pending or {}),
     )
 
 
@@ -176,8 +206,18 @@ def _artifact_sidecar(run_dir: Path, task_id: str) -> tuple[str | None, str | No
     return _sidecar(run_dir, f"batch-artifact-{hashlib.sha256(task_id.encode()).hexdigest()}.json")
 
 
+def _cancel_text(cancel: dict[str, Any]) -> str:
+    if cancel.get("requested"):
+        return f"requested ({cancel['reason']})"
+    if cancel.get("queued"):
+        return f"queued ({cancel['reason']})"
+    return "-"
+
+
 def _cell(row: TaskRow, field: str, width: int) -> str:
     value = getattr(row, field)
+    if isinstance(value, dict):
+        return _cancel_text(value)
     if isinstance(value, bool):
         return "yes" if value else "no"
     if value is None or value == "":
@@ -207,6 +247,7 @@ def _print_detail(
         "attempt_id",
         "terminal",
         "acknowledged",
+        "cancel",
         "containment",
         "result_id",
         "artifact_kind",
@@ -251,7 +292,8 @@ def list_tasks(
     results = _read(run_dir)
     if results is None:
         return 2
-    rows = [_row(result) for result in results]
+    pending = _pending_cancel_reasons(run_dir)
+    rows = [_row(result, pending) for result in results]
     if json_output:
         _emit(
             {
@@ -282,7 +324,7 @@ def show_task(
     by_id = {result.handle.spec.task_id: result for result in results}
     if task_id not in by_id:
         return _unknown(task_id, by_id)
-    row = _row(by_id[task_id])
+    row = _row(by_id[task_id], _pending_cancel_reasons(run_dir))
     result_ref, result_sha256 = _result_sidecar(run_dir, task_id)
     artifact_ref, artifact_sha256 = _artifact_sidecar(run_dir, task_id)
     if json_output:
@@ -356,7 +398,8 @@ def wait_tasks(
             unknown = [task_id for task_id in watched if task_id not in by_id]
             if unknown:
                 return _unknown(unknown[0], by_id)
-            latest = [_row(by_id[task_id]) for task_id in watched]
+            pending = _pending_cancel_reasons(run_dir)
+            latest = [_row(by_id[task_id], pending) for task_id in watched]
             if all(row.terminal for row in latest):
                 if json_output:
                     _emit(_wait_payload(run_dir.name, latest, timed_out=False, timeout=timeout, waiting_for=[]))
@@ -461,6 +504,41 @@ def dispose_tasks(
     return 2 if refused else 0
 
 
+def cancel_tasks(
+    run: str | Path,
+    task_ids: Sequence[str],
+    *,
+    cwd: Path,
+    runs_dir: Path | None = None,
+    reason: str = "operator",
+    json_output: bool = False,
+) -> int:
+    """Record cancellation intent for selected tasks, or report why not."""
+    from . import run_task_inbox
+
+    run_dir = _resolve(run, cwd=cwd, runs_dir=runs_dir)
+    if run_dir is None:
+        return 2
+    try:
+        payload = run_task_inbox.cancel(run_dir, task_ids, reason=reason)
+    except run_task_inbox.TaskInboxError as exc:
+        payload = run_task_inbox.refusal_payload(exc, run_id=run_dir.name, reason=reason)
+        if json_output:
+            _emit(payload)
+        else:
+            print(run_task_inbox.render(payload), file=sys.stderr)
+        return 2
+    if json_output:
+        _emit(payload)
+    else:
+        print(run_task_inbox.render(payload))
+    refused = [row for row in payload["tasks"] if row["outcome"] in run_task_inbox.REFUSAL_OUTCOMES]
+    if refused and not json_output:
+        for row in refused:
+            print(f"task {row['task_id']}: {row['outcome']}", file=sys.stderr)
+    return 2 if refused else 0
+
+
 def collect_task(
     run: str | Path,
     task_id: str,
@@ -533,5 +611,14 @@ def dispatch(args, *, cwd: Path, runs_dir: Path | None) -> int:
         )
     if args.tasks_command == "collect":
         return collect_task(args.run, args.task_id, cwd=cwd, runs_dir=runs_dir, json_output=args.json)
+    if args.tasks_command == "cancel":
+        return cancel_tasks(
+            args.run,
+            args.task_ids,
+            cwd=cwd,
+            runs_dir=runs_dir,
+            reason=args.reason,
+            json_output=args.json,
+        )
     print(f"error: unknown runs tasks command: {args.tasks_command}", file=sys.stderr)
     return 2
