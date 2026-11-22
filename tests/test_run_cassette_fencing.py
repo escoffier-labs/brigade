@@ -135,6 +135,46 @@ def test_purge_keeps_stop_marker_under_live_owner(tmp_path):
     assert not list(marker.parent.iterdir())
 
 
+def test_journalless_publication_and_purge_hold_the_same_file_lock(tmp_path, monkeypatch):
+    fcntl = pytest.importorskip("fcntl")
+    run = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
+    journal = run / "events" / "lifecycle.jsonl"
+    journal.parent.mkdir(parents=True)
+    (run / "run.json").write_text(json.dumps({"run_id": run.name}))
+    lock = journal.with_suffix(".jsonl.lock")
+    lock.touch()
+    unfenced = []
+    publish, purge = store.publish, store.purge
+
+    def probe(operation):
+        # A separately opened descriptor contends with the real file lock.
+        # Probe before mutation without scheduling a competing write or delete.
+        with lock.open("rb+") as contender:
+            try:
+                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return
+            unfenced.append(operation)
+
+    def publish_with_probe(*args, **kwargs):
+        probe("publish")
+        return publish(*args, **kwargs)
+
+    def purge_with_probe(*args, **kwargs):
+        probe("purge")
+        return purge(*args, **kwargs)
+
+    monkeypatch.setattr(store, "publish", publish_with_probe)
+    monkeypatch.setattr(store, "purge", purge_with_probe)
+
+    ref = _record(run, cwd=tmp_path)
+    assert ref is not None and (run / ref["path"]).is_file()
+    assert run_cassette.purge_cli(str(run), cwd=tmp_path) == 0
+    assert not list((journal.parent / store.DIRECTORY).iterdir())
+    assert not journal.exists()
+    assert not unfenced, f"cassette mutations outside the shared file lock: {unfenced}"
+
+
 def test_cassette_reserves_quarter_of_journal_for_lifecycle(tmp_path):
     run = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
     journal = run / "events" / "lifecycle.jsonl"
