@@ -2249,3 +2249,89 @@ def test_the_held_launcher_reports_an_unreadable_environment_as_a_launch_failure
     assert done.stderr.startswith("command launch failed: seat ("), done.stderr
     assert "Traceback" not in done.stderr
     assert not marker.exists()
+
+
+def test_task_cancel_passes_exact_job_and_isolates_attempts(monkeypatch):
+    from unittest.mock import Mock
+
+    registry = proc.ProcessRegistry()
+    target, sibling = Mock(), Mock()
+    target.poll.return_value = 0
+    sibling.poll.return_value = None
+    target_job, sibling_job = object(), object()
+    terminate = Mock()
+    monkeypatch.setattr(proc, "_terminate_processes", terminate)
+    first = registry.for_task("task", "attempt-a", "same-seat")
+    second = registry.for_task("task", "attempt-b", "same-seat")
+    first.register_with_job(target, target_job)
+    second.register_with_job(sibling, sibling_job)
+
+    assert registry.cancel_task("task", "attempt-a") == (proc.ProcessCancelOutcome("same-seat", "interrupted"),)
+    assert terminate.call_args.args == ((target,),)
+    assert terminate.call_args.kwargs["jobs"] == {target: target_job}
+    with pytest.raises(proc.ProcessCancelledError):
+        first.check_cancellation()
+    with pytest.raises(proc.ProcessCancelledError):
+        first.ensure_launch_allowed()
+    second.check_cancellation()
+    second.ensure_launch_allowed()
+    assert sibling.poll() is None
+
+    registry.cancel()
+    assert sibling in terminate.call_args.args[0]
+    assert terminate.call_args.kwargs["jobs"][sibling] is sibling_job
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX process group signals")
+def test_task_registration_after_cancel_is_terminated_and_run_cancel_still_works():
+    from concurrent.futures import ThreadPoolExecutor
+
+    registry = proc.ProcessRegistry()
+    first = registry.for_task("a", "attempt-a", "worker")
+    second = registry.for_task("b", "attempt-b", "worker")
+    checked, register = threading.Event(), threading.Event()
+
+    def spawn(view, *, late=False):
+        view.ensure_launch_allowed()
+        if late:
+            checked.set()
+            assert register.wait(10)
+        return launch(view)
+
+    def launch(view):
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.read()"],
+            stdin=subprocess.PIPE,
+            **proc.process_group_kwargs(),
+        )
+        try:
+            view.register(child)
+        except BaseException:
+            child.kill()
+            child.communicate(timeout=10)
+            raise
+        return child
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(spawn, first, late=True)
+        sibling = spawn(second)
+        try:
+            assert checked.wait(10)
+            assert registry.cancel_task("a", "attempt-a") == ()
+            assert sibling.poll() is None
+        finally:
+            register.set()
+        late = future.result(timeout=10)
+        try:
+            assert late.wait(timeout=10) < 0
+            assert registry.task_cancellation_outcomes("a", "attempt-a") == (
+                proc.ProcessCancelOutcome("worker", "interrupted"),
+            )
+            assert sibling.poll() is None
+            registry.cancel()
+            assert sibling.wait(timeout=10) < 0
+        finally:
+            for child in (late, sibling):
+                if child.poll() is None:
+                    child.kill()
+                child.communicate(timeout=10)
