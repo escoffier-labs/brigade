@@ -1,0 +1,1 @@
+- Skip anchoring proposals that cannot be applied, retry inconclusive automatic results, and read anchoring quota once per run.
