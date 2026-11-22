@@ -75,7 +75,7 @@ PROTECTED_PATTERNS = (
     "verify/*",
 )
 APPROVAL_LABEL = "workflow-change-approved"
-APPROVAL_DESCRIPTION = re.compile(r"pull request ([0-9]+) (approved|approval removed)")
+APPROVAL_DESCRIPTION = re.compile(r"pull request ([1-9][0-9]*) (approved|approval removed)")
 GITHUB_ACTIONS_BOT_ID = 41898282
 COMMIT_SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
 

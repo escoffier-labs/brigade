@@ -36,8 +36,9 @@ jobs:
     # Re-running a check must not replay a past approval or revocation.
     if: >-
       github.run_attempt == '1' && github.event.label.name == 'workflow-change-approved' &&
-      github.event.pull_request.base.ref == github.event.repository.default_branch &&
-      (github.event.action == 'labeled' || github.event.action == 'unlabeled')
+      (github.event.action == 'unlabeled' ||
+      (github.event.action == 'labeled' &&
+      github.event.pull_request.base.ref == github.event.repository.default_branch))
     permissions:
       pull-requests: read
       statuses: write

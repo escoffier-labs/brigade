@@ -170,6 +170,7 @@ def test_commit_status_decision(fake_gh, capsys, statuses, exit_code):
         "Workflow change approval",
         "pull request approved",
         "pull request 43 approved",
+        "pull request 042 approved",
         "pull request 42 approved\n",
     ],
 )
@@ -397,9 +398,21 @@ def test_write_jobs_only_run_the_expected_scripts(guard_workflow):
     assert clear["if"] == "github.run_attempt == '1' && github.event.action == 'synchronize'"
     assert record["if"] == (
         "github.run_attempt == '1' && github.event.label.name == 'workflow-change-approved' && "
-        "github.event.pull_request.base.ref == github.event.repository.default_branch && "
-        "(github.event.action == 'labeled' || github.event.action == 'unlabeled')"
+        "(github.event.action == 'unlabeled' || "
+        "(github.event.action == 'labeled' && "
+        "github.event.pull_request.base.ref == github.event.repository.default_branch))"
     )
+    record_if = record["if"]
+    for action, base, expected in (
+        ("unlabeled", "other-branch", True),
+        ("labeled", "other-branch", False),
+    ):
+        evaluated = record_if.replace("github.run_attempt", "'1'")
+        evaluated = evaluated.replace("github.event.label.name", repr(APPROVAL))
+        evaluated = evaluated.replace("github.event.action", repr(action))
+        evaluated = evaluated.replace("github.event.pull_request.base.ref", repr(base))
+        evaluated = evaluated.replace("github.event.repository.default_branch", repr("main"))
+        assert eval(evaluated.replace("&&", "and").replace("||", "or"), {"__builtins__": {}}) is expected
     assert set(clear) == {"if", "permissions", "runs-on", "steps"}
     assert set(record) == {*clear, "concurrency"}
     assert record["concurrency"] == {
