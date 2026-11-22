@@ -173,6 +173,10 @@ def _dispatch_impl(args) -> int:
     if args.work_command == "sweep-review":
         return work_cmd.sweep_review(target=args.target, sweep_id=args.sweep_id, json_output=args.json)
     if args.work_command == "verify":
+        if args.verify_command == "push-check":
+            from ...work_cmd.verify_push import push_check
+
+            return push_check(target=args.target, ref=args.ref, json_output=args.json)
         if args.verify_command == "required":
             from ...work_cmd.verify_required import required
 

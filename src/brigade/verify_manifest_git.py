@@ -73,17 +73,18 @@ def _git(
 
 
 def resolve_base(
-    target: Path, *, deadline: float | None = None, git_env: dict[str, str] | None = None
+    target: Path, *, commit: str = "HEAD", deadline: float | None = None, git_env: dict[str, str] | None = None
 ) -> BaseResolution:
+    """Find the trusted base for HEAD or a supplied commit object ID."""
     git = partial(_git, target, deadline=deadline, git_env=git_env)
     remotes = git("remote")
     if remotes.returncode != 0:
         return BaseResolution("unresolved_default_branch", message="Git could not list remotes for this target")
     if not remotes.stdout.strip():
-        head = git("rev-parse", "--verify", "HEAD^{commit}")
+        head = git("rev-parse", "--verify", f"{commit}^{{commit}}")
         if head.returncode != 0:
-            return BaseResolution("no_merge_base", message="verify manifest base has no commit at HEAD")
-        return BaseResolution("resolved", "no_remote", "HEAD", head.stdout.decode("ascii").strip())
+            return BaseResolution("no_merge_base", message=f"verify manifest base has no commit at {commit}")
+        return BaseResolution("resolved", "no_remote", commit, head.stdout.decode("ascii").strip())
     candidates: list[str] = []
     symbolic = git("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
     if symbolic.returncode == 0:
@@ -102,7 +103,7 @@ def resolve_base(
             message="verify manifest default branch is unresolved; run git fetch origin <branch> or git remote set-head origin -a",
         )
     try:
-        merged = git("merge-base", "HEAD", tip_commit)
+        merged = git("merge-base", commit, tip_commit)
     except subprocess.TimeoutExpired:
         return BaseResolution(
             "no_merge_base",
@@ -114,10 +115,12 @@ def resolve_base(
         return BaseResolution(
             "no_merge_base",
             reference=reference,
-            message=f"verify manifest default branch has no merge base with HEAD: {reference}",
+            message=f"verify manifest default branch has no merge base with {commit}: {reference}",
             default_branch_tip=tip_commit,
         )
-    return BaseResolution("resolved", "default_branch", reference, merged.stdout.decode("ascii").strip())
+    return BaseResolution(
+        "resolved", "default_branch", reference, merged.stdout.decode("ascii").strip(), default_branch_tip=tip_commit
+    )
 
 
 def _require_base(base: BaseResolution) -> tuple[str, str, str]:
