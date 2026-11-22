@@ -12,7 +12,7 @@ developing Brigade itself; the contributor policy lives in `CONTRIBUTING.md`.
 
 ## Definition of Done
 
-During development and before opening a PR, run relevant focused checks through Brigade:
+Before opening a PR, run relevant focused checks through Brigade:
 
 ```bash
 brigade work verify run --target . --argv-json '["./scripts/verify-focused","<pytest-selector>"]' --capture brigade-work
@@ -23,55 +23,18 @@ check, managed snapshot, template-profile snapshot, mypy, and only the named
 pytest selectors. Report the actual result, paste any failure verbatim, and
 never claim success you did not observe.
 
-Required CI supplies the final full-suite and coverage gate for code changes.
-Keep all required CI, coverage, review, and merge-queue gates intact. A successful
-equivalent required CI run does not require a duplicate local full run before
-PR or merge completion, including verification-infrastructure changes.
-
-Local full verification is explicit opt-in for CI reproduction, broad offline
-validation, or an operator request. When needed, run it through Brigade:
-
-```bash
-brigade work verify run --target . --argv-json '["./scripts/verify"]' --timeout 3600 --capture brigade-work
-```
-
-`--timeout 3600` bounds the known-long integration gate and is not permission
-to retry status 75.
-
-Keep receipt reuse enabled for unchanged code and environment. If dependencies
-or environment state changed and a fresh local full run was explicitly selected,
-add `--no-reuse` to the Brigade command above. This reruns the existing gate
-under the same admission limits. Never use it to retry contention or make a
-duplicate full run mandatory for PRs or merges. Status 75 means all full
-verification slots for this user on this host are occupied. It must not be retried
-with a larger timeout. Use `./scripts/verify-focused` or wait for an active
-Brigade receipt. Set `BRIGADE_VERIFY_WAIT=<seconds>` before starting a gate
-to wait for a slot within a bounded deadline.
-
-The full gate reuses CI's deterministic pytest hash shards, combines their
-coverage, and enforces the 78% floor once. `BRIGADE_VERIFY_SHARDS` overrides
-N (default: CPU count / 2, rounded down, bounded to 1 through 4).
-`BRIGADE_VERIFY_SLOTS` overrides K (default: 1, independent of N).
-The default pool is shared across linked worktrees and separate clones under
-`/tmp/brigade-verify-<uid>/`, with owner-only directory and file permissions.
-Overrides must be positive integers. Coordinate overrides across all callers
-on the host: each must use the same K and lock path to share the limit.
-`BRIGADE_VERIFY_LOCK_PATH` names an existing slot directory or a file prefix.
-Changing it creates a separate admission pool. Do not remove active lock files.
-The focused gate runs only named selectors, without coverage or full-gate slots.
-
-Reuse consults only the latest receipt overall in the target workspace. That
-receipt itself must be completed and passing, with the same tree fingerprint
-and planned command. A newer focused receipt prevents reuse of an older full
-receipt. Do not create another cache. Reuse does not discover another
-clone's receipts, wait for an active run, or certify changed environments,
-dependencies, or external state. An audit receipt is not required CI evidence.
+Required `ci-gate` on the exact head commit supplies the suite and coverage
+evidence. After pushing, wait for `ci-gate` on the head SHA. A local receipt is
+not evidence that the suite passed. Do not run `./scripts/verify` as part of
+normal work, before a PR or merge, inside a review lane, or on `main` to compare
+failures. It runs only when the operator asks to reproduce CI locally (see
+[Reproducing CI locally](CONTRIBUTING.md#reproducing-ci-locally)) or during a
+release cut (`RELEASE.md`). Status 75 means another full gate holds the slot. Do
+not retry it.
 
 CI-only jobs still cover work that is slower, platform-oriented, or depends on
 extra checkout/install context: `content-guard`, `repo-metadata`,
 `changelog-fragments`, `install-from-source`, `quickstart-smoke`, and `windows-native-acceptance`.
-The local `./scripts/verify` gate is the full coverage gate. Do not treat it
-as a replacement for those CI-only release and public-repo checks.
 
 Setup, if `.venv/` is missing:
 
@@ -83,12 +46,15 @@ python -m venv .venv && source .venv/bin/activate && pip install -e ".[dev]"
 
 Format: trigger, then the rule, then what to do instead.
 
-- About to report a code change as complete: run focused verification through
-  `brigade work verify run` with `./scripts/verify-focused` and the relevant
-  pytest selector. Required CI supplies final suite and coverage evidence.
-  `./scripts/verify` is optional local full validation. If you cannot run the
-  focused gate, do not guess. Report the exact command and error that blocked
-  you. Status 75 from the full gate must not be retried with a larger timeout.
+- Before opening a PR or reporting a code change complete: run focused
+  verification through `brigade work verify run` with `./scripts/verify-focused`
+  and the relevant pytest selector. Required `ci-gate` on the exact head commit
+  supplies suite and coverage evidence; after pushing, wait for it on the head
+  SHA. A local receipt is not suite evidence. Do not run `./scripts/verify` in
+  normal work, before a PR or merge, inside a review lane, or on `main` to compare
+  failures. Run it only when the operator asks to reproduce CI, as documented in
+  CONTRIBUTING.md, or during a release cut.
+  If the focused gate cannot run, report the exact command and error.
 - A test fails after your change: never weaken, skip, or delete the test to
   make it pass. Fix the code. If you believe the test itself is wrong, say so
   explicitly and get agreement before touching it.
@@ -116,8 +82,8 @@ Format: trigger, then the rule, then what to do instead.
   `changelog.d/<pr-number-or-slug>.md` holding `- ` bullets (see
   `changelog.d/README.md`) and run `python3 scripts/changelog_fragments.py check`.
 - Bumping the version: update `pyproject.toml`, `src/brigade/__init__.py`, and
-  every template `_brigade_version` field together. `./scripts/verify` checks
-  the sync.
+  every template `_brigade_version` field together. Run
+  `python scripts/version_sync.py --check` to verify the sync.
 - Committing: use conventional commits. In escoffier-labs organizations and original solomonneas repositories, commits for substantial coding work should carry the coding agent's co-author trailer. External repositories and upstream third-party PRs remain trailer-free.
 - Posting or editing an issue, pull request, or GitHub comment on an agent's
   behalf: end it with the attribution block shown in `CONTRIBUTING.md`
@@ -177,11 +143,11 @@ See AGENTS.md Definition of Done and CONTRIBUTING.md. Day-to-day:
 - Lint/type/sync gate pieces: `ruff check .`, `ruff format --check .`, `mypy`,
   `python scripts/version_sync.py --check`, `python scripts/managed_snapshot.py --check`
   (or `./scripts/verify-focused <pytest-selector>` for a development slice)
-- Tests: `pytest -q` (full suite; expect a long run, ~30+ minutes)
-- Development and pre-PR gate: `./scripts/verify-focused <pytest-selector>`.
-- Optional local full gate: `./scripts/verify`. `./scripts/verify-fast` delegates
-  to the same admission and shard limits. Positive integer `JOBS` values remain
-  a deprecated alias for `BRIGADE_VERIFY_SHARDS`. Unset `JOBS=auto` for defaults.
+- Development and pre-PR checks: run focused selectors through Brigade as
+  described in the Definition of Done. Required CI on the exact head commit
+  supplies the full-suite and coverage evidence.
+- Reproduce the full gate locally only when the operator asks, as described in
+  [Reproducing CI locally](CONTRIBUTING.md#reproducing-ci-locally).
 - End-to-end smoke (same shape as CI `install-from-source`):
 
 ```bash

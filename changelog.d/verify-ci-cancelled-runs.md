@@ -1,0 +1,1 @@
+- `brigade work verify ci` no longer reports a commit as failed when its newest `ci-gate` run was cancelled. It reads the newest run that was not cancelled, and reports `unknown` when every run was cancelled.

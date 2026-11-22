@@ -5,16 +5,20 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import types
 from pathlib import Path
 
 import pytest
 
-from brigade import cli, model_trial_claude, model_trials, proc
+from brigade import cli, model_trial_claude, model_trials, proc, proc_group
 from brigade.memory_verify_seat import CLAUDE_SETTINGS
+from brigade.proc_group import drain_supported
 from brigade.model_trial_claude import (
     ADAPTER_ID,
     ENV_PASSTHROUGH,
@@ -34,6 +38,7 @@ from brigade.model_trial_claude import (
     module_hashes,
 )
 from brigade.model_trial_paired import TOOLS, _pairs, digest
+from tests._child_publish import PUBLISH_SOURCE, process_is_running
 from tests._posix import requires_process_groups
 from tests.paired_live_fake import GOOD_STEPS, make_fake, records, render_script
 
@@ -88,6 +93,20 @@ def _remove_temp_root(root, *, remove=None, attempts=5, pause=0.05):
             if exc.errno != errno.ENOTEMPTY or attempt == attempts:
                 raise
         time.sleep(pause * attempt)
+
+
+def _track_work_dirs(monkeypatch):
+    """Record each cell work dir so a test can assert on the exact directories it created."""
+    created = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def tracking(*args, **kwargs):
+        path = real_mkdtemp(*args, **kwargs)
+        created.append(Path(path))
+        return path
+
+    monkeypatch.setattr(model_trial_claude.tempfile, "mkdtemp", tracking)
+    return created
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -522,6 +541,38 @@ def test_build_env_copies_only_named_variables_and_roots_windows_dirs_in_the_arm
             assert env["TEMP"] == env["TMP"] == str(arm / "tmp")
 
 
+def test_build_env_disables_the_update_refresh_in_every_arm(tmp_path):
+    """A cell needs no network, so its server must not spawn a detached refresh into the arm home."""
+    for windows in (False, True):
+        env = build_env({TOKEN_ENV: "t"}, tmp_path / "arm", windows=windows)
+        assert env["BRIGADE_NO_UPDATE_CHECK"] == "1"
+
+
+def test_an_arm_mcp_server_leaves_no_update_refresh_in_its_home(tmp_path):
+    arm = tmp_path / "arm"
+    (arm / "home").mkdir(parents=True)
+    (arm / "state").mkdir()
+    target = tmp_path / "target"
+    target.mkdir()
+    env = build_env(ENVIRON, arm)
+    config = model_trial_claude.mcp_config("passing-verify", target, FIXTURES / "baseline", arm / "state")
+    server = config["mcpServers"]["brigade-paired"]
+    # A dead proxy makes any refresh child fail its request at once, so a leak cannot linger.
+    dead_proxy = {name: "http://127.0.0.1:9" for name in ("HTTPS_PROXY", "HTTP_PROXY", "https_proxy", "http_proxy")}
+    subprocess.run(
+        [server["command"], *server["args"]],
+        env={**env, **server["env"], **dead_proxy},
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        timeout=60,
+        check=True,
+    )
+    cache = arm / "home" / ".cache" / "brigade"
+    assert not (cache / "update-notify.claim").exists(), "the arm's MCP server claimed an update refresh"
+    assert not (cache / "update-notify.json").exists(), "the arm's MCP server spawned an update refresh"
+
+
 def test_argv_builder_effort_is_optional():
     kwargs = dict(session_id="s", mcp_config=Path("m"), system_prompt_file=Path("p"), cli_model="opus")
     assert "--effort" not in build_argv("claude", effort=None, **kwargs)
@@ -739,8 +790,10 @@ def test_expiry_cannot_flip_a_finished_cell_or_signal_a_recycled_group(monkeypat
     monkeypatch.setattr(model_trial_claude, "_kill", lambda proc: kills.append(proc.pid))
     observer = _Observer(expected_model="m", session_id="s", version="v", cwd=tmp_path)
     env = {key: os.environ[key] for key in ENV_PASSTHROUGH if key in os.environ}
-    _, _, code, timed_out = _run_process([sys.executable, "-c", "pass"], env, tmp_path, "", 30, observer, "tok")
-    assert (code, timed_out) == (0, False)
+    _, _, code, timed_out, drain_failed = _run_process(
+        [sys.executable, "-c", "pass"], env, tmp_path, "", 30, observer, "tok"
+    )
+    assert (code, timed_out, drain_failed) == (0, False, False)
     assert events.index("cancel") < events.index("wait")  # the timer is gone before we reap
     before = list(kills)
     callbacks[0]()  # a late expiry for a process that already exited
@@ -1090,6 +1143,205 @@ def test_remove_work_dir_retries_only_on_windows_and_only_a_few_times(tmp_path, 
     with pytest.raises(PermissionError):
         model_trial_claude.remove_work_dir(arm, windows=True)
     assert len(calls) == model_trial_claude.WINDOWS_REMOVE_ATTEMPTS
+
+
+@pytest.mark.skipif(not drain_supported(), reason="process-group draining needs /proc")
+def test_a_finished_cell_stops_a_descendant_that_left_its_process_group(tmp_path, monkeypatch):
+    """The work dir is only removed after every process the arm started is gone.
+
+    The writer leaves the CLI's process group with setpgid but keeps the session, and keeps writing
+    under the arm's cwd. A group kill alone misses it, so the adapter drains and stops the session.
+    """
+    pid_log = tmp_path / "writers.pid"
+    ready_base = tmp_path / "writer.ready"
+    work_dirs = _track_work_dirs(monkeypatch)
+    writer = PUBLISH_SOURCE + (
+        "import os, time\n"
+        "os.setpgid(0, 0)\n"
+        "target = os.path.join(os.getcwd(), 'escaped-writer.log')\n"
+        f"pid_log = {str(pid_log)!r}\n"
+        f"ready = {str(ready_base)!r} + '.' + str(os.getppid())\n"
+        "with open(target, 'w') as handle:\n"
+        "    for index in range(2000):\n"
+        "        handle.write('line %d\\n' % index)\n"
+        "        handle.flush()\n"
+        "        if index == 2:\n"
+        "            with open(pid_log, 'a') as pids:\n"
+        "                pids.write(str(os.getpid()) + '\\n')\n"
+        "        if index == 5:\n"
+        "            publish(ready, 'ready')\n"
+        "        time.sleep(0.05)\n"
+    )
+    exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS, escaped_writer={"code": writer, "ready": str(ready_base)})
+    leaked = []
+    try:
+        result = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        assert all(a["failure"] is None for a in result["attempts"])
+        pids = [int(line) for line in pid_log.read_text().splitlines() if line.strip()]
+        assert pids, "the escaped writer never published its pid"
+        leaked = [pid for pid in pids if process_is_running(pid)]
+        assert leaked == [], f"arm descendants survived the cell: {leaked}"
+        assert work_dirs and not any(path.exists() for path in work_dirs)
+    finally:
+        for pid in leaked:
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except OSError:
+                pass
+        for path in work_dirs:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def test_a_drain_failure_keeps_the_original_error_and_reaps_the_leader(monkeypatch, tmp_path):
+    threads, events, children = [], [], []
+    real_thread = threading.Thread
+
+    class SpyThread(real_thread):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            threads.append(self)
+
+    class ThreadingProxy:
+        Thread = SpyThread
+
+        def __getattr__(self, name):
+            return getattr(threading, name)
+
+    class BoomObserver:
+        failure = None
+        result = None
+        init_event = None
+        observed = []
+        controls = []
+
+        def feed(self, event):
+            raise ValueError("observer boom")
+
+    class SpyPopen(subprocess.Popen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            children.append(self)
+
+    def failing_drain(process):
+        events.append("drain")
+        raise model_trial_claude.ArmDrainError("drain failed")
+
+    monkeypatch.setattr(model_trial_claude, "threading", ThreadingProxy())
+    monkeypatch.setattr(model_trial_claude.subprocess, "Popen", SpyPopen)
+    monkeypatch.setattr(model_trial_claude, "_drain_arm_group", failing_drain)
+    env = {key: os.environ[key] for key in ENV_PASSTHROUGH if key in os.environ}
+    with pytest.raises(ValueError, match="observer boom") as raised:
+        _run_process(
+            [sys.executable, "-c", "import json; print(json.dumps({'type': 'system'}))"],
+            env,
+            tmp_path,
+            "",
+            30,
+            BoomObserver(),
+            "tok",
+        )
+    child = children[0]
+    assert events == ["drain"]  # drained once, and the drain failure never replaced the primary error
+    assert child.returncode is not None  # the leader was reaped
+    assert child.stdout is not None and child.stdout.closed and child.stderr is not None and child.stderr.closed
+    assert threads and not threads[0].is_alive()  # the stderr drainer was joined
+    if hasattr(raised.value, "add_note"):
+        assert any("drain" in note for note in raised.value.__notes__)
+
+
+def test_a_drain_failure_fails_only_its_cell_and_keeps_its_work_dir(tmp_path, monkeypatch):
+    exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS)
+    work_dirs = _track_work_dirs(monkeypatch)
+
+    def failing_drain(process):
+        raise model_trial_claude.ArmDrainError("drain failed")
+
+    monkeypatch.setattr(model_trial_claude, "_drain_arm_group", failing_drain)
+    try:
+        result = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        assert _failures(result) == ["process_group_drain_failed"]
+        assert len(result["attempts"]) == 2  # the trial kept going after the first failed cell
+        assert len(work_dirs) == 2 and all(path.is_dir() for path in work_dirs)
+    finally:
+        for path in work_dirs:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def test_the_bounded_drain_re_signals_members_on_every_poll(monkeypatch):
+    calls = []
+    alive = [True, True, False]
+
+    monkeypatch.setattr(model_trial_claude, "drain_supported", lambda: True, raising=False)
+    monkeypatch.setattr(model_trial_claude, "kill_group_members", lambda pgid, sig: calls.append(pgid), raising=False)
+    monkeypatch.setattr(
+        model_trial_claude, "group_has_live_members", lambda pgid: alive.pop(0) if alive else False, raising=False
+    )
+    model_trial_claude._drain_arm_group(types.SimpleNamespace(pid=4242))
+    assert len(calls) == 3 and alive == []
+
+
+def test_an_unreadable_process_table_fails_the_drain_at_once(monkeypatch):
+    real_listdir = os.listdir
+
+    def listdir(path):
+        if str(path) == "/proc":
+            raise PermissionError(errno.EACCES, "denied")
+        return real_listdir(path)
+
+    monkeypatch.setattr(proc_group.os, "listdir", listdir)
+    monkeypatch.setattr(model_trial_claude, "GROUP_DRAIN_SECONDS", 0.5)
+    started = time.monotonic()
+    with pytest.raises(model_trial_claude.ArmDrainError):
+        model_trial_claude._drain_arm_group(types.SimpleNamespace(pid=4242))
+    assert time.monotonic() - started < 0.3
+
+
+def test_a_stream_error_with_a_failed_drain_keeps_the_work_dir(tmp_path, monkeypatch):
+    exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS)
+    work_dirs = _track_work_dirs(monkeypatch)
+
+    def exploding_feed(self, event):
+        raise ValueError("stream boom")
+
+    def failing_drain(process):
+        raise model_trial_claude.ArmDrainError("drain failed")
+
+    monkeypatch.setattr(model_trial_claude._Observer, "feed", exploding_feed)
+    monkeypatch.setattr(model_trial_claude, "_drain_arm_group", failing_drain)
+    try:
+        with pytest.raises(ValueError, match="stream boom"):
+            execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        assert work_dirs and work_dirs[0].is_dir()  # the primary error still won, and the dir was kept
+    finally:
+        for path in work_dirs:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def test_a_drainer_that_outlives_the_join_keeps_the_work_dir(tmp_path, monkeypatch):
+    exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS)
+    work_dirs = _track_work_dirs(monkeypatch)
+    release = threading.Event()
+
+    class BlockedCapture:
+        overflow = False
+        tail = b""
+
+        def __init__(self, token):
+            pass
+
+        def drain(self, pipe, on_overflow):
+            release.wait(30)
+
+    monkeypatch.setattr(model_trial_claude, "_StderrCapture", BlockedCapture)
+    monkeypatch.setattr(model_trial_claude, "EXIT_GRACE", 0.05)
+    try:
+        result = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        assert _failures(result) == ["process_group_drain_failed"]
+        assert len(work_dirs) == 2 and all(path.is_dir() for path in work_dirs)
+    finally:
+        release.set()
+        for path in work_dirs:
+            shutil.rmtree(path, ignore_errors=True)
 
 
 def test_kill_sends_nothing_for_a_reaped_child(monkeypatch):

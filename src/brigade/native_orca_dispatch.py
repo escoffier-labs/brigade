@@ -1,4 +1,4 @@
-"""Caller-mediated local Orca worker-start contract at v1.4.268."""
+"""Caller-mediated local Orca worker-start contract."""
 
 from __future__ import annotations
 
@@ -10,7 +10,14 @@ from uuid import UUID
 from . import run_task_journal
 from .native_child_host import NativeChildError
 from .native_child_journal import digest
-from .native_orca_host import HOST, NEW_WORKTREES, ORCA_VERSION, NativeTarget, require_supported_target
+from .native_orca_host import (
+    HOST,
+    NEW_WORKTREES,
+    ORCA_VERSION,
+    SUPPORTED_VERSIONS,
+    NativeTarget,
+    require_supported_target,
+)
 
 _START_DOMAIN = "brigade.native-orca.worker-start.v1"
 _HANDLE_DOMAIN = "brigade.native-orca.handle.v1"
@@ -71,7 +78,7 @@ class WorkerReference:
 
     def __post_init__(self) -> None:
         self.binding.checked_key()
-        if self.orca_version != ORCA_VERSION or not valid_id(self.dispatch_id, "ctx"):
+        if self.orca_version not in SUPPORTED_VERSIONS or not valid_id(self.dispatch_id, "ctx"):
             raise NativeChildError("native-invalid", "the Orca worker reference is invalid")
 
     @property
@@ -90,7 +97,6 @@ class WorkerReference:
         )
 
 
-# Workstream 3 plugs in here after the core has committed the governed claim.
 def launch_argv(binding: LaunchBinding, target: NativeTarget) -> tuple[str, ...]:
     """Describe a local start for the caller's existing Run and Task.
 
@@ -132,9 +138,21 @@ def result_fields(payload: object, *, ok: bool = True) -> Mapping[str, object]:
     return result if isinstance(result, Mapping) else {}
 
 
+# Orca v1.4.269 src/main/runtime/orchestration/db/tasks/task-start-claim.ts
+# rejects any non-ready Task, as does the AppImage's compiled
+# orcad-retained-source-BfK6WWlH.js. Only failed qualifies for a direct
+# refusal. worker-dispatch-settlement.ts separates Task settlement from
+# process exit, so a Task refusal cannot settle a previously ambiguous launch.
+_TASK_STATES_FOR_REFUSAL = frozenset({"failed"})
+
+
+class DefiniteStartRefusal(NativeChildError):
+    """A matching refusal that produced no live worker for this claim."""
+
+
 def parse_start(binding: LaunchBinding, target: NativeTarget, payload: object, *, exit_code: int) -> WorkerReference:
     """Correlate a ready, replay-safe worker-start receipt, with no retry advice."""
-    key = binding.checked_key()
+    binding.checked_key()
     require_supported_target(target)
     reply = result_fields(payload, ok=False)
     error = payload.get("error") if isinstance(payload, Mapping) else None
@@ -144,18 +162,52 @@ def parse_start(binding: LaunchBinding, target: NativeTarget, payload: object, *
         and payload.get("ok") is False
         and isinstance(error, Mapping)
         and error.get("code") == "task_not_startable"
+        and not reply
     ):
-        raise NativeChildError("start-refused", "Orca refused to start the retained Task")
-    if reply.get("state") == "failed":
-        raise NativeChildError("start-failed", "Orca reported a failed worker start")
+        data = error.get("data")
+        data = data if isinstance(data, Mapping) else {}
+        status = data.get("status")
+        if not isinstance(status, str) or status not in _TASK_STATES_FOR_REFUSAL:
+            raise NativeChildError("start-unknown", "the Orca Task refusal does not establish a failed start")
+        # task-dispatch-refusal.ts always emits taskId, status and unmetDependencies.
+        # The refusal contract adds nextSteps and omits runId in these errors.
+        if data.get("taskId") != binding.task_id or data.get("runId", binding.run_id) != binding.run_id:
+            raise NativeChildError("native-mismatch", "the Orca start refusal does not match the retained claim")
+        if valid_id(data.get("retryOf"), "ctx") and type(data.get("failureCount")) is int and data["failureCount"] >= 3:
+            raise DefiniteStartRefusal(
+                "circuit-broken", "Orca refused another start in the retained Task's retry chain"
+            )
+        raise DefiniteStartRefusal("start-refused", "Orca refused to start the retained Task")
+    if exit_code != 0 and reply.get("state") == "failed" and result_fields(payload):
+        _start_reference(binding, target, reply)
+        # Orca can report failed and still retain a session from that start.
+        if reply.get("residualResources") == [] and reply.get("recovery") is None:
+            raise DefiniteStartRefusal("start-failed", "Orca reported a failed worker start")
     if exit_code != 0 or reply.get("state") != "ready" or not result_fields(payload):
         raise NativeChildError("start-unknown", "the Orca worker start was not confirmed")
+    return _start_reference(binding, target, reply)
+
+
+def unconfirmed_start(binding: LaunchBinding, target: NativeTarget, payload: object) -> WorkerReference:
+    """Recover identity from the original unknown receipt, never from a notice."""
+    reply = result_fields(payload)
+    if reply.get("state") != "outcome_unknown":
+        raise NativeChildError("start-unknown", "a full outcome_unknown start receipt is required for recovery")
+    return _start_reference(binding, target, reply)
+
+
+def _start_reference(binding: LaunchBinding, target: NativeTarget, reply: Mapping[str, object]) -> WorkerReference:
+    key = binding.checked_key()
+    # Full worker-start receipts always carry runId, taskId and dispatchId.
+    # The mutation wrapper supplies requestId and replayed.
     dispatch_id = reply.get("dispatchId")
     mutation = reply.get("mutation")
     launch = reply.get("launch")
     effective = launch.get("effective") if isinstance(launch, Mapping) else None
     if (
         reply.get("runId") != binding.run_id
+        or reply.get("server") is not None
+        or reply.get("coordinatedFrom") is not None
         or reply.get("taskId") != binding.task_id
         or not valid_id(dispatch_id, "ctx")
         or not isinstance(mutation, Mapping)
@@ -167,4 +219,4 @@ def parse_start(binding: LaunchBinding, target: NativeTarget, payload: object, *
         or (target.effort is not None and effective.get("effort") != target.effort)
     ):
         raise NativeChildError("native-mismatch", "the Orca start receipt does not match the retained claim")
-    return WorkerReference(binding, dispatch_id)
+    return WorkerReference(binding, dispatch_id, target.orca_version)

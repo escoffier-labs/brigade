@@ -1,0 +1,1 @@
+- Keep a live paired-trial cell from leaking processes: the arm drains its process group with pidfd-pinned signals before removing its work dir, a /proc read that is not a disappearance or any cleanup that cannot confirm a quiet arm fails only that cell and keeps its work dir, and the arm environment disables the update refresh so no detached child writes into its home (#2830).

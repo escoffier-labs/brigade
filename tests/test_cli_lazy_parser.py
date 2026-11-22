@@ -110,8 +110,7 @@ def test_completions_still_walk_the_full_tree(capsys):
     out = capsys.readouterr().out
     assert '["brigade fleet msg"]=' in out
     assert '["brigade memory"]=' in out
-    assert '["brigade work verify"]=' in out
-    assert "required" in out.split('["brigade work verify"]=', 1)[1].splitlines()[0]
+    assert '["brigade work verify"]="ci plan required run runs show"' in out
 
 
 _PROBE = r"""

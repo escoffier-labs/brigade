@@ -205,6 +205,7 @@ _STATUS_NEUTRAL_EVENT_TYPES: frozenset[str] = frozenset(
         "task.native-held",
         "task.native-cancel-requested",
         "task.native-hold-resolved",
+        "task.native-capacity",
         "control.requested",
         "control.observed",
         "control.failed",

@@ -25,8 +25,10 @@ In a memory/operator workspace, `brigade daily status --target .` is the lighter
 ### 2. Verify THROUGH Brigade Stack, not raw
 When you would run tests or a check to confirm a change, run it through Brigade Stack so it records the exit code:
 ```bash
-brigade work verify run --target . --command "<your test command>" --capture auto   # e.g. "pytest -q", "npm test", "go test ./..."
+brigade work verify run --target . --command "<your test command>" --capture auto   # e.g. "pytest -q tests/test_example.py", "npm test", "go test ./..."
 ```
+
+Use a focused selector for local pytest checks; the full suite belongs to CI.
 This writes an audit receipt under `.brigade/work/verify-runs/<run-id>/` with the real status. Running tests raw produces no Brigade receipt. Neither a raw test result nor an ad hoc receipt scores an artifact.
 
 To do steps 2 and 3 in one command (so the capture is never forgotten), pass `--capture`. Use `--capture auto` so you never hand-type an artifact id: Brigade reads this session's hook state and captures against each skill whose `SKILL.md` you read:
@@ -97,6 +99,6 @@ brigade outcome reconcile --target .       # dry-run; --apply promotes a proven 
 - Skipping capture on failures loses audit evidence. Failures can affect artifact ranking only when the receipt meets the scoring and attribution requirements.
 - Treating Brigade Stack as install-and-forget. It is dormant until work flows through it; this skill is how the work flows.
 - Stopping at capture without export: receipts pile up locally and the next `brigade run` has no brigade-evidence evidence brief to attach.
-- Putting shell operators in the verify command. `brigade work verify run` splits `--command` with `shlex` and runs it with `shell=False` in the `--target` directory, so `cd x && pytest`, pipes, and `&&` do NOT work. Set the working directory with `--target <dir>` and pass a single command, e.g. `--target ./pkg --command "pytest -q"`.
+- Putting shell operators in the verify command. `brigade work verify run` splits `--command` with `shlex` and runs it with `shell=False` in the `--target` directory, so `cd x && pytest`, pipes, and `&&` do NOT work. Set the working directory with `--target <dir>` and pass a single command, e.g. `--target ./pkg --command "pytest -q tests/test_example.py"`.
 
 The receipt export subcommand and context import flag retain their legacy spelling for compatibility through v0.32.

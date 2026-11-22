@@ -234,7 +234,8 @@ def test_resolve_manifest_rejects_untracked_workspace_manifest(scoreable_target)
 
     manifest, error = verify_manifest.resolve_manifest(scoreable_target, "untracked-patch")
     assert manifest is None
-    assert error == "verify manifest not tracked: untracked-patch"
+    assert error is not None
+    assert "not on the default branch yet" in error
     assert "untracked-patch" not in verify_manifest.registered_manifest_ids(scoreable_target)
 
 
@@ -273,6 +274,7 @@ def test_manifest_verify_writes_subject_binding_and_check_roles(scoreable_target
     binding = receipt["subject_binding"]
     assert binding["binding_mode"] == "patch_backed"
     assert binding["manifest_binding"]["manifest_id"] == "test-skill-patch"
+    assert binding["manifest_binding"]["manifest_worktree_modified"] is False
     assert binding["artifact_id"] == "brigade-work"
     assert binding["patch_binding"]["subject_path"] == "skills/brigade-work/SKILL.md"
     assert receipt["commands"][0]["check_role"] == "effectiveness"
@@ -728,6 +730,21 @@ def test_project_trial_missing_receipt_digest_is_ineligible(scoreable_target):
     assert projection.eligible is False
     assert projection.reason == "receipt_digest_missing"
     assert projection.attributed is True
+
+
+def test_modified_manifest_runs_base_command_and_stamps_receipt(scoreable_target, monkeypatch):
+    payload = _write_patch_manifest(scoreable_target, manifest_id="base-command")
+    payload["checks"][0]["command"] = f'{sys.executable} -c "raise SystemExit(9)"'
+    verify_manifest.write_workspace_manifest(scoreable_target, payload)
+
+    receipt = _run_manifest_verify(scoreable_target, "base-command", monkeypatch=monkeypatch)
+
+    binding = receipt["subject_binding"]["manifest_binding"]
+    assert receipt["status"] == "completed"
+    assert binding["manifest_worktree_modified"] is True
+    assert binding["base_commit"]
+    assert binding["base_payload_sha256"] == binding["payload_sha256"]
+    assert "print('ok')" in receipt["commands"][0]["command"]
 
 
 def test_project_trial_receipt_digest_mismatch_is_ineligible(scoreable_target):

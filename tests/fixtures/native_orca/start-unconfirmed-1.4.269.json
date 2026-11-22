@@ -1,0 +1,19 @@
+{
+  "orca_version": "1.4.269",
+  "source": "Synthetic inbox message shape with redacted alert wording based on stablyai/orca#46155 and worker-start-unconfirmed-alert.test.ts",
+  "payload": {
+    "id": "rpc-example",
+    "ok": true,
+    "result": {
+      "messages": [
+        {
+          "id": "msg_000000000009",
+          "type": "escalation",
+          "run_id": "run_000000000001",
+          "subject": "Worker's brief may not have been submitted",
+          "body": "Your worker's brief may not have been submitted; check it. Synthetic private text."
+        }
+      ]
+    }
+  }
+}

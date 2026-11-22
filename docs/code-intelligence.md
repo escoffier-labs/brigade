@@ -49,7 +49,7 @@ The export caps the module map at 15 modules and 24 edges. `--overlay` reads the
 
 - The index is local to the machine and target. It is not a hosted code-intelligence service.
 - Queries depend on a successful sync. Stale checkouts need another sync pass.
-- Graph ranking inside `work verify plan` is advisory. The worker still chooses the command.
+- Graph ranking inside `work verify plan` is a suggestion when you pass `--command` or `--manifest`. With neither, the ranked suggestion becomes the planned command, and the plan is blocked when nothing is ranked.
 - Static analysis has language and dynamic-dispatch blind spots. Treat impact results as evidence for choosing checks, not proof that no other code is affected.
 - New indexes use `.brigade/code-graph/code-graph.db`. Existing legacy indexes remain readable through v0.32.
 

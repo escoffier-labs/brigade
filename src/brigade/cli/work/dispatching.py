@@ -236,6 +236,10 @@ def _dispatch_impl(args) -> int:
                 capture_kind=args.capture_kind,
                 reuse=not args.no_reuse,
             )
+        if args.verify_command == "ci":
+            from ...work_cmd.verify_ci import verify_ci
+
+            return verify_ci(target=args.target, check_name=args.check, json_output=args.json)
         if args.verify_command == "runs":
             return work_cmd.verify_runs(target=args.target, limit=args.limit, json_output=args.json)
         if args.verify_command == "show":

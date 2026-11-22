@@ -19,11 +19,7 @@ never authenticated acceptance.
 
 from __future__ import annotations
 
-import json
-import os
 import re
-import stat
-import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple, Sequence
@@ -31,6 +27,8 @@ from urllib.parse import quote, unquote
 
 from . import fleet_t3_transport, run_events, run_journal, run_tasks
 from . import native_child_claim as claim_core
+from .native_child_cli import _MAX_NATIVE_BYTES as _MAX_NATIVE_BYTES
+from .native_child_cli import emit as _emit, read_native as _read_native
 from . import native_child_journal as journal_core
 from . import native_t3_admission as admission
 from . import native_t3_capacity as capacity
@@ -54,7 +52,6 @@ ABANDONED = journal_core.ABANDONED
 ACCEPT_CONFLICT = journal_core.ACCEPT_CONFLICT
 HELD_RUN_STATUS = journal_core.HELD_RUN_STATUS
 _MAX_DIAGNOSTIC = journal_core.MAX_DIAGNOSTIC
-_MAX_NATIVE_BYTES = 1_048_576
 _INTENT_DOMAIN = "brigade.native-t3.intent.v1"
 _HANDLE_DOMAIN = "brigade.native-t3.handle.v1"
 _EVIDENCE_DOMAIN = "brigade.native-t3.evidence.v1"
@@ -849,16 +846,9 @@ def _durable_claim(
     current = verified.get(task_id)
     if current is None:
         raise _refuse("not-enrolled", "the task has no native enrollment record")
-    binding = _claim_binding(events, task_id)
-    if binding is None or current.result.handle.attempt_id != binding.attempt_id:
-        raise _refuse("no-claim", "the task has no durable governed claim")
-    if current.result.launch_claim is None and require_launch:
-        raise _refuse("no-claim", "the task has no durable launch claim")
-    requested = journal_core.requested_attempts(events)
-    if require_requested and current.result.launch_claim is not None:
-        binding_key = (current.result.launch_claim.seat, current.result.launch_claim.dispatch_attempt)
-        if binding_key not in requested:
-            raise _refuse("claim-incomplete", "the claim has no durable dispatch request")
+    binding = claim_core.require_durable_claim(
+        events, current.result, require_launch=require_launch, require_requested=require_requested
+    )
     if parent_thread is not None and binding.parent_thread != parent_thread:
         raise _refuse("parent-mismatch", "the parent thread does not match the durable claim")
     batch_ref = _batch_ref(events, run_dir.name, task_id)
@@ -993,65 +983,6 @@ def _resolve_hold(
         "result_id": updated.result_id,
         "replayed": False,
     }
-
-
-def _read_native(path: str) -> object:
-    """Read a bounded native projection from stdin or one regular file.
-
-    A named pipe would block the CLI forever, so the path is lstat-checked
-    first, then opened non-blocking and no-follow where the platform supports
-    it, and the open handle is checked again before any read.
-    """
-    if path == "-":
-        raw = sys.stdin.buffer.read(_MAX_NATIVE_BYTES + 1)
-    else:
-        target = Path(path).expanduser()
-        try:
-            before = os.lstat(target)
-        except OSError:
-            raise _refuse("native-unreadable", "the native result file is not readable") from None
-        if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
-            raise _refuse("native-unreadable", "the native result is not a regular file")
-        flags = os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0)
-        try:
-            descriptor = os.open(target, flags)
-        except OSError:
-            raise _refuse("native-unreadable", "the native result file is not readable") from None
-        try:
-            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
-                raise _refuse("native-unreadable", "the native result is not a regular file")
-            chunks: list[bytes] = []
-            remaining = _MAX_NATIVE_BYTES + 1
-            while remaining > 0:
-                chunk = os.read(descriptor, remaining)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                remaining -= len(chunk)
-            raw = b"".join(chunks)
-        except OSError:
-            raise _refuse("native-unreadable", "the native result file is not readable") from None
-        finally:
-            os.close(descriptor)
-    if len(raw) > _MAX_NATIVE_BYTES:
-        raise _refuse("native-too-large", "the native result exceeds the size bound")
-    try:
-        return json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError):
-        raise _refuse("native-invalid", "the native result is not valid JSON") from None
-
-
-def _emit(call: Any) -> int:
-    try:
-        report = call()
-    except DispatchError as exc:
-        print(f"error [{exc.code}]: {_bound(str(exc))}", file=sys.stderr)
-        return 2
-    except enrollment.EnrollmentError as exc:
-        print(f"error [{exc.code}]: {_bound(str(exc))}", file=sys.stderr)
-        return 2
-    print(json.dumps(report, sort_keys=True))
-    return 0
 
 
 def claim_cli(args: Any) -> int:

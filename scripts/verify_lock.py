@@ -17,7 +17,9 @@ from verify_parallel import positive_setting, shard_count
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CONTENTION_MESSAGE = (
     "full verification already running for this user on this host; "
-    "run ./scripts/verify-focused <pytest-selector>... or wait for the active Brigade receipt"
+    "run ./scripts/verify-focused <pytest-selector>... or wait for the active Brigade receipt\n"
+    # Brigade records exit 75 as a neutral busy outcome only when this line is present.
+    "brigade-verify: busy"
 )
 
 

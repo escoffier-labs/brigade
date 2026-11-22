@@ -47,6 +47,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade node`: 1 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
 - `brigade operator`: 21 command path(s)
+- `brigade orca`: 9 command path(s)
 - `brigade outcome`: 13 command path(s)
 - `brigade pantry` (extras): 5 command path(s)
 - `brigade profiles`: 2 command path(s)
@@ -476,6 +477,15 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade operator sync-mcp`
 - `brigade operator sync-tools`
 - `brigade operator verify-harness`
+- `brigade orca accepted`
+- `brigade orca ack`
+- `brigade orca cancel`
+- `brigade orca claim`
+- `brigade orca finalize`
+- `brigade orca hold-resolve`
+- `brigade orca observe`
+- `brigade orca open`
+- `brigade orca status`
 - `brigade outcome backfill scorecard`
 - `brigade outcome capture`
 - `brigade outcome diff`
@@ -1012,6 +1022,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade work task edge remove`
 - `brigade work task plan`
 - `brigade work tasks`
+- `brigade work verify ci`
 - `brigade work verify plan`
 - `brigade work verify required`
 - `brigade work verify run`

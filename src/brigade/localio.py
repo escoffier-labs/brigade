@@ -53,14 +53,16 @@ def read_json_dict(path: Path) -> dict[str, Any] | None:
     return payload if isinstance(payload, dict) else None
 
 
-def tree_fingerprint_with_head(target: Path) -> tuple[str | None, str | None]:
+def tree_fingerprint_with_head(
+    target: Path, *, extra_evidence_paths: tuple[str, ...] = ()
+) -> tuple[str | None, str | None]:
     """Return the Git tree for the live workspace and the HEAD commit that fed it.
 
     The tree is built from ``read-tree HEAD``, ``add -A``, ``reset -q HEAD --``
     over the excluded evidence paths, and ``write-tree``. The excluded paths
     therefore carry the content of the HEAD commit that was checked out when the
     fingerprint was taken; returning that HEAD makes the normalization base
-    provable later.
+    provable later. Callers can also exclude their own generated evidence.
     """
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -85,7 +87,10 @@ def tree_fingerprint_with_head(target: Path) -> tuple[str | None, str | None]:
                 return None, None
             if git("read-tree", "HEAD").returncode != 0 or git("add", "-A").returncode != 0:
                 return None, None
-            if git("reset", "-q", "HEAD", "--", *TREE_FINGERPRINT_EVIDENCE_PATHS).returncode != 0:
+            if (
+                git("reset", "-q", "HEAD", "--", *TREE_FINGERPRINT_EVIDENCE_PATHS, *extra_evidence_paths).returncode
+                != 0
+            ):
                 return None, None
             value = git("write-tree")
             tree_sha = value.stdout.strip() if value.returncode == 0 and value.stdout.strip() else None

@@ -83,6 +83,17 @@ def reusable_receipt(
         or latest.get("planned_commands") != planned_display
     ):
         return False
+    records = latest.get("commands")
+    if (
+        not isinstance(records, list)
+        or not records
+        or len(records) != len(planned_display)
+        or any(
+            not isinstance(record, dict) or record.get("status") != "completed" or record.get("exit_code") != 0
+            for record in records
+        )
+    ):
+        return False
     hashes = argv_file_hashes(target, commands)
     # Legacy receipts remain eligible only when no file arguments need binding.
     return hashes is not None and latest.get("argv_file_hashes", {}) == hashes

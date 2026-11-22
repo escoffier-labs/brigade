@@ -53,6 +53,8 @@ class TrialProjection:
 def classify_verify_failure(status: object, exit_code: object) -> tuple[str, str]:
     """Map a verify command outcome to the #474-style failure taxonomy."""
     normalized_status = str(status or "")
+    if normalized_status == "busy":
+        return "infrastructure", "busy"
     if normalized_status == "timed_out":
         return "infrastructure", "timeout"
     if normalized_status == "interrupted":
@@ -90,12 +92,23 @@ def stamp_verify_receipt_failure_taxonomy(receipt: dict[str, Any]) -> None:
         receipt["failure_class"] = "infrastructure"
         receipt["failure_kind"] = "canceled"
         return
+    if status == "busy":
+        receipt["failure_class"] = "infrastructure"
+        receipt["failure_kind"] = "busy"
+        return
     commands = receipt.get("commands")
     if isinstance(commands, list):
         for command in commands:
             if isinstance(command, dict):
                 stamp_verify_command_failure_taxonomy(command)
     if status == "failed":
+        planned = receipt.get("planned_commands")
+        if receipt.get("bookkeeping_error") or (
+            isinstance(planned, list) and isinstance(commands, list) and len(planned) != len(commands)
+        ):
+            receipt["failure_class"] = "infrastructure"
+            receipt["failure_kind"] = "receipt_incomplete"
+            return
         receipt["failure_class"] = "verification"
         receipt["failure_kind"] = "receipt_failed"
         return
@@ -536,6 +549,9 @@ def _manifest_binding_dict(binding: dict[str, Any]) -> dict[str, Any] | None:
 def _manifest_binding_structure_complete(manifest_binding: dict[str, Any]) -> bool:
     manifest_id = manifest_binding.get("manifest_id")
     payload_sha256 = manifest_binding.get("payload_sha256")
+    base_source = manifest_binding.get("base_source")
+    if base_source is not None and base_source not in {"default_branch", "no_remote"}:
+        return False
     return (
         isinstance(manifest_id, str) and bool(manifest_id) and isinstance(payload_sha256, str) and bool(payload_sha256)
     )
@@ -634,6 +650,9 @@ def _manifest_binding_matches_resolved(
         expected_source = verify_manifest.manifest_source_path(target, manifest)
         if not isinstance(source_path, str) or source_path != expected_source:
             return False
+    # The base commit moves with every merge to the default branch, so it is
+    # recorded for audit and not compared. The payload hash above is what ties
+    # a receipt to the manifest content that is trusted now.
     return True
 
 
@@ -687,7 +706,23 @@ def _validate_manifest_contract(
 
     manifest, error = verify_manifest.resolve_manifest(target, verify_manifest_id)
     if manifest is None:
-        return "verifier_manifest_missing" if error and "not found" in error else "verifier_manifest_mismatch"
+        if error and "not found" in error:
+            return "verifier_manifest_missing"
+        if error:
+            reason = error.split(":", 1)[0]
+            if reason in {
+                "unresolved_default_branch",
+                "no_merge_base",
+                "manifest_not_on_default_branch",
+                "manifest_not_regular_file",
+                "manifest_too_large",
+                "manifest_invalid_utf8_json",
+                "manifest_invalid_json",
+                "manifest_blob_unreadable",
+                "manifest_base_unreadable",
+            }:
+                return reason
+        return "verifier_manifest_mismatch"
 
     if not _manifest_binding_matches_resolved(target, manifest_binding, manifest):
         return "verifier_manifest_mismatch"

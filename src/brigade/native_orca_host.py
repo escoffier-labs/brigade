@@ -1,4 +1,4 @@
-"""Orca 1.4.268 binding of the governed native child core."""
+"""Orca binding of the governed native child core."""
 
 from __future__ import annotations
 
@@ -9,7 +9,9 @@ from typing import Mapping
 from . import roster as roster_mod
 from .native_child_host import NativeChildError, NativeChildHost, TargetUnresolved
 
-ORCA_VERSION = "1.4.268"
+ORCA_VERSION = "1.4.269"
+# PR #2825 adapter fixtures cover 1.4.268. Orca verb tests cover 1.4.269.
+SUPPORTED_VERSIONS = frozenset({"1.4.268", ORCA_VERSION})
 UNSUPPORTED = "orca-unsupported"
 STRUCTURAL_GAPS = frozenset(
     {
@@ -22,7 +24,7 @@ STRUCTURAL_GAPS = frozenset(
     }
 )
 
-# Orca's worker-start help and agent-session option catalogs at v1.4.268.
+# Orca's worker-start help and agent-session option catalogs at v1.4.269.
 # Provider-specific model/effort availability remains an Orca runtime check.
 _STANDARD_EFFORT = frozenset({"low", "medium", "high"})
 _EXTENDED_EFFORT = _STANDARD_EFFORT | {"xhigh", "max"}
@@ -54,7 +56,7 @@ class NativeTarget:
 
 
 def structural_gap(target: NativeTarget) -> str | None:
-    if target.orca_version != ORCA_VERSION:
+    if target.orca_version not in SUPPORTED_VERSIONS:
         return "version-unsupported"
     if target.agent not in AGENT_EFFORTS:
         return "driver-unsupported"
@@ -108,14 +110,19 @@ def _resolve_target(roster: roster_mod.Roster, seat: str, source_revision: str) 
     )
 
 
-def target_for_seat(roster: roster_mod.Roster, seat: str, *, source_revision: str) -> NativeTarget:
-    """Resolve the declaration at enrollment without granting launch authority."""
+def declared_target(roster: roster_mod.Roster, seat: str, *, source_revision: str) -> NativeTarget:
+    """Read an Orca declaration before classifying structural gaps."""
     try:
-        target = _resolve_target(roster, seat, source_revision)
+        return _resolve_target(roster, seat, source_revision)
     except TargetUnresolved as exc:
         if exc.missing:
             raise NativeChildError("seat-unbound", "the seat has no declared Orca target") from None
         raise NativeChildError("invalid-target", "the Orca target declaration is invalid") from None
+
+
+def target_for_seat(roster: roster_mod.Roster, seat: str, *, source_revision: str) -> NativeTarget:
+    """Resolve a supported declaration without granting launch authority."""
+    target = declared_target(roster, seat, source_revision=source_revision)
     require_supported_target(target)
     return target
 

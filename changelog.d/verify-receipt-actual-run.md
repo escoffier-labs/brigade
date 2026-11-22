@@ -1,0 +1,1 @@
+- Make verify receipts fail closed, record busy slot outcomes neutrally, and capture post-run tree, pytest outcome, and inherited test environment details.

@@ -24,6 +24,18 @@ STATUS = ("queued", "running", "waiting", *TERMINAL)
 # Same bounded provider-reference alphabet as the existing task journal, with
 # no dependency on its persistence or event implementation.
 _REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:%~+/@=-]*", re.ASCII)
+RESOURCE_EVENT = "task.native-capacity"
+START_UNCONFIRMED = "start-unconfirmed"
+START_REFUSALS = frozenset({"start-failed", "start-refused", "circuit-broken"})
+QUIESCENT_RESOURCE_STATES = START_REFUSALS | {"released"}
+RESOURCE_STATES = QUIESCENT_RESOURCE_STATES | {
+    START_UNCONFIRMED,
+    "structured-tab-open",
+    "kept-open",
+    "worker-not-released",
+    "release-unverified",
+    "abandoned-unknown",
+}
 REASONS = {
     "refused": ("origin-mismatch", "task-mismatch", "remote-mismatch", "circuit-broken"),
     "awaiting": (

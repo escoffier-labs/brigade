@@ -23,12 +23,13 @@ from collections import Counter
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterator, Mapping
+from typing import Iterator, Mapping, Sequence
 
 from . import roster as roster_mod
 from . import run_dirfd, run_journal, run_lifecycle, runguard, worktree_lease
 from . import run_task_journal as journal
 from .native_child_host import NativeChildCapacityError, NativeChildHost
+from .native_child_observations import QUIESCENT_RESOURCE_STATES, RESOURCE_EVENT, RESOURCE_STATES, START_UNCONFIRMED
 
 MAX_RUN_ENTRIES = 512
 MAX_RUN_RECEIPT_BYTES = 262_144
@@ -59,6 +60,7 @@ _READ_EVENT_TYPES = frozenset(
         "task.acknowledged",
         HOLD_EVENT,
         HOLD_RESOLVED_EVENT,
+        RESOURCE_EVENT,
     }
 )
 
@@ -174,17 +176,18 @@ def _scan_run(host: NativeChildHost, run_dir: Path, name: str, workspace: Path) 
             # directory is still the one at this path.
             if not bound.still_bound():
                 raise _Unverified("run-dir")
-            return _scan_units(events), size, trusted
+            return Counter(seat for seat, _reason in _live_claims(events).values()), size, trusted
     except OSError:
         raise _Unverified("run-dir") from None
 
 
-def _scan_units(events: list[run_journal.RunEvent]) -> Counter[str]:
-    """Fold one run's launch claims into per-seat live units."""
+def _live_claims(events: Sequence[run_journal.RunEvent]) -> dict[str, tuple[str, str]]:
+    """Fold one run's live launch claims into seats and fixed capacity reasons."""
     claims: dict[str, tuple[str, object]] = {}
     observed: dict[str, tuple[object, object, object]] = {}
     acknowledged: dict[str, object] = {}
     held: dict[str, str] = {}
+    resources: dict[str, str] = {}
     for event in events:
         if event.event_type not in _READ_EVENT_TYPES:
             continue
@@ -212,6 +215,17 @@ def _scan_units(events: list[run_journal.RunEvent]) -> Counter[str]:
             if task_id not in claims:
                 raise _Unverified("payload")
             acknowledged[task_id] = payload.get("result_id")
+        elif event.event_type == RESOURCE_EVENT:
+            reason = payload.get("reason")
+            if (
+                task_id not in claims
+                or payload.get("attempt_id") != claims[task_id][1]
+                or not isinstance(reason, str)
+                or reason not in RESOURCE_STATES
+                or (resources.get(task_id) in QUIESCENT_RESOURCE_STATES and reason != resources[task_id])
+            ):
+                raise _Unverified("payload")
+            resources[task_id] = reason
         elif event.event_type == HOLD_EVENT:
             reason = payload.get("reason")
             if reason not in _HELD_REASONS:
@@ -222,21 +236,31 @@ def _scan_units(events: list[run_journal.RunEvent]) -> Counter[str]:
             if reason != _ACCEPT_CONFLICT or held.get(task_id) != reason:
                 raise _Unverified("payload")
             held.pop(task_id, None)
-    units: Counter[str] = Counter()
+    live: dict[str, tuple[str, str]] = {}
     for task_id, (seat, _attempt) in claims.items():
-        if held.get(task_id) is not None:
-            units[seat] += 1
-            continue
-        status, containment, result_id = observed.get(task_id, (None, None, None))
-        freed = (
-            status in journal.TERMINAL
-            and containment == "quiescent"
-            and isinstance(result_id, str)
-            and acknowledged.get(task_id) == result_id
-        )
-        if not freed:
-            units[seat] += 1
-    return units
+        reason = held.get(task_id)
+        resource = resources.get(task_id)
+        # Start uncertainty records history. Current task evidence still
+        # determines occupancy and whether the task remains uncorrelated.
+        if reason is None and resource != START_UNCONFIRMED and resource not in QUIESCENT_RESOURCE_STATES:
+            reason = resource
+        if reason is None:
+            status, containment, result_id = observed.get(task_id, (None, None, None))
+            terminal = status in journal.TERMINAL and containment == "quiescent" and isinstance(result_id, str)
+            if not terminal:
+                reason = "awaiting-terminal"
+            elif acknowledged.get(task_id) != result_id:
+                reason = "awaiting-ack"
+        if reason is not None:
+            live[task_id] = (seat, reason)
+    return live
+
+
+def capacity_reasons(events: Sequence[run_journal.RunEvent]) -> dict[str, str]:
+    try:
+        return {task_id: reason for task_id, (_seat, reason) in _live_claims(events).items()}
+    except _Unverified:
+        raise CapacityError(CAPACITY_UNKNOWN, "live governed native capacity cannot be verified") from None
 
 
 def governed_occupancy(host: NativeChildHost, workspace: Path) -> Occupancy:
