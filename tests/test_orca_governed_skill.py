@@ -64,6 +64,8 @@ SKILL_RULES = (
     "do not use `hold-resolve` to settle a worker stop",
     "orca-unsupported",
     "release-unverified",
+    "for a cancelled worker, after a confirmed stop, use the fresh full show alone to verify release",
+    "a cancelled worker may not produce a worker_done report or transcript",
     "accept-conflict",
     "--transcript-json",
 )
@@ -75,6 +77,8 @@ DOC_RULES = (
     "`hold-resolve` cannot settle a stop",
     "abandoned-unknown",
     "release-unverified",
+    "for a cancelled worker, after a confirmed stop, use the fresh full show alone to verify release",
+    "a cancelled worker may not produce a worker_done report or transcript",
 )
 
 

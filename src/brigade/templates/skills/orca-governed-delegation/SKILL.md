@@ -52,13 +52,15 @@ receipts; `<result-id>` comes from a Brigade terminal result.
    `result-transfer-missing` and no terminal result is available to ack.
 6. For each exact terminal result, acknowledge the Brigade result:
    `brigade orca ack <run> <task> --result-id <result-id> --target <workspace>`.
-7. After Orca releases the worker, run a fresh full `worker-show` using the
-   printed `observe_argv`, then repeat `observe` with that show, the matching
-   worker_done report and transcript. Finalize only after this post-release
-   observation proves release; otherwise `release-unverified` blocks closeout.
-   A cancelled worker sends no worker_done report: after a confirmed stop,
-   repeat `observe` with the fresh show alone.
-   Then close the settled run explicitly:
+7. For a normally completed or failed worker, after Orca releases it, run a
+   fresh full `worker-show` using the printed `observe_argv`, then repeat
+   `observe` with that show, the matching worker_done report and transcript.
+   For a cancelled worker, after a confirmed stop, use the fresh full show
+   alone to verify release:
+   `brigade orca observe <run> <task> --native-json <show.json> --target <workspace>`.
+   A cancelled worker may not produce a worker_done report or transcript.
+   Finalize only after the post-release observation proves release; otherwise
+   `release-unverified` blocks closeout. Then close the settled run explicitly:
    `brigade orca finalize <run> --target <workspace>`.
 
 ## Recovery and capacity

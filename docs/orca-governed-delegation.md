@@ -51,12 +51,14 @@ Each definite start refusal (`start-refused`, `circuit-broken` or
 Until ack, it holds capacity as `awaiting-ack`.
 
 After acknowledging a terminal result, wait for Orca to release its worker.
-Run a fresh full `worker-show` using the printed `observe_argv`, then repeat
-`observe` with the fresh show and the matching worker_done report and
-transcript. Finalization is blocked by `release-unverified` until this
-post-release observation proves release. A cancelled worker sends no
-worker_done report, so after a confirmed stop the post-release `observe` takes
-the fresh show alone.
+For a normally completed or failed worker, run a fresh full `worker-show`
+using the printed `observe_argv`, then repeat `observe` with the fresh show
+and the matching worker_done report and transcript. For a cancelled worker,
+after a confirmed stop, use the fresh full show alone to verify release with
+`brigade orca observe <run> <task> --native-json <show.json> --target <workspace>`.
+A cancelled worker may not produce a worker_done report or transcript.
+Finalization is blocked by `release-unverified` until the post-release
+observation proves release.
 
 ## Cancellation and recovery
 
