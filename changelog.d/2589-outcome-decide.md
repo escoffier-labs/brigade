@@ -1,0 +1,2 @@
+- Run the CI outcome ledger writer daily to promote approved skill text, roll back regressions, and request owner approval for qualifying new text.
+- Add `brigade outcome ledger` with a read-only dry run and summarize the tracked ledger in the work brief.

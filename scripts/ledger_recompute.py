@@ -37,7 +37,8 @@ from brigade.outcome_ledger_actions import EvidenceError  # noqa: E402
 from brigade.outcome_ledger_git import GitError, Repo, is_sha  # noqa: E402
 
 SCRIPT_PATH = "scripts/ledger_recompute.py"
-QUEUE_REF = re.compile(r"^refs/heads/gh-readonly-queue/[^/]+/pr-(\d+)-[0-9a-f]{40}$")
+QUEUE_REF = re.compile(r"^refs/heads/gh-readonly-queue/main/pr-(\d+)-([0-9a-f]{40})$")
+QUEUE_REMOTE = "refs/remotes/origin/gh-readonly-queue/main/"
 
 
 def say(message: str) -> None:
@@ -73,6 +74,37 @@ def event_context(event_name: str, payload: dict, gh, slug: str) -> ledger.Event
     return ledger.EventContext(event=event_name, pr_number=number)
 
 
+def ledger_change(repo: Repo, base: str, head: str) -> str:
+    """Locate the individual ledger change in a cumulative squash queue group or push."""
+    commits = [
+        sha
+        for sha in repo.first_parent(base, head)
+        if any(path.startswith(ledger.LEDGER_DIR) for path in repo.changed_paths(f"{sha}^1", sha))
+    ]
+    if len(commits) != 1:
+        raise GitError("expected one outcome ledger change in the range")
+    return commits[0]
+
+
+def queue_ledger_pr(repo: Repo, payload: dict, change: str, head: str) -> int | None:
+    """Identify the queue entry for the ledger squash commit."""
+    group = payload.get("merge_group") or {}
+    head_ref = str(group.get("head_ref", ""))
+    if group.get("head_sha") != head or not QUEUE_REF.fullmatch(head_ref):
+        return None
+    parent = repo.resolve(f"{change}^1")
+    if change == head:
+        candidates = [head_ref]
+    else:
+        # Full-history checkout fetches the queue's read-only branches from origin.
+        refs = repo._run("for-each-ref", "--format=%(refname)", "--points-at", change, QUEUE_REMOTE)
+        candidates = [
+            ref.replace("refs/remotes/origin/", "refs/heads/", 1) for ref in refs.stdout.decode("ascii").splitlines()
+        ]
+    numbers = {int(match[1]) for ref in candidates if (match := QUEUE_REF.fullmatch(ref)) and match[2] == parent}
+    return next(iter(numbers)) if len(numbers) == 1 else None
+
+
 def _read_context(args: argparse.Namespace, event_name: str) -> tuple[dict, str, Repo]:
     payload = json.loads(Path(os.environ["GITHUB_EVENT_PATH"]).read_text(encoding="utf-8"))
     return payload, os.environ["GITHUB_REPOSITORY"], Repo(Path(args.repo))
@@ -90,6 +122,7 @@ def _run_verify(
     main_sha: str,
     head_sha: str,
     landed: bool,
+    change_range: tuple[str, str] | None = None,
 ) -> int:
     try:
         info = gh(f"repos/{slug}")
@@ -97,7 +130,14 @@ def _run_verify(
         if not isinstance(repo_id, int):
             raise TypeError("repository id")
         evidence = ledger.Evidence(repo=repo, gh=gh, slug=slug, repo_id=repo_id)
-        context = event_context(event_name, payload, gh, slug)
+        if change_range is not None:
+            pr = queue_ledger_pr(repo, payload, change_range[1], head_sha)
+            if pr is None:
+                say("cannot identify the pull request for the ledger change in this merge group")
+                return 1
+            context = ledger.EventContext(event_name, pr)
+        else:
+            context = event_context(event_name, payload, gh, slug)
         errors = ledger.verify_ledger(
             evidence,
             raw=raw,
@@ -107,6 +147,7 @@ def _run_verify(
             context=context,
             now=dt.datetime.now(dt.timezone.utc),
             landed=landed,
+            change_range=change_range,
         )
     except (
         ci_attestation.GhUnavailable,
@@ -151,34 +192,23 @@ def _check_push(args: argparse.Namespace) -> int:
         if script_before is None:
             say("push to main: the tree before it has no recompute script, so nothing could check this push")
             return 0
-        if after_raw is None:
-            say("the outcome ledger is untouched")
-            return 0
-        # The script was already on main, so a first ledger is checked like any other change.
-        return _run_verify(
-            repo,
-            ci_attestation.default_gh_api,
-            slug,
-            "push",
-            payload,
-            raw=after_raw,
-            main_raw=None,
-            main_sha=before,
-            head_sha=after,
-            landed=True,
-        )
+    if before_raw == after_raw:
+        say("the outcome ledger is untouched")
+        return 0
     if after_raw is None:
         say(f"{ledger.LEDGER_PATH} was removed by this push")
         return 1
-    if after_raw == before_raw:
-        say("the outcome ledger is untouched")
-        return 0
+    try:
+        change = ledger_change(repo, before, after)
+    except GitError as exc:
+        say(str(exc))
+        return 1
     return _run_verify(
         repo,
         ci_attestation.default_gh_api,
         slug,
         "push",
-        payload,
+        {**payload, "after": change},
         raw=after_raw,
         main_raw=before_raw,
         main_sha=before,
@@ -203,13 +233,22 @@ def main(argv: list[str] | None = None) -> int:
         payload, slug, repo = _read_context(args, event_name)
         main_sha = repo.resolve(args.main_ref)
         head_sha = repo.resolve(args.head_ref)
-        touched = repo.changed_paths(repo.merge_base(main_sha, head_sha), head_sha)
+        base = repo.merge_base(main_sha, head_sha)
+        touched = repo.changed_paths(base, head_sha)
     except (KeyError, OSError, ValueError, GitError) as exc:
         say(f"cannot read the event or the checkout: {type(exc).__name__}")
         return 1
     if not any(path.startswith(ledger.LEDGER_DIR) for path in touched):
         say("the outcome ledger is untouched")
         return 0
+    change_range = None
+    if event_name == "merge_group":
+        try:
+            change = ledger_change(repo, base, head_sha)
+            change_range = (repo.resolve(f"{change}^1"), change)
+        except GitError as exc:
+            say(str(exc))
+            return 1
     raw = repo.show(head_sha, ledger.LEDGER_PATH)
     if raw is None:
         say(f"{ledger.LEDGER_PATH} is missing from the proposed tree")
@@ -225,6 +264,7 @@ def main(argv: list[str] | None = None) -> int:
         main_sha=main_sha,
         head_sha=head_sha,
         landed=False,
+        change_range=change_range,
     )
 
 

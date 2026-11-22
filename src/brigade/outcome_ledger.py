@@ -538,12 +538,15 @@ def verify_ledger(
     config: outcome_core.ReconcileConfig | None = None,
     on_stage: Callable[[str], None] | None = None,
     landed: bool = False,
+    change_range: tuple[str, str] | None = None,
 ) -> list[str]:
     """Recompute the ledger from trusted inputs and return every reason ``raw`` is not it. Empty means valid.
 
     ``landed`` is for a change already on main. Other commits may have merged alongside it and
     the pull request is over, so the age limit and the rule on which paths a change may touch no
     longer apply. Every rule about the ledger itself still does, restored bundle included.
+    A trusted merge group can supply the individual ledger change's range for the path check.
+    The final group head must still contain the exact restored bundles.
     """
     stage = on_stage or (lambda _name: None)
     ev = dataclasses.replace(ev, gh=_memoized(ev.gh))
@@ -620,8 +623,8 @@ def verify_ledger(
         stage("complete")
         errors += _completeness_errors(ev, definitions, expected, prev, covers, now)
         stage("paths")
-        base = repo.merge_base(main_sha, head_sha)
-        errors += _path_errors(repo, expected, base, head_sha, any_other_path=landed)
+        base, change_head = change_range or (repo.merge_base(main_sha, head_sha), head_sha)
+        errors += _path_errors(repo, expected, base, change_head, head_sha, any_other_path=landed)
     except Exception as exc:  # noqa: BLE001 - any failed read must fail the check closed
         errors.append(f"recompute could not finish: {type(exc).__name__}: {str(exc)[:200]}")
     return errors
@@ -693,7 +696,7 @@ def _completeness_errors(
 
 
 def _path_errors(
-    repo: Repo, expected: Mapping[str, Any], base: str, head: str, *, any_other_path: bool = False
+    repo: Repo, expected: Mapping[str, Any], base: str, change_head: str, head: str, *, any_other_path: bool = False
 ) -> list[str]:
     """A ledger change may touch the ledger file and the restored bundle, and nothing else."""
     errors: list[str] = []
@@ -701,7 +704,7 @@ def _path_errors(
         key: body["restore"] for key, body in expected["subjects"].items() if isinstance(body.get("restore"), dict)
     }
     bundle_dirs = {skill_dir(expected["subjects"][key]["subject_path"]) + "/": row for key, row in restores.items()}
-    for path in repo.changed_paths(base, head):
+    for path in repo.changed_paths(base, change_head):
         if any_other_path or path == LEDGER_PATH:
             continue
         if any(path.startswith(prefix) for prefix in bundle_dirs):
