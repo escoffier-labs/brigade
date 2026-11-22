@@ -255,6 +255,21 @@ live validator from the schema. The init gate reports the CLI's own view of its
 configuration. Model and CLI authenticity remain unverified, and the result can
 neither score nor promote a skill.
 
+#### Deadline and leftovers
+
+On Linux a cell's deadline is hard. Stdout is read through `poll` against a
+monotonic deadline instead of waiting for EOF, so a process the arm started that
+calls `setsid` and keeps the inherited pipe open cannot hold the cell past its
+timeout. The read stops at the deadline, the arm's group and session are
+signalled, and the cell fails as `descendant_held_pipes` while the trial moves on
+to the next cell. After teardown the adapter scans `/proc` for a live process
+whose working directory is inside the cell's work dir, or that still holds one of
+the cell's pipes. Each one is signalled through a pidfd, then an otherwise
+passing cell fails as `descendant_survived`, keeps its work dir and records the
+pids in `live.diagnostics`. Windows behavior is unchanged, and there is no cgroup
+or PID-namespace containment yet, so a process that leaves the work dir and
+closes its pipes before the scan is not accounted for.
+
 #### Size caps
 
 Every read is bounded before it is buffered, and exceeding a cap fails the cell

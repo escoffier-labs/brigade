@@ -38,9 +38,10 @@ from brigade.model_trial_claude import (
     module_hashes,
 )
 from brigade.model_trial_paired import TOOLS, _pairs, digest
-from tests._child_publish import PUBLISH_SOURCE, process_is_running
+from tests._child_publish import PUBLISH_SOURCE, process_is_running, wait_for_text
 from tests._posix import requires_process_groups
 from tests.paired_live_fake import GOOD_STEPS, make_fake, records, render_script
+from tests.thread_sync import join_thread, start_thread
 
 pytestmark = [
     pytest.mark.allow_agent_cli,  # launches only the fake claude from tests/paired_live_fake.py
@@ -790,10 +791,8 @@ def test_expiry_cannot_flip_a_finished_cell_or_signal_a_recycled_group(monkeypat
     monkeypatch.setattr(model_trial_claude, "_kill", lambda proc: kills.append(proc.pid))
     observer = _Observer(expected_model="m", session_id="s", version="v", cwd=tmp_path)
     env = {key: os.environ[key] for key in ENV_PASSTHROUGH if key in os.environ}
-    _, _, code, timed_out, drain_failed = _run_process(
-        [sys.executable, "-c", "pass"], env, tmp_path, "", 30, observer, "tok"
-    )
-    assert (code, timed_out, drain_failed) == (0, False, False)
+    run = _run_process([sys.executable, "-c", "pass"], env, tmp_path, "", 30, observer, "tok")
+    assert (run.code, run.timed_out, run.cleanup_failed) == (0, False, False)
     assert events.index("cancel") < events.index("wait")  # the timer is gone before we reap
     before = list(kills)
     callbacks[0]()  # a late expiry for a process that already exited
@@ -1188,6 +1187,108 @@ def test_a_finished_cell_stops_a_descendant_that_left_its_process_group(tmp_path
                 os.kill(pid, signal.SIGKILL)
             except OSError:
                 pass
+        for path in work_dirs:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def _orphan_source(pid_file, ready_base):
+    """A fake-arm descendant that leaves the CLI's session and stays alive for 30 s.
+
+    ``setsid`` puts it outside both the arm's process group and its session, so no group or session
+    signal reaches it. It inherits the CLI's stdout and stderr unless the scenario is quiet, and it
+    publishes readiness by CLI pid, so the fake only exits once the orphan is provably alive.
+    """
+    return PUBLISH_SOURCE + (
+        "import os, time\n"
+        "os.setsid()\n"
+        f"pid_file = {str(pid_file)!r}\n"
+        f"ready = {str(ready_base)!r} + '.' + str(os.getppid())\n"
+        "publish(pid_file, str(os.getpid()))\n"
+        "publish(ready, 'ready')\n"
+        "time.sleep(30)\n"
+    )
+
+
+def _published_pids(path):
+    try:
+        return [int(line) for line in path.read_text().split() if line.strip().isdigit()]
+    except OSError:
+        return []
+
+
+def _kill_published(path):
+    for pid in _published_pids(path):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+@requires_process_groups
+@pytest.mark.skipif(not drain_supported(), reason="the leftover scan needs /proc")
+def test_a_descendant_that_leaves_the_session_cannot_stretch_the_cell_deadline(tmp_path, monkeypatch):
+    """A setsid holder keeps the arm's stdout open, so EOF never arrives and the cell must time out.
+
+    The holder is the fake arm's own child: it starts a new session, publishes its pid, and keeps
+    the inherited stdout and stderr open for 30 s. A group or session kill cannot reach it, so the
+    deadline has to end the read and the leftover scan has to stop it.
+    """
+    pid_file = tmp_path / "orphan.pid"
+    ready_base = tmp_path / "orphan.ready"
+    work_dirs = _track_work_dirs(monkeypatch)
+    orphan = _orphan_source(pid_file, ready_base)
+    exe = make_fake(
+        tmp_path / "fake",
+        steps=GOOD_STEPS,
+        session_orphan={"code": orphan, "ready": str(ready_base)},
+    )
+    outcome = {}
+
+    def run():
+        outcome["result"] = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=3)
+
+    worker = start_thread(run)
+    try:
+        published = wait_for_text(pid_file, timeout=15)
+        assert published is not None, "the arm's descendant never published its pid"
+        assert process_is_running(int(published)), "the descendant must be alive while the cell runs"
+        join_thread(worker, description="the cell deadline ends a streaming arm")
+        pids = {int(published), *_published_pids(pid_file)}
+        leaked = sorted(pid for pid in pids if process_is_running(pid))
+        assert leaked == [], f"the holder outlived its cell: {leaked}"
+        assert _failures(outcome["result"]) == [model_trial_claude.DESCENDANT_PIPES_FAILURE]
+        assert len(work_dirs) == 2 and all(path.is_dir() for path in work_dirs)
+    finally:
+        _kill_published(pid_file)
+        for path in work_dirs:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+@requires_process_groups
+@pytest.mark.skipif(not drain_supported(), reason="the leftover scan needs /proc")
+def test_a_descendant_left_in_the_cell_work_dir_fails_the_cell_and_is_stopped(tmp_path, monkeypatch):
+    """A quiet setsid survivor holds no pipe, so only the work-dir scan can find it after teardown."""
+    pid_file = tmp_path / "orphan.pid"
+    ready_base = tmp_path / "orphan.ready"
+    work_dirs = _track_work_dirs(monkeypatch)
+    orphan = _orphan_source(pid_file, ready_base)
+    exe = make_fake(
+        tmp_path / "fake",
+        steps=GOOD_STEPS,
+        session_orphan={"code": orphan, "ready": str(ready_base), "quiet": True},
+    )
+    try:
+        result = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        pids = _published_pids(pid_file)
+        assert pids, "the descendant never published its pid"
+        leaked = [pid for pid in pids if process_is_running(pid)]
+        assert leaked == [], f"the survivor outlived its cell: {leaked}"
+        assert _failures(result) == [model_trial_claude.DESCENDANT_SURVIVED_FAILURE]
+        reported = [row for a in result["attempts"] for row in a["live"]["diagnostics"]]
+        assert any(row.startswith("stray_pids:") for row in reported)
+        assert len(work_dirs) == 2 and all(path.is_dir() for path in work_dirs)
+    finally:
+        _kill_published(pid_file)
         for path in work_dirs:
             shutil.rmtree(path, ignore_errors=True)
 

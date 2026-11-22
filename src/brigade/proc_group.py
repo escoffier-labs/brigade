@@ -5,6 +5,12 @@ output when the direct child exits. Draining waits, bounded, for them instead
 of reaping the group mid-write, and keeps the leader's pid and process group id
 reserved for the whole wait, so a recycled id can never be probed or signalled
 (#2286).
+
+A descendant that calls ``setsid`` leaves both the group and the session, so a
+group drain cannot reach it (#2847). ``stray_processes`` names what a run left
+behind by its working directory or by a descriptor on the run's own pipe, and
+``kill_strays`` signals each through the same pinned pidfd pattern as
+``kill_group_members``.
 """
 
 from __future__ import annotations
@@ -14,6 +20,7 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Collection, Sequence
 from pathlib import Path
 
 
@@ -181,3 +188,107 @@ def wait_for_group(process: subprocess.Popen[bytes], timeout: float) -> bool:
         if remaining <= 0:
             return True
         time.sleep(min(0.02, remaining))
+
+
+def stray_processes(root: Path, pipe_inodes: Collection[int] = ()) -> list[tuple[int, int]] | None:
+    """(pid, starttime) for every live process still inside ``root`` or holding one of ``pipe_inodes``.
+
+    This is the post-teardown scan for a process that left the group and the session, so neither a
+    group kill nor a session drain could reach it. A process counts when its working directory is
+    inside ``root``, or when one of its descriptors is a pipe with a listed inode. Zombies cannot
+    write and hold no descriptor, so they never count. ``None`` means the process table could not be
+    read, which the caller must treat as "cannot confirm", never as "nothing left".
+    """
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return None
+    target = Path(os.path.realpath(root))
+    mine = os.getpid()
+    found: list[tuple[int, int]] = []
+    try:
+        for entry in entries:
+            if not entry.isdigit() or int(entry) == mine:
+                continue
+            fields = _stat_fields(int(entry))
+            if fields is None or len(fields) <= 19 or fields[0] in (b"Z", b"X", b"x"):
+                continue
+            try:
+                started = int(fields[19])
+            except ValueError:
+                continue
+            if _inside(target, int(entry)) or _holds_pipe(int(entry), pipe_inodes):
+                found.append((int(entry), started))
+    except OSError:
+        return None
+    return found
+
+
+def kill_strays(records: Sequence[tuple[int, int]], sig: int) -> int:
+    """Signal each recorded process through its pidfd, after re-reading its identity.
+
+    The pidfd pins the process itself, so a recycled number cannot redirect the signal. The stat
+    re-read drops a pid whose starttime moved or which became a zombie since the scan. Returns how
+    many were signalled. Raises ``ProcessGroupUnreadable`` when the process table cannot be read.
+    """
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+    if pidfd_open is None or pidfd_send_signal is None:
+        return 0
+    signalled = 0
+    for pid, started in records:
+        try:
+            descriptor = pidfd_open(pid)
+        except OSError:
+            continue
+        try:
+            fields = _stat_fields(pid)
+            if fields is None or len(fields) <= 19:
+                continue
+            try:
+                started_now = int(fields[19])
+            except ValueError:
+                continue
+            if started_now != started or fields[0] in (b"Z", b"X", b"x"):
+                continue
+            try:
+                pidfd_send_signal(descriptor, sig)
+            except OSError:
+                continue
+            signalled += 1
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    return signalled
+
+
+def _inside(root: Path, pid: int) -> bool:
+    """Whether the process in ``pid`` runs with a working directory inside ``root``."""
+    try:
+        return Path(os.readlink(f"/proc/{pid}/cwd")).is_relative_to(root)
+    except OSError:
+        return False
+
+
+def _holds_pipe(pid: int, inodes: Collection[int]) -> bool:
+    """Whether any descriptor of ``pid`` is one of the listed pipes."""
+    if not inodes:
+        return False
+    try:
+        names = os.listdir(f"/proc/{pid}/fd")
+    except OSError:
+        return False
+    for name in names:
+        try:
+            target = os.readlink(f"/proc/{pid}/fd/{name}")
+        except OSError:
+            continue
+        if target.startswith("pipe:[") and target.endswith("]"):
+            try:
+                if int(target[6:-1]) in inodes:
+                    return True
+            except ValueError:
+                continue
+    return False

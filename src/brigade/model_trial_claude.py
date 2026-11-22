@@ -15,6 +15,7 @@ import functools
 import hashlib
 import json
 import os
+import select
 import shutil
 import signal
 import stat
@@ -26,11 +27,18 @@ import time
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, BinaryIO, Callable, Iterator, Mapping, Sequence
+from typing import Any, BinaryIO, Callable, Iterator, Mapping, NamedTuple, Sequence
 from urllib.parse import unquote
 
 from . import dirfd, proc
-from .proc_group import ProcessGroupUnreadable, drain_supported, group_has_live_members, kill_group_members
+from .proc_group import (
+    ProcessGroupUnreadable,
+    drain_supported,
+    group_has_live_members,
+    kill_group_members,
+    kill_strays,
+    stray_processes,
+)
 from .memory_verify_seat import CLAUDE_BUILTIN_AGENTS, CLAUDE_SETTINGS, open_executable
 from .model_trial_paired import (
     INSTRUCTION,
@@ -66,8 +74,14 @@ EXIT_GRACE = 10.0
 # After the arm's leader exits, give every process it started this long to be gone before the work
 # directory is removed. The same bound the supervised scanner launches use.
 GROUP_DRAIN_SECONDS = proc.GROUP_DRAIN_SECONDS
+# A process the arm left outside its group and session gets this long to disappear after SIGKILL.
+STRAY_DRAIN_SECONDS = 2.0
 # A drain failure is a cell failure with a fixed reason, never a crash of the whole trial.
 DRAIN_FAILURE = "process_group_drain_failed"
+# A descendant that kept the arm's pipe open past the deadline: the trial goes on with the next cell.
+DESCENDANT_PIPES_FAILURE = "descendant_held_pipes"
+# A process the arm started was still inside the cell's work dir, or on its pipe, after teardown.
+DESCENDANT_SURVIVED_FAILURE = "descendant_survived"
 # Windows has no tree kill here, so give a grandchild's handles up to about 7 s to be released.
 WINDOWS_REMOVE_ATTEMPTS = 8
 WINDOWS_REMOVE_PAUSE = 0.25
@@ -704,6 +718,127 @@ class _StderrCapture:
         self._keep(redact(carry, self.token))
 
 
+class _StreamLineTooLarge(Exception):
+    """A stdout line passed the cap before its newline arrived."""
+
+
+class _StdoutLines:
+    """The arm's stdout as lines, never blocking past a monotonic deadline.
+
+    On Windows this stays a plain ``readline``, as before: the deadline there is the timer's and no
+    pipe is polled. On POSIX every read waits on ``poll`` only as long as the deadline allows, so a
+    descendant that keeps the pipe open cannot extend the cell. ``expired`` then says the deadline,
+    not the arm, ended the stream. A line past ``MAX_LINE_BYTES`` raises ``_StreamLineTooLarge``
+    before it is yielded, so the cap is enforced without buffering the whole line.
+    """
+
+    def __init__(self, pipe: Any, deadline: float) -> None:
+        self.pipe = pipe
+        self.deadline = deadline
+        self.expired = False
+
+    def __iter__(self) -> Iterator[bytes]:
+        if os.name != "posix":
+            return self._blocking()
+        return self._polled()
+
+    def _blocking(self) -> Iterator[bytes]:
+        while line := self.pipe.readline(MAX_LINE_BYTES + 1):
+            if len(line) > MAX_LINE_BYTES and not line.endswith(b"\n"):
+                raise _StreamLineTooLarge
+            yield line
+
+    def _polled(self) -> Iterator[bytes]:
+        descriptor = self.pipe.fileno()
+        poller = select.poll()
+        poller.register(descriptor, select.POLLIN | select.POLLHUP | select.POLLERR)
+        pending = bytearray()
+        while True:
+            while (cut := pending.find(b"\n")) >= 0:
+                yield bytes(pending[: cut + 1])
+                del pending[: cut + 1]
+            if len(pending) > MAX_LINE_BYTES:
+                raise _StreamLineTooLarge
+            remaining = self.deadline - time.monotonic()
+            if remaining <= 0:
+                self.expired = True
+                return
+            if not poller.poll(max(1, int(remaining * 1000) + 1)):
+                continue
+            try:
+                chunk = os.read(descriptor, 65536)
+            except BlockingIOError:
+                continue
+            if not chunk:  # EOF: a final line without a newline still belongs to the arm.
+                if len(pending) > MAX_LINE_BYTES:
+                    raise _StreamLineTooLarge
+                if pending:
+                    yield bytes(pending)
+                return
+            pending += chunk
+
+
+class _ArmRun(NamedTuple):
+    """What one arm's run left behind, before the caller turns it into a cell result."""
+
+    stream: bytes
+    stderr: bytes
+    code: int | None
+    timed_out: bool
+    cleanup_failed: bool
+    held_pipes: bool
+    stray: tuple[int, ...]
+
+
+def _pipe_inodes(child: subprocess.Popen[bytes]) -> frozenset[int]:
+    """The inodes of the pipes the arm inherited, read from our own ends while they are still open."""
+    inodes = set()
+    for pipe in (child.stdout, child.stderr):
+        if pipe is None:
+            continue
+        try:
+            target = os.readlink(f"/proc/self/fd/{pipe.fileno()}")
+        except (OSError, ValueError):
+            continue
+        if target.startswith("pipe:[") and target.endswith("]"):
+            try:
+                inodes.add(int(target[6:-1]))
+            except ValueError:
+                continue
+    return frozenset(inodes)
+
+
+def _stop_strays(root: Path, pipe_inodes: frozenset[int]) -> tuple[list[int], bool]:
+    """Stop every process the arm left behind, bounded, and report its pids.
+
+    ``stray_processes`` names a process by a working directory inside the cell's work dir or by a
+    descriptor on one of the cell's pipes. That catches a descendant which called ``setsid`` and so
+    left both the group and the session the drain owns. Each is signalled through its pidfd, then
+    the scan repeats, because a survivor can fork while the scan runs. The second element is False
+    when the process table could not be read or a stray outlived the drain, which the caller must
+    treat as "not confirmed quiet".
+    """
+    deadline = time.monotonic() + STRAY_DRAIN_SECONDS
+    found: list[int] = []
+    while True:
+        try:
+            records = stray_processes(root, pipe_inodes)
+        except ProcessGroupUnreadable:
+            return found, False
+        if records is None:
+            return found, False
+        if not records:
+            return found, True
+        found = sorted({*found, *(pid for pid, _ in records)})
+        try:
+            kill_strays(records, signal.SIGKILL)
+        except ProcessGroupUnreadable:
+            return found, False
+        if time.monotonic() >= deadline:
+            return found, False
+        time.sleep(0.01)
+
+
 def _run_process(
     command: list[str],
     env: dict[str, str],
@@ -714,11 +849,14 @@ def _run_process(
     token: str,
     *,
     pass_fds: tuple[int, ...] = (),
-) -> tuple[bytes, bytes, int | None, bool, bool]:
+    root: Path | None = None,
+) -> _ArmRun:
     """Run one arm. Stdout and stderr stay in memory, redacted, and bounded line by line and in total.
 
-    The fifth element is True when the arm's process drain failed. The caller turns that into a cell
-    failure and keeps the work dir for diagnosis.
+    ``root`` is the cell's work dir, scanned after teardown for anything the arm left running
+    outside its group and session. The result carries the drain and deadline outcomes, which the
+    caller turns into a cell failure and keeps the work dir for when they did not confirm a quiet
+    cell.
     """
     raw: list[bytes] = []
     size = 0
@@ -734,6 +872,8 @@ def _run_process(
         start_new_session=os.name == "posix",
         **extra,
     )
+    deadline = time.monotonic() + max(timeout, 0.0)
+    pipes = _pipe_inodes(child) if drain_supported() else frozenset()
     timed_out = threading.Event()
     # Every kill, and every reap, holds this lock: a signal is never sent for a pid that was just reaped.
     expiry = threading.Lock()
@@ -782,6 +922,8 @@ def _run_process(
     timer.start()
     primary: BaseException | None = None
     cleanup_failed = False
+    held_pipes = False
+    stray: list[int] = []
     try:
         assert child.stdin is not None and child.stdout is not None
         try:
@@ -789,29 +931,34 @@ def _run_process(
             child.stdin.close()
         except OSError:
             pass
-        # readline(n) stops at n bytes, so a line with no newline is never buffered past the cap.
-        while line := child.stdout.readline(MAX_LINE_BYTES + 1):
-            if len(line) > MAX_LINE_BYTES and not line.endswith(b"\n"):
-                observer.failure = observer.failure or "stream_line_too_large"
-                break
-            line = redact(line, token)  # Observer, evidence and hashes only ever see redacted bytes.
-            size += len(line)
-            if size > MAX_STREAM_BYTES:
-                observer.failure = observer.failure or "stream_too_large"
-                break
-            raw.append(line)
-            text = line.decode("utf-8", "replace").strip()
-            if not text:
-                continue
-            try:
-                event = json.loads(text)
-            except ValueError:
-                event = None
-            if not isinstance(event, dict):
-                observer.failure = observer.failure or "malformed_stream"
-                break
-            if observer.feed(event):
-                break
+        lines = _StdoutLines(child.stdout, deadline)
+        try:
+            for line in lines:
+                line = redact(line, token)  # Observer, evidence and hashes only ever see redacted bytes.
+                size += len(line)
+                if size > MAX_STREAM_BYTES:
+                    observer.failure = observer.failure or "stream_too_large"
+                    break
+                raw.append(line)
+                text = line.decode("utf-8", "replace").strip()
+                if not text:
+                    continue
+                try:
+                    event = json.loads(text)
+                except ValueError:
+                    event = None
+                if not isinstance(event, dict):
+                    observer.failure = observer.failure or "malformed_stream"
+                    break
+                if observer.feed(event):
+                    break
+        except _StreamLineTooLarge:
+            observer.failure = observer.failure or "stream_line_too_large"
+        if lines.expired:
+            # The deadline, not the arm's EOF, ended the stream. A leader that already exited left a
+            # descendant holding the pipe, and no group or session signal can reach it.
+            expire()
+            held_pipes = not timed_out.is_set()
         if observer.failure is not None:
             kill()
         timer.cancel()
@@ -832,6 +979,10 @@ def _run_process(
         kill()
         drain_once()
         cleanup_failed = drain_failure is not None
+        if drain_supported():
+            # After the drain, anything still in the cell's work dir or on its pipes escaped both.
+            stray, quiet = _stop_strays(Path(os.path.realpath(root or cwd)), pipes)
+            cleanup_failed = cleanup_failed or not quiet
         try:
             drainer.join(timeout=EXIT_GRACE)
         finally:
@@ -853,7 +1004,15 @@ def _run_process(
                 add_note(f"cell process cleanup also failed: {reason}")
     if capture.overflow:
         observer.failure = observer.failure or "stderr_too_large"
-    return b"".join(raw), bytes(capture.tail), code, timed_out.is_set(), cleanup_failed
+    return _ArmRun(
+        b"".join(raw),
+        bytes(capture.tail),
+        code,
+        timed_out.is_set(),
+        cleanup_failed,
+        held_pipes,
+        tuple(stray),
+    )
 
 
 def read_capped(path: Path, cap: int) -> bytes:
@@ -954,10 +1113,10 @@ def run_cell(
     observer = _Observer(expected_model=ctx["expected_model"], session_id=session_id, version=ctx["version"], cwd=cwd)
     blocked = ancestor_instruction_file(cwd)
     if blocked is not None:  # Never launch: the CLI would load this file as instructions.
-        stream, stderr, code, timed_out, drain_failed = b"", b"", None, False, False
+        run = _ArmRun(b"", b"", None, False, False, False, ())
     else:
         executable.verify()  # What runs is the file hashed at the start, never a replacement.
-        stream, stderr, code, timed_out, drain_failed = _run_process(
+        run = _run_process(
             executable.command(argv),
             build_env(ctx["environ"], work),
             cwd,
@@ -966,14 +1125,16 @@ def run_cell(
             observer,
             token,
             pass_fds=executable.pass_fds,
+            root=work,
         )
+    stream, stderr, code = run.stream, run.stderr, run.code
     rows, trace_bytes, receipt_bytes, oversize = _read_server_state(work / "state", token)
     server_failure, trace = (oversize, []) if oversize else _server_failure(rows, observer)
     result = observer.result
     failure = observer.failure
     if blocked is not None:
         failure = f"ancestor_instructions:{blocked.name}"
-    elif failure is None and timed_out:
+    elif failure is None and run.timed_out:
         failure = "model_timeout"
     elif failure is None and result is None:
         failure = f"claude_exit:{code}" if code else "no_result"
@@ -981,15 +1142,22 @@ def run_cell(
         failure = f"model_error:{result.get('subtype')}"
     diagnostics = [] if server_failure is None else [server_failure]
     failure = failure or server_failure
-    if drain_failed:
+    if run.cleanup_failed:
         failure = DRAIN_FAILURE
+    elif run.held_pipes:
+        failure = DESCENDANT_PIPES_FAILURE
+    elif failure is None and run.stray:
+        failure = DESCENDANT_SURVIVED_FAILURE
+    if run.stray:
+        diagnostics.append("stray_pids:" + ",".join(str(pid) for pid in run.stray))
+    keep_work_dir = run.cleanup_failed or bool(run.stray) or run.held_pipes
     return {
         "trace": trace,
         "receipt": json.loads(receipt_bytes) if receipt_bytes is not None else None,
         "receipt_bytes": receipt_bytes,
         "final": None if failure else _final(result),
         "failure": failure,
-        "keep_work_dir": drain_failed,
+        "keep_work_dir": keep_work_dir,
         "live": {
             "session_id": session_id,
             "cwd": str(cwd),
