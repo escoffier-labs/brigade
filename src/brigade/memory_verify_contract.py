@@ -325,6 +325,7 @@ class CardInput:
     updated_ms: int | None
     blocks: tuple[ClaimBlock, ...]
     _source_text: str = field(default="", init=False, repr=False, compare=False)
+    _source_context: dict[int, tuple[int, ...]] = field(default_factory=dict, init=False, repr=False, compare=False)
 
     @classmethod
     def from_text(
@@ -339,15 +340,22 @@ class CardInput:
         """The anchored claim blocks of a replica head's text, or `Abstain(verify_card_invalid)`."""
         if not isinstance(text, str) or len(text.encode()) > MAX_CARD_TEXT_BYTES:
             raise Abstain(CARD_INVALID)
+        normalized = text.replace("\r\n", "\n")
         try:
-            found = delta.blocks(text.replace("\r\n", "\n"))
+            found = delta.blocks(normalized)
+            from .memory_claim_blocks import claim_spans
+
+            source_context = {
+                span.start: span.list_context for span in claim_spans(normalized, delta.legacy._body_offset(normalized))
+            }
         except ValueError:
             raise Abstain(CARD_INVALID) from None
         anchored = tuple(ClaimBlock(b.block_id, b.text, b.sha256) for b in found if b.block_id)
         if not anchored or len(anchored) > MAX_BLOCKS or type(revision) is not int or revision <= 0:
             raise Abstain(CARD_INVALID)
         card = cls(scope, card_id, revision, updated_ms, anchored)
-        object.__setattr__(card, "_source_text", text.replace("\r\n", "\n"))
+        object.__setattr__(card, "_source_text", normalized)
+        object.__setattr__(card, "_source_context", source_context)
         return card
 
     def block(self, block_id: str) -> ClaimBlock | None:
@@ -358,35 +366,34 @@ class CardInput:
         from .memory_proposal_v2_ops import blocks
 
         source = self._source_text
-        selected = [block for block in blocks(source) if block.block_id in block_ids]
-        excerpts = []
-        for block in selected:
-            line_start = source.rfind("\n", 0, block.start) + 1
-            line_end = source.find("\n", line_start)
-            line = source[line_start : len(source) if line_end < 0 else line_end]
-            indent = len(line) - len(line.lstrip(" "))
-            parents = []
-            parent_indents = set()
-            cursor = line_start
-            while cursor > 0 and indent:
-                previous_end = cursor - 1
-                previous_start = source.rfind("\n", 0, previous_end) + 1
-                previous = source[previous_start:previous_end]
-                if not previous.strip():
-                    break
-                previous_indent = len(previous) - len(previous.lstrip(" "))
-                if previous_indent < indent:
-                    if re.match(r" {0,3}(?:[-+*]|\d+[.)])(?: +|$)", previous):
-                        if previous_indent in parent_indents:
-                            break
-                        parents.append(previous)
-                        parent_indents.add(previous_indent)
-                    else:
-                        break
-                cursor = previous_start
-            excerpt = "\n".join([*reversed(parents), block.text])
-            excerpts.append(excerpt)
-        return "\n\n".join(excerpts)
+        found = blocks(source)
+        selected = [block for block in found if block.block_id in block_ids]
+        if {block.block_id for block in selected} != block_ids:
+            return ""
+        included_starts = {block.start for block in selected}
+        for claim in selected:
+            claim_context = self._source_context.get(claim.start, ())
+            for context in found:
+                context_path = self._source_context.get(context.start, ())
+                if (
+                    context.end <= claim.start
+                    and context_path
+                    and len(context_path) < len(claim_context)
+                    and claim_context[: len(context_path)] == context_path
+                ):
+                    included_starts.add(context.start)
+
+        text = []
+        for block in found:
+            if block.start not in included_starts:
+                continue
+            value = (
+                block.text
+                if block.block_id in block_ids
+                else re.sub(r" \^c-[0-9a-f]{6}(?=[ \t]*(?:\n|$))", "", block.text)
+            )
+            text.append(value)
+        return "\n".join(text)
 
 
 # --- Prompt -------------------------------------------------------------------------------

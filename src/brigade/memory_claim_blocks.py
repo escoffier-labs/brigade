@@ -39,13 +39,16 @@ _RAW_HTML = (
 class ClaimSpan:
     start: int
     end: int
+    list_context: tuple[int, ...] = ()
 
 
 def _closes_fence(marker: re.Match[str], fence: str) -> bool:
     return marker[1][0] == fence[0] and len(marker[1]) >= len(fence) and not marker[2].strip()
 
 
-def _container_view(line: str, containers: list[int], lazy: bool) -> tuple[str, bool, int]:
+def _container_view(
+    line: str, containers: list[int], context_ids: list[int], lazy: bool, next_context_id: int
+) -> tuple[str, bool, int, int]:
     """Strip list indentation without retaining containers across block boundaries."""
     indent = len(line) - len(line.lstrip(" "))
     interrupt = (
@@ -60,6 +63,7 @@ def _container_view(line: str, containers: list[int], lazy: bool) -> tuple[str, 
         if lazy and not interrupt:
             break
         containers.pop()
+        context_ids.pop()
     base = min(indent, containers[-1]) if containers else 0
     view = line[base:]
     bullet = False
@@ -69,9 +73,11 @@ def _container_view(line: str, containers: list[int], lazy: bool) -> tuple[str, 
         width = match.end() - (padding - 1 if padding >= 5 else 0)
         base += width + (1 if not padding else 0)
         containers.append(base)
+        context_ids.append(next_context_id)
+        next_context_id += 1
         view = view[width:]
         bullet = True
-    return view, bullet, base
+    return view, bullet, base, next_context_id
 
 
 def _relative(line: str, base: int) -> str:
@@ -109,11 +115,14 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
     lines = text[offset:].splitlines(keepends=True)
     expanded = [line.rstrip("\r\n").expandtabs(4) for line in lines]
     containers: list[int] = []
+    context_ids: list[int] = []
+    next_context_id = 1
     positions = [offset]
     for line in lines:
         positions.append(positions[-1] + len(line))
     result: list[ClaimSpan] = []
     start: int | None = None
+    start_context: tuple[int, ...] = ()
     end = offset
     fence: str | None = None
     fence_base = 0
@@ -125,13 +134,14 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
     index = 0
 
     def finish() -> None:
-        nonlocal start
+        nonlocal start, start_context
         if start is not None:
             stop = end
             while stop > start and text[stop - 1] in "\r\n":
                 stop -= 1
-            result.append(ClaimSpan(start, stop))
+            result.append(ClaimSpan(start, stop, start_context))
             start = None
+            start_context = ()
 
     while index < len(lines):
         raw = expanded[index]
@@ -170,6 +180,7 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
             finish()
             if empty_item:
                 containers.pop()
+                context_ids.pop()
                 empty_item = False
             quote = opaque = table = False
             index += 1
@@ -177,7 +188,9 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
         if opaque:
             index += 1
             continue
-        line, bullet, base = _container_view(raw, containers, start is not None or quote)
+        line, bullet, base, next_context_id = _container_view(
+            raw, containers, context_ids, start is not None or quote, next_context_id
+        )
         empty_item = False
         marker = _FENCE.match(line)
         heading = _HEADING.match(line)
@@ -222,6 +235,7 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
             continue
         if start is not None and _SETEXT.fullmatch(line):
             start = None
+            start_context = ()
             index += 1
             continue
         if thematic or heading or (line.startswith("    ") and start is None) or line.lstrip().startswith("|"):
@@ -240,6 +254,7 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
             # Keep the entire inline-comment paragraph opaque, including any
             # continuation after a same-line or multiline closing marker.
             start = None
+            start_context = ()
             opaque = True
             comment = "-->" not in line.split("<!--", 1)[1]
             index += 1
@@ -251,6 +266,7 @@ def claim_spans(text: str, offset: int = 0) -> list[ClaimSpan]:
             continue
         if start is None:
             start = positions[index]
+            start_context = tuple(context_ids)
         end = positions[index + 1]
         index += 1
     finish()
