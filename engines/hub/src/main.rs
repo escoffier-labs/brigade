@@ -555,7 +555,7 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
         .cloned()
         .unwrap_or_default();
     // Create the log first so a request cancelled during the lookup is still counted.
-    let mut log = RequestLog {
+    let log = RequestLog {
         telemetry: app.telemetry.clone(),
         id: app.telemetry.id(),
         family: f,
@@ -568,6 +568,9 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
         response_bytes: 0,
         start: started,
     };
+    #[cfg(test)]
+    let log = tests_pools::CapturedLog(log);
+    let mut log = log;
     log.credential_kind = if admin_authorized(&app, &req) {
         "admin"
     } else if f == "health" || bearer_token(&req).is_some() {
@@ -691,8 +694,6 @@ async fn handle(State(app): State<App>, req: Request<Body>) -> Response<Body> {
     }
     log.status = response.status().as_u16();
     stage.set(Stage::Replying);
-    #[cfg(test)]
-    request_lines::record(Arc::as_ptr(&log.telemetry) as usize, log.line());
     let (parts, body) = response.into_parts();
     // Hold the logger until completion or disconnect and count actual streamed bytes.
     let stream = futures_util::stream::unfold(
@@ -2467,34 +2468,3 @@ mod tests_pools;
 
 #[cfg(test)]
 mod tests_verifier;
-
-/// The request line `handle` logs, keyed by the app's telemetry, so a test can
-/// assert a logged value. The process's stderr cannot be captured in-process.
-#[cfg(test)]
-mod request_lines {
-    use std::sync::Mutex;
-    static LINES: Mutex<Vec<(usize, serde_json::Value)>> = Mutex::new(Vec::new());
-    pub fn record(key: usize, line: impl std::fmt::Display) {
-        let line = serde_json::from_str(&line.to_string()).expect("valid request log JSON");
-        LINES.lock().unwrap().push((key, line));
-    }
-    /// The lines one app logged for one family, oldest first.
-    pub fn entries(key: usize, family: &str) -> Vec<serde_json::Value> {
-        LINES
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|(k, line)| *k == key && line["family"] == family)
-            .map(|(_, line)| line.clone())
-            .collect()
-    }
-    /// The `credential_kind` the app logged for the last request of a family.
-    pub fn credential_kind(key: usize, family: &str) -> Option<String> {
-        entries(key, family).last().map(|line| {
-            line["credential_kind"]
-                .as_str()
-                .unwrap_or_default()
-                .to_owned()
-        })
-    }
-}

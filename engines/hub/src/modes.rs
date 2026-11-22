@@ -117,11 +117,37 @@ pub fn method_label(method: &str) -> &'static str {
     }
 }
 
-/// Request log labels for the native dispatch and Python's fleet_hub_http
-/// route table. Match the path separately from the method so refusals still
-/// identify the endpoint. Only fixed strings may leave this function.
-pub fn route_label(path: &str) -> &'static str {
-    match path {
+// Keep the test inventory tied to the same literal arms used by the matcher.
+macro_rules! route_labels {
+    (
+        $(#[$doc:meta])*
+        $vis:vis fn $name:ident($input:ident: &str);
+        $inventory:ident;
+        match $value:expr;
+        { $($pattern:pat $(if $guard:expr)? => $label:literal,)* }
+        otherwise => $fallback:expr
+    ) => {
+        $(#[$doc])*
+        $vis fn $name($input: &str) -> &'static str {
+            match $value {
+                $($pattern $(if $guard)? => $label,)*
+                _ => $fallback,
+            }
+        }
+
+        #[cfg(test)]
+        const $inventory: &[&str] = &[$($label),*];
+    };
+}
+
+const OTHER_ROUTE: &str = "other";
+
+route_labels! {
+    /// Native and Python dispatch paths, classified independently of method.
+    pub fn route_label(path: &str);
+    FRONT_ROUTE_LABELS;
+    match path;
+    {
         "/" => "/",
         "/actions" => "/actions",
         "/apple-touch-icon.png" => "/apple-touch-icon.png",
@@ -191,38 +217,23 @@ pub fn route_label(path: &str) -> &'static str {
         "/view/machines" => "/view/machines",
         "/view/repos" => "/view/repos",
         "/work" => "/work",
-        _ => {
-            if let Some(tail) = path.strip_prefix("/work/") {
-                work_route_label(tail)
-            } else if let Some(id) = path.strip_prefix("/deck/actions/") {
-                if id.starts_with("aa_") && !id.contains('/') {
-                    "/deck/actions/:id"
-                } else {
-                    "other"
-                }
-            } else if let Some(group) = path.strip_prefix("/deck/observed/") {
-                if !group.is_empty() && !group.contains('/') {
-                    "/deck/observed/:group"
-                } else {
-                    "other"
-                }
-            } else {
-                "other"
-            }
-        }
+        path if path.strip_prefix("/deck/actions/aa_")
+            .is_some_and(|id| !id.is_empty() && !id.contains('/')) => "/deck/actions/:id",
+        path if path.strip_prefix("/deck/observed/")
+            .is_some_and(|group| !group.is_empty() && !group.contains('/')) => "/deck/observed/:group",
     }
+    otherwise => path.strip_prefix("/work/").map_or(OTHER_ROUTE, work_route_label)
 }
 
-/// Worklore ignores empty segments, then dispatches on the resource and tail.
-fn work_route_label(tail: &str) -> &'static str {
-    let mut parts = tail.split('/').filter(|part| !part.is_empty());
-    match (
-        parts.next(),
-        parts.next(),
-        parts.next(),
-        parts.next(),
-        parts.next(),
-    ) {
+route_labels! {
+    /// Worklore ignores empty segments, then dispatches on the resource and tail.
+    fn work_route_label(tail: &str);
+    WORK_ROUTE_LABELS;
+    match {
+        let mut parts = tail.split('/').filter(|part| !part.is_empty());
+        (parts.next(), parts.next(), parts.next(), parts.next(), parts.next())
+    };
+    {
         (Some("campaigns"), None, None, None, None) => "/work/campaigns",
         (Some("campaigns"), Some(_), None, None, None) => "/work/campaigns/:key",
         (Some("events"), None, None, None, None) => "/work/events",
@@ -236,17 +247,128 @@ fn work_route_label(tail: &str) -> &'static str {
         (Some("items"), Some(_), Some("links"), None, None) => "/work/items/:id/links",
         (Some("items"), Some(_), Some("links"), Some(_), None) => "/work/items/:id/links/:link",
         (Some("items"), Some(_), Some("ownership"), None, None) => "/work/items/:id/ownership",
-        (Some("items"), Some(_), Some("prepared-handoff"), None, None) => {
-            "/work/items/:id/prepared-handoff"
-        }
+        (Some("items"), Some(_), Some("prepared-handoff"), None, None) => "/work/items/:id/prepared-handoff",
         (Some("items"), Some(_), Some("transitions"), None, None) => "/work/items/:id/transitions",
         (Some("queue"), Some("burn"), None, None, None) => "/work/queue/burn",
-        _ => "other",
     }
+    otherwise => OTHER_ROUTE
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeSet;
+
+    #[test]
+    fn registered_paths_reach_every_route_label() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/request-log-routes.json")).unwrap();
+        let prefixes = fixture["python_prefixes"].as_object().unwrap();
+        let paths = fixture["python_exact"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .chain(
+                prefixes
+                    .values()
+                    .flat_map(|paths| paths.as_array().unwrap()),
+            )
+            .chain(fixture["native"].as_array().unwrap());
+        let reached: BTreeSet<_> = paths
+            .map(|value| {
+                let path = value.as_str().unwrap();
+                let label = route_label(path);
+                assert_ne!(label, OTHER_ROUTE, "{path}");
+                label
+            })
+            .chain([route_label("/fixture-unknown")])
+            .collect();
+        let closed: BTreeSet<_> = FRONT_ROUTE_LABELS
+            .iter()
+            .chain(WORK_ROUTE_LABELS)
+            .copied()
+            .chain([OTHER_ROUTE])
+            .collect();
+        assert_eq!(reached, closed);
+    }
+
+    #[test]
+    fn method_labels_are_bounded_and_case_sensitive() {
+        for (method, label) in [
+            ("GET", "GET"),
+            ("POST", "POST"),
+            ("PUT", "PUT"),
+            ("PATCH", "PATCH"),
+            ("DELETE", "DELETE"),
+            ("HEAD", "HEAD"),
+            ("OPTIONS", "OPTIONS"),
+            ("CONNECT", "other"),
+            ("get", "other"),
+            ("", "other"),
+        ] {
+            assert_eq!(method_label(method), label, "{method:?}");
+        }
+    }
+
+    #[test]
+    fn route_labels_cover_templates_and_hostile_paths() {
+        for (path, label) in [
+            ("/deck/actions/aa_fixture", "/deck/actions/:id"),
+            ("/deck/observed/fixture", "/deck/observed/:group"),
+            ("/work/campaigns/%66ixture", "/work/campaigns/:key"),
+            ("/work/items/fixture", "/work/items/:id"),
+            ("/work/items/fixture/attempts", "/work/items/:id/attempts"),
+            (
+                "/work/items/fixture/completions",
+                "/work/items/:id/completions",
+            ),
+            ("/work/items/fixture/events", "/work/items/:id/events"),
+            ("/work/items/fixture/execution", "/work/items/:id/execution"),
+            ("/work/items/fixture/links", "/work/items/:id/links"),
+            (
+                "/work/items/fixture/links/fixture",
+                "/work/items/:id/links/:link",
+            ),
+            ("/work/items/fixture/ownership", "/work/items/:id/ownership"),
+            (
+                "/work/items/fixture/prepared-handoff",
+                "/work/items/:id/prepared-handoff",
+            ),
+            (
+                "/work/items/fixture/transitions",
+                "/work/items/:id/transitions",
+            ),
+            ("/deck/actions/", "other"),
+            ("/deck/actions/aa_", "other"),
+            ("/deck/actions/AA_fixture", "other"),
+            ("/deck/actions/%61a_fixture", "other"),
+            ("/deck/actions/aa_fixture/", "other"),
+            ("/deck/actions//aa_fixture", "other"),
+            ("/deck/observed/", "other"),
+            ("/deck/observed/fixture/", "other"),
+            ("/deck/observed//fixture", "other"),
+            ("/he%61lth", "other"),
+            ("/HEALTH", "other"),
+            ("/healthcheck", "other"),
+            ("/policyX", "other"),
+            ("/health/", "other"),
+            ("//health", "other"),
+            // The Python Worklore dispatcher discards empty path segments.
+            ("/work/campaigns/", "/work/campaigns"),
+            ("/work/campaigns//fixture", "/work/campaigns/:key"),
+            ("/work/items/", "/work/items"),
+            ("/work/items//fixture/", "/work/items/:id"),
+            ("/work/items/fixture/links/", "/work/items/:id/links"),
+            (
+                "/work/items/fixture/links//fixture",
+                "/work/items/:id/links/:link",
+            ),
+            ("/work/items/fixture/UNKNOWN", "other"),
+            ("/work/items/fixture/events/extra", "other"),
+        ] {
+            assert_eq!(route_label(path), label, "{path}");
+        }
+    }
+
     #[test]
     fn registration_accepts_native_and_proxy_but_not_shadow() {
         let modes = Modes::parse(&["registration=native".into()]).unwrap();

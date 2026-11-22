@@ -432,26 +432,34 @@ pub struct RequestLine<'a> {
 impl fmt::Display for RequestLine<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let log = self.log;
-        // The method, route and stage classifiers return JSON-safe literals.
-        // Write them directly so the new fields need no owned strings.
-        write!(
-            f,
-            concat!(
-                r#"{{"event":"request","request_id":{},"family":{},"method":"{}","route":"{}","#,
-                r#""status":{},"latency_seconds":{:?},"credential_kind":{},"stage":"{}","#,
-                r#""request_bytes":{},"response_bytes":{}}}"#
-            ),
-            log.id,
-            serde_json::json!(log.family),
-            log.method,
-            log.route,
-            log.status,
-            self.latency_seconds,
-            serde_json::json!(log.credential_kind),
-            log.stage.get().label(),
-            log.request_bytes.load(Ordering::Relaxed),
-            log.response_bytes,
-        )
+        // Keep the legacy key order. Serde writes all values to one buffer
+        // from borrowed labels, without building a map or owned label strings.
+        let mut line = Vec::with_capacity(256);
+        line.push(b'{');
+        macro_rules! fields {
+            ($($key:literal => $value:expr),+ $(,)?) => {
+                $(
+                    line.extend_from_slice(concat!("\"", $key, "\":").as_bytes());
+                    serde_json::to_writer(&mut line, &$value).map_err(|_| fmt::Error)?;
+                    line.push(b',');
+                )+
+            };
+        }
+        fields!(
+            "credential_kind" => log.credential_kind,
+            "event" => "request",
+            "family" => log.family,
+            "latency_seconds" => self.latency_seconds,
+            "request_bytes" => log.request_bytes.load(Ordering::Relaxed),
+            "request_id" => log.id,
+            "response_bytes" => log.response_bytes,
+            "stage" => log.stage.get().label(),
+            "status" => log.status,
+            "method" => log.method,
+            "route" => log.route,
+        );
+        *line.last_mut().expect("request log fields") = b'}';
+        f.write_str(std::str::from_utf8(&line).map_err(|_| fmt::Error)?)
     }
 }
 impl Drop for RequestLog {
@@ -533,6 +541,42 @@ mod tests {
         assert_eq!(line["credential_kind"], "unchecked");
         assert_eq!(line["family"], "status");
         assert_eq!(line["status"], 500);
+    }
+
+    #[test]
+    fn request_line_escapes_labels_and_appends_fields_after_the_legacy_order() {
+        let log = RequestLog {
+            telemetry: Arc::default(),
+            id: 7,
+            family: "family\"fixture",
+            method: "NEW\nMETHOD",
+            route: "/fixture/\"\\path",
+            status: 503,
+            credential_kind: "credential\\fixture",
+            stage: StageSlot::default(),
+            request_bytes: Arc::default(),
+            response_bytes: 0,
+            start: Instant::now(),
+        };
+        let line = |latency_seconds| {
+            RequestLine {
+                log: &log,
+                latency_seconds,
+            }
+            .to_string()
+        };
+        assert_eq!(
+            line(0.5),
+            concat!(
+                r#"{"credential_kind":"credential\\fixture","event":"request","family":"family\"fixture","#,
+                r#""latency_seconds":0.5,"request_bytes":0,"request_id":7,"response_bytes":0,"#,
+                r#""stage":"received","status":503,"method":"NEW\nMETHOD","route":"/fixture/\"\\path"}"#,
+            )
+        );
+        for latency_seconds in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let decoded: serde_json::Value = serde_json::from_str(&line(latency_seconds)).unwrap();
+            assert!(decoded["latency_seconds"].is_null());
+        }
     }
 
     #[test]
