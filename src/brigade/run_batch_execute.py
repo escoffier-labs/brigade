@@ -3,60 +3,74 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import hashlib
 import json
 import re
 import sys
-from dataclasses import replace
+import threading
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from . import (
     agents,
+    codex_appserver,
     fleet_client,
     inbox_lock,
     localio,
+    proc,
     run_batch_artifacts,
+    run_batch_capability,
     run_batch_launch,
     run_batch_workspace,
+    run_control,
     run_journal,
     run_lifecycle,
     run_receipts,
+    run_task_inbox,
     run_task_journal,
     run_tasks,
     runguard,
 )
-from .run_batch import BatchError
-from .run_transport import Assignment, WorkerResult
+from .run_batch import MARKER_NAME, BatchError, read_request_marker
+from .run_batch_capability import read_only_enforcement_error
+from .run_transport import TASK_CANCELLED_STATUS, Assignment, WorkerResult
 from .roster import Roster, read_only_cloud_mutation_error
 
 
 # Written once the batch is accepted into the lifecycle journal, so a deleted journal is detectable.
 JOURNAL_SENTINEL = "batch-journal-enrolled.json"
+_CANCEL_POLL_SECONDS = 0.5
+# Cancel outcomes that do not prove the worker stopped writing its checkout.
+_UNCONTAINED = frozenset({"still_active", "error"})
+
+
+@dataclass
+class _TaskRuntime:
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    handed_off: bool = False
+    cancel_done: threading.Event | None = None
+    attempt_id: str | None = None
+    containment: str | None = None
+    # Where the task runs once a remote router has decided: "local" or
+    # "remote". None means no decision yet; without a router every task is local.
+    routing: str | None = None
+
+
+_BATCH_TASK_PREFIX = "Batch task_id: "
+
+
+def _batch_task_id(task: str) -> str | None:
+    """The task id from a batch assignment's text, which always starts with it."""
+    if not task.startswith(_BATCH_TASK_PREFIX):
+        return None
+    return task[len(_BATCH_TASK_PREFIX) :].split("\n", 1)[0] or None
 
 
 def _reference(value: str | None) -> str | None:
     """Drop a provider value the journal would refuse, rather than lose the whole observation."""
     return value if run_task_journal.provider_reference(value) else None
-
-
-def _read_only_enforcement_error(task_id: str, agent: Any, roster: Roster, *, read_only: bool) -> str | None:
-    """Refuse a per-task read-only setting the seat cannot hard-enforce.
-
-    The shared-writable layer rule lets a read-only task run beside a writer in
-    one checkout, so a soft or prompt-only read-only mode is not enough. A
-    read-only roster sandbox likewise cannot carry a writable task.
-    """
-    if read_only:
-        enforcement = agents.read_only_enforcement(agent.cli or "", sandbox=roster.sandbox, transport=agent.transport)
-        if enforcement != "hard":
-            return (
-                f"task {task_id} is read_only but seat {agent.name!r} enforces read-only as {enforcement!r} "
-                f"under sandbox {roster.sandbox!r}; use isolation worktree, depends_on, or a hard read-only seat"
-            )
-    elif roster.sandbox == "read-only":
-        return f"task {task_id} is writable but the roster sandbox is read-only"
-    return None
 
 
 def _refuse_externally_controlled(run_dir: Path) -> None:
@@ -73,6 +87,11 @@ class BatchExecution:
         self.plan = plan
         self.run_dir = run_dir
         self.workspace = workspace
+        self.runtime = {task["task_id"]: _TaskRuntime() for task in plan["tasks"]}
+        self.processes = proc.ProcessRegistry()
+        # True when a remote router may send tasks to another machine.
+        self.routed = False
+        self.turns: run_control.LiveTurnRegistry | None = None
         # The prepared handle and its journal version, captured at the launch point.
         self.prepared: dict[str, tuple[run_tasks.TaskHandle, str]] = {}
         # Per-task read-only is enforced by the existing worker read-only path,
@@ -80,6 +99,10 @@ class BatchExecution:
         self.read_only = {t["task_id"]: bool(t.get("read_only", False)) for t in plan["tasks"]}
         # Tasks refused at the launch point keep their journal state untouched.
         self.refused: set[str] = set()
+        # Declared prerequisites, and dependents never launched because one of
+        # them was cancelled. Those stay queued and do not abort later waves.
+        self.depends_on = {t["task_id"]: tuple(t.get("depends_on") or ()) for t in plan["tasks"]}
+        self.prerequisite_cancelled: set[str] = set()
         # Per-task worktrees created and validated before any launch, by task ID.
         self.workspaces: dict[str, run_batch_workspace.Binding] = {}
         # Per-task launch refusals, as (code, reason), including every workspace
@@ -199,8 +222,11 @@ class BatchExecution:
         paths = [run_batch_workspace.expected_path(self.workspace, self.run_dir.name, task_id) for task_id in isolated]
         for index, task_id in enumerate(isolated):
             state = states.get(task_id)
-            if state is not None and (state.handle.attempt_id is not None or state.status != "queued"):
-                # The existing relaunch fence owns this task. Never prepare a checkout for it.
+            if state is not None and (
+                state.cancel_requested or state.handle.attempt_id is not None or state.status != "queued"
+            ):
+                # The existing relaunch fence owns this task. Never prepare a
+                # checkout for it, including one cancelled before launch.
                 continue
             others = [path for position, path in enumerate(paths) if position != index]
             try:
@@ -243,9 +269,120 @@ class BatchExecution:
             raise BatchError("launch-refused", f"task {task_id} is missing from the lifecycle journal")
         return found
 
+    def _drain_inbox(self) -> bool:
+        """Journal pending cancel intent; the batch owns the run lock here.
+
+        A refused inbox is reported and skipped: a malformed request must never
+        turn into a failed dispatch, and it names no task the batch may launch.
+        """
+        try:
+            return bool(run_task_inbox.drain(self.run_dir, self.workspace))
+        except run_task_inbox.TaskInboxError as exc:
+            print(f"warning: task cancel inbox refused: {exc.code}: {exc.detail}", file=sys.stderr)
+            return False
+
+    def _route_recorder(self, router: Any) -> Any:
+        """Wrap the per-seat remote router to record each task's routing decision."""
+
+        def routed(seat: str, task: str, prompt: str) -> Any:
+            task_id = _batch_task_id(task)
+            runtime = self.runtime.get(task_id) if task_id is not None else None
+            dispatched = router(seat, task, prompt)
+            if runtime is not None:
+                with runtime.lock:
+                    runtime.routing = "local" if dispatched is None else "remote"
+                if dispatched is None and task_id is not None:
+                    run_task_inbox.mark_local_task(self.run_dir, self.workspace, task_id)
+            return dispatched
+
+        return routed
+
+    def _watch_cancels(self, stopped: threading.Event, *, terminate: bool = True) -> None:
+        try:
+            self._watch_cancels_loop(stopped, terminate=terminate)
+        finally:
+            # A watcher that stops for any reason must stop advertising live
+            # termination, or `runs tasks cancel` would promise a stop nobody makes.
+            run_task_inbox.retire_live_watcher(self.run_dir, self.workspace)
+
+    def _watch_cancels_loop(self, stopped: threading.Event, *, terminate: bool) -> None:
+        while not stopped.wait(_CANCEL_POLL_SECONDS):
+            try:
+                self._watch_once(stopped, terminate=terminate)
+            except Exception as exc:  # noqa: BLE001 - one bad poll must not end live cancellation
+                print(f"warning: task cancel watcher poll failed: {type(exc).__name__}", file=sys.stderr)
+
+    def _watch_once(self, stopped: threading.Event, *, terminate: bool) -> None:
+        self._drain_inbox()
+        if not terminate:
+            # A remote route has no exact per-task cancel, so a running
+            # task keeps its real result and the intent shows as too late.
+            return
+        try:
+            states = run_tasks.read_tasks(self.run_dir)
+        except run_tasks.TaskJournalError as exc:
+            print(f"warning: task cancel journal refused: {exc}", file=sys.stderr)
+            return
+        # Both transactions have exited before we acquire runtime locks
+        # or make any potentially blocking transport call.
+        for state in states:
+            if stopped.is_set():
+                return
+            if not state.cancel_requested or state.launch_claim is None or state.result_id is not None:
+                continue
+            task_id, attempt_id = state.handle.spec.task_id, state.handle.attempt_id
+            runtime = self.runtime.get(task_id)
+            if runtime is None or attempt_id is None:
+                continue
+            with runtime.lock:
+                if runtime.handed_off or runtime.cancel_done is not None:
+                    continue
+                if self.routed and runtime.routing != "local":
+                    # A remote request has no exact per-task cancel, and an
+                    # undecided route is retried on the next poll. Only a task
+                    # known to run on this machine is ever stopped.
+                    continue
+                done = runtime.cancel_done = threading.Event()
+                runtime.attempt_id = attempt_id
+            try:
+                self.processes.cancel_task(task_id, attempt_id)
+                if self.turns is not None:
+                    self.turns.interrupt(task_id=task_id, attempt_id=attempt_id, latch_task=True)
+            finally:
+                done.set()
+
+    def _cancel_containment(self, task_id: str, attempt_id: str, result: WorkerResult) -> str:
+        outcomes = {outcome.result for outcome in self.processes.task_cancellation_outcomes(task_id, attempt_id)}
+        if self.turns is not None:
+            turn = self.turns.task_interrupt_outcome(task_id, attempt_id)
+            if turn is not None:
+                outcomes.add("interrupted" if turn == "still_active" and result.status == "interrupted" else turn)
+        return next((s for s in ("error", "still_active", "interrupted") if s in outcomes), "unknown")
+
+    def _record_cancelled(self, task_id: str) -> None:
+        """Record the one terminal cancellation observation for a gated task.
+
+        The attempt is the deterministic one the launch would have used, so the
+        cancellation names the same assignment. Replay is a no-op once the
+        terminal result exists.
+        """
+        state = self.current(task_id)
+        if state.result_id is not None or not state.cancel_requested:
+            return
+        handle = run_tasks.prepare_attempt(self.run_dir, workspace=self.workspace, task_id=task_id)
+        run_tasks.observe_task(
+            self.run_dir,
+            workspace=self.workspace,
+            handle=handle,
+            observation=run_tasks.TaskObservation(status="cancelled", containment="not-launched"),
+        )
+
     def launch_recorder(self, agent: Any, assignment: Assignment | None, record_requested: Any) -> Any:
         """The claim-then-requested recorder the orchestrator runs inside the budget reservation."""
         task_id = assignment.task_id if assignment is not None else None
+        # The owner drains before each claim, so an intent that arrived after
+        # this task's attempt was prepared is journaled before the claim folds it.
+        self._drain_inbox()
         return run_batch_launch.launch_recorder(
             run_dir=self.run_dir,
             workspace=self.workspace,
@@ -270,7 +407,7 @@ class BatchExecution:
                 # The same refusal a read-only run applies to a mutating cloud seat.
                 error = read_only_cloud_mutation_error(agent)
             if error is None and agent is not None:
-                error = _read_only_enforcement_error(task["task_id"], agent, roster, read_only=read_only)
+                error = read_only_enforcement_error(task["task_id"], agent, roster, read_only=read_only)
             if error is not None:
                 raise BatchError("invalid-seat", error)
         specs = tuple(
@@ -289,7 +426,7 @@ class BatchExecution:
         return [
             Assignment(
                 worker=t["seat"],
-                task=f"Batch task_id: {t['task_id']}\n\n{t['text']}",
+                task=f"{_BATCH_TASK_PREFIX}{t['task_id']}\n\n{t['text']}",
                 stage=layers[t["task_id"]],
                 task_id=t["task_id"],
                 attempt_id=attempts[t["task_id"]],
@@ -297,9 +434,44 @@ class BatchExecution:
             for t in self.plan["tasks"]
         ]
 
-    def observe(self, result: WorkerResult) -> None:
+    def observe(self, result: WorkerResult) -> WorkerResult | None:
+        if result.task_id is None:
+            return None
         task_id = str(result.task_id)
+        runtime = self.runtime[task_id]
+        with runtime.lock:
+            runtime.handed_off = True
+            done, attempt_id = runtime.cancel_done, runtime.attempt_id
+        containment = None
+        if done is not None and attempt_id is not None:
+            done.wait()
+            if runtime.containment is None:
+                runtime.containment = self._cancel_containment(task_id, attempt_id, result)
+            containment = runtime.containment
+            result = replace(result, ok=False, status=TASK_CANCELLED_STATUS)
+        self._publish_result(result, task_id, containment)
+        return result
+
+    def _observe_for_dispatch(self, result: WorkerResult) -> WorkerResult | None:
+        try:
+            return self.observe(result)
+        except Exception:
+            task_id = result.task_id
+            if task_id is None or self.runtime[task_id].containment is None:
+                raise
+            # Keep the scheduling decision on a write failure. Finish retries
+            # observation and reports any error that persists.
+            print(f"warning: task {task_id} cancellation observation failed", file=sys.stderr)
+            return replace(result, ok=False, status=TASK_CANCELLED_STATUS)
+
+    def _publish_result(self, result: WorkerResult, task_id: str, cancel_containment: str | None) -> None:
+        if task_id in self.prerequisite_cancelled:
+            # Never launched and never journaled: the task stays queued.
+            return
         if task_id in self.refused or result.status == "refused":
+            # A refusal is also where a cancel gate lands: record the terminal
+            # cancellation once, then leave the result untouched.
+            self._record_cancelled(task_id)
             return
         if self.current(task_id).result_id is not None:
             return
@@ -314,6 +486,11 @@ class BatchExecution:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         artifact_kind, artifact_digest = "receipt", digest
         binding = self.workspaces.get(task_id)
+        if cancel_containment in _UNCONTAINED:
+            # The stop was not confirmed, so the worker may still be writing
+            # the checkout. Commit nothing: the observation rests on the
+            # receipt, and the worktree stays exactly as the worker leaves it.
+            binding = None
         if binding is not None:
             # Collection runs inside the per-task run lock the batch holds from
             # creation through worker exit, so nothing else can be writing the
@@ -336,15 +513,18 @@ class BatchExecution:
                     # A candidate exists: the artifact is the commit, and only
                     # then does the observation name the artifact sidecar.
                     artifact_kind, artifact_digest = "commit", sidecar_digest
+        # An intent arriving after handoff can still be journaled before
+        # publication, including while worktree artifact collection is running.
+        self._drain_inbox()
         run_tasks.observe_task(
             self.run_dir,
             workspace=self.workspace,
             handle=handle,
             observation=run_tasks.TaskObservation(
-                status="completed" if result.ok else "failed",
+                status="cancelled" if cancel_containment is not None else ("completed" if result.ok else "failed"),
                 artifact_kind=artifact_kind,
                 artifact_digest=artifact_digest,
-                containment="quiescent",
+                containment=cancel_containment or "quiescent",
                 provider_task_id=_reference(result.provider_task_id),
                 original_run_id=_reference(result.original_run_id),
                 provider_result_id=_reference(result.provider_result_id),
@@ -366,13 +546,17 @@ class BatchExecution:
 
         # Reuse the wave scheduler and its fail-fast behavior. No wave exceeds
         # the effective roster limit, even before transport admission is applied.
-        waves: list[Assignment] = []
-        stage = 0
-        for layer in sorted({a.stage for a in assignments}):
-            members = [a for a in assignments if a.stage == layer]
-            for offset in range(0, len(members), roster.max_workers):
-                waves.extend(replace(a, stage=stage) for a in members[offset : offset + roster.max_workers])
-                stage += 1
+        # An enrolled Fleet Hub also caps same-seat members by that seat's free
+        # capacity; the lease at launch stays the final check. Only a layer with
+        # two tasks on one seat can be reshaped by that cap, so no other batch
+        # pays for the read.
+        per_layer: dict[int, list[str]] = {}
+        for assignment in assignments:
+            per_layer.setdefault(assignment.stage, []).append(assignment.worker)
+        capacity: dict[str, int] = {}
+        if any(len(seats) != len(set(seats)) for seats in per_layer.values()):
+            capacity = run_batch_capability.remaining_capacity(roster)
+        waves = run_batch_capability.build_waves(assignments, roster.max_workers, capacity)
         original_prompt = kwargs["build_prompt"]
 
         def build_prompt(agent, assignment, **prompt_kwargs):
@@ -387,7 +571,20 @@ class BatchExecution:
                 # An isolated task's checkout is re-validated immediately before
                 # its launch, so a file added since creation refuses that task.
                 self._validate_at_launch(task_id)
+                blocked = sorted(
+                    dep
+                    for dep in self.depends_on.get(task_id, ())
+                    if dep in self.prerequisite_cancelled or self._cancelled(dep)
+                )
+                if blocked:
+                    self.prerequisite_cancelled.add(task_id)
+                    raise BatchError("prerequisite-cancelled", f"task {task_id} depends on cancelled task {blocked[0]}")
                 current = self.current(task_id)
+                if current.cancel_requested:
+                    # A journaled intent owns this launch: record the terminal
+                    # cancellation on the prepared attempt and never invoke.
+                    self._record_cancelled(task_id)
+                    raise BatchError("cancelled-before-launch", f"task {task_id} was cancelled before it launched")
                 if current.handle.attempt_id is not None or current.status != "queued":
                     raise BatchError(
                         "launch-refused", f"task {task_id} already has a recorded attempt; refusing relaunch"
@@ -408,16 +605,51 @@ class BatchExecution:
             return original_prompt(agent, assignment, **prompt_kwargs)
 
         kwargs["build_prompt"] = build_prompt
-        kwargs["on_result"] = self.observe
+        kwargs["on_result"] = self._observe_for_dispatch
         kwargs["allow_reinvocation"] = False
         # Layers are ordered by stage. The DAG scheduler ignores stage, so it is never used here.
         kwargs["scheduler"] = "waves"
         kwargs["read_only_for"] = self.read_only_for
         kwargs["cwd_for"] = self.cwd_for
         kwargs["writable_worktree_for"] = self.writable_worktree_for
+        self.processes = kwargs.get("process_registry") or self.processes
+        self.turns = kwargs.get("control_registry")
+        if self.turns is None and kwargs.get("appserver") is not None:
+            self.turns = run_control.LiveTurnRegistry()
+        kwargs["process_registry"] = self.processes
+        kwargs["control_registry"] = self.turns
+        if kwargs.get("remote_transport") is not None:
+            self.routed = True
+            kwargs["remote_transport"] = self._route_recorder(kwargs["remote_transport"])
         with contextlib.ExitStack() as stack:
+            # Resume/replay: an intent that survived a crash is journaled, and
+            # the task is recorded as cancelled before any checkout or launch.
+            self._drain_inbox()
             self.prepare_workspaces(stack)
-            return planning.dispatch(waves, roster, **kwargs)
+            stopped = threading.Event()
+            # Fleet remote dispatch routes per seat and cannot cancel one exact
+            # remote request. Each task's routing decision is recorded: the
+            # watcher stops only tasks that run on this machine, and a task
+            # routed remote is listed in the live marker so `runs tasks cancel`
+            # reports live-termination-unavailable for it.
+            ctx = contextvars.copy_context()
+            watcher = threading.Thread(
+                target=ctx.run,
+                args=(self._watch_cancels, stopped),
+                name="batch-task-cancel",
+                daemon=True,
+            )
+            advertise = run_task_inbox.live_watcher(self.run_dir, self.workspace, routed=self.routed)
+            with advertise:
+                watcher.start()
+                try:
+                    return planning.dispatch(waves, roster, **kwargs)
+                finally:
+                    stopped.set()
+                    watcher.join(timeout=self.processes.cancellation_timeout + codex_appserver._INTERRUPT_GRACE)
+                    if watcher.is_alive():
+                        raise runguard.RetainRunLockError("batch cancellation watcher did not stop")
+                    self._drain_inbox()
 
     def resolve_model_policy(self, roster: Roster, **kwargs: Any) -> Any:
         from .aboyeur import orchestrator
@@ -459,6 +691,14 @@ class BatchExecution:
                 return routing
         return orchestrator.OrchestratorHealthRoutingDecision(roster=roster)
 
+    def _cancelled(self, task_id: str) -> bool:
+        """True when this task's terminal state is the recorded cancellation."""
+        try:
+            state = self.current(task_id)
+        except (BatchError, run_tasks.TaskJournalError):
+            return False
+        return state.status == "cancelled" and state.cancel_requested
+
     def finish(self, results: list[WorkerResult]) -> agents.AgentResult:
         failures: list[str] = []
         lines = []
@@ -471,10 +711,25 @@ class BatchExecution:
                 # could not be written. Keep it inside the batch summary path
                 # instead of escaping as an unexpected run failure.
                 failures.append(f"task {result.task_id} observation failed: {exc}")
+            if self._cancelled(str(result.task_id)):
+                # A recorded cancellation is a decided outcome, not a failure;
+                # the sibling results keep their own status.
+                lines.append(f"{result.task_id}: cancelled")
+                continue
+            if str(result.task_id) in self.prerequisite_cancelled:
+                # Never launched because a prerequisite was cancelled; it stays queued.
+                lines.append(f"{result.task_id}: prerequisite-cancelled")
+                continue
             lines.append(f"{result.task_id}: {'completed' if result.ok else result.status or 'failed'}")
         # Use the planned-run finish path with no synthesis invocation. It
         # records incomplete workers and retains every result and artifact.
-        ok = all(r.ok for r in results) and not failures
+        ok = (
+            all(
+                r.ok or self._cancelled(str(r.task_id)) or str(r.task_id) in self.prerequisite_cancelled
+                for r in results
+            )
+            and not failures
+        )
         detail = "; ".join(failures)
         if detail:
             lines.append(detail)
@@ -517,6 +772,7 @@ def stored_result(
             "result_id": state.result_id if state else None,
             "result_ref": str(path.relative_to(run_dir)) if path.is_file() else None,
             "workspace": "worktree" if worktree else "shared",
+            "selection": run_batch_capability.selection(task),
             "artifact": artifact,
             "refusal": {"code": refusal[0], "reason": refusal[1]} if refusal is not None else None,
         }
@@ -574,6 +830,62 @@ def request_lock(run_dir: Path):
         raise BatchError("request-busy", "another caller is dispatching this batch request") from exc
 
 
+def _batch_roster(workspace: Path, explicit: Path | None) -> Roster:
+    """Load the same roster the run dispatch would load for this workspace."""
+    from . import roster as roster_mod
+
+    try:
+        resolution = roster_mod.resolve_roster(workspace, explicit)
+        return roster_mod.load_roster(resolution.path, resolution=resolution)
+    except FileNotFoundError as exc:
+        raise BatchError("roster-unavailable", f"capability selection needs a roster: {exc}") from exc
+    except ValueError as exc:
+        raise BatchError("roster-invalid", f"capability selection needs a valid roster: {exc}") from exc
+
+
+def accepted_plan(plan: dict[str, Any], marker: dict[str, Any] | None, workspace: Path, args: Any) -> dict[str, Any]:
+    """Bind capability tasks to seats once, or replay the seats already recorded.
+
+    The first acceptance resolves against the live roster and persists the
+    result with the request. A retry or resume never recomputes: it validates
+    the recorded block, re-checks the recorded seat, and refuses when the roster
+    no longer declares or no longer admits that seat.
+    """
+    if not run_batch_capability.has_capability(plan):
+        return plan
+    roster = _batch_roster(workspace, getattr(args, "roster", None))
+    snapshot = fleet_client.load_model_policy_snapshot()
+    if marker is None:
+        return run_batch_capability.resolve(plan, roster, snapshot=snapshot)
+    return run_batch_capability.reuse(plan, marker, roster, snapshot=snapshot)
+
+
+def _refuse_recorded_seat_conflict(run_dir: Path, plan: dict[str, Any]) -> None:
+    """Refuse a capability task the journal already accepted on another seat.
+
+    Acceptance refuses a changed descriptor as a journal identity conflict; a
+    closed code keeps a retry that bound a different seat from surfacing as an
+    unhandled journal error. A task with no accepted spec is not checked here.
+    """
+    if not run_lifecycle._journal_path(run_dir).exists():
+        return
+    try:
+        accepted = run_tasks.read_tasks(run_dir)
+    except run_tasks.TaskJournalError:
+        return
+    seats = {row.handle.spec.task_id: row.handle.spec.seat for row in accepted}
+    for task in plan["tasks"]:
+        if not isinstance(task.get("capability"), str):
+            continue
+        seat = seats.get(task["task_id"])
+        if seat is not None and seat != task["seat"]:
+            raise BatchError(
+                "capability-seat-conflict",
+                f"task {task['task_id']} is already accepted on seat {seat!r}, "
+                f"not the recorded seat {task['seat']!r}; refusing launch. Use a new request_id",
+            )
+
+
 def execute_cli(args: Any, plan: dict[str, Any]) -> int:
     from . import cli
     from .cli.run import dispatch
@@ -597,11 +909,11 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
     # Serialize retry eligibility with dispatch, including preflight. The
     # workspace run lock remains the authority for executing worker processes.
     with request_lock(run_dir):
-        marker_path = run_dir / "batch-request.json"
-        marker = localio.read_json_dict(marker_path)
-        if marker_path.exists() and (
-            marker is None or re.fullmatch(r"[0-9a-f]{64}", str(marker.get("fingerprint"))) is None
-        ):
+        marker_path = run_dir / MARKER_NAME
+        # The reservation is read no-follow and bounded: a symlinked or oversized
+        # marker is refused rather than silently treated as absent.
+        marker = read_request_marker(run_dir)
+        if marker is not None and re.fullmatch(r"[0-9a-f]{64}", str(marker.get("fingerprint"))) is None:
             raise BatchError("request-unknown", "request reservation has no readable fingerprint; refusing launch")
         if marker is not None and marker.get("fingerprint") != plan["fingerprint"]:
             raise BatchError("request-conflict", "request_id already belongs to a different batch")
@@ -621,8 +933,14 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
                     "journal shows a possible launch but the request marker is missing; refusing launch",
                 )
         else:
-            localio.write_json(marker_path, plan)
-            run_journal._fsync_directory(run_dir)
+            # A valid marker is never rewritten: the accepted request, including
+            # its capability resolutions and digest, stays exactly as accepted.
+            fresh = marker is None
+            plan = accepted_plan(plan, marker, workspace, args)
+            _refuse_recorded_seat_conflict(run_dir, plan)
+            if fresh:
+                localio.write_json(marker_path, plan)
+                run_journal._fsync_directory(run_dir)
             execution = BatchExecution(plan, run_dir, workspace)
             # The base is checked once before the run starts, so a caller that
             # moved HEAD is refused with its own code and no run artifacts.

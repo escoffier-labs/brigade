@@ -34,7 +34,12 @@ STATES = frozenset(
     }
 )
 TERMINAL = frozenset({"completed", "failed", "interrupted", "cancelled"})
-CONTAINMENT = frozenset({"unknown", "active", "quiescent"})
+# ``not-launched`` names the containment of a cancellation that stopped a task
+# before any worker existed, so it is never confused with a quiescent worker.
+LIVE_CANCEL_CONTAINMENT = frozenset({"interrupted", "still_active", "error"})
+CONTAINMENT = frozenset({"unknown", "active", "quiescent", "not-launched"}) | LIVE_CANCEL_CONTAINMENT
+# Closed cancel-intent reasons: who asked for the cancellation, never free text.
+CANCEL_REASONS = frozenset({"operator", "parent", "budget"})
 ARTIFACT_KINDS = frozenset({"commit", "patch", "receipt", "unavailable"})
 # Closed disposal vocabulary: the retained-copy proof that justified removing a
 # task worktree, and whether its task branch survived. Values are tokens, never
@@ -191,6 +196,14 @@ def _validate_disposal_payload(payload: Mapping[str, Any]) -> None:
         raise run_events.CanonicalizationError("invalid task disposal branch state")
 
 
+def _validate_cancel_requested_payload(payload: Mapping[str, Any]) -> None:
+    """Closed cancel-intent shape: one identity and one bounded reason token."""
+    if not task_id(payload["task_id"]):
+        raise run_events.CanonicalizationError("invalid task cancel-request identity")
+    if payload["reason"] not in CANCEL_REASONS:
+        raise run_events.CanonicalizationError("invalid task cancel-request reason")
+
+
 def _validate_collected_payload(payload: Mapping[str, Any]) -> None:
     """Closed recovered-collection shape: one sidecar digest and its delivery.
 
@@ -230,6 +243,9 @@ def validate_payload(event_type: str, payload: Mapping[str, Any]) -> None:
     if event_type == "task.disposed":
         _validate_disposal_payload(payload)
         return
+    if event_type == "task.cancel-requested":
+        _validate_cancel_requested_payload(payload)
+        return
     if event_type == "task.artifact-collected":
         _validate_collected_payload(payload)
         return
@@ -260,6 +276,8 @@ def validate_payload(event_type: str, payload: Mapping[str, Any]) -> None:
         if not valid:
             raise run_events.CanonicalizationError("invalid task reference field")
     if event_type == "task.observed":
+        if payload["containment"] in LIVE_CANCEL_CONTAINMENT and payload["status"] != "cancelled":
+            raise run_events.CanonicalizationError("live cancel containment requires a cancelled task")
         terminal = payload["status"] in TERMINAL
         if terminal != (payload["result_id"] is not None):
             raise run_events.CanonicalizationError("task result identity requires terminal status")

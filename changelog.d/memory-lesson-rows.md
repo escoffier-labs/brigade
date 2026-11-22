@@ -1,1 +1,0 @@
-- Failed runs and review findings with card references now add deduplicated negative evidence. Memory verification prioritizes pending negative evidence within a bounded batch share and keeps the existing verification cooldown.

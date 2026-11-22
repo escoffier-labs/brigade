@@ -11,6 +11,7 @@ from .. import localio, work_mode
 from ..config import load_config
 from ..skill_wiring import normalize_newlines
 from ..templates import template_root
+from ..work_cmd.verify_gate import StopGate
 from .install_cmd import status_payload
 from .anchored_io import SessionIntegrityError
 from .runtime import (
@@ -55,6 +56,7 @@ def _skill_current(target: Path) -> tuple[bool, bool]:
 def _recent_write_without_receipt(target: Path) -> bool:
     now = localio.utc_now()
     target_label = str(target.expanduser().resolve())
+    gate = StopGate(target)
     for state in iter_session_states(
         target,
         modified_since=now - RECENT_WRITE_WINDOW,
@@ -78,7 +80,8 @@ def _recent_write_without_receipt(target: Path) -> bool:
             target,
             receipt_threshold,
             session_fingerprint=fingerprint,
-        ) and not _shared_tree_block_is_foreign(target, session_id, state):
+            gate=gate,
+        ) and not _shared_tree_block_is_foreign(target, session_id, state, gate=gate):
             return True
     return False
 

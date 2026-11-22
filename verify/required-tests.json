@@ -1,0 +1,9 @@
+{
+  "schema": "brigade.verify_required_config.v1",
+  "planner_files": ["scripts/ci_test_selection.py", "scripts/ci_selection_core.py"],
+  "planner_argv": ["{python}", "{planner_dir}/scripts/ci_test_selection.py", "--repo", "{head_dir}", "--base", "{base}", "--head", "{head}", "--output", "{output}"],
+  "mode_key": "mode",
+  "selected_key": "selected",
+  "digest_key": "selector_digest",
+  "run_argv": ["./scripts/verify-focused", "--", "{tests}"]
+}

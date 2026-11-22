@@ -1,8 +1,10 @@
 # Explicit task batches
 
 `brigade run batch batch.json --dry-run [--json]` validates a caller-supplied
-batch and prints deterministic topological layers, task seats, and a SHA-256
-request fingerprint. Dry runs make zero model calls and require no roster.
+batch and prints deterministic topological layers, task seats or capability
+selectors, and a SHA-256 request fingerprint. Dry runs make zero model calls and
+require no roster; a capability is resolved when the request is accepted, not
+when it is planned.
 
 Without `--dry-run`, the command executes through the existing run orchestrator.
 Use `--cwd WORKSPACE` and optionally `--roster ROSTER.toml`. Execution makes no
@@ -11,6 +13,8 @@ Validation errors exit 2, with a stable code in text or `error.code` in JSON.
 Tasks that `brigade t3 open` refuses as `t3-unsupported` belong here, submitted
 as a separate request with its own admission, budget and receipts. See
 [work T3 cannot run](t3-governed-delegation.md#work-t3-cannot-run).
+Tasks that `brigade orca open` refuses as `orca-unsupported` also belong here.
+See [governed Orca delegation](orca-governed-delegation.md).
 
 ```json
 {
@@ -18,7 +22,7 @@ as a separate request with its own admission, budget and receipts. See
   "request_id": "example-request-1",
   "tasks": [
     {"task_id": "inspect", "text": "Inspect the example", "seat": "coder"},
-    {"task_id": "review", "text": "Review the findings", "seat": "coder", "depends_on": ["inspect"]}
+    {"task_id": "review", "text": "Review the findings", "capability": "review.code", "depends_on": ["inspect"]}
   ],
   "synthesis": {"text": "Summarize the results", "seat": "writer"}
 }
@@ -28,15 +32,16 @@ Synthesis defaults to off (omit it or use `null`). When present, it must specify
 non-empty `text` and a `seat`. It is fingerprinted and displayed as requested,
 but never executed. No synthesis budget, receipt, or launch is created yet.
 Only the documented fields are accepted. Each task requires `task_id`, `text`,
-and `seat`. `depends_on` defaults to an empty list of unique task IDs.
-`depends_on` must be a list when present. `null` is refused, unlike
-`synthesis`. Each task may also declare `isolation`, either `shared` (the
-default) or `worktree`, and `read_only`, a boolean that defaults to false.
-Rows are checked in input order, so when several rows are
-invalid, the reported code belongs to the first invalid row. A row error names
-the row as `tasks[N]` until its `task_id` is valid, and by `task_id` after that.
-Selecting a task by admitted capability instead of a named seat, which #2047
-also allows, is not part of v1. It remains a later capability-selection slice.
+and exactly one selector: `seat` or `capability`. `depends_on` defaults to an
+empty list of unique task IDs. `depends_on` must be a list when present. `null`
+is refused, unlike `synthesis`. Each task may also declare `isolation`, either
+`shared` (the default) or `worktree`, and `read_only`, a boolean that defaults to
+false. Rows are checked in input order, so when several rows are invalid, the
+reported code belongs to the first invalid row. A row error names the row as
+`tasks[N]` until its `task_id` is valid, and by `task_id` after that. A task that
+names both selectors, or neither, is refused with `invalid-selection`. A
+`capability` that is not a roster capability tag is refused with
+`invalid-capability`. See [Capability selection](#capability-selection).
 
 The batch admits 1 through 8 tasks, matching the existing durable assignment
 batch bound. Each task or synthesis text is limited to 16,384 UTF-8 bytes.
@@ -54,14 +59,16 @@ tasks, create task storage, or use the T3 route.
 
 Canonicalization sorts tasks by ID, dependency lists, and object keys, fills
 optional dependencies, synthesis, isolation, and read-only defaults, and
-preserves exact text.
-Layers sort ready task IDs lexicographically. The fingerprint hashes compact
-ASCII-escaped canonical JSON, including schema, request ID, texts, seats,
-dependencies, non-default isolation and read-only values, synthesis, and any
-pinned `base_sha`. Object key, task, and dependency ordering do not
-change the fingerprint. Text changes do. Isolation and read-only at their
-defaults are omitted from the hashed bytes, so a batch written before these
-fields existed keeps its fingerprint. `compare_request(stored_fingerprint,
+preserves exact text. Layers sort ready task IDs lexicographically. The
+fingerprint hashes compact ASCII-escaped canonical JSON, including schema,
+request ID, texts, seats or capabilities, dependencies, non-default isolation
+and read-only values, synthesis, and any pinned `base_sha`. Object key, task,
+and dependency ordering do not change the fingerprint. Text changes do.
+Isolation and read-only at their defaults are omitted from the hashed bytes, so
+a batch written before these fields existed keeps its fingerprint. A
+`capability` field is added to the hashed row only when that task uses one, so a
+batch whose tasks all name a seat keeps its existing fingerprint byte for byte.
+`compare_request(stored_fingerprint,
 payload, base_sha=...)` returns `new` for no stored fingerprint, `same` for a
 match, and `conflict` otherwise. The caller must look up the stored fingerprint
 under the same request ID. A stored value that is not 64 lowercase hex
@@ -71,6 +78,79 @@ those exact bytes: Python `json.dumps` with `ensure_ascii=True`, so non-ASCII
 text is written as lowercase `\uXXXX` escapes and characters outside the Basic
 Multilingual Plane as surrogate pairs. A golden vector in
 `tests/test_run_batch.py` pins the bytes and digest for other implementations.
+
+## Capability selection
+
+A task may name an admitted capability instead of a seat:
+
+```json
+{"task_id": "review", "text": "Review the findings", "capability": "review.code"}
+```
+
+The tag uses the roster capability grammar:
+`[a-z][a-z0-9]*(\.[a-z][a-z0-9-]*)+`, the same rule `agents.<name>.capabilities`
+uses. A task names exactly one of `seat` or `capability`; both, or neither, is
+`invalid-selection`.
+
+Resolution runs once, at acceptance, before any worker is launched. Candidates
+are the roster seats that declare the capability, in roster order, including a
+researcher's implicit `research.general` expansion. A candidate the batch would
+refuse for that task is dropped:
+
+1. the direct-worker rule (unknown seat, orchestrator seat, no CLI adapter, a
+   CLI outside `limits.allow_models`, or a read-only-incapable seat for a
+   `read_only` task);
+2. read-only enforcement, and the mutating `codex-cloud` refusal for a read-only
+   task;
+3. the same Fleet Hub model-policy admission the batch applies to a named seat,
+   when a policy snapshot applies.
+
+The first surviving candidate is the task's seat. The same roster and request
+always pick the same seat. When no candidate survives, the whole batch is
+refused before launch with `capability-unavailable`, naming the task and the
+tag and never the task text.
+
+Each resolution is recorded in `batch-request.json` as
+`{"task_id", "capability", "seat", "candidates"}` under
+`capability_resolutions`, where `candidates` is the number of roster seats that
+declared the tag. The task row also records the resolved `seat`, and the
+lifecycle journal accepts that seat. A retry or resume reuses the recorded seat
+and never resolves again: removing or reordering seats in the roster does not
+move an accepted task. A recorded seat the roster no longer declares refuses the
+batch with `capability-seat-missing` instead of silently picking another seat,
+because the journal binds the resolved seat. A retry whose marker has no
+recorded resolution for a capability task is refused with `request-unknown`.
+An unresolvable roster refuses a capability batch with `roster-unavailable` or
+`roster-invalid` rather than an unhandled error.
+
+The recorded block sits outside the request fingerprint, so it is read closed.
+Every row must be exactly those four fields, name a capability task of this
+request, carry that task's capability, count its candidates, and agree with the
+seat the request row records. The marker also carries a `resolution_digest`, a
+sha256 over the canonical rows and the request fingerprint, and a retry verifies
+it. Any other shape, a mismatch with the request row, or a digest that does not
+match refuses the batch with `capability-marker-mismatch` before anything is
+launched:
+
+- `capability-marker-mismatch`: the persisted capability resolutions are not a
+  closed list of this request's capability tasks, disagree with the request's
+  recorded seats, or do not match `resolution_digest`.
+- `capability-seat-invalid`: the recorded seat no longer declares the
+  capability, or the batch's per-task checks would now refuse it. The retry
+  refuses rather than resolving another seat.
+- `capability-seat-missing`: the roster no longer declares the recorded seat.
+- `capability-seat-conflict`: the lifecycle journal already accepted the task
+  on a different seat, so the retry refuses instead of failing as a journal
+  identity error. Use a new `request_id`.
+
+`batch-request.json` is read no-follow and bounded (512 KiB). A marker that is a
+symlink, not a regular file, oversized, or unreadable is refused with
+`request-unknown`, as is a missing journal that acceptance had already bound. A
+retry with a valid marker never rewrites it, so the accepted request and its
+resolutions stay exactly as accepted.
+
+Resolution never puts the tag on the assignment's `capabilities`, so it selects
+a seat and does not gate the worker's tools.
 
 ## Isolation and concurrency
 
@@ -633,6 +713,16 @@ same-seat retries, continuations, and fallback dispatch after the first result.
 The first failure is retained as the task result. Planned and `--worker` runs
 retain their existing retry policy.
 
+Besides `max_workers`, wave construction caps how many tasks in one wave use the
+same seat by that seat's known capacity. When the run's fleet is enrolled and
+the Hub answers `read_seat_usage`, the cap is the seat's remaining capacity from
+the enrolled policy's `concurrency` for that seat; otherwise no extra cap
+applies. A task over the cap moves to the next wave in the same dependency
+layer, and order inside the layer is preserved. A seat whose remaining capacity
+is zero adds no scheduling cap, because the launch-time lease is the final
+admission check and is what refuses it. The cap is a scheduling hint only: it
+never grants a lease and never replaces provider or Hub admission.
+
 A request reserves `.brigade/runs/batch-<SHA-256 of request ID>/` by atomic
 directory creation before dispatch. `batch-request.json` retains its fingerprint
 and canonical plan. The directory is rooted at the git worktree root, or the
@@ -713,15 +803,21 @@ JSON output uses `brigade.run_batch_result.v1`, with `run_id`, `request_id`, `ru
 `tasks` object keyed by task ID. Each member has `status`, `not_run`, `result_id`,
 `result_ref` (relative to the run directory, or null), `workspace`
 (`worktree` for a task that ran in its own reserved checkout, `shared` for one
-that ran in the caller workspace), `artifact` (`{delivery, candidate_commit,
+that ran in the caller workspace), `selection`
+(`{"kind": "seat", "capability": null}` or
+`{"kind": "capability", "capability": "<tag>"}`, with no roster or task text),
+`artifact` (`{delivery, candidate_commit,
 patch_ref, patch_sha256}` for a worktree task, null for a shared one), and
 `refusal` (`{code, reason}` for a task
 refused at its launch point, otherwise null). Human mode also prints each
-refusal to stderr as `task <id>: <code> (<reason>)`. Completed results persist
+refusal to stderr as `task <id>: <code> (<reason>)`. `brigade runs tasks show`
+reports the same `selection` for a batch task, read from its request marker.
+Completed results persist
 as each worker finishes, as the same sanitized projection the run receipt uses
 (no raw stdout or stderr captures). Failed workers retain their result receipt too. Skipped
 tasks remain queued in the journal, have `not_run: true`, and have no result reference. Cancellation
 and timeout preserve completed results and report unresolved tasks as stored.
+Per-task cancellation is described in [Cancellation](#cancellation).
 Exit 0 requires every task to be completed successfully and the run to pass
 finalization. Worker failures, cancellation, and timeout exit 1. Preflight and
 run-guard refusals retain their nonzero dispatch exit code and stderr reason.
@@ -729,6 +825,97 @@ Batch runs retain normal drift checkpoints, worker-result artifacts, final
 receipts, artifact collection, and lineage metadata without calling synthesis.
 Synthesis execution exits 2 with `synthesis-not-implemented`. Dry run still shows
 its requested seat. No synthesis model call or budget is created.
+
+## Cancellation
+
+`brigade runs tasks cancel <run> <task_id>... [--reason operator|parent|budget] [--json]`
+requests cancellation of the selected assignments. Each request targets one
+task. `--reason` accepts the tokens shown above.
+
+The journal records intent as `task.cancel-requested` and the worker outcome
+separately as `task.observed`. The inbox reserves the `ack` kind and refuses it
+with `ack-unsupported`.
+
+A task journal may only be written by the active run owner. A cancel request
+often comes from another process, so it never journals directly. It is first
+written as one closed `brigade.task_inbox_request.v1` document under
+`<run_dir>/task-inbox/`: kind, task id, reason token and a UTC timestamp, with no
+paths and no free text. Requests are created with an exclusive no-follow create
+and are never overwritten, so the first request for a task wins and a repeated
+request is a no-op. They are also never deleted, because the file is the replay
+source.
+
+The owner drains the inbox before each launch claim and every 0.5 seconds
+while dispatch is active. A journaled request for an unclaimed task blocks the
+launch. Brigade records one `cancelled` observation with containment
+`not-launched` on the task's deterministic attempt. Replay and resume drain
+the inbox before preparing another dispatch.
+
+For a claimed task, Brigade decides between completion and cancellation at
+the worker result handoff. If the result reaches the batch before the watcher
+claims cancellation, Brigade keeps the worker's status and result. A journaled
+intent then appears as `cancel.too_late: true` in `runs tasks show` and
+`runs tasks list`. If the watcher wins, Brigade terminates subprocesses
+registered to that task and attempt, or requests interruption of that exact
+app-server turn. On Windows it uses each subprocess's existing Job Object to
+terminate the owned process tree. A worker or turn registering after the
+watcher wins is also cancelled.
+
+Once the worker returns, Brigade collects partial worktree changes through
+the usual artifact collection path and records one `cancelled` observation.
+When the stop was not confirmed (`still_active` or `error`), the worker may
+still be writing its checkout, so Brigade commits nothing from it: the
+observation rests on the receipt and the worktree is left as it is.
+Containment reports `interrupted`, `still_active`, or `error` based on the
+observed stop outcome, or `unknown` when no stop outcome was available. An
+app-server interrupt acknowledgement alone does not prove that the turn
+stopped. The batch joins the watcher when dispatch ends. A failed watcher poll
+is reported and the next poll continues. A watcher that ends for any reason
+stops advertising live termination, so `runs tasks cancel` never reports
+`requested` without a watcher to act on it.
+
+Fleet remote dispatch routes each task by seat, and it cannot cancel one
+exact remote request. When a batch has a remote router, Brigade records where
+each task went. The watcher stops a task only once the router has kept it on
+this machine. A task routed to another machine, or not routed yet, is never
+stopped and never recorded as `cancelled` after launch: it keeps its real
+result, and the intent shows as `cancel.too_late: true`. The cancel command
+promises `requested` only for a task known to run here and reports
+`live-termination-unavailable` for the rest. Intent still keeps a task that
+has not launched from launching, wherever it would have run.
+
+Cancellation leaves same-seat siblings eligible to finish. It also counts as
+a decided outcome for fail-fast, so unrelated tasks in later waves still run.
+Only a cancellation the batch's own watcher performed counts. A worker that
+reports `cancelled` on its own, with no cancel request, is a failure and still
+stops later waves.
+A task that `depends_on` a cancelled task never launches. The batch reports
+it as `prerequisite-cancelled` and leaves it `queued` in the journal.
+
+An unknown task reports `unknown-task`, and a task that is already terminal
+when the command reads it reports `already-terminal`. Neither writes a request.
+
+The inbox is bounded: at most 1024 request files of at most 4 KiB each. Exceeding
+either bound refuses with `inbox-overflow`. Malformed request files are skipped
+and reported by name. A symlinked inbox directory or request file is refused with
+`inbox-refused`, and so is an entry swapped for a non-regular file after it was
+inspected. The batch treats any inbox refusal as a warning and keeps launching,
+so a damaged inbox cannot stop a batch. The `cancel` command tries to acquire
+the workspace run lock without waiting. If it acquires the lock, it journals
+the intent and reports `recorded`. An inbox or journal failure under that lock
+is a refusal with exit 2.
+
+JSON output uses `brigade.runs_tasks_cancel.v1`, with `run_id`, `reason`, a
+`tasks` list of `{task_id, outcome, reason, live_termination}`, and `refusal`.
+Closed outcomes are `recorded`, `queued`, `already-terminal`, `unknown-task` and
+`not-recorded`. A `queued` request with `live_termination: "requested"` is
+available for the live watcher to act on. `live-termination-unavailable`
+means there is no live batch watcher to stop a potentially running task.
+`null` means live termination did not apply. When writing one request fails,
+the requests already written stay
+in the answer, the failed task and any after it report `not-recorded`, and
+`refusal` names the failure.
+Exit 2 means at least one task was not recorded.
 
 See [kinds of delegated work](execution-model.md#kinds-of-delegated-work) for how
 batch tasks compare with ledger tasks, run-lineage children, remote fleet

@@ -1,10 +1,13 @@
 """The Fleet Hub route-registration seam (v2 slice S22a)."""
 
+import json
+from http.server import BaseHTTPRequestHandler
+from io import BytesIO
 from pathlib import Path
 
 import pytest
 
-from brigade import fleet_hub, fleet_hub_http
+from brigade import fleet_dashboard, fleet_deck_pages_http, fleet_hub, fleet_hub_http
 from brigade.fleet_hub_routes import RouteTable
 
 
@@ -134,6 +137,49 @@ def test_hub_route_inventory_is_unchanged():
         + [("PUT", "/preference"), ("PATCH", "/work/*"), ("DELETE", "/work/*")]
     )
     assert table.registered() == expected
+
+
+@pytest.mark.parametrize(
+    ("target", "parsed"),
+    [
+        ("//health", "/health"),
+        ("//policy?mode=fixture%2Bvalue", "/policy?mode=fixture%2Bvalue"),
+        ("///work//items", "/work//items"),
+        ("//", "/"),
+        ("//unknown", "/unknown"),
+        ("//deck/actions/aa_x", "/deck/actions/aa_x"),
+    ],
+)
+def test_stdlib_normalizes_only_leading_request_slashes(target, parsed):
+    handler = BaseHTTPRequestHandler.__new__(BaseHTTPRequestHandler)
+    handler.raw_requestline = f"GET {target} HTTP/1.1\r\n".encode("ascii")
+    handler.rfile = BytesIO(b"Host: example.test\r\n\r\n")
+    assert handler.parse_request()
+    assert handler.path == parsed
+
+
+def test_request_log_fixture_covers_registered_python_routes():
+    fixture = Path(__file__).resolve().parents[1] / "engines" / "hub" / "tests" / "request-log-routes.json"
+    inventory = json.loads(fixture.read_text(encoding="utf-8"))
+    table = fleet_hub_http.make_handler("fixture-token", Path("unused.db")).route_table
+    exact = {path for _, path in table.registered() if not path.endswith("*")}
+    prefixes = inventory["python_prefixes"]
+    assert set(inventory["python_exact"]) == exact
+    assert set(prefixes) == {path for _, path in table.registered() if path.endswith("*")}
+
+    for method, pattern in table.registered():
+        if not pattern.endswith("*"):
+            continue
+        prefix = pattern.removesuffix("*")
+        handler = table.find(method, prefix)
+        assert handler is not None, (method, pattern)
+        assert prefixes[pattern], pattern
+        for sample in prefixes[pattern]:
+            assert sample.startswith(prefix) and sample != prefix, sample
+            assert table.find(method, sample) is handler, (method, pattern, sample)
+
+    assert set(prefixes["/deck/*"]) == fleet_deck_pages_http.DECK_PATHS - exact
+    assert set(prefixes["/view/*"]) == {f"/view/{view}" for view in fleet_dashboard.VIEWS}
 
 
 def test_hub_specific_routes_win_over_the_deck_catch_all():

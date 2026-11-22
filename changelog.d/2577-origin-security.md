@@ -1,8 +1,0 @@
-- Origin filing ignores receipt key environment overrides and requires a private, current-user-owned, single-link key at the fixed workspace location. Platforms without ownership proof require review.
-- Ingest refuses linked handoffs, cleans the exact verified sidecar, and consumes origin and review retry stamps before canonical writes to prevent replay after archive or a crash.
-- Drain revokes review stamps for drafts observed missing, so restoring the same bytes after manual removal requires review.
-- Ingest archives handoffs after review stamp storage fails, retaining one unsigned draft for a person with a fixed failure reason.
-- Recovery abandons prepared review decisions without usable origin claims and refuses pending review appends from committed decisions unless they already own a claim. Drafts are kept or restored for human review.
-- Windows handoffs require human review until #2588 adds Win32 ACL confinement checks. Portable file safety checks still run.
-- Origin claims publish complete markers atomically and recover their own linked temporary files after a crash. Failed claims abandon retry authority and retain drafts for review. Oversized handoffs get a metadata-only review draft and move their original source to a private hold. Linked handoffs report a specific refusal.
-- Oversized holds read at most 128 KiB for a labeled size and endpoint digest, publish metadata through confined directory handles, remove empty failed holds, and report rename failures as `handoff-hold-failed` with the OS cause. Orphan claim cleanup visits at most 64 directory entries per call.

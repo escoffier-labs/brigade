@@ -1,7 +1,9 @@
 """Live paired adapter, driven by a fake `claude` that emits recorded-style stream-json."""
 
+import ctypes
 import errno
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -12,11 +14,12 @@ import tempfile
 import threading
 import time
 import types
+from ctypes import wintypes
 from pathlib import Path
 
 import pytest
 
-from brigade import cli, model_trial_claude, model_trials, proc, proc_group
+from brigade import cli, model_trial_claude, model_trial_paired, model_trials, proc, proc_group, proc_windows_job
 from brigade.memory_verify_seat import CLAUDE_SETTINGS
 from brigade.proc_group import drain_supported
 from brigade.model_trial_claude import (
@@ -47,7 +50,7 @@ pytestmark = [
     pytest.mark.allow_agent_cli,  # launches only the fake claude from tests/paired_live_fake.py
     pytest.mark.skipif(
         os.name == "nt",
-        reason="paired-live call phase hangs in a pipe wait on Windows (issue #2720); predates this change",
+        reason="native Windows: the fake CLI waits on its MCP server and never exits (issue #2793)",
     ),
 ]
 
@@ -55,6 +58,7 @@ FIXTURES = Path(__file__).parents[1] / "src/brigade/fixtures/paired-brigade-work
 LIVE = FIXTURES / "live-claude.json"
 SECRET_TOKEN = "sentinel-oauth-token-value"
 LAUNCH = (sys.executable,)  # The fake is a script; a launcher prefix runs it the same way on every platform.
+LIVE_TEST_TIMEOUT = 20 if os.name == "nt" else 60
 WINDOWS_BASICS = {
     k: os.environ[k] for k in ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "COMSPEC", "PATHEXT") if k in os.environ
 }
@@ -131,7 +135,15 @@ def clean_temp_root():
 
 def _live(tmp_path, fake_dir="fake", output="evidence", **scenario):
     exe = make_fake(tmp_path / fake_dir, **scenario)
-    result = execute_live(LIVE, tmp_path / output, claude_bin=str(exe), environ=ENVIRON, timeout=60)
+    result = execute_live(LIVE, tmp_path / output, claude_bin=str(exe), environ=ENVIRON, timeout=LIVE_TEST_TIMEOUT)
+    deadline_details = [
+        f"{attempt['cell']['arm']} {diagnostic}"
+        for attempt in result["attempts"]
+        for diagnostic in attempt["live"]["diagnostics"]
+        if diagnostic.startswith("windows_process_deadline:")
+    ]
+    if deadline_details:
+        pytest.fail(" | ".join(deadline_details), pytrace=False)
     return result, tmp_path / fake_dir, tmp_path / output
 
 
@@ -373,11 +385,19 @@ def test_stream_disagreeing_with_the_server_row_is_trace_mismatch(tmp_path, step
     assert all(a["trace"] == [] and a["grade"]["passed"] is False for a in result["attempts"])
 
 
-def test_timeout_and_cli_errors_are_recorded_not_retried(tmp_path):
+def test_timeout_and_cli_errors_are_recorded_not_retried(tmp_path, monkeypatch):
     exe = make_fake(tmp_path / "hang", hang=True)
-    result = execute_live(LIVE, tmp_path / "out", claude_bin=str(exe), environ=ENVIRON, timeout=3)
-    assert _failures(result) == ["model_timeout"]
-    assert len(records(tmp_path / "hang")) == 2
+    work_dirs = _track_work_dirs(monkeypatch)
+    try:
+        result = execute_live(LIVE, tmp_path / "out", claude_bin=str(exe), environ=ENVIRON, timeout=3)
+        allowed = {"model_timeout", model_trial_claude.DRAIN_FAILURE} if os.name == "nt" else {"model_timeout"}
+        assert len(result["attempts"]) == len(work_dirs) == len(records(tmp_path / "hang")) == 2
+        for attempt, work in zip(result["attempts"], work_dirs, strict=True):
+            assert attempt["failure"] in allowed
+            assert work.exists() == (attempt["failure"] == model_trial_claude.DRAIN_FAILURE)
+    finally:
+        for work in work_dirs:
+            model_trial_claude.remove_work_dir(work)
     result, _, _ = _live(
         tmp_path,
         fake_dir="err",
@@ -402,20 +422,27 @@ def test_resume_appends_only_with_the_reviewed_digest_and_refuses_any_identity_c
     first, fake_dir, output = _live(tmp_path, init={"model": "wrong"})
     exe = fake_dir / "claude"
     again = execute_live(
-        LIVE, output, claude_bin=str(exe), environ=ENVIRON, timeout=60, resume_digest=first["evidence_sha256"]
+        LIVE,
+        output,
+        claude_bin=str(exe),
+        environ=ENVIRON,
+        timeout=LIVE_TEST_TIMEOUT,
+        resume_digest=first["evidence_sha256"],
     )
     assert len(again["attempts"]) == 4 and again["attempts"][:2] == first["attempts"]
     reviewed = again["evidence_sha256"]
     make_fake(fake_dir, init={"model": "wrong"}, version="2.1.400")
     with pytest.raises(ValueError, match="identity changed"):
-        execute_live(LIVE, output, claude_bin=str(exe), environ=ENVIRON, timeout=60, resume_digest=reviewed)
+        execute_live(
+            LIVE, output, claude_bin=str(exe), environ=ENVIRON, timeout=LIVE_TEST_TIMEOUT, resume_digest=reviewed
+        )
     make_fake(fake_dir, init={"model": "wrong"})
     with pytest.raises(ValueError, match="identity changed"):
         execute_live(LIVE, output, claude_bin=str(exe), environ=ENVIRON, timeout=61, resume_digest=reviewed)
     copy = tmp_path / "pkg"
     shutil.copytree(FIXTURES, copy)
     first_copy = execute_live(
-        copy / "live-claude.json", tmp_path / "out3", claude_bin=str(exe), environ=ENVIRON, timeout=60
+        copy / "live-claude.json", tmp_path / "out3", claude_bin=str(exe), environ=ENVIRON, timeout=LIVE_TEST_TIMEOUT
     )
     assert len(first_copy["attempts"]) == 2
     skill = copy / "candidate/SKILL.md"
@@ -426,7 +453,7 @@ def test_resume_appends_only_with_the_reviewed_digest_and_refuses_any_identity_c
             tmp_path / "out3",
             claude_bin=str(exe),
             environ=ENVIRON,
-            timeout=60,
+            timeout=LIVE_TEST_TIMEOUT,
             resume_digest=first_copy["evidence_sha256"],
         )
 
@@ -437,8 +464,8 @@ def _forge_one_attempt_away(output, destination):
     payload = json.loads((destination / "evidence.json").read_text())
     payload["attempts"].pop()
     payload["pairs"] = _pairs(payload["plan"], payload["attempts"])
-    (destination / "evidence.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
-    (destination / "evidence.sha256").write_text(digest(payload) + "\n")
+    (destination / "evidence.json").write_bytes((json.dumps(payload, indent=2, sort_keys=True) + "\n").encode())
+    (destination / "evidence.sha256").write_bytes((digest(payload) + "\n").encode())
     return digest(payload)
 
 
@@ -448,7 +475,7 @@ def test_a_stored_digest_cannot_vouch_for_rewritten_attempts(tmp_path):
     forged = tmp_path / "forged"
     forged_digest = _forge_one_attempt_away(output, forged)
     # The file beside the evidence says the forged tree is intact. Without the operator's digest nothing is reused.
-    fresh = execute_live(LIVE, forged, claude_bin=str(exe), environ=ENVIRON, timeout=60)
+    fresh = execute_live(LIVE, forged, claude_bin=str(exe), environ=ENVIRON, timeout=LIVE_TEST_TIMEOUT)
     assert len(fresh["attempts"]) == 2 and all(a["attempt_id"].endswith("-1") for a in fresh["attempts"])
     moved = sorted(path.name for path in forged.glob("superseded-*"))
     assert len(moved) == 1
@@ -463,7 +490,7 @@ def test_a_stored_digest_cannot_vouch_for_rewritten_attempts(tmp_path):
             forged_again,
             claude_bin=str(exe),
             environ=ENVIRON,
-            timeout=60,
+            timeout=LIVE_TEST_TIMEOUT,
             resume_digest=first["evidence_sha256"],
         )
     assert len(json.loads((forged_again / "evidence.json").read_text())["attempts"]) == 1
@@ -473,7 +500,14 @@ def test_a_stored_digest_cannot_vouch_for_rewritten_attempts(tmp_path):
 def test_resume_digest_without_evidence_is_refused(tmp_path):
     exe = make_fake(tmp_path / "f")
     with pytest.raises(ValueError, match="no evidence to resume"):
-        execute_live(LIVE, tmp_path / "empty", claude_bin=str(exe), environ=ENVIRON, timeout=60, resume_digest="0" * 64)
+        execute_live(
+            LIVE,
+            tmp_path / "empty",
+            claude_bin=str(exe),
+            environ=ENVIRON,
+            timeout=LIVE_TEST_TIMEOUT,
+            resume_digest="0" * 64,
+        )
     assert records(tmp_path / "f") == []
 
 
@@ -570,7 +604,7 @@ def test_an_arm_mcp_server_leaves_no_update_refresh_in_its_home(tmp_path):
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        timeout=60,
+        timeout=LIVE_TEST_TIMEOUT,
         check=True,
     )
     cache = arm / "home" / ".cache" / "brigade"
@@ -770,6 +804,311 @@ def test_revalidation_checks_the_stored_cwd_against_init(good, tmp_path):
         model_trials.paired_validate(copy, digest(payload))
 
 
+@pytest.mark.parametrize(
+    "leader_exited, releases_pipes, reaps",
+    [(True, True, True), (False, True, True), (True, False, True), (False, False, True), (False, True, False)],
+    ids=[
+        "leader-exited",
+        "leader-times-out",
+        "pipe-outlives-job",
+        "timeout-with-held-pipes",
+        "timeout-with-live-leader",
+    ],
+)
+def test_windows_arm_has_a_deadline_even_when_a_descendant_holds_the_pipes(
+    monkeypatch, tmp_path, leader_exited, releases_pipes, reaps
+):
+    released = threading.Event()
+    reading = threading.Event()
+    actions = []
+    code = None
+    workers = []
+    outcomes = []
+
+    class HeldPipe(io.BytesIO):
+        def readline(self, size=-1):
+            if line := super().readline(size):
+                return line
+            reading.set()
+            released.wait(2)
+            return b""
+
+        def read1(self, size=-1):
+            return self.readline(size)
+
+    class Child:
+        args = ["fake"]
+        pid = 4242
+        returncode = None
+
+        def __init__(self):
+            self.stdin = io.BytesIO()
+            self.stdout = HeldPipe(b" \n")
+            self.stderr = HeldPipe(b"diagnostic\n")
+
+        def poll(self):
+            nonlocal code
+            if code is None and leader_exited and reading.is_set():
+                code = 0
+            self.returncode = code
+            return code
+
+        def wait(self, timeout=None):
+            if self.poll() is None:
+                raise subprocess.TimeoutExpired(self.args, timeout)
+            return self.returncode
+
+        def kill(self):
+            nonlocal code
+            actions.append("kill-cli")
+            code = 125
+
+    class Job:
+        def active_processes(self):
+            if leader_exited:
+                return None
+            assert code is None  # Query before terminating the leader and descendant.
+            return 2
+
+        def terminate(self):
+            nonlocal code
+            actions.append("terminate")
+            if leader_exited:
+                assert code == 0 and reading.is_set()
+            if code is None and reaps:
+                code = 125
+            if releases_pipes:
+                released.set()
+                if not leader_exited:
+                    for worker in workers:
+                        worker.join(timeout=1)
+            return True
+
+        def close(self):
+            actions.append("close")
+
+    class TrackedThread(threading.Thread):
+        def start(self):
+            workers.append(self)
+            super().start()
+
+    def launch(command, **kwargs):
+        nonlocal code
+        code = None
+        reading.clear()
+        released.clear()
+        actions.append(("launch", kwargs.get("creationflags")))
+        child = Child()
+        child.args = command
+        return child
+
+    def bind(actual_job, actual_child, argv):
+        assert isinstance(actual_job, Job)
+        assert actual_child.args == argv
+        actions.append("bind")
+
+    def create_job():
+        actions.append("create")
+        return Job()
+
+    def run_and_record(*args, **kwargs):
+        start = time.monotonic()
+        result = _run_process(*args, **kwargs)
+        assert time.monotonic() - start < 1
+        outcomes.append((result.code, result.timed_out, result.cleanup_failed))
+        return result
+
+    exe = make_fake(tmp_path / "fake")
+    work_dirs = _track_work_dirs(monkeypatch)
+    monkeypatch.setattr(model_trial_claude, "os", types.SimpleNamespace(name="nt", path=os.path))
+    monkeypatch.setattr(
+        model_trial_claude, "threading", types.SimpleNamespace(Thread=TrackedThread, Event=threading.Event)
+    )
+    monkeypatch.setattr(model_trial_claude, "_probe_version", lambda *_: "2.1.327")
+    monkeypatch.setattr(model_trial_claude, "WINDOWS_PIPE_DRAIN_GRACE", 0.15, raising=False)
+    monkeypatch.setattr(model_trial_claude, "_run_process", run_and_record)
+    monkeypatch.setattr(proc_windows_job, "create_windows_child_job", create_job)
+    monkeypatch.setattr(proc, "suspended_process_group_kwargs", lambda: {"creationflags": 4})
+    monkeypatch.setattr(proc_windows_job, "bind_suspended_windows_child", bind)
+    monkeypatch.setattr(model_trial_claude.subprocess, "Popen", launch)
+    try:
+        timeout = 20 if leader_exited else 0.15
+        result = execute_live(LIVE, tmp_path / "out", claude_bin=str(exe), environ=ENVIRON, timeout=timeout)
+        code = 0 if leader_exited else (125 if reaps else None)
+        drain_failed = not releases_pipes or not reaps
+        assert outcomes == [(code, not leader_exited, drain_failed)] * 2
+        assert actions == ["create", ("launch", 4), "bind", "terminate", "close"] * 2
+        assert len(work_dirs) == 2 and all(work.is_dir() == drain_failed for work in work_dirs)
+        if not leader_exited:
+            for attempt in result["attempts"]:
+                diagnostic = next(
+                    value for value in attempt["live"]["diagnostics"] if value.startswith("windows_process_deadline:")
+                )
+                assert json.loads(diagnostic.split(":", 1)[1]) == {
+                    "leader_exited": False,
+                    "exit_code": None,
+                    "stdin_closed": True,
+                    "stdout_bytes": 2,
+                    "stderr_bytes": 11,
+                    "active_processes": 2,
+                }
+        if drain_failed:
+            assert _failures(result) == [model_trial_claude.DRAIN_FAILURE]
+    finally:
+        released.set()
+        for worker in workers:
+            worker.join(timeout=1)
+        for work in work_dirs:
+            model_trial_claude.remove_work_dir(work)
+
+
+def test_windows_paired_tool_captures_output_when_its_cli_leaves_a_pipe_writer(monkeypatch, tmp_path):
+    script = (
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3)'], "
+        "stdin=subprocess.DEVNULL, stdout=sys.stdout, stderr=sys.stderr)\n"
+        "print('brief output', flush=True)\n"
+        "print('brief diagnostic', file=sys.stderr, flush=True)\n"
+    )
+    command = [sys.executable, "-c", script]
+    real_run = subprocess.run
+    monkeypatch.setattr(model_trial_paired, "os", types.SimpleNamespace(name="nt", environ=ENVIRON))
+    monkeypatch.setattr(
+        model_trial_paired,
+        "subprocess",
+        types.SimpleNamespace(run=lambda _args, **kwargs: real_run(command, **{**kwargs, "timeout": 2})),
+    )
+    boundary = model_trial_paired.Boundary(tmp_path, "passing-verify", {("SKILL.md",): b"# fake skill"})
+    assert boundary.call("brief", {}) == {
+        "exit_code": 0,
+        "stdout": "brief output\n",
+        "stderr": "brief diagnostic\n",
+    }
+
+
+def test_windows_arm_declares_all_win32_job_and_thread_prototypes(monkeypatch, tmp_path):
+    handle, dword, boolean = wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL
+    job_handle, process_handle, snapshot, thread_handle = (0x1_0000_0000 + offset for offset in range(4))
+    calls = []
+    resumed = iter([1, 0])
+    child = types.SimpleNamespace(
+        _handle=process_handle,
+        pid=4242,
+        stdin=io.BytesIO(),
+        stdout=io.BytesIO(b"\n"),
+        stderr=io.BytesIO(b"diagnostic"),
+        poll=lambda: 0,
+    )
+
+    class Win32Function:
+        def __init__(self, name, argtypes, restype, implementation):
+            self.name = name
+            self.expected = (argtypes, restype)
+            self.implementation = implementation
+            self.argtypes = self.restype = None
+
+        def __call__(self, *args):
+            assert (self.argtypes, self.restype) == self.expected, self.name
+            calls.append((self.name, args[0]))
+            return self.implementation(*args)
+
+    def thread_next(_snapshot, entry):
+        entry._obj.th32OwnerProcessID = child.pid
+        entry._obj.th32ThreadID = 777
+        return True
+
+    def query_job(_job, info_class, info, size, returned_length):
+        assert info_class == 1 and size == 48 and returned_length is None
+        info._obj.ActiveProcesses = 2
+        return True
+
+    signatures = {
+        "CreateJobObjectW": ([wintypes.LPVOID, wintypes.LPCWSTR], handle, lambda *_: job_handle),
+        "SetInformationJobObject": ([handle, ctypes.c_int, wintypes.LPVOID, dword], boolean, lambda *_: True),
+        "QueryInformationJobObject": (
+            [handle, ctypes.c_int, wintypes.LPVOID, dword, wintypes.LPDWORD],
+            boolean,
+            query_job,
+        ),
+        "AssignProcessToJobObject": ([handle, handle], boolean, lambda _, process: process == process_handle),
+        "TerminateJobObject": ([handle, wintypes.UINT], boolean, lambda *_: True),
+        "CloseHandle": ([handle], boolean, lambda *_: True),
+        "CreateToolhelp32Snapshot": ([dword, dword], handle, lambda *_: snapshot),
+        "Thread32First": ([handle, wintypes.LPVOID], boolean, lambda *_: True),
+        "Thread32Next": ([handle, wintypes.LPVOID], boolean, thread_next),
+        "OpenThread": ([dword, boolean, dword], handle, lambda *_: thread_handle),
+        "ResumeThread": ([handle], dword, lambda _: next(resumed)),
+    }
+    kernel32 = types.SimpleNamespace(**{name: Win32Function(name, *spec) for name, spec in signatures.items()})
+    windows = types.SimpleNamespace(name="nt")
+    monkeypatch.setattr(proc, "os", windows)
+    monkeypatch.setattr(proc_windows_job, "os", windows)
+    monkeypatch.setattr(model_trial_claude, "os", windows)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *_args, **_kwargs: kernel32, raising=False)
+
+    def legacy_wrapper(*_args):
+        pytest.fail("the trial should call proc_windows_job directly")
+
+    monkeypatch.setattr(proc, "create_owned_windows_job", legacy_wrapper)
+    monkeypatch.setattr(proc, "bind_owned_windows_child", legacy_wrapper)
+
+    def launch(_command, **kwargs):
+        assert kwargs["creationflags"] & 4  # CREATE_SUSPENDED
+        calls.append(("launch", None))
+        return child
+
+    monkeypatch.setattr(model_trial_claude.subprocess, "Popen", launch)
+    observer = _Observer(expected_model="m", session_id="s", version="v", cwd=tmp_path)
+    run = _run_process(["fake"], {}, tmp_path, "", 2, observer, "tok")
+    assert (run.stream, run.stderr, run.code, run.timed_out, run.cleanup_failed) == (
+        b"\n",
+        b"diagnostic",
+        0,
+        False,
+        False,
+    )
+    assert calls == [
+        ("CreateJobObjectW", None),
+        ("SetInformationJobObject", job_handle),
+        ("launch", None),
+        ("AssignProcessToJobObject", job_handle),
+        ("CreateToolhelp32Snapshot", 4),
+        ("Thread32First", snapshot),
+        ("Thread32Next", snapshot),
+        ("OpenThread", 2),
+        ("ResumeThread", thread_handle),
+        ("ResumeThread", thread_handle),
+        ("CloseHandle", thread_handle),
+        ("CloseHandle", snapshot),
+        ("TerminateJobObject", job_handle),
+        ("CloseHandle", job_handle),
+    ]
+    job = proc_windows_job.create_windows_child_job()
+    assert job is not None
+    assert job.active_processes() == 2
+    job.close()
+    assert job.active_processes() is None
+    assert calls[-2:] == [("QueryInformationJobObject", job_handle), ("CloseHandle", job_handle)]
+
+
+@pytest.mark.skipif(os.name != "nt", reason="exercises native Windows job and inherited pipes")
+def test_windows_job_stops_a_descendant_that_inherits_both_arm_output_pipes(tmp_path):
+    script = (
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(20)'], "
+        "stdin=subprocess.DEVNULL, stdout=sys.stdout, stderr=sys.stderr)\n"
+        "print('  ', flush=True)\n"
+        "print('diagnostic', file=sys.stderr, flush=True)\n"
+    )
+    observer = _Observer(expected_model="m", session_id="s", version="v", cwd=tmp_path)
+    env = {key: os.environ[key] for key in ENV_PASSTHROUGH if key in os.environ}
+    run = _run_process([sys.executable, "-c", script], env, tmp_path, "", 10, observer, "tok")
+    assert run.stream.strip() == b"" and run.stream
+    assert run.stderr.splitlines() == [b"diagnostic"]
+    assert (run.code, run.timed_out, run.cleanup_failed) == (0, False, False)
+
+
+@requires_process_groups
 def test_expiry_cannot_flip_a_finished_cell_or_signal_a_recycled_group(monkeypatch, tmp_path):
     events, callbacks, kills = [], [], []
 
@@ -834,7 +1173,12 @@ def test_adapter_identity_records_the_executable_hash_and_a_changed_file_refuses
         handle.write("\n# replaced\n")
     with pytest.raises(ValueError, match="identity changed"):
         execute_live(
-            LIVE, output, claude_bin=str(exe), environ=ENVIRON, timeout=60, resume_digest=first["evidence_sha256"]
+            LIVE,
+            output,
+            claude_bin=str(exe),
+            environ=ENVIRON,
+            timeout=LIVE_TEST_TIMEOUT,
+            resume_digest=first["evidence_sha256"],
         )
     stripped = json.loads((output / "evidence.json").read_text())
     stripped["plan"]["adapter"].pop("executable")
@@ -864,7 +1208,7 @@ def test_the_bound_executable_is_rechecked_before_every_launch(tmp_path, monkeyp
 
     monkeypatch.setattr(model_trial_claude, "run_cell", run_after_a_swap)
     with pytest.raises(ValueError, match="changed after it was hashed"):
-        execute_live(LIVE, tmp_path / "out", claude_bin=str(swapped), environ=ENVIRON, timeout=60)
+        execute_live(LIVE, tmp_path / "out", claude_bin=str(swapped), environ=ENVIRON, timeout=LIVE_TEST_TIMEOUT)
     assert calls == [1] and records(fake_dir) == []  # the swapped file never received the token
 
 
@@ -1041,7 +1385,7 @@ def test_a_proxy_url_with_credentials_refuses_the_run_without_naming_the_secret(
     exe = make_fake(tmp_path / "px")
     environ = {**ENVIRON, key: "http://proxyuser:hunter2-proxy-secret@proxy.example:3128"}
     with pytest.raises(ValueError, match=key) as caught:
-        execute_live(LIVE, tmp_path / "out", claude_bin=str(exe), environ=environ, timeout=60)
+        execute_live(LIVE, tmp_path / "out", claude_bin=str(exe), environ=environ, timeout=LIVE_TEST_TIMEOUT)
     assert "hunter2-proxy-secret" not in str(caught.value) and "proxyuser" not in str(caught.value)
     assert not (tmp_path / "px" / "record.jsonl").exists()  # No model was launched.
 
@@ -1178,7 +1522,9 @@ def test_a_finished_cell_stops_a_descendant_that_left_its_process_group(tmp_path
     exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS, escaped_writer={"code": writer, "ready": str(ready_base)})
     leaked = []
     try:
-        result = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        result = execute_live(
+            LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=LIVE_TEST_TIMEOUT
+        )
         assert all(a["failure"] is None for a in result["attempts"])
         pids = [int(line) for line in pid_log.read_text().splitlines() if line.strip()]
         assert pids, "the escaped writer never published its pid"
@@ -1342,6 +1688,7 @@ def test_a_descendant_left_in_the_cell_work_dir_fails_the_cell_and_is_stopped(tm
             shutil.rmtree(path, ignore_errors=True)
 
 
+@requires_process_groups
 def test_a_drain_failure_keeps_the_original_error_and_reaps_the_leader(monkeypatch, tmp_path):
     threads, events, children = [], [], []
     real_thread = threading.Thread
@@ -1399,6 +1746,7 @@ def test_a_drain_failure_keeps_the_original_error_and_reaps_the_leader(monkeypat
         assert any("drain" in note for note in raised.value.__notes__)
 
 
+@requires_process_groups
 def test_a_drain_failure_fails_only_its_cell_and_keeps_its_work_dir(tmp_path, monkeypatch):
     exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS)
     work_dirs = _track_work_dirs(monkeypatch)
@@ -1408,7 +1756,9 @@ def test_a_drain_failure_fails_only_its_cell_and_keeps_its_work_dir(tmp_path, mo
 
     monkeypatch.setattr(model_trial_claude, "_drain_arm_group", failing_drain)
     try:
-        result = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        result = execute_live(
+            LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=LIVE_TEST_TIMEOUT
+        )
         assert _failures(result) == ["process_group_drain_failed"]
         assert len(result["attempts"]) == 2  # the trial kept going after the first failed cell
         assert len(work_dirs) == 2 and all(path.is_dir() for path in work_dirs)
@@ -1481,6 +1831,7 @@ def test_the_bounded_drain_re_signals_members_on_every_poll(monkeypatch):
     assert len(calls) == 3 and alive == []
 
 
+@pytest.mark.skipif(not drain_supported(), reason="process-group draining needs /proc")
 def test_an_unreadable_process_table_fails_the_drain_at_once(monkeypatch):
     real_listdir = os.listdir
 
@@ -1497,6 +1848,7 @@ def test_an_unreadable_process_table_fails_the_drain_at_once(monkeypatch):
     assert time.monotonic() - started < 0.3
 
 
+@requires_process_groups
 def test_a_stream_error_with_a_failed_drain_keeps_the_work_dir(tmp_path, monkeypatch):
     exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS)
     work_dirs = _track_work_dirs(monkeypatch)
@@ -1511,13 +1863,14 @@ def test_a_stream_error_with_a_failed_drain_keeps_the_work_dir(tmp_path, monkeyp
     monkeypatch.setattr(model_trial_claude, "_drain_arm_group", failing_drain)
     try:
         with pytest.raises(ValueError, match="stream boom"):
-            execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+            execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=LIVE_TEST_TIMEOUT)
         assert work_dirs and work_dirs[0].is_dir()  # the primary error still won, and the dir was kept
     finally:
         for path in work_dirs:
             shutil.rmtree(path, ignore_errors=True)
 
 
+@requires_process_groups
 def test_a_drainer_that_outlives_the_join_keeps_the_work_dir(tmp_path, monkeypatch):
     exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS)
     work_dirs = _track_work_dirs(monkeypatch)
@@ -1536,7 +1889,9 @@ def test_a_drainer_that_outlives_the_join_keeps_the_work_dir(tmp_path, monkeypat
     monkeypatch.setattr(model_trial_claude, "_StderrCapture", BlockedCapture)
     monkeypatch.setattr(model_trial_claude, "EXIT_GRACE", 0.05)
     try:
-        result = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        result = execute_live(
+            LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=LIVE_TEST_TIMEOUT
+        )
         assert _failures(result) == ["process_group_drain_failed"]
         assert len(work_dirs) == 2 and all(path.is_dir() for path in work_dirs)
     finally:

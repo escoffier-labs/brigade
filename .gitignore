@@ -56,6 +56,8 @@ Thumbs.db
 /scripts/*
 !/scripts/memory_scan_bundle.py
 !/scripts/outcome_attest_plan.py
+!/scripts/ledger_recompute.py
+!/scripts/skill_contract_check.py
 !/scripts/memory_scan_unicode14_unassigned.ranges
 !/scripts/verify-engine-rename-installer
 !/scripts/windows-native-acceptance.ps1
@@ -75,6 +77,7 @@ Thumbs.db
 !/scripts/ci_hub_paths.yml
 !/scripts/ci_hub_select.py
 !/scripts/changelog_fragments.py
+!/scripts/workflow_guard.py
 !/scripts/windows_affected_tests.py
 !/scripts/windows_pytest.py
 !/scripts/windows_pytest_diagnostics.py
@@ -95,6 +98,8 @@ Thumbs.db
 !/scripts/verify_component_manifest_provenance.py
 !/scripts/verify_env.py
 !/scripts/version_sync.py
+!/scripts/stamp_brigade_cli.py
+!/scripts/check_cli_upgrade.py
 !/scripts/sync_plugin_skills.py
 /skills/
 

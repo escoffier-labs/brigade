@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import io
 import json
 import os
 import subprocess
 import sys
+import tarfile
 from pathlib import Path
 
 import pytest
@@ -45,8 +47,18 @@ else:
 
 
 def run(tmp_path, state, *, repository="escoffier-labs/brigadestack", repository_id="1238165856"):
-    data = b"compat tarball bytes"
-    (tmp_path / "compat.tgz").write_bytes(data)
+    manifest = {"repository": {"url": f"git+https://github.com/{repository}.git"}}
+    if state == "mismatched-repository-url":
+        manifest["repository"]["url"] = "git+https://github.com/escoffier-labs/brigade.git"
+    if state == "missing-repository-url":
+        del manifest["repository"]["url"]
+    archive = tmp_path / "compat.tgz"
+    manifest_bytes = json.dumps(manifest).encode()
+    with tarfile.open(archive, "w:gz") as tar:
+        entry = tarfile.TarInfo("package/package.json")
+        entry.size = len(manifest_bytes)
+        tar.addfile(entry, io.BytesIO(manifest_bytes))
+    data = archive.read_bytes()
     (tmp_path / "integrity.json").write_text(
         json.dumps("sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode())
     )
@@ -166,3 +178,11 @@ def test_a_foreign_repository_never_reaches_the_registry(tmp_path, repository, r
     assert result.returncode == 1
     assert message in result.stderr
     assert calls == [] and publications == []
+
+
+@pytest.mark.parametrize("state", ["mismatched-repository-url", "missing-repository-url"])
+def test_archive_without_the_publishing_repository_url_never_reaches_the_registry(tmp_path, state):
+    result, _, calls = run(tmp_path, state)
+    assert result.returncode == 1
+    assert calls == []
+    assert "compat.tgz: repository.url" in result.stderr

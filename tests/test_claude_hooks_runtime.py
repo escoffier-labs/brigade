@@ -810,10 +810,8 @@ def test_stop_keeps_prior_receipt_when_interleaved_foreign_write_lags_fingerprin
     handoff = target / ".claude" / "memory-handoffs" / "handoff.md"
     handoff.parent.mkdir(parents=True, exist_ok=True)
     handoff.write_text("durable finding\n")
-    assert (
-        runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader_session, stop_hook_active=False))
-        is None
-    )
+    result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=reader_session, stop_hook_active=False))
+    assert result is None
 
 
 def _write_session_receipt(target: Path, session_id: str, *, tree_fingerprint: str | None = None) -> dict:
@@ -1375,9 +1373,8 @@ def test_final_bash_handoff_write_does_not_require_verification_again(tmp_path: 
     updated = runtime.read_session_state(target, session_id)
     assert updated["last_write_at"] >= updated["last_verification_write_at"]
     assert updated["last_verification_write_at"] == state["last_verification_write_at"]
-    assert (
-        runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False)) is None
-    )
+    result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False))
+    assert result is None
 
 
 @pytest.mark.parametrize(
@@ -2020,9 +2017,8 @@ def test_final_handoff_write_does_not_require_verification_again(tmp_path: Path,
 
     updated = runtime.read_session_state(target, session_id)
     assert updated["last_write_at"] >= updated["last_verification_write_at"]
-    assert (
-        runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False)) is None
-    )
+    result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session_id, stop_hook_active=False))
+    assert result is None
 
 
 @pytest.mark.parametrize("wrapper", ["tokenjuice", "token-glace"])
@@ -3536,14 +3532,24 @@ def test_stop_fails_open_when_git_errors_in_the_manifest_probe(tmp_path: Path, m
 
     target = _manifest_repo(tmp_path)
     stop, _written = _stop_after_subject_write(target, monkeypatch)
+    probe_attempted = False
 
     def broken_git(*_args, **_kwargs):
+        nonlocal probe_attempted
+        probe_attempted = True
         raise subprocess.TimeoutExpired(cmd="git", timeout=1)
 
-    monkeypatch.setattr(manifest_loop.subprocess, "run", broken_git)
+    monkeypatch.setattr(
+        manifest_loop,
+        "subprocess",
+        SimpleNamespace(
+            run=broken_git, DEVNULL=subprocess.DEVNULL, PIPE=subprocess.PIPE, TimeoutExpired=subprocess.TimeoutExpired
+        ),
+    )
 
     result = runtime.handle_payload("Stop", stop)
 
+    assert probe_attempted
     assert result is None or result.get("decision") != "block"
 
 

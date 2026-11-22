@@ -18,7 +18,73 @@ from claims_native import BINARY, START, enroll, launch, send
 import hub_contract as hc
 
 
+def request_lines(hub):
+    return [
+        line
+        for line in hub.log.read_text().splitlines()
+        if line.startswith("{") and '"event":"request"' in line
+    ]
+
+
+def wait_for_request_line(hub, previous, timeout=10.0):
+    """Return the request lines once one follows `previous` of them."""
+    deadline = time.monotonic() + timeout
+    while True:
+        lines = request_lines(hub)
+        if len(lines) > previous:
+            return lines
+        if time.monotonic() >= deadline:
+            raise AssertionError(f"no request log line after {previous} logged lines")
+        time.sleep(0.05)
+
+
 class Heartbeat(unittest.TestCase):
+    def test_extra_leading_slashes_match_in_both_modes(self):
+        routes = [
+            ("GET", "/status?all=1", None, "heartbeat", "/status"),
+            ("POST", "/events", {}, "heartbeat", "/events"),
+            ("POST", "/sessions", {}, "heartbeat", "/sessions"),
+            ("GET", "/claims", None, "claims", "/claims"),
+            ("POST", "/messages", {}, "messages", "/messages"),
+            ("GET", "/nodes", None, "registration", "/nodes"),
+            ("GET", "/health", None, "health", "/health"),
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            work = Path(directory)
+            clock = work / "clock"
+            clock.write_text(str(START), encoding="utf-8")
+            for native in (False, True):
+                state = work / ("native" if native else "proxy")
+                state.mkdir()
+                template = (
+                    f"{BINARY} --host {{host}} --port {{port}} --db {{db}} --token-file {{token_file}} "
+                    f"--test-clock-file {clock}"
+                )
+                if native:
+                    template += " --route-mode registration=native --route-mode claims=native"
+                    template += " --route-mode heartbeat=native --route-mode messages=native"
+                else:
+                    template += " --route-mode health=proxy"
+                hub = hc.launch_hub(
+                    template, brigade=[sys.executable, "-m", "brigade"], state_dir=state, startup_timeout=30
+                )
+                try:
+                    hub.tokens = {"admin": hub.admin_token}
+                    enroll(hub, "node-a")
+                    for method, path, payload, family, label in routes:
+                        for token in (None, hub.tokens["node-a"], hub.admin_token):
+                            with self.subTest(native=native, method=method, path=path):
+                                single_before = len(request_lines(hub))
+                                single = send(hub, method, path, token, payload)
+                                count = len(wait_for_request_line(hub, single_before))
+                                doubled = send(hub, method, "/" + path, token, payload)
+                                self.assertEqual((single.status, single.body), (doubled.status, doubled.body))
+                                lines = wait_for_request_line(hub, count)
+                                record = json.loads(lines[count])
+                                self.assertEqual((record["family"], record["route"]), (family, label))
+                finally:
+                    hc.stop_hub(hub)
+
     def test_wire_and_storage(self):
         with tempfile.TemporaryDirectory() as directory:
             work = Path(directory)

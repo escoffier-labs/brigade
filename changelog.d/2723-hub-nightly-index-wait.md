@@ -1,1 +1,0 @@
-- Make the hub pipeline's Python memory client test wait for the hub to publish the index entry for the revision it just pushed, so a search issued straight after a push no longer answers from the older snapshot and reports the card as missing (#2723).

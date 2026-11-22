@@ -4,14 +4,56 @@
 //! them.
 use super::*;
 use brigade_hub::read::{HubPools, ReaderPool};
-use brigade_hub::telemetry::{Stage, StageSlot};
+use brigade_hub::telemetry::{RequestLog, Stage, StageSlot};
 use sha2::Digest;
+use std::ops::{Deref, DerefMut};
 use std::path::{Path, PathBuf};
 use std::sync::{
-    Arc,
+    Arc, Mutex,
     atomic::{AtomicUsize, Ordering},
     mpsc as std_mpsc,
 };
+use tokio::net::TcpListener;
+
+static REQUEST_LINES: Mutex<Vec<(usize, &'static str, String)>> = Mutex::new(Vec::new());
+
+/// Capture the same formatter stderr uses when the log is dropped, including
+/// when a request is cancelled before producing a response.
+pub(super) struct CapturedLog(pub RequestLog);
+
+impl Deref for CapturedLog {
+    type Target = RequestLog;
+
+    fn deref(&self) -> &RequestLog {
+        &self.0
+    }
+}
+
+impl DerefMut for CapturedLog {
+    fn deref_mut(&mut self) -> &mut RequestLog {
+        &mut self.0
+    }
+}
+
+impl Drop for CapturedLog {
+    fn drop(&mut self) {
+        let line = self.line().to_string();
+        let key = Arc::as_ptr(&self.telemetry) as usize;
+        REQUEST_LINES.lock().unwrap().push((key, self.family, line));
+    }
+}
+
+fn take_request_line(app: &App, family: &str) -> Option<(serde_json::Value, String)> {
+    let key = Arc::as_ptr(&app.telemetry) as usize;
+    let mut lines = REQUEST_LINES.lock().unwrap();
+    let index = lines
+        .iter()
+        .rposition(|(app, f, _)| *app == key && *f == family)?;
+    let (_, _, text) = lines.remove(index);
+    drop(lines);
+    let fields = serde_json::from_str(&text).expect("valid request log JSON");
+    Some((fields, text))
+}
 
 const ADMIN: &str = "pool-admin-token-0123456789";
 const NODE_TOKEN: &str = "pool-node-token-0123456789";
@@ -79,6 +121,49 @@ impl Fixture {
         app.lookup = Some(admission::Lookup::new(self.lookups.clone(), ADMIN));
         app
     }
+    fn native_app(&self) -> App {
+        let mut app = self.app();
+        app.registration = Some(registration::Registration {
+            readers: self.readers.clone(),
+            lookups: self.lookups.clone(),
+            writer: self.writer.clone(),
+            admin: self.admin(),
+            clock: None,
+            memory: None,
+        });
+        app.claims = Some(claims_route::Claims {
+            readers: self.readers.clone(),
+            lookups: self.lookups.clone(),
+            writer: self.writer.clone(),
+            admin: self.admin(),
+            clock: None,
+            allow_admin_writes: true,
+            events: false,
+        });
+        app.heartbeat = Some(heartbeat::Heartbeat {
+            readers: self.readers.clone(),
+            lookups: self.lookups.clone(),
+            writer: self.writer.clone(),
+            admin: self.admin(),
+            clock: None,
+            allow_admin_writes: true,
+            events: false,
+            stale_after: 900,
+        });
+        app.messages = Some(messages_route::Messages::new(
+            self.readers.clone(),
+            self.lookups.clone(),
+            self.writer.clone(),
+            self.admin(),
+            None,
+            true,
+            brigade_hub::messages::Policy::from_env(|_| None, false).unwrap(),
+            Arc::new(brigade_hub::messages::wake::Wake::new(
+                brigade_hub::messages::wake::Limits::for_connections(64),
+            )),
+        ));
+        app
+    }
     fn admin(&self) -> String {
         registration::digest(ADMIN)
     }
@@ -140,6 +225,27 @@ fn hub_db(dir: &Path) -> PathBuf {
     path
 }
 
+#[tokio::test]
+async fn front_admission_credential_kind_and_key_for_principals() {
+    let fixture = Fixture::new("principal-classification");
+    let lookup = admission::Lookup::new(fixture.lookups.clone(), ADMIN);
+    for (token, expected_kind, expected_key) in [
+        (
+            PRINCIPAL_TOKEN,
+            "principal",
+            Some(registration::digest(PRINCIPAL_TOKEN)),
+        ),
+        (REVOKED_PRINCIPAL_TOKEN, "anonymous", None),
+        (UNKNOWN_TOKEN, "anonymous", None),
+    ] {
+        let credential = lookup.credential(Some(&bearer(token))).await.unwrap();
+        assert_eq!(
+            (credential.kind, credential.key),
+            (expected_kind, expected_key)
+        );
+    }
+}
+
 fn bearer(token: &str) -> String {
     format!("Bearer {token}")
 }
@@ -194,7 +300,197 @@ async fn answer(app: &App, request: Request<Body>) -> (u16, serde_json::Value) {
 }
 
 fn logged(app: &App, family: &str) -> Option<String> {
-    request_lines::credential_kind(Arc::as_ptr(&app.telemetry) as usize, family)
+    take_request_line(app, family)
+        .and_then(|(line, _)| line["credential_kind"].as_str().map(str::to_owned))
+}
+
+fn log_test_app(upstream: String) -> App {
+    App::new(
+        upstream,
+        Client::builder(TokioExecutor::new()).build_http(),
+        false,
+        false,
+    )
+}
+
+async fn log_request(
+    app: &App,
+    method: &str,
+    uri: &str,
+    family: &str,
+) -> (serde_json::Value, String) {
+    let request = Request::builder()
+        .method(method)
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap();
+    let (status, _) = answer(app, request).await;
+    let (line, text) = take_request_line(app, family).expect("request log line");
+    assert_eq!(line["status"], status);
+    (line, text)
+}
+
+#[tokio::test]
+async fn request_log_labels_native_health_and_drops_query() {
+    let app = log_test_app(String::new());
+    let (line, text) =
+        log_request(&app, "GET", "/health?fixture_query=fixture_value", "health").await;
+    assert_eq!(line["status"], 200);
+    assert_eq!(line["method"], "GET");
+    assert_eq!(line["route"], "/health");
+    assert!(!text.contains("fixture_query"));
+    assert!(!text.contains("fixture_value"));
+    let (line, text) = log_request(
+        &app,
+        "GET",
+        "//health?fixture_query=fixture_value",
+        "health",
+    )
+    .await;
+    assert_eq!(line["status"], 200);
+    assert_eq!(line["method"], "GET");
+    assert_eq!(line["route"], "/health");
+    assert!(!text.contains("fixture_query"));
+    assert!(!text.contains("fixture_value"));
+}
+
+#[tokio::test]
+async fn absolute_form_doubled_leading_slashes_serve_as_single() {
+    let app = log_test_app(String::new());
+    let request = |uri: &str| {
+        Request::builder()
+            .method("GET")
+            .uri(uri)
+            .body(Body::empty())
+            .unwrap()
+    };
+    let single = answer(&app, request("http://example.test/health")).await;
+    let doubled = answer(&app, request("http://example.test//health")).await;
+    assert_eq!(single, doubled);
+    assert_eq!(single.0, 200);
+}
+
+#[tokio::test]
+async fn request_log_labels_proxied_cold_policy() {
+    let listener = TcpListener::bind((Ipv4Addr::from([127, 0, 0, 1]), 0))
+        .await
+        .unwrap();
+    let app = log_test_app(format!("http://{}", listener.local_addr().unwrap()));
+    let upstream = Router::new().route(
+        "/policy",
+        axum::routing::post(|uri: axum::http::Uri| async move {
+            assert_eq!(uri.query(), Some("fixture_query=fixture%2Bvalue&empty="));
+            StatusCode::NO_CONTENT
+        }),
+    );
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let (line, text) = log_request(
+        &app,
+        "POST",
+        "//policy?fixture_query=fixture%2Bvalue&empty=",
+        "cold",
+    )
+    .await;
+    assert!(!text.contains("fixture_query"));
+    assert!(!text.contains("fixture%2Bvalue"));
+    server.abort();
+    assert_eq!(line["status"], 204);
+    assert_eq!(line["method"], "POST");
+    assert_eq!(line["route"], "/policy");
+}
+
+#[tokio::test]
+async fn request_log_labels_immediate_admission_refusal() {
+    let app = log_test_app(String::new());
+    let _slots: Vec<_> = (0..8)
+        .map(|_| app.budgets.admit(None, "/policy", "", None).unwrap())
+        .collect();
+    let (line, _) = log_request(&app, "POST", "/policy", "cold").await;
+    assert_eq!(line["status"], 503);
+    assert_eq!(line["stage"], "replying");
+    assert_eq!(line["method"], "POST");
+    assert_eq!(line["route"], "/policy");
+}
+
+#[tokio::test]
+async fn request_log_labels_refusals_before_admission() {
+    let app = log_test_app(String::new());
+    let (invalid, _) = log_request(&app, "OPTIONS", "*", "cold").await;
+    assert_eq!(invalid["status"], 400);
+    assert_eq!(invalid["method"], "OPTIONS");
+    assert_eq!(invalid["route"], "other");
+
+    let (refused, text) =
+        log_request(&app, "GET", "/policy?token=fixture-query-value", "cold").await;
+    assert_eq!(refused["status"], 401);
+    assert_eq!(refused["method"], "GET");
+    assert_eq!(refused["route"], "/policy");
+    assert!(!text.contains("token="));
+    assert!(!text.contains("fixture-query-value"));
+}
+
+#[tokio::test]
+async fn request_log_labels_proxied_route_templates() {
+    let app = log_test_app(String::new());
+    for (path, family, label) in [
+        (
+            "/deck/actions/aa_fixture-id",
+            "browser",
+            "/deck/actions/:id",
+        ),
+        ("/deck/actions/aa_", "browser", "other"),
+        (
+            "//deck/actions/aa_fixture-id",
+            "browser",
+            "/deck/actions/:id",
+        ),
+        ("///work//items", "cold", "/work/items"),
+        ("//unknown", "cold", "other"),
+        ("//", "browser", "/"),
+        (
+            "/deck/observed/fixture-id",
+            "browser",
+            "/deck/observed/:group",
+        ),
+        ("/work/campaigns/fixture-id", "cold", "/work/campaigns/:key"),
+    ] {
+        let (line, text) = log_request(&app, "GET", path, family).await;
+        assert_eq!(line["method"], "GET", "{path}");
+        assert_eq!(line["route"], label, "{path}");
+        assert!(!text.contains("fixture-id"));
+    }
+}
+
+#[tokio::test]
+async fn request_log_replaces_ids_with_placeholders() {
+    let app = log_test_app(String::new());
+    let (line, text) = log_request(
+        &app,
+        "DELETE",
+        "/work/items/fixture-item/links/fixture-link",
+        "cold",
+    )
+    .await;
+    assert_eq!(line["method"], "DELETE");
+    assert_eq!(line["route"], "/work/items/:id/links/:link");
+    assert!(!text.contains("fixture-item"));
+    assert!(!text.contains("fixture-link"));
+}
+
+#[tokio::test]
+async fn request_log_masks_unknown_path_and_method() {
+    let app = log_test_app(String::new());
+    let (line, text) = log_request(
+        &app,
+        "FIXTURE-METHOD",
+        "/work/items/fixture-item/fixture-unknown",
+        "cold",
+    )
+    .await;
+    assert_eq!(line["method"], "other");
+    assert_eq!(line["route"], "other");
+    assert!(!text.contains("FIXTURE-METHOD"));
+    assert!(!text.contains("fixture-unknown"));
 }
 
 /// The read-only audit records the hundreds of `PRAGMA table_xinfo` and
@@ -228,46 +524,7 @@ async fn a_checked_pool_checks_its_schema_at_open_not_on_its_first_job() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_route_auth_never_waits_on_a_held_handler_pool() {
     let fixture = Fixture::new("native-route-auth");
-    let mut app = fixture.app();
-    app.registration = Some(registration::Registration {
-        readers: fixture.readers.clone(),
-        lookups: fixture.lookups.clone(),
-        writer: fixture.writer.clone(),
-        admin: fixture.admin(),
-        clock: None,
-        memory: None,
-    });
-    app.claims = Some(claims_route::Claims {
-        readers: fixture.readers.clone(),
-        lookups: fixture.lookups.clone(),
-        writer: fixture.writer.clone(),
-        admin: fixture.admin(),
-        clock: None,
-        allow_admin_writes: true,
-        events: false,
-    });
-    app.heartbeat = Some(heartbeat::Heartbeat {
-        readers: fixture.readers.clone(),
-        lookups: fixture.lookups.clone(),
-        writer: fixture.writer.clone(),
-        admin: fixture.admin(),
-        clock: None,
-        allow_admin_writes: true,
-        events: false,
-        stale_after: 900,
-    });
-    app.messages = Some(messages_route::Messages::new(
-        fixture.readers.clone(),
-        fixture.lookups.clone(),
-        fixture.writer.clone(),
-        fixture.admin(),
-        None,
-        true,
-        brigade_hub::messages::Policy::from_env(|_| None, false).unwrap(),
-        Arc::new(brigade_hub::messages::wake::Wake::new(
-            brigade_hub::messages::wake::Limits::for_connections(64),
-        )),
-    ));
+    let app = fixture.native_app();
     let held = hold_every(&fixture.readers, brigade_hub::read::hub_threads());
     let node = bearer(NODE_TOKEN);
     let requests = [
@@ -325,6 +582,131 @@ async fn native_route_auth_never_waits_on_a_held_handler_pool() {
     );
 }
 
+#[tokio::test]
+async fn leading_slashes_preserve_route_mode_and_credentials() {
+    let fixture = Fixture::new("leading-slash-modes");
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let upstream_address = format!("http://{}", listener.local_addr().unwrap());
+    let upstream = Router::new().fallback(|uri: axum::http::Uri| async move {
+        (
+            StatusCode::ACCEPTED,
+            axum::Json(serde_json::json!({"path": uri.path()})),
+        )
+    });
+    let server = tokio::spawn(async move { axum::serve(listener, upstream).await.unwrap() });
+    let mut python = fixture.app();
+    python.modes = brigade_hub::modes::Modes::parse(&["health=proxy".into()]).unwrap();
+
+    for (is_native, app) in [(true, fixture.native_app()), (false, python)] {
+        *app.upstream.write().unwrap() = upstream_address.clone();
+        for (method, path, family) in [
+            ("GET", "/status", "heartbeat"),
+            ("POST", "/events", "heartbeat"),
+            ("POST", "/sessions", "heartbeat"),
+            ("GET", "/claims", "claims"),
+            ("POST", "/messages", "messages"),
+            ("GET", "/nodes", "registration"),
+            ("GET", "/health", "health"),
+        ] {
+            for token in [None, Some(NODE_TOKEN), Some(ADMIN)] {
+                let request = |uri: &str| {
+                    let mut builder = Request::builder().method(method).uri(uri);
+                    if let Some(token) = token {
+                        builder = builder.header("authorization", bearer(token));
+                    }
+                    let body = if method == "POST" {
+                        builder = builder.header("content-length", 2);
+                        Body::from("{}")
+                    } else {
+                        Body::empty()
+                    };
+                    builder.body(body).unwrap()
+                };
+                let single = answer(&app, request(path)).await;
+                let (single_log, _) = take_request_line(&app, family).unwrap();
+                let doubled = answer(&app, request(&format!("/{path}"))).await;
+                assert_eq!(single, doubled, "{method} {path}, native={is_native}");
+                let (doubled_log, _) = take_request_line(&app, family).expect(path);
+                assert_eq!(doubled_log["route"], path);
+                assert_eq!(
+                    single_log["credential_kind"],
+                    doubled_log["credential_kind"]
+                );
+                assert_eq!(single.0 == 202, !is_native, "{method} {path}");
+                if !is_native {
+                    assert_eq!(single.1["path"], path);
+                }
+            }
+        }
+    }
+    server.abort();
+}
+
+#[tokio::test]
+async fn leading_slashes_use_the_same_admission_lane() {
+    let fixture = Fixture::new("leading-slash-admission");
+    let app = fixture.app();
+
+    for (token, capacity) in [(None, 4), (Some(NODE_TOKEN), 64), (Some(ADMIN), 64)] {
+        let authorization = token.map(bearer);
+        let credential = app
+            .lookup
+            .as_ref()
+            .unwrap()
+            .credential(authorization.as_deref())
+            .await
+            .unwrap()
+            .key;
+        let slots: Vec<_> = (0..capacity)
+            .map(|_| {
+                app.budgets
+                    .admit(credential.clone(), "/deck", "", None)
+                    .unwrap()
+            })
+            .collect();
+        for path in ["/deck", "//deck"] {
+            let mut request = Request::builder().uri(path);
+            if let Some(value) = &authorization {
+                request = request.header("authorization", value);
+            }
+            let (status, body) = answer(&app, request.body(Body::empty()).unwrap()).await;
+            assert_eq!(status, 503, "{path}");
+            assert_eq!(body["reason"], "credential-inflight-full", "{path}");
+        }
+        drop(slots);
+    }
+}
+
+#[tokio::test]
+async fn leading_slashes_keep_event_and_session_disk_guards() {
+    let fixture = Fixture::new("leading-slash-disk");
+    let mut app = fixture.native_app();
+    let storage = brigade_hub::maintenance::Maintenance::start(
+        &fixture.db,
+        &fixture.dir.join("unused-memory.db"),
+        Arc::new(HubSweeps {
+            memory: None,
+            messages: Arc::default(),
+            last: Mutex::new(None),
+        }),
+    )
+    .unwrap();
+    storage.disk.update(0, Some(0));
+    app.storage = Some(Arc::new(storage));
+
+    for path in ["/events", "//events", "/sessions", "//sessions"] {
+        let request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("authorization", bearer(NODE_TOKEN))
+            .body(Body::empty())
+            .unwrap();
+        let (status, body) = answer(&app, request).await;
+        assert_eq!(status, 503, "{path}");
+        assert_eq!(body["reason"], "disk-pressure", "{path}");
+    }
+}
+
 /// A request the client abandons while a native route's own credential lookup
 /// is still queued keeps that stage. The line exists to name where a request
 /// stalled, and the route's auth read is what the route itself waits on.
@@ -366,9 +748,14 @@ async fn abandoned_route_lookup_keeps_the_credential_lookup_stage() {
     // The client gives up: no reply is ever written, so the stage is the whole
     // record of where the request was.
     task.abort();
-    let _ = task.await;
+    assert!(task.await.unwrap_err().is_cancelled());
     assert_eq!(stage.get(), Stage::CredentialLookup);
     held.release().await;
+    let (line, _) =
+        take_request_line(&app, "heartbeat").expect("request log line for the cancelled request");
+    assert_eq!(line["stage"], "credential-lookup");
+    assert_eq!(line["method"], "GET");
+    assert_eq!(line["route"], "/status");
 }
 
 /// The memory route's credential read is `Store::authenticate`. Its harness
