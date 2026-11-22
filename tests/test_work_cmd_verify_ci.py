@@ -375,3 +375,18 @@ def test_ci_is_unknown_when_every_run_was_cancelled(checkout, monkeypatch, capsy
     payload = json.loads(capsys.readouterr().out)
     assert payload["state"] == "unknown"
     assert "cancelled" in payload["reason"]
+    assert (payload["check_run_id"], payload["conclusion"]) == (101, "cancelled")
+
+
+def test_ci_reads_a_newer_run_when_the_older_one_was_cancelled(checkout, monkeypatch, capsys):
+    # The cancelled run has the lower id and comes first, so position alone cannot decide.
+    target, head, _ = checkout
+    _fake_gh(
+        monkeypatch,
+        head,
+        _check(head, run_id=101, conclusion="cancelled"),
+        _check(head, run_id=202, status="in_progress", conclusion=None),
+    )
+    assert _ci(target) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert (payload["state"], payload["check_run_id"]) == ("pending", 202)

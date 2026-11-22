@@ -5,7 +5,7 @@ Use `--target` to select a different checkout, `--check` to look at a check
 other than `ci-gate`, and `--json` for machine-readable output. Authenticate the GitHub CLI (`gh`) for the checkout's
 GitHub origin before running the command.
 
-Brigade records the newest run of `ci-gate` for the exact commit in
+Brigade records the newest run of `ci-gate` that was not cancelled, for the exact commit, in
 `.brigade/work/verify-ci/<head-sha>.json`. A run with `--check` is recorded in
 its own file next to it. The record includes the commit and
 tree IDs, the check run ID, and the time Brigade fetched the result. A dirty

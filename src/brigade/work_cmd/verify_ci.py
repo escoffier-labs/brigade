@@ -120,7 +120,16 @@ def _fetch_check(target: Path, repository: str, head: str, check_name: str) -> d
         item for item in runs if not (item.get("status") == "completed" and item.get("conclusion") == "cancelled")
     ]
     if not decisive:
-        return {"reason": "Every check run with that name for HEAD was cancelled."}
+        # Point at the newest cancelled run so the record explains itself.
+        newest = max(runs, key=lambda item: item["id"])
+        url = newest.get("html_url")
+        return {
+            "check_run_id": newest["id"],
+            "status": "completed",
+            "conclusion": "cancelled",
+            "html_url": url if isinstance(url, str) else None,
+            "reason": f"Every check run with that name for HEAD was cancelled ({len(runs)}).",
+        }
     # Run IDs increase with creation order, including for runs still queued.
     run = max(decisive, key=lambda item: item["id"])
     if run.get("head_sha") != head:
