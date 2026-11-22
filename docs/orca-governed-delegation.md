@@ -11,7 +11,8 @@ for all recovery rules.
 
 ```mermaid
 flowchart TD
-    A[brigade orca open] --> B[brigade orca claim]
+    R[Orca readiness] --> A[brigade orca open]
+    A --> B[brigade orca claim]
     B --> C[Run printed orca-ide worker-start argv]
     C --> D[brigade orca accepted]
     D --> E[brigade orca observe with full worker-show]
@@ -24,6 +25,24 @@ flowchart TD
     K --> E
     A -. capacity .-> L[brigade orca status]
 ```
+
+## Before the first claim
+
+Run the [Orca readiness check](roster-readiness.md#route-orca) on the
+coordinator, using the workspace, seat, and PATH that will be used for launch.
+
+```console
+brigade roster ready --route orca --worker <seat> --target <workspace> --json
+```
+
+Proceed to the initial claim only after readiness reports `ready`. After an
+Orca upgrade, update `[orca_targets.<seat>].orca_version` to the exact installed
+version, then rerun readiness and use a fresh enrollment for new work. Keep
+the original enrollment and retry keys for retained work. Repeat the
+preflight if the executable, PATH, or roster changes before launch.
+
+The registry confirms command and flag availability. Brigade still validates
+the returned worker receipts against the existing wire contract.
 
 ## Observe and acknowledge
 

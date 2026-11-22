@@ -13,10 +13,9 @@ from .native_child_journal import digest
 from .native_orca_host import (
     HOST,
     NEW_WORKTREES,
-    ORCA_VERSION,
-    SUPPORTED_VERSIONS,
     NativeTarget,
     require_supported_target,
+    valid_version,
 )
 
 _START_DOMAIN = "brigade.native-orca.worker-start.v1"
@@ -74,11 +73,11 @@ class WorkerReference:
 
     binding: LaunchBinding
     dispatch_id: str
-    orca_version: str = ORCA_VERSION
+    orca_version: str
 
     def __post_init__(self) -> None:
         self.binding.checked_key()
-        if self.orca_version not in SUPPORTED_VERSIONS or not valid_id(self.dispatch_id, "ctx"):
+        if not valid_version(self.orca_version) or not valid_id(self.dispatch_id, "ctx"):
             raise NativeChildError("native-invalid", "the Orca worker reference is invalid")
 
     @property
