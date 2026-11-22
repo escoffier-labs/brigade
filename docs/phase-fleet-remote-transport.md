@@ -74,23 +74,22 @@ projection. It never leases a model seat, calls a provider, renews a
 reservation, or releases one for a remote branch. A blocked source route leaves
 the unaccepted reservation to expire at its TTL.
 
-At launch admission, before target preparation, the selected target uses its
-node credentials to accept the reservation with the reservation and decision
-IDs from routing and its session ID:
+At launch admission, the selected target uses its own node credentials to
+accept the reservation with the IDs from the routing decision and its session.
 
 ```bash
 brigade fleet policy reservation accept --reservation-id R --decision-id D --session-id S --json
 ```
 
-The target must receive `state: "accepted"` before provider execution. Acceptance
-commits the slot. An accepted reservation occupies node capacity until release,
-even after its lease expires, so the target must release it on every exit path.
-The target renews as needed during execution and releases when work ends. Accept,
-renew, and release all require the same reservation ID, decision ID, and session
-ID. The accept reply has `state: "accepted"`. A renew reply has `state: "active"`.
-The Hub checks that each operation comes from the selected target and requires
-acceptance before renew or release. The target then performs prepare -> context
-application -> ack -> launch proof -> provider execution.
+The target must receive `state: accepted` before starting provider execution.
+It uses `reservation renew` during execution and `reservation release` when the
+work ends, with the same IDs. The Hub checks that all three operations come
+from the selected target and requires acceptance before renew or release.
+
+Acceptance commits the slot. An accepted reservation occupies node capacity
+until release, even after its lease expires, so the target must release it on
+every exit path. The accept reply has `state: "accepted"`. A renew reply has
+`state: "active"`.
 
 ## Result states and handoff
 

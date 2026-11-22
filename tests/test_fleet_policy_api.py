@@ -1294,12 +1294,11 @@ def test_reservation_cli_lifecycle_requires_selected_target(tmp_path, monkeypatc
         assert released["state"] == "released"
 
 
-def test_reservation_accept_cli_lifecycle_over_real_http(tmp_path, monkeypatch, capsys):
+def test_reservation_cli_refuses_release_before_accept_and_renew_after_release(tmp_path, monkeypatch, capsys):
     from brigade import cli, fleet_client_policy
 
     with _hub(tmp_path) as hub:
         token = _enroll(hub, NODE_A)
-        other = _enroll(hub, NODE_B)
         ids = _route_reservation(hub, "accept-cli-lifecycle")
 
         def configured_transport(*, admin):
@@ -1307,16 +1306,6 @@ def test_reservation_accept_cli_lifecycle_over_real_http(tmp_path, monkeypatch, 
             return f"http://{hub[0]}:{hub[1]}", token
 
         monkeypatch.setattr(fleet_client_policy, "_hub_and_token", configured_transport)
-
-        status, refusal = _request(
-            hub,
-            "POST",
-            "/policy",
-            token=token,
-            body={"action": "reservation-release", **ids},
-        )
-        assert status == 403, refusal
-        assert refusal["error"]["code"] == "auth-failed"
 
         refused = cli.main(
             [
@@ -1337,71 +1326,23 @@ def test_reservation_accept_cli_lifecycle_over_real_http(tmp_path, monkeypatch, 
         refusal = json.loads(capsys.readouterr().out)
         assert refusal["error"]["code"] == "auth-failed"
 
-        for action in ("reservation-renew", "reservation-release"):
-            status, payload = _request(
-                hub,
-                "POST",
-                "/policy",
-                token=other,
-                body={"action": action, **ids},
-            )
-            assert status == 403, payload
-            assert payload["error"]["code"] == "auth-failed"
-
-        accepted_rc = cli.main(
-            [
-                "fleet",
-                "policy",
-                "reservation",
-                "accept",
-                "--reservation-id",
-                ids["reservation_id"],
-                "--decision-id",
-                ids["decision_id"],
-                "--session-id",
-                ids["session_id"],
-                "--json",
-            ]
+        status, accepted = _request(
+            hub,
+            "POST",
+            "/policy",
+            token=token,
+            body={"action": "reservation-accept", **ids},
         )
-        assert accepted_rc == 0
-        accepted = json.loads(capsys.readouterr().out)
-        assert accepted["state"] == "accepted"
-
-        renewed_rc = cli.main(
-            [
-                "fleet",
-                "policy",
-                "reservation",
-                "renew",
-                "--reservation-id",
-                ids["reservation_id"],
-                "--decision-id",
-                ids["decision_id"],
-                "--session-id",
-                ids["session_id"],
-                "--json",
-            ]
+        assert status == 200, accepted
+        status, released = _request(
+            hub,
+            "POST",
+            "/policy",
+            token=token,
+            body={"action": "reservation-release", **ids},
         )
-        assert renewed_rc == 0
-        assert json.loads(capsys.readouterr().out)["reservation_id"] == ids["reservation_id"]
-
-        released_rc = cli.main(
-            [
-                "fleet",
-                "policy",
-                "reservation",
-                "release",
-                "--reservation-id",
-                ids["reservation_id"],
-                "--decision-id",
-                ids["decision_id"],
-                "--session-id",
-                ids["session_id"],
-                "--json",
-            ]
-        )
-        assert released_rc == 0
-        assert json.loads(capsys.readouterr().out)["state"] == "released"
+        assert status == 200, released
+        assert released["state"] == "released"
 
         after_release_rc = cli.main(
             [
