@@ -66,7 +66,6 @@ Thumbs.db
 !/scripts/hyper-v-native-acceptance.ps1
 !/scripts/measure_work_store.py
 !/scripts/measure_dispatch_exclusions.py
-!/scripts/verify-fast
 !/scripts/ci_pytest_shard.py
 !/scripts/ci_timing_report.py
 !/scripts/ci_selection_core.py
