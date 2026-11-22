@@ -41,8 +41,10 @@ def test_v0261_release_notes_remain_complete():
 
 
 def test_repo_memory_handoff_template_matches_agents_guidance():
-    path = ROOT / ".claude" / "memory-handoffs" / "TEMPLATE.md"
+    template = Path("src/brigade/templates/claude/memory-handoffs/TEMPLATE.md")
+    path = ROOT / template
 
+    assert f"]({template.as_posix()})" in (ROOT / "AGENTS.md").read_text()
     assert path.is_file()
     text = path.read_text()
     for heading in (
