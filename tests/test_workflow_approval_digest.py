@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
+import shlex
 import subprocess
 import sys
 
@@ -19,7 +20,7 @@ FILES = {
     13: "docs/readme.md",
     14: ".github/workflows/hostile|`name.yml",
 }
-HOSTILE_TITLE = "evil </table><h1>x</h1> [click](https://example.com)"
+HOSTILE_TITLE = "evil </table><h1>x</h1> [click](https://example.com) | a ` b"
 PULLS = [
     {
         "number": number,
@@ -54,6 +55,10 @@ def revoked_status(number: int) -> dict[str, object]:
         "creator": {"login": "github-actions[bot]", "type": "Bot", "id": workflow_guard.GITHUB_ACTIONS_BOT_ID},
         "created_at": "2026-11-22T13:14:15Z",
     }
+
+
+def unescaped_pipe_count(line: str) -> int:
+    return sum(char == "|" and (index == 0 or line[index - 1] != "\\") for index, char in enumerate(line))
 
 
 def fake_gh(monkeypatch, *, fail_endpoint: str | None = None):
@@ -110,11 +115,14 @@ def test_digest_includes_approved_and_missing_and_omits_unprotected(monkeypatch,
     assert rows[12].endswith("| no |")
     assert rows[14].endswith("| no |")
     assert "Label present" in output
-    assert "\\u007c" in output and "\\u0060" in output
     assert "hostile|`name" not in output
-    assert r"\u003c" in rows[14] and r"\u005b" in rows[14]
-    for token in ("<", ">", "[", "]("):
-        assert token not in rows[14]
+    title_cell = workflow_approval_digest.code_span(HOSTILE_TITLE)
+    assert f"| 14 | {title_cell} |" in rows[14]
+    assert HOSTILE_TITLE.replace("|", r"\|") in title_cell
+    for fragment in ("</table>", "<h1>x</h1>", "[click]", "https://example.com"):
+        assert rows[14].count(fragment) == title_cell.count(fragment) == 1
+    header = next(line for line in output.splitlines() if line.startswith("| # |"))
+    assert unescaped_pipe_count(rows[14]) == unescaped_pipe_count(header)
 
 
 def test_api_failure_exits_two_without_partial_digest(monkeypatch, capsys):
@@ -143,9 +151,7 @@ def test_days_excludes_older_merged_pull_requests(monkeypatch, capsys):
 def test_cutoff_excludes_pre_guard_pull_requests_and_counts_them(monkeypatch, capsys):
     fake_gh(monkeypatch)
     old_dates = [PULLS[number - 11]["merged_at"] for number in (11, 12)]
-    PULLS[0]["merged_at"] = (
-        (workflow_approval_digest.GUARD_START - timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
-    )
+    PULLS[0]["merged_at"] = workflow_approval_digest.GUARD_START.isoformat().replace("+00:00", "Z")
     PULLS[1]["merged_at"] = (
         (workflow_approval_digest.GUARD_START + timedelta(seconds=1)).isoformat().replace("+00:00", "Z")
     )
@@ -153,11 +159,23 @@ def test_cutoff_excludes_pre_guard_pull_requests_and_counts_them(monkeypatch, ca
         assert workflow_approval_digest.main(["--repo", "example/project"]) == 0
         output = capsys.readouterr().out
         assert "Excluded 1 merged protected pull request(s)" in output
-        assert "predate the cutoff" in output
+        assert "at or before the cutoff" in output
         assert "Example 11" not in output
         assert "Example 12" in output
     finally:
         PULLS[0]["merged_at"], PULLS[1]["merged_at"] = old_dates
+
+
+def test_title_with_three_backticks_uses_a_longer_fence(monkeypatch, capsys):
+    fake_gh(monkeypatch)
+    original = PULLS[-1]["title"]
+    PULLS[-1]["title"] = "value with ``` run"
+    try:
+        assert workflow_approval_digest.main(["--repo", "example/project"]) == 0
+        row = next(line for line in capsys.readouterr().out.splitlines() if line.startswith("| 14 |"))
+        assert "| 14 | ```` value with ``` run ```` |" in row
+    finally:
+        PULLS[-1]["title"] = original
 
 
 def test_script_path_help_works_from_another_directory(tmp_path):
@@ -177,16 +195,28 @@ def test_script_path_help_works_from_another_directory(tmp_path):
 def test_script_path_runs_with_fake_gh_from_another_directory(tmp_path):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    fake_gh = fake_bin / "gh"
-    fake_gh.write_text(
-        "#!/bin/sh\n"
-        'case "$2" in\n'
-        "  repos/example/project) printf '%s\\n' '{\"default_branch\":\"main\"}' ;;\n"
-        "  repos/example/project/pulls*) printf '%s\\n' '[[]]' ;;\n"
-        "  *) exit 1 ;;\n"
-        "esac\n",
+    fake_gh_script = fake_bin / "fake_gh.py"
+    fake_gh_script.write_text(
+        "import json\n"
+        "import sys\n"
+        "endpoint = sys.argv[2]\n"
+        "if endpoint == 'repos/example/project':\n"
+        "    print(json.dumps({'default_branch': 'main'}))\n"
+        "elif endpoint.startswith('repos/example/project/pulls?'):\n"
+        "    print(json.dumps([[]]))\n"
+        "else:\n"
+        "    raise SystemExit(1)\n",
         encoding="utf-8",
     )
+    if os.name == "nt":
+        fake_gh = fake_bin / "gh.cmd"
+        fake_gh.write_text(f'@echo off\n"{sys.executable}" "{fake_gh_script}" %*\n', encoding="utf-8")
+    else:
+        fake_gh = fake_bin / "gh"
+        fake_gh.write_text(
+            f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(fake_gh_script))} "$@"\n',
+            encoding="utf-8",
+        )
     fake_gh.chmod(0o755)
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)

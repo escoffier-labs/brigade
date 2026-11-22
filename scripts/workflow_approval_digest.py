@@ -3,12 +3,12 @@
 
 import argparse
 from datetime import date, datetime, time, timedelta, timezone
-import json
 from pathlib import Path
 import re
 import subprocess
 import sys
 from typing import Any
+import unicodedata
 from urllib.parse import quote
 
 # Support execution by path from outside the repository as well as package imports.
@@ -21,11 +21,19 @@ REPO = re.compile(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+")
 GUARD_START = datetime(2026, 11, 22, 3, 47, 17, tzinfo=timezone.utc)
 
 
-def safe_json(value: object) -> str:
-    encoded = json.dumps(value, ensure_ascii=True, separators=(",", ":"))
-    for char in "|`<>&[]()*_~#!":
-        encoded = encoded.replace(char, f"\\u{ord(char):04x}")
-    return encoded
+def code_span(value: str) -> str:
+    cleaned = []
+    for char in value:
+        if char in "\n\r\t":
+            cleaned.append(" ")
+        elif unicodedata.category(char) != "Cc":
+            cleaned.append(char)
+    text = "".join(cleaned)
+    runs = re.findall(r"`+", text)
+    delimiter = "`" * (max(map(len, runs), default=0) + 1)
+    padding = " " if runs or text.startswith(" ") or text.endswith(" ") else ""
+    text = text.replace("|", "\\|")
+    return f"{delimiter}{padding}{text}{padding}{delimiter}"
 
 
 def parse_timestamp(value: object) -> datetime:
@@ -85,13 +93,13 @@ def approval_record(repo: str, head_sha: str, number: int) -> tuple[str, str] | 
 
 def table(rows: list[tuple[int, str, str, str, str, str, str]]) -> str:
     lines = [
-        "| # | Pull request | Merged (UTC) | Protected files (JSON) | Success approval | Status written (UTC) | Label present |",
+        "| # | Pull request | Merged (UTC) | Protected files | Success approval | Status written (UTC) | Label present |",
         "| ---: | --- | --- | --- | --- | --- | --- |",
     ]
     for number, title, merged_at, files, approval, written_at, has_label in rows:
-        # JSON keeps values on one line; safe_json replaces Markdown and HTML delimiters.
+        # Code spans display pull request titles literally in the table.
         lines.append(
-            f"| {number} | {safe_json(title)} | {merged_at} | {files} | {approval} | {written_at} | {has_label} |"
+            f"| {number} | {code_span(title)} | {merged_at} | {files} | {approval} | {written_at} | {has_label} |"
         )
     return "\n".join(lines)
 
@@ -130,7 +138,7 @@ def main(argv: list[str] | None = None) -> int:
             protected = workflow_guard.protected_paths(paths)
             if not protected:
                 continue
-            if merged_at < since:
+            if merged_at <= since:
                 excluded_before_cutoff += 1
                 continue
             label_names = {item["name"] for item in pull["labels"]}
@@ -139,7 +147,7 @@ def main(argv: list[str] | None = None) -> int:
                 number,
                 pull["title"],
                 merged_at.isoformat().replace("+00:00", "Z"),
-                safe_json(protected),
+                ", ".join(code_span(path) for path in protected),
                 approval[0] if approval is not None else "no",
                 approval[1] if approval is not None else "none",
                 "yes" if workflow_guard.APPROVAL_LABEL in label_names else "no",
@@ -154,7 +162,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"# Workflow approval digest: {begin} to {end} UTC")
     cutoff = since.isoformat().replace("+00:00", "Z")
     print(
-        f"Cutoff: {cutoff}. Excluded {excluded_before_cutoff} merged protected pull request(s) in this date range because they predate the cutoff."
+        f"Cutoff: {cutoff}. Excluded {excluded_before_cutoff} merged protected pull request(s) in this date range because they merged at or before the cutoff."
     )
     success_count = sum(row[4] == "yes" for row in status_rows)
     print(
