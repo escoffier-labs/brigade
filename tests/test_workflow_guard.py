@@ -17,6 +17,8 @@ ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github/workflows"
 APPROVAL = "workflow-change-approved"
 PULL = "repos/example/project/pulls/42"
+HEAD = "a" * 40
+STATUSES = f"repos/example/project/commits/{HEAD}/statuses?per_page=100"
 CLI_ARGS = ["--repo", "example/project", "--pr", "42"]
 
 
@@ -71,13 +73,16 @@ def test_unprotected_paths():
 def pull_request_event(monkeypatch):
     monkeypatch.setenv("PR_BASE_REF", "main")
     monkeypatch.setenv("REPO_DEFAULT_BRANCH", "main")
-    monkeypatch.setenv("PR_ACTION", "labeled")
-    monkeypatch.setenv("APPROVAL_CLEAR_RESULT", "skipped")
+    monkeypatch.setenv("APPROVAL_RECORD_RESULT", "skipped")
 
 
 @pytest.fixture
 def fake_gh(monkeypatch):
-    def install(pages, *, labels=(), changed_files=None, fail=False):
+    def install(
+        pages, *, labels=(), changed_files=None, fail=False, statuses=([],), heads=(HEAD, HEAD), fail_statuses=False
+    ):
+        live_heads = iter(heads)
+
         def run(args, **kwargs):
             assert args[:2] == ["gh", "api"]
             assert kwargs.get("shell", False) is False
@@ -86,10 +91,21 @@ def fake_gh(monkeypatch):
                 if fail:
                     raise subprocess.CalledProcessError(1, args, stderr="API unavailable")
                 payload = pages
+            elif args[2] == STATUSES:
+                assert args[3:] == ["--paginate", "--slurp"]
+                assert workflow_guard.protected_paths(
+                    [entry["filename"] for page in pages for entry in page]
+                    + [entry["previous_filename"] for page in pages for entry in page if "previous_filename" in entry]
+                )
+                if fail_statuses:
+                    raise subprocess.CalledProcessError(1, args, stderr="API unavailable")
+                payload = statuses
             else:
                 assert args[2:] == [PULL]
                 payload = {
                     "changed_files": sum(map(len, pages)) if changed_files is None else changed_files,
+                    "head": {"sha": next(live_heads)},
+                    "base": {"ref": "main", "sha": "b" * 40},
                     "labels": [{"name": label} for label in labels],
                 }
             return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload))
@@ -99,29 +115,51 @@ def fake_gh(monkeypatch):
     return install
 
 
+def approval_status(state="success", *, login="github-actions[bot]", creator_type="Bot", context=APPROVAL):
+    return {"context": context, "state": state, "creator": {"login": login, "type": creator_type}}
+
+
 @pytest.mark.parametrize(
-    ("path", "labels", "exit_code"),
+    ("statuses", "exit_code"),
     [
-        ("docs/guide.md", [], 0),
-        (".github/workflows/ci.yml", [APPROVAL], 0),
-        (".github/workflows/ci.yml", ["unrelated"], 1),
+        ([[]], 1),
+        ([[approval_status()]], 0),
+        ([[approval_status("failure"), approval_status()]], 1),
+        ([[approval_status("pending"), approval_status()]], 1),
+        ([[approval_status(login="reviewer"), approval_status(creator_type="User")]], 1),
+        ([[approval_status(context="other-check"), approval_status(login="reviewer")], [approval_status()]], 0),
+        ([[approval_status("failure", login="reviewer"), approval_status()]], 0),
+        ([[{"context": APPROVAL, "state": "success"}]], 2),
+        ([[{"context": APPROVAL, "state": True, "creator": {"login": "github-actions[bot]", "type": "Bot"}}]], 2),
+        ([{"unexpected": []}], 2),
     ],
 )
-def test_label_decision(fake_gh, capsys, path, labels, exit_code):
-    fake_gh([[{"filename": path, "status": "modified"}]], labels=labels)
+def test_commit_status_decision(fake_gh, capsys, statuses, exit_code):
+    path = ".github/workflows/ci.yml"
+    fake_gh([[{"filename": path}]], labels=[APPROVAL], statuses=statuses)
 
     assert workflow_guard.main(CLI_ARGS) == exit_code
-
-    if path.startswith(".github/"):
-        output = capsys.readouterr().out
-        assert path in output
+    output = capsys.readouterr().out
+    assert path in output
+    if exit_code == 1:
         assert APPROVAL in output
-        assert "maintainer" in output and "after reading" in output
+        assert "maintainer" in output and "this commit" in output
 
 
-def test_custom_label(fake_gh):
-    fake_gh([[{"filename": "scripts/ci_docs_only.py", "status": "modified"}]], labels=["ci-reviewed"])
-    assert workflow_guard.main([*CLI_ARGS, "--label", "ci-reviewed"]) == 0
+def test_unprotected_changes_do_not_read_statuses(fake_gh):
+    fake_gh([[{"filename": "docs/guide.md"}]], fail_statuses=True)
+    assert workflow_guard.main(CLI_ARGS) == 0
+
+
+def test_failed_status_request_cannot_pass(fake_gh):
+    fake_gh([[{"filename": ".github/workflows/ci.yml"}]], labels=[APPROVAL], fail_statuses=True)
+    assert workflow_guard.main(CLI_ARGS) == 2
+
+
+@pytest.mark.parametrize("heads", [(HEAD, "c" * 40), ("invalid", "invalid"), (None, None)])
+def test_inconsistent_or_invalid_live_head_cannot_pass(fake_gh, heads):
+    fake_gh([[{"filename": "docs/guide.md"}]], heads=heads)
+    assert workflow_guard.main(CLI_ARGS) == 2
 
 
 @pytest.mark.parametrize(
@@ -191,24 +229,21 @@ def test_rejects_nondefault_or_missing_base(fake_gh, capsys, monkeypatch, base):
     assert "default branch" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(
-    ("action", "clear_result", "path", "exit_code"),
-    [
-        ("synchronize", "success", ".github/workflows/ci.yml", 1),
-        ("synchronize", "success", "docs/guide.md", 0),
-        ("synchronize", "failure", "docs/guide.md", 2),
-        ("synchronize", "skipped", "docs/guide.md", 2),
-        ("labeled", "skipped", "pyproject.toml", 0),
-    ],
-)
-def test_approval_after_push(fake_gh, capsys, monkeypatch, action, clear_result, path, exit_code):
-    monkeypatch.setenv("PR_ACTION", action)
-    monkeypatch.setenv("APPROVAL_CLEAR_RESULT", clear_result)
-    fake_gh([[{"filename": path}]], labels=[APPROVAL])
+@pytest.mark.parametrize("result", ["failure", "cancelled", ""])
+def test_record_failure_cannot_pass_with_older_approval(fake_gh, capsys, monkeypatch, result):
+    monkeypatch.setenv("APPROVAL_RECORD_RESULT", result)
+    fake_gh([[{"filename": ".github/workflows/ci.yml"}]], statuses=[[approval_status()]])
 
-    assert workflow_guard.main(CLI_ARGS) == exit_code
-    if exit_code == 2:
-        assert "clear" in capsys.readouterr().err
+    assert workflow_guard.main(CLI_ARGS) == 2
+    assert "record" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("clear_result", ["failure", "success"])
+def test_label_cleanup_is_advisory(fake_gh, monkeypatch, clear_result):
+    monkeypatch.setenv("APPROVAL_CLEAR_RESULT", clear_result)
+    fake_gh([[{"filename": ".github/workflows/ci.yml"}]], statuses=[[approval_status()]])
+
+    assert workflow_guard.main(CLI_ARGS) == 0
 
 
 @pytest.fixture
@@ -229,22 +264,13 @@ def test_workflow_triggers(guard_workflow):
 def test_workflow_job_contract(guard_workflow):
     read_permissions = {"contents": "read", "pull-requests": "read"}
     assert guard_workflow["permissions"] == read_permissions
-    assert set(guard_workflow["jobs"]) == {"clear-approval", "workflow-guard"}
-
-    clear = guard_workflow["jobs"]["clear-approval"]
-    assert clear["if"] == "github.event.action == 'synchronize'"
-    assert clear["permissions"] == {"pull-requests": "write"}
-    assert all("uses" not in step for step in clear["steps"])
-    assert clear["steps"][0]["env"] == {
-        "GH_TOKEN": "${{ github.token }}",
-        "PR_NUMBER": "${{ github.event.number }}",
-    }
+    assert set(guard_workflow["jobs"]) == {"clear-approval", "record-approval", "workflow-guard"}
 
     guard = guard_workflow["jobs"]["workflow-guard"]
     assert guard["name"] == "workflow-guard"
-    assert guard["needs"] == "clear-approval"
+    assert guard["needs"] == ["clear-approval", "record-approval"]
     assert guard["if"] == "${{ !cancelled() }}"
-    assert guard["permissions"] == read_permissions
+    assert guard["permissions"] == {**read_permissions, "statuses": "read"}
     run_guard = next(step for step in guard["steps"] if "scripts/workflow_guard.py" in step.get("run", ""))
     assert run_guard["if"] == "github.event_name == 'pull_request_target'"
     assert run_guard["env"] == {
@@ -252,10 +278,69 @@ def test_workflow_job_contract(guard_workflow):
         "PR_NUMBER": "${{ github.event.number }}",
         "PR_BASE_REF": "${{ github.event.pull_request.base.ref }}",
         "REPO_DEFAULT_BRANCH": "${{ github.event.repository.default_branch }}",
-        "PR_ACTION": "${{ github.event.action }}",
-        "APPROVAL_CLEAR_RESULT": "${{ needs.clear-approval.result }}",
+        "APPROVAL_RECORD_RESULT": "${{ needs.record-approval.result }}",
     }
     assert guard["steps"][-1]["if"] == "github.event_name == 'merge_group'"
+
+
+CLEAR_APPROVAL_SCRIPT = """\
+if response=$(gh api --include --silent -X DELETE "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/workflow-change-approved" 2>/dev/null); then
+  exit 0
+fi
+if [[ $response =~ ^HTTP/[^[:space:]]+[[:space:]]404([[:space:]]|$) ]]; then
+  exit 0
+fi
+echo "Could not clear the workflow approval label." >&2
+exit 1
+"""
+
+RECORD_APPROVAL_SCRIPT = """\
+if [[ ! $PR_HEAD_SHA =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
+  echo "Invalid pull request head commit." >&2
+  exit 1
+fi
+case "$PR_ACTION" in
+  labeled) state=success ;;
+  unlabeled) state=failure ;;
+  *) exit 1 ;;
+esac
+gh api --silent -X POST "repos/$GITHUB_REPOSITORY/statuses/$PR_HEAD_SHA" \\
+  -f context=workflow-change-approved -f state="$state" -f description="Workflow change approval"
+"""
+
+
+def test_write_jobs_only_run_the_expected_scripts(guard_workflow):
+    jobs = guard_workflow["jobs"]
+    assert {name for name, job in jobs.items() if "write" in job.get("permissions", {}).values()} == {
+        "clear-approval",
+        "record-approval",
+    }
+    clear = jobs["clear-approval"]
+    record = jobs["record-approval"]
+    assert clear["if"] == "github.run_attempt == '1' && github.event.action == 'synchronize'"
+    assert record["if"] == (
+        "github.run_attempt == '1' && github.event.label.name == 'workflow-change-approved' && "
+        "(github.event.action == 'labeled' || github.event.action == 'unlabeled')"
+    )
+    for job, permission, script, env in (
+        (clear, "pull-requests", CLEAR_APPROVAL_SCRIPT, {"PR_NUMBER": "${{ github.event.number }}"}),
+        (
+            record,
+            "statuses",
+            RECORD_APPROVAL_SCRIPT,
+            {
+                "PR_HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
+                "PR_ACTION": "${{ github.event.action }}",
+            },
+        ),
+    ):
+        assert set(job) == {"if", "permissions", "runs-on", "steps"}
+        assert job["runs-on"] == "ubuntu-latest"
+        assert job["permissions"] == {permission: "write"}
+        (step,) = job["steps"]
+        assert set(step) == {"name", "env", "run"}
+        assert step["env"] == {"GH_TOKEN": "${{ github.token }}", **env}
+        assert step["run"] == script
 
 
 @pytest.mark.parametrize(
@@ -297,6 +382,41 @@ exec 3>&1
     ]
 
 
+@pytest.mark.parametrize(
+    ("sha", "action", "api_exit", "job_exit", "state"),
+    [
+        (HEAD, "labeled", 0, 0, "success"),
+        ("B" * 64, "unlabeled", 0, 0, "failure"),
+        (HEAD, "unlabeled", 1, 1, "failure"),
+        ("a" * 39, "labeled", 0, 1, None),
+        ("G" * 40, "labeled", 0, 1, None),
+        ("a" * 41, "labeled", 0, 1, None),
+        (HEAD, "edited", 0, 1, None),
+    ],
+)
+def test_record_approval_posts_once_to_the_event_commit(guard_workflow, sha, action, api_exit, job_exit, state):
+    script = guard_workflow["jobs"]["record-approval"]["steps"][0]["run"]
+    fake_gh = 'gh() { printf "%s\\n" "$*"; return "$API_EXIT"; }\n'
+    result = subprocess.run(
+        _workflow_bash_command(fake_gh + script, "-e"),
+        env=dict(
+            os.environ, GITHUB_REPOSITORY="example/project", PR_HEAD_SHA=sha, PR_ACTION=action, API_EXIT=str(api_exit)
+        ),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == job_exit, result.stderr
+    calls = (
+        []
+        if state is None
+        else [
+            f"api --silent -X POST repos/example/project/statuses/{sha} "
+            f"-f context={APPROVAL} -f state={state} -f description=Workflow change approval"
+        ]
+    )
+    assert result.stdout.splitlines() == calls
+
+
 def test_workflow_only_checks_out_base_with_pinned_actions(guard_workflow):
     checkouts = []
     for job in guard_workflow["jobs"].values():
@@ -304,13 +424,43 @@ def test_workflow_only_checks_out_base_with_pinned_actions(guard_workflow):
         for step in job["steps"]:
             uses = step.get("uses")
             if uses is not None:
-                assert re.search(r"@[0-9a-f]{40}$", uses)
-                if uses.startswith("actions/checkout@"):
-                    checkouts.append(step)
-                    assert step["with"] == {"persist-credentials": False}
-                    assert step["if"].startswith("github.event_name == 'pull_request_target'")
-            assert not re.search(r"\$\{\{\s*github\.(?:event\.pull_request\.|head_ref\b)", step.get("run", ""))
+                assert re.fullmatch(r"actions/checkout@[0-9a-f]{40}", uses)
+                checkouts.append(step)
+                assert step["with"] == {"persist-credentials": False}
+                assert step["if"] == "github.event_name == 'pull_request_target'"
     assert len(checkouts) == 1
+
+
+def workflow_strings(value, path=()):
+    if isinstance(value, dict):
+        for key, child in value.items():
+            yield from workflow_strings(child, (*path, key))
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            yield from workflow_strings(child, (*path, index))
+    elif isinstance(value, str):
+        yield path, value
+
+
+def test_workflow_expressions_stay_out_of_shell_and_untrusted_inputs(guard_workflow):
+    event_head = ("jobs", "record-approval", "steps", 0, "env", "PR_HEAD_SHA")
+    trusted_inputs = {
+        "github.token",
+        "github.event.number",
+        "github.event.pull_request.base.ref",
+        "github.event.repository.default_branch",
+        "github.event.action",
+        "needs.record-approval.result",
+    }
+    for path, value in workflow_strings(guard_workflow):
+        if "run" in path:
+            assert "${{" not in value, path
+        if "env" in path or "with" in path:
+            expressions = re.findall(r"\$\{\{\s*(.*?)\s*\}\}", value, re.DOTALL)
+            allowed = {"github.event.pull_request.head.sha"} if path == event_head else trusted_inputs
+            assert set(expressions) <= allowed, path
+        if "github.event.pull_request.head" in value:
+            assert path == event_head and value == "${{ github.event.pull_request.head.sha }}"
 
 
 # These are ordinary tests explicitly selected by workflow commands. Requiring a
@@ -349,7 +499,7 @@ WORKFLOW_PATH_EXEMPTIONS = {
 WORKFLOW_PATH = re.compile(
     r"(?:(?P<workspace>\$\{\{\s*github\.workspace\s*\}\}|\$GITHUB_WORKSPACE|\$\{GITHUB_WORKSPACE\})[/\\]"
     r"|(?<![\w./\\-]))"
-    r"(?P<path>(?:\.{1,2}[/\\])*(?:scripts|tests|registry)[/\\][\w./\\*-]*)"
+    r"(?P<path>(?:\.{1,2}[/\\])*(?:scripts|tests|registry|npm)[/\\][\w./\\*-]*)"
 )
 
 
@@ -371,8 +521,68 @@ def test_workflow_referenced_repository_paths_are_protected(workflow):
                 raw_path = match["path"].replace("\\", "/")
                 root = "." if match["workspace"] or directory == "${{ github.workspace }}" else directory
                 path = normpath(f"{root}/{raw_path}")
-                if path.split("/", 1)[0] in {"scripts", "tests", "registry"}:
-                    paths.add(path + "/" if raw_path.endswith("/") else path)
+                if path.split("/", 1)[0] in {"scripts", "tests", "registry", "npm"}:
+                    is_directory = raw_path.endswith("/") or (ROOT / path).is_dir()
+                    paths.add(path + "/" if is_directory else path)
 
     missing = paths - WORKFLOW_PATH_EXEMPTIONS.keys() - set(workflow_guard.protected_paths(list(paths)))
     assert not missing, f"{workflow.name} uses unprotected paths: {', '.join(sorted(missing))}"
+
+
+# List fixed CI inputs that workflow commands reach indirectly. Ordinary test
+# selections and source trees processed by the CI checks remain out of scope.
+TRANSITIVE_INPUTS = {
+    "npm/feasibility/acceptance.cjs": ("npm/feasibility/provenance.cjs",),
+    "npm/feasibility/prepare.py": (
+        "npm/feasibility/build-requirements.txt",
+        "npm/feasibility/launcher.cjs",
+        "npm/feasibility/package.json",
+        "npm/feasibility/runtime.json",
+        "scripts/prepare_dev_wheel.py",
+    ),
+    "npm/feasibility/provenance.test.cjs": (
+        "npm/feasibility/fixtures/sigstore-3.1.0-attestations.json",
+        "npm/feasibility/provenance.cjs",
+    ),
+    "npm/feasibility/publish-compat.cjs": ("npm/feasibility/provenance.cjs", "npm/feasibility/readback.cjs"),
+    "npm/feasibility/publish.cjs": ("npm/feasibility/provenance.cjs", "npm/feasibility/readback.cjs"),
+    "scripts/check_size_ratchet_baseline.py": ("tests/test_module_size_ratchet.py",),
+    "scripts/ci_hub_select.py": ("scripts/ci_hub_paths.yml",),
+    "scripts/ci_shadow_report.py": ("scripts/ci_selection_core.py", "scripts/ci_test_selection.py"),
+    "scripts/ci_test_selection.py": ("scripts/ci_selection_core.py",),
+    "scripts/managed_snapshot.py": ("src/brigade/templates/stations/managed-snapshot.json",),
+    "scripts/memory_scan_bundle.py": (
+        "engines/hub/src/memory/scan.rs",
+        "scripts/memory_scan_unicode14_unassigned.ranges",
+        "src/brigade/guard/memory-rules.json",
+        "src/brigade/memory_content_scan.py",
+    ),
+    "scripts/pr_tier_selection.py": ("scripts/pr_test_tiers.json", "scripts/windows_affected_tests.py"),
+    "scripts/pr_tier_shadow.py": ("scripts/pr_tier_selection.py",),
+    "scripts/retired_engine_names.py": (
+        "src/brigade/__init__.py",
+        "tests/fixtures/retired-engine-names-allowlist.json",
+    ),
+    "scripts/shipped_file_history.py": ("src/brigade/templates/shipped-file-history.json",),
+    "scripts/template_profile_snapshot.py": ("src/brigade/templates/template-profile-snapshot.json",),
+    "scripts/verify-focused": (
+        "scripts/managed_snapshot.py",
+        "scripts/shipped_file_history.py",
+        "scripts/template_profile_snapshot.py",
+        "scripts/verify_env.py",
+        "scripts/version_sync.py",
+    ),
+    "scripts/verify-guard-native": ("scripts/verify-focused", "tests/test_verify_brigade_guard_parity.py"),
+    "scripts/verify_component_manifest_provenance.py": ("src/brigade/templates/components/manifest-v1.json",),
+    "scripts/version_sync.py": ("pyproject.toml", "src/brigade/__init__.py"),
+    "scripts/windows_affected_tests.py": ("scripts/ci_selection_core.py", "scripts/windows_test_weights.json"),
+    "scripts/windows_pytest.py": ("tests/windows_pytest_allowlist.json",),
+}
+
+
+def test_listed_transitive_ci_inputs_are_protected():
+    for script, inputs in TRANSITIVE_INPUTS.items():
+        paths = {script, *inputs}
+        assert all((ROOT / path).is_file() for path in paths), script
+        missing = paths - set(workflow_guard.protected_paths(list(paths)))
+        assert not missing, f"{script} uses unprotected paths: {', '.join(sorted(missing))}"
