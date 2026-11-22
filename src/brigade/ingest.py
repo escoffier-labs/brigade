@@ -26,7 +26,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable, Dict, List, NamedTuple
 
-from . import dirfd, handoff_case_probe, handoff_worktrees, instruction_overflow, ingest_near_duplicate
+from . import dirfd, handoff_case_probe, handoff_worktrees, ingest_index, instruction_overflow, ingest_near_duplicate
 from .card_fingerprint import (
     CardMatch,
     ensure_card_id_frontmatter,
@@ -266,6 +266,7 @@ def run(
     return 0
 
 
+@ingest_index.cache_listings()
 def ingest_into(
     *,
     source: Path,
@@ -1730,36 +1731,22 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
                 return None
             # --show-cdup can return an absolute configured-worktree path.
             worktree = (marker_root / os.fsdecode(discovery.stdout.removesuffix(b"\n"))).resolve()
-            result = subprocess.run(
-                [
-                    "git",
-                    "-C",
-                    str(worktree),
-                    "--git-dir",
-                    git_dir,
-                    "--work-tree",
-                    str(worktree),
-                    "-c",
-                    "core.fsmonitor=false",
-                    "ls-files",
-                    "-z",
-                ],
-                capture_output=True,
-                env=env,
-                timeout=30,
-                check=False,
-            )
-            if result.returncode != 0:
-                detail = result.stderr.decode("utf-8", "replace").strip().splitlines()
-                _warn_tracking_check_failed(directory, detail[0] if detail else f"git exited {result.returncode}")
-                return None
-            for entry in result.stdout.decode("utf-8", "surrogateescape").split("\0"):
-                if not entry:
-                    continue
+            command = [
+                "git",
+                "-C",
+                str(worktree),
+                "--git-dir",
+                git_dir,
+                "--work-tree",
+                str(worktree),
+                "-c",
+                "core.fsmonitor=false",
+            ]
+            for parent, basenames in ingest_index.paths(command, env):
                 try:
                     # Git's case matching can miss Unicode directory aliases.
-                    if (worktree / entry).parent.samefile(directory):
-                        names.add(Path(entry).name)
+                    if (worktree / parent).samefile(directory):
+                        names.update(basenames)
                 except FileNotFoundError:
                     # A deleted parent cannot contain the current handoff.
                     continue

@@ -660,7 +660,7 @@ def test_npm_release_workflow_has_dispatch_source_oidc_and_native_gates():
     assert 'test "$GITHUB_REF" = refs/heads/main' in publish
     assert 'test "$GITHUB_SHA" = "$EXPECTED_SHA"' in publish
     assert 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"' in publish
-    assert 'test "$RELEASE_TAG" = v0.31.0' in publish
+    assert 'test "$RELEASE_TAG" = v0.32.0' in publish
     guard = next(step for step in jobs["publish"]["steps"] if "EXPECTED_SHA" in step.get("env", {}))
     assert guard["env"]["EXPECTED_SHA"] == "${{ inputs.expected_sha }}"
     assert guard["env"]["RELEASE_TAG"] == "${{ inputs.release_tag }}"
@@ -669,7 +669,7 @@ def test_npm_release_workflow_has_dispatch_source_oidc_and_native_gates():
     argv = next(
         step["run"] for step in jobs["registry-acceptance"]["steps"] if "--registry-spec" in step.get("run", "")
     )
-    assert '"--registry-spec","brigadestack@0.31.0"' in argv
+    assert '"--registry-spec","brigadestack@0.32.0"' in argv
 
 
 def revalidation_python(step_name):

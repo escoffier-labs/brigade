@@ -16,8 +16,9 @@ from brigade import fleet_client
 from brigade import code_graph_delta
 from brigade import localio
 from brigade import receipts_cmd
+from brigade import verify_manifest_git
 from brigade import work_cmd
-from brigade.work_cmd import verify_receipt_details
+from brigade.work_cmd import verification, verify_gate, verify_receipt_details, verify_runtime
 
 from tests.work_cmd_test_helpers import (
     _write_json,
@@ -2855,6 +2856,266 @@ def test_work_closeout_blocks_failed_verification(tmp_path, capsys):
     assert "latest verification did not complete" in payload["blockers"][0]
 
 
+@pytest.fixture
+def closeout_check(tmp_path):
+    _init_git_repo_with_head(tmp_path)
+    (tmp_path / "test_sample.py").write_text("def test_sample():\n    assert True\n", encoding="utf-8")
+    declaration = tmp_path / "verify" / "required-check.json"
+    declaration.parent.mkdir()
+    prefix = [sys.executable, "-B", "-m", "pytest", "-p", "no:cacheprovider"]
+
+    def declare(argv_prefix=prefix, *, malformed=False, commit=True):
+        payload = {
+            "schema": "brigade.verify_required_check.v1",
+            "argv_prefix": argv_prefix,
+            "needs_arguments": True,
+            "needs_passed_tests": True,
+        }
+        declaration.write_text("{" if malformed else json.dumps(payload), encoding="utf-8")
+        if commit:
+            subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+            _init_git_repo_with_head(tmp_path)
+
+    return declare, prefix
+
+
+@pytest.mark.parametrize(
+    ("scenario", "reason"),
+    [
+        ("ad hoc", "did not run the required check"),
+        ("passing check", None),
+        ("newer ad hoc", "did not run the required check"),
+        ("no selector", "had no test selector"),
+        ("collect only", "passed no tests"),
+        ("changed rule", "rule changed since the run"),
+        ("old audit policy", "rule changed since the run"),
+        ("malformed", "could not load verify/required-check.json"),
+    ],
+)
+def test_work_closeout_required_check(tmp_path, closeout_check, capsys, monkeypatch, scenario, reason):
+    declare, prefix = closeout_check
+    if scenario != "old audit policy":
+        declare(malformed=scenario == "malformed")
+    expected_prefix = prefix
+    policy_changes = scenario in {"changed rule", "old audit policy"}
+    if policy_changes:
+        subprocess.run(["git", "remote", "add", "origin", "../origin.git"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True)
+        expected_prefix = [*prefix, "-q", "a path with a 'quote'"]
+        declare(expected_prefix)
+
+    assert work_cmd.start(target=tmp_path, title="Finish work", force=False) == 0
+    capsys.readouterr()
+    if scenario in {"passing check", "newer ad hoc", "changed rule", "old audit policy"}:
+        assert work_cmd.verify_run(target=tmp_path, commands=[[*prefix, "test_sample.py"]], json_output=True) == 0
+        receipt = json.loads(capsys.readouterr().out)
+        assert receipt["commands"][0]["test_outcomes"]["passed"] == 1
+    if scenario in {"ad hoc", "newer ad hoc"}:
+        if sys.platform == "win32":
+            # Windows has no standalone true command. Stub only its child process.
+            real_which = verification.shutil.which
+            monkeypatch.setattr(
+                verification.shutil,
+                "which",
+                lambda name, **kwargs: sys.executable if name == "true" else real_which(name, **kwargs),
+            )
+            monkeypatch.setattr(verify_runtime, "_run_verify_child_process", lambda *a, **kw: ("completed", 0, "", ""))
+        assert cli.main(["work", "verify", "run", "--target", str(tmp_path), "--command", "true", "--json"]) == 0
+        latest = json.loads(capsys.readouterr().out)
+        if scenario == "newer ad hoc":
+            assert latest["tree_fingerprint"] == receipt["tree_fingerprint"]
+        receipt = latest
+    if scenario in {"no selector", "collect only", "malformed"}:
+        args = {
+            "no selector": prefix,
+            "collect only": [*prefix, "--collect-only", "test_sample.py"],
+            "malformed": [sys.executable, "-V"],
+        }[scenario]
+        assert work_cmd.verify_run(target=tmp_path, commands=[args], json_output=True) == 0
+        receipt = json.loads(capsys.readouterr().out)
+    if policy_changes:
+        assert receipt["gating"]["mode"] == ("audit_only" if scenario == "old audit policy" else "required_check")
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True)
+        assert localio.tree_fingerprint(tmp_path) == receipt["tree_fingerprint"]
+
+    assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
+    capsys.readouterr()
+    assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == int(reason is not None)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verification"]["run_id"] == receipt["run_id"]
+    if reason is None:
+        assert payload["ready"] is True
+    elif scenario == "malformed":
+        (blocker,) = payload["blockers"]
+        assert blocker.startswith("The repository's required check could not be read. Could not load ")
+        assert "verify/required-check.json" in blocker
+        assert "Expecting property name" in blocker
+        assert "--argv-json" not in blocker
+    else:
+        (blocker,) = payload["blockers"]
+        assert "latest verification run for this session is not the repository's required check" in blocker
+        assert reason in blocker
+        command = shlex.split(blocker.split("`")[1])
+        assert command[command.index("--target") + 1] == str(tmp_path)
+        assert json.loads(command[command.index("--argv-json") + 1]) == [*expected_prefix, "tests/test_example.py"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "malformed_stamp"), [("audit only", False), ("declared", False), ("non-git", False), ("declared", True)]
+)
+def test_work_closeout_receipt_without_valid_stamp(tmp_path, capsys, mode, malformed_stamp):
+    if mode != "non-git":
+        _init_git_repo_with_head(tmp_path)
+    if mode == "declared":
+        declaration = tmp_path / "verify" / "required-check.json"
+        declaration.parent.mkdir()
+        _write_json(
+            declaration,
+            {
+                "schema": "brigade.verify_required_check.v1",
+                "argv_prefix": [sys.executable, "-V"],
+                "needs_arguments": False,
+                "needs_passed_tests": False,
+            },
+        )
+        subprocess.run(["git", "add", "verify"], cwd=tmp_path, check=True)
+        _init_git_repo_with_head(tmp_path)
+    assert work_cmd.start(target=tmp_path, title="Finish work", force=False) == 0
+    capsys.readouterr()
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["gating"]["eligible"] is True
+    if malformed_stamp:
+        receipt["gating"]["eligible"] = "yes"
+    else:
+        del receipt["gating"]
+    receipt["digests"]["receipt_sha256"] = localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    _write_json(Path(receipt["path"]) / "receipt.json", receipt)
+    assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
+    capsys.readouterr()
+
+    assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == int(mode != "audit only")
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verification"]["run_id"] == receipt["run_id"]
+    if mode == "declared":
+        reason = "has an invalid required-check verdict" if malformed_stamp else "has no required-check verdict"
+        assert reason in payload["blockers"][0]
+    if mode == "non-git":
+        assert payload["blockers"] == ["could not read the current tree fingerprint"]
+
+
+@pytest.mark.parametrize("case", ["resolve base", "lose base", "malformed stamp"])
+def test_work_closeout_audit_ignores_receipt_stamp(tmp_path, capsys, case):
+    _init_git_repo_with_head(tmp_path)
+    subprocess.run(["git", "remote", "add", "origin", "../origin.git"], cwd=tmp_path, check=True)
+    ref = "refs/remotes/origin/main"
+    if case != "resolve base":
+        subprocess.run(["git", "update-ref", ref, "HEAD"], cwd=tmp_path, check=True)
+    assert work_cmd.start(target=tmp_path, title="Finish work", force=False) == 0
+    capsys.readouterr()
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["gating"]["mode"] == "audit_only"
+    assert receipt["gating"].get("fallback_source") == ("none" if case == "resolve base" else None)
+    if case == "resolve base":
+        subprocess.run(["git", "update-ref", ref, "HEAD"], cwd=tmp_path, check=True)
+    elif case == "lose base":
+        subprocess.run(["git", "update-ref", "-d", ref], cwd=tmp_path, check=True)
+    else:
+        receipt["gating"]["eligible"] = "yes"
+        receipt["digests"]["receipt_sha256"] = localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+        _write_json(Path(receipt["path"]) / "receipt.json", receipt)
+    assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
+    capsys.readouterr()
+
+    gate = verify_gate.StopGate(tmp_path)
+    started = localio.parse_iso_datetime(receipt["started_at"])
+    assert started is not None
+    assert gate.completion_in_window(receipt, started, None) is not None
+    assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["ready"] is True
+
+
+@pytest.mark.parametrize("git_command", ["ls-tree", "cat-file"])
+def test_work_closeout_blocks_policy_lookup_timeout(tmp_path, closeout_check, capsys, monkeypatch, git_command):
+    declare, _ = closeout_check
+    if git_command == "cat-file":
+        declare()
+    assert work_cmd.start(target=tmp_path, title="Finish work", force=False) == 0
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]]) == 0
+    assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
+    capsys.readouterr()
+
+    real_run = verify_manifest_git.subprocess.run
+
+    def slow_git(args, **kwargs):
+        if args[:2] == ["git", git_command] and "env" in kwargs:
+            raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(verify_manifest_git.subprocess, "run", slow_git)
+    assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == 1
+    assert json.loads(capsys.readouterr().out)["blockers"] == [
+        "Git timed out while reading the required check, so run closeout again."
+    ]
+
+
+@pytest.mark.parametrize("source", ["default_branch_tip", "head", "worktree"])
+def test_work_closeout_enforces_fallback_declaration(tmp_path, closeout_check, capsys, source):
+    declare, prefix = closeout_check
+    declare(commit=source != "worktree")
+    subprocess.run(["git", "remote", "add", "origin", "../origin.git"], cwd=tmp_path, check=True)
+    if source == "default_branch_tip":
+        tip = subprocess.check_output(
+            [
+                "git",
+                "-c",
+                "user.name=Test User",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit-tree",
+                "HEAD^{tree}",
+                "-m",
+                "unrelated tip",
+            ],
+            cwd=tmp_path,
+            text=True,
+        ).strip()
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", tip], cwd=tmp_path, check=True)
+    assert work_cmd.start(target=tmp_path, title="Finish work", force=False) == 0
+    capsys.readouterr()
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["gating"]["fallback_source"] == source
+    assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
+    capsys.readouterr()
+
+    assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == 1
+    (blocker,) = json.loads(capsys.readouterr().out)["blockers"]
+    assert "did not run the required check" in blocker
+    command = shlex.split(blocker.split("`")[1])
+    assert json.loads(command[command.index("--argv-json") + 1]) == [*prefix, "tests/test_example.py"]
+
+
+def test_work_closeout_accepts_manifest_under_required_check(tmp_path, closeout_check, capsys):
+    declare, _ = closeout_check
+    declare()
+    manifest_id = _register_tracked_verify_manifest(tmp_path, command=[sys.executable, "-V"])
+    assert work_cmd.start(target=tmp_path, title="Finish work", force=False) == 0
+    capsys.readouterr()
+    assert work_cmd.verify_run(target=tmp_path, manifest_id=manifest_id, json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["gating"]["mode"] == "required_check"
+    assert receipt["gating"]["reason"] == "manifest_run"
+    assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
+    capsys.readouterr()
+
+    assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ready"] is True
+    assert payload["verification"]["run_id"] == receipt["run_id"]
+
+
 @pytest.mark.parametrize(
     ("case", "blocker"),
     [
@@ -3848,7 +4109,7 @@ def test_distinct_skill_captures_accumulate_separate_rank_signals(tmp_target, mo
     assert "brigade-work" not in by_id or by_id.get("brigade-work", {}).get("helped", 0) == 0
 
 
-def _register_tracked_verify_manifest(target, *, manifest_id="demo-verify"):
+def _register_tracked_verify_manifest(target, *, manifest_id="demo-verify", command="true"):
     """Track a patch-backed manifest so a --manifest run can be scoreable (#1378)."""
     skill_dir = target / "skills" / "demo"
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -3869,7 +4130,7 @@ def _register_tracked_verify_manifest(target, *, manifest_id="demo-verify"):
                 "subject_path": "skills/demo/SKILL.md",
                 "content_fingerprint": "sha256:demo",
             },
-            "checks": [{"check_id": "eff-1", "check_role": "effectiveness", "command": "true"}],
+            "checks": [{"check_id": "eff-1", "check_role": "effectiveness", "command": command}],
         },
     )
     subprocess.run(["git", "add", "-A"], cwd=target, check=True, stdout=subprocess.DEVNULL)

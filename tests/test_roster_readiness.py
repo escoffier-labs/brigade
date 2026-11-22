@@ -6,6 +6,7 @@ from dataclasses import replace
 import pytest
 
 from brigade import roster, roster_readiness as readiness, seat_health
+from brigade.seat_health import SeatHealthProbe as _RealSeatHealthProbe
 
 NOW = 1000.0
 
@@ -1712,3 +1713,128 @@ def test_brigade_hub_seat_usage_uses_the_fullest_limited_seat(monkeypatch):
         [("a", 2), ("c", 2)], snapshot, observed_at=1.0, scope="scope"
     )
     assert missing.status == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("transport", "account", "inventory", "exit_code", "statuses"),
+    [
+        ("app-server", {"type": "chatgpt", "email": "private@example.com"}, "exact", 0, ("passed", "passed", "passed")),
+        ("app-server", None, "exact", 2, ("passed", "failed", "passed")),
+        ("app-server", {}, "exact", 3, ("passed", "unknown", "passed")),
+        ("app-server", "rpc-error", "exact", 3, ("passed", "unknown", "passed")),
+        ("app-server", {"type": "apiKey"}, "missing", 2, ("passed", "passed", "failed")),
+        ("app-server", {"type": "apiKey"}, "paginated", 3, ("passed", "passed", "unknown")),
+        ("app-server", {"type": "apiKey"}, "malformed", 3, ("passed", "passed", "unknown")),
+        ("app-server", {"type": "apiKey"}, "rpc-error", 3, ("passed", "passed", "unknown")),
+        ("app-server", "startup-error", "exact", 2, ("failed", "unknown", "unknown")),
+        ("exec", {"type": "apiKey"}, "exact", 3, ("passed", "unknown", "unknown")),
+    ],
+)
+def test_installed_codex_readiness_uses_only_app_server_metadata(
+    transport, account, inventory, exit_code, statuses, tmp_path, monkeypatch, capsys
+):
+    import json
+
+    from brigade import cli, codex_appserver, proc
+
+    _stub_standalone_env(monkeypatch)
+    monkeypatch.setattr(seat_health, "SeatHealthProbe", _RealSeatHealthProbe)
+    monkeypatch.setattr(
+        seat_health.agents,
+        "resolve_agent_executable",
+        lambda cli_ref, **kwargs: proc.ExecutableIdentity(cli_ref, cli_ref, "native", True, ""),
+    )
+    workspace = tmp_path / "workspace"
+    _git_checkout(workspace, commit=True)
+    config = workspace / ".brigade"
+    config.mkdir()
+    (config / "roster.toml").write_text(
+        f"""orchestrator = "chef"
+codex_transport = "{transport}"
+[limits]
+sandbox = "read-only"
+[agents.chef]
+cli = "codex"
+role = "plan"
+[agents.sol62]
+cli = "codex"
+role = "implement"
+model = "example-model"
+reasoning = "medium"
+""",
+        encoding="utf-8",
+    )
+    calls = []
+    private_error = "private provider diagnostic"
+
+    class MetadataServer:
+        def __init__(self, **kwargs):
+            assert kwargs == {"cwd": workspace}
+            calls.append("spawn")
+
+        def start(self, *, timeout):
+            assert 0 < timeout <= seat_health.PER_SEAT_TIMEOUT_SECONDS
+            calls.append("initialize")
+            if account == "startup-error":
+                raise codex_appserver.AppServerError(private_error)
+
+        def request(self, method, params, *, timeout):
+            assert 0 < timeout <= seat_health.PER_SEAT_TIMEOUT_SECONDS
+            calls.append(method)
+            if method == "account/read":
+                assert params == {"refreshToken": False}
+                if account == "rpc-error":
+                    raise codex_appserver.AppServerError(private_error)
+                return {"account": account, "requiresOpenaiAuth": True}
+            assert method == "model/list"
+            assert params == {}
+            if inventory == "rpc-error":
+                raise codex_appserver.AppServerError(private_error)
+            return {
+                "data": (
+                    [{"model": "example-model"}]
+                    if inventory == "exact"
+                    else [{"id": "example-model", "model": "example-model-other"}]
+                    if inventory != "malformed"
+                    else [{"id": "example-model"}]
+                ),
+                "nextCursor": "private-cursor" if inventory == "paginated" else None,
+            }
+
+        def close(self):
+            calls.append("close")
+
+    monkeypatch.setattr(codex_appserver, "AppServer", MetadataServer)
+
+    def forbid_inference(*args, **kwargs):
+        pytest.fail("readiness attempted inference")
+
+    monkeypatch.setattr(seat_health.agents, "run_agent", forbid_inference)
+    rc = cli.main(
+        ["roster", "ready", "--target", str(workspace), "--worker", "sol62", "--isolation", "worktree", "--json"]
+    )
+    output = capsys.readouterr()
+    assert output.err == ""
+    assert private_error not in output.out
+    assert "private@example.com" not in output.out
+    assert "private-cursor" not in output.out
+    assert "example-model-other" not in output.out
+    report = json.loads(output.out)
+    assert rc == report["exit_code"] == exit_code
+    assert report["status"] == {0: "ready", 2: "blocked", 3: "unverified"}[exit_code]
+    evidence = {row["category"]: row for row in report["evidence"]}
+    assert evidence["admission"]["status"] == "passed"
+    assert evidence["isolation-compatibility"]["status"] == "passed"
+    assert (
+        tuple(
+            evidence[category]["status"]
+            for category in ("transport-liveness", "authentication-entitlement", "model-reachability")
+        )
+        == statuses
+    )
+    if transport == "exec":
+        assert calls == []
+    elif account == "startup-error":
+        assert calls == ["spawn", "initialize", "close"]
+    else:
+        assert calls == ["spawn", "initialize", "account/read", "model/list", "close"]

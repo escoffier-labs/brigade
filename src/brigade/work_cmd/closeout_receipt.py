@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import localio
-from . import verify_ci, verify_receipt_details
+from . import verify_ci, verify_gate, verify_receipt_details
 
 
 def _matches_session(receipt: dict[str, Any], session_id: str, session: dict[str, Any]) -> bool:
@@ -70,6 +70,10 @@ def select(
             return receipt, f"latest verification did not complete: {receipt.get('run_id')} [{status}]"
         if receipt.get("tree_stable") is False:
             return receipt, "tree changed during the verification run"
+        # An older pass must never hide a newer run that failed or did not count.
+        counts, explanation = verify_gate.receipt_counts_for_policy(target, receipt, current_tree=tree)
+        if not counts:
+            return receipt, explanation
         return receipt, None
 
     if not tested:

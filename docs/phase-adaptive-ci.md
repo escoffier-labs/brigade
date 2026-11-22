@@ -209,8 +209,7 @@ not per run:
 
 ### Extended numbers
 
-Files: `docs/adaptive-ci/baseline-ci-2026-11-09-extended.json` (aggregates
-only, no per-run list) and `.md`.
+The [extended baseline summary](adaptive-ci/baseline-ci-2026-11-09-extended.md) records the aggregates.
 
 Window 2026-11-05T15:00:00Z to 2026-11-09T12:00:00Z (half-open), 497 runs. Times are minutes, first attempt of each run.
 
@@ -315,7 +314,7 @@ days, so recapturing an old window later can change that one field and
 
 ## After window, 2026-11-13
 
-Files: `docs/adaptive-ci/after-ci-2026-11-13.json` (aggregates only) and `.md`.
+The [after-window summary](adaptive-ci/after-ci-2026-11-13.md) records the aggregates.
 Window 2026-11-09T19:15:00Z to 2026-11-13T12:00:00Z (half-open), 311 runs,
 starting after the last campaign PR (#2439) merged at 19:14:39Z.
 

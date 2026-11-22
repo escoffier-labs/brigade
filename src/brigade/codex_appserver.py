@@ -18,7 +18,7 @@ import time
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, cast
+from typing import Any, Callable, Literal, cast
 
 from . import proc as proc_mod
 
@@ -103,6 +103,73 @@ class AppServerError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class ReadinessMetadata:
+    """Presence checks only. Provider payloads never leave this module."""
+
+    initialized: bool = False
+    account: Literal["present", "required", "unknown"] = "unknown"
+    model: Literal["listed", "missing", "partial", "unknown"] = "unknown"
+
+
+def probe_readiness_metadata(*, cwd: Path | None, model: str | None, timeout: float) -> ReadinessMetadata:
+    """Use the same default command, inherited environment and cwd as the shared server."""
+    deadline = time.monotonic() + timeout
+    server = AppServer(cwd=cwd)
+    try:
+        try:
+            server.start(timeout=timeout)
+        except AppServerError:
+            return ReadinessMetadata()
+        account = _readiness_account(server, deadline)
+        return ReadinessMetadata(True, account, _readiness_model(server, model, deadline))
+    finally:
+        server.close()
+
+
+def _readiness_account(server: AppServer, deadline: float) -> Literal["present", "required", "unknown"]:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return "unknown"
+    try:
+        result = server.request("account/read", {"refreshToken": False}, timeout=remaining)
+    except AppServerError:
+        return "unknown"
+    required = result.get("requiresOpenaiAuth")
+    account = result.get("account")
+    if type(required) is not bool:
+        return "unknown"
+    if isinstance(account, dict) and account.get("type") in ("chatgpt", "apiKey"):
+        return "present"
+    if required and account is None and "account" in result:
+        return "required"
+    return "unknown"
+
+
+def _readiness_model(
+    server: AppServer, model: str | None, deadline: float
+) -> Literal["listed", "missing", "partial", "unknown"]:
+    remaining = deadline - time.monotonic()
+    if model is None or remaining <= 0:
+        return "unknown"
+    try:
+        result = server.request("model/list", {}, timeout=remaining)
+    except AppServerError:
+        return "unknown"
+    rows = result.get("data")
+    cursor = result.get("nextCursor")
+    if not isinstance(rows, list) or any(
+        not isinstance(row, dict) or not isinstance(row.get("model"), str) or not row["model"] for row in rows
+    ):
+        return "unknown"
+    if "nextCursor" not in result or (cursor is not None and (not isinstance(cursor, str) or not cursor)):
+        return "unknown"
+    if any(row["model"] == model for row in rows):
+        return "listed"
+    # A first page can prove presence. Only an exhausted list can prove absence.
+    return "partial" if cursor is not None else "missing"
+
+
+@dataclass(frozen=True)
 class TurnResult:
     text: str
     ok: bool
@@ -167,7 +234,7 @@ class AppServer:
     def __exit__(self, *exc_info: object) -> None:
         self.close()
 
-    def start(self) -> None:
+    def start(self, *, timeout: float = _REQUEST_TIMEOUT) -> None:
         # #1744: the app-server child launches through the same owned job path
         # as proc.run, so cancellation kills its tree without a pid lookup.
         windows_job = proc_mod.create_owned_windows_job() if os.name == "nt" else None
@@ -222,6 +289,7 @@ class AppServer:
             self.request(
                 "initialize",
                 {"clientInfo": {"name": _CLIENT_NAME, "version": _CLIENT_VERSION}},
+                timeout=timeout,
             )
             self._send({"jsonrpc": "2.0", "method": "initialized"})
         except BaseException:
@@ -262,8 +330,12 @@ class AppServer:
         response = entry["response"]
         if response is None or "error" in response:
             error = (response or {}).get("error") or {"message": "app-server exited"}
-            raise AppServerError(f"{method} failed: {error.get('message', error)}")
-        return response.get("result") or {}
+            message = error.get("message", error) if isinstance(error, dict) else error
+            raise AppServerError(f"{method} failed: {message}")
+        result = response.get("result")
+        if "result" not in response or (result is not None and not isinstance(result, dict)):
+            raise AppServerError(f"{method} returned a malformed result")
+        return result if result is not None else {}
 
     def start_thread(self, *, cwd: Path | None, model: str | None = None, sandbox: str | None = None) -> "CodexThread":
         result = self.request("thread/start", self._thread_params(cwd, model, sandbox))

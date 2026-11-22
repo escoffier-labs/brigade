@@ -12,10 +12,17 @@ developing Brigade itself; the contributor policy lives in `CONTRIBUTING.md`.
 
 ## Definition of Done
 
-Before opening a PR, run relevant focused checks through Brigade:
+Run `brigade work verify required --worktree --json` to preview the plan. For a
+selective plan of up to 20 files, run the listed files together in one verify run.
+For a broader plan, run one relevant focused check and rely on required CI for
+the full check.
+
+Before opening a PR, use the entire `run_argv` array from a selective plan.
+For example, a plan listing two files can look like this:
 
 ```bash
-brigade work verify run --target . --argv-json '["./scripts/verify-focused","<pytest-selector>"]' --capture brigade-work
+brigade work verify required --worktree --json
+brigade work verify run --target . --argv-json '["./scripts/verify-focused","--","tests/test_verify_gate.py","tests/test_verify_required.py"]' --capture brigade-work
 ```
 
 `./scripts/verify-focused` runs ruff lint, ruff format check, the version-sync
@@ -48,10 +55,11 @@ Format: trigger, then the rule, then what to do instead.
 
 For protected CI changes, the author does not approve the change and a builder that wrote it never applies the label. The pull request conductor applies `workflow-change-approved` only after an independent security review of the protected-path changes at the current head says to ship, with a comment naming the commit and protected files. A new head needs the label again; it needs a new review only when the protected files changed. No pull request gets more than two reviews without operator agreement. Approval is recorded and audited after the fact, not supplied by a separate account; see [the workflow guard](docs/workflow-guard.md).
 
-- Before opening a PR or reporting a code change complete: run focused
-  verification through `brigade work verify run` with `./scripts/verify-focused`
-  and the relevant pytest selector. Required `ci-gate` on the exact head commit
-  supplies suite and coverage evidence; after pushing, wait for it on the head
+- Before opening a PR or reporting a code change complete: run the planned files
+  together through `brigade work verify run` as shown above. To skip the preview,
+  use the command from Stop or closeout if the receipt misses files. For a broad
+  plan, run one relevant focused check. Required `ci-gate` on the exact head commit
+  supplies suite and coverage evidence. After pushing, wait for it on the head
   SHA. A local receipt is not suite evidence. Do not run `./scripts/verify` in
   normal work, before a PR or merge, inside a review lane, or on `main` to compare
   failures. Run it only when the operator asks to reproduce CI, as documented in
@@ -144,7 +152,7 @@ See AGENTS.md Definition of Done and CONTRIBUTING.md. Day-to-day:
 
 - Lint/type/sync gate pieces: `ruff check .`, `ruff format --check .`, `mypy`,
   `python scripts/version_sync.py --check`, `python scripts/managed_snapshot.py --check`
-  (or `./scripts/verify-focused <pytest-selector>` for a development slice)
+  (or `./scripts/verify-focused` with the planned files for a development slice)
 - Development and pre-PR checks: run focused selectors through Brigade as
   described in the Definition of Done. Required CI on the exact head commit
   supplies the full-suite and coverage evidence.

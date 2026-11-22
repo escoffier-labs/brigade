@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from brigade import cli, verify_manifest_git
-from brigade.work_cmd import verify_required
+from brigade.work_cmd import verify_gate, verify_required
 
 
 def git(repo: Path, *args: str) -> str:
@@ -346,12 +346,19 @@ def test_git_subprocesses_use_target_environment(repo, capsys, monkeypatch, tmp_
     monkeypatch.setenv("GIT_DIR", str(other / ".git"))
     monkeypatch.setenv("GIT_WORK_TREE", str(other))
     monkeypatch.setenv("Git_Config_Count", "0")
+    caller_only = ("LD_PRELOAD", "PYTHONPATH", "PYTHONSTARTUP", "BRIGADE_TEST_EXTRA")
+    if entry_point != "resolve_base":
+        for name in caller_only:
+            monkeypatch.setenv(name, "caller-value")
     original_run = subprocess.run
     planner_environments = []
 
     def check_environment(argv, *args, **kwargs):
         env = kwargs.get("env")
         assert env is not None
+        assert "PATH" in env
+        if entry_point != "resolve_base":
+            assert all(name not in env for name in caller_only)
         git_keys = {key for key in env if key.upper().startswith("GIT_")}
         if argv[0] == "git":
             assert git_keys == ({"GIT_INDEX_FILE"} if argv[1] == "-C" else set())
@@ -372,6 +379,7 @@ def test_git_subprocesses_use_target_environment(repo, capsys, monkeypatch, tmp_
     else:
         result = run(target, capsys)
         assert result["head_sha"] == head
+        assert result["tests"] == ["tests/a.py", "tests/z.py"]
         assert result["covers_worktree"] is True
         assert len(planner_environments) == 1
 
@@ -423,6 +431,7 @@ def test_hint_quotes_arguments_for_bash(repo, capsys):
     output = run(target, capsys, human=True)
     assert "Bash" in output
     assert shlex.split(output.splitlines()[0]) == ["focused", *paths]
+    assert "after the command prefix and before any separator" in output
 
 
 def test_test_filenames_are_not_pytest_argument_files(repo, capsys):
@@ -474,3 +483,19 @@ def test_bundled_planner_reads_committed_sources(repo, capsys):
     result = run(target, capsys)
     assert result["tests"] == ["tests/test_a.py", "tests/test_module_size_ratchet.py"]
     assert result["covers_worktree"] is False
+
+
+def test_repository_planner_template_satisfies_declared_coverage():
+    project = Path(__file__).resolve().parents[1]
+    policy = verify_gate._parse_declaration((project / "verify/required-check.json").read_bytes())
+    assert policy.needs_plan_coverage is True
+    config = json.loads((project / verify_required.CONFIG_PATH).read_text(encoding="utf-8"))
+    files = ["tests/test_verify_gate.py", "tests/test_verify_required.py"]
+    entries = {name: (b"100644", b"") for name in files if (project / name).is_file()}
+    argv = verify_required._run_argv(config["run_argv"], files)
+    prefix = list(policy.argv_prefix)
+    assert argv[: len(prefix)] == prefix
+    selectors = argv[len(prefix) :]
+    assert selectors == ["--", *files]
+    assert verify_gate._command_files(selectors, entries) == set(files)
+    assert verify_gate._command_files(["-p", "xdist", "-n", "4", *selectors], entries) == set(files)

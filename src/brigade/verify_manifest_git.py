@@ -47,7 +47,9 @@ def trusted_git_env() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
 
 
-def _git(target: Path, *args: str, deadline: float | None = None) -> subprocess.CompletedProcess[bytes]:
+def _git(
+    target: Path, *args: str, deadline: float | None = None, git_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[bytes]:
     command = ["git", *args]
     timeout = 30.0 if deadline is None else min(30.0, deadline - monotonic())
     if timeout <= 0:
@@ -59,7 +61,7 @@ def _git(target: Path, *args: str, deadline: float | None = None) -> subprocess.
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=timeout,
-            env=trusted_git_env(),
+            env=trusted_git_env() if git_env is None else git_env,
         )
     except subprocess.TimeoutExpired:
         if deadline is not None:
@@ -70,8 +72,10 @@ def _git(target: Path, *args: str, deadline: float | None = None) -> subprocess.
     return subprocess.CompletedProcess(command, 127, b"", b"")
 
 
-def resolve_base(target: Path, *, deadline: float | None = None) -> BaseResolution:
-    git = partial(_git, target, deadline=deadline)
+def resolve_base(
+    target: Path, *, deadline: float | None = None, git_env: dict[str, str] | None = None
+) -> BaseResolution:
+    git = partial(_git, target, deadline=deadline, git_env=git_env)
     remotes = git("remote")
     if remotes.returncode != 0:
         return BaseResolution("unresolved_default_branch", message="Git could not list remotes for this target")

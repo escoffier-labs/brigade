@@ -1554,7 +1554,7 @@ def _run_verify_commands(
             "commands": [],
             "planned_commands": _planned_commands_display(commands),
             "argv_file_hashes": verify_argv_files.argv_file_hashes(target, commands),
-            "inherited_test_env": verify_receipt_details.inherited_test_env(),
+            "inherited_test_env": verify_receipt_details.inherited_test_env(include_py=True),
         }
         receipt.update(identity)
         state = verify_runtime._ACTIVE_VERIFY_CANCEL.get()
@@ -2015,7 +2015,7 @@ def verify_run(
                 if (
                     latest is not None
                     and verify_argv_files.reusable_receipt(target, planned, planned_display, fingerprint, latest)
-                    and (gating := verify_gate.reuse_gating(target, latest)) is not None
+                    and (gating := verify_gate.reuse_gating(target, latest, current_tree=fingerprint)) is not None
                 ):
                     receipt, rc = _write_reused_receipt(
                         target,

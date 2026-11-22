@@ -201,15 +201,70 @@ class V4Behavior(Fixture):
 
     @requires_local_state
     def test_work_list_filters_in_process(self):
-        items = [dict(WORK_ITEM, work_id=f"wl-{i:024x}", status="ready" if i < 3 else "captured") for i in range(10)]
-        self.runner.handler = reply({"items": items, "next_cursor": "abc"})
+        first = [dict(WORK_ITEM, work_id=f"wl-{i:024x}", status="ready" if i < 3 else "captured") for i in range(10)]
+        second = [dict(WORK_ITEM, work_id=f"wl-{i + 10:024x}", status="ready") for i in range(2)]
+
+        def handler(argv, stdin):
+            return CommandResult(
+                0,
+                json.dumps(
+                    {"items": first, "next_cursor": "cursor-2"} if "--cursor" not in argv else {"items": second}
+                ).encode(),
+            )
+
+        self.runner.handler = handler
         result = self.call("fleet_work_list", source="github", status="ready", limit=2)
-        self.assertEqual(self.runner.argvs(), [[BRIGADE, "fleet", "work", "list", "--source", "github", "--json"]])
-        self.assertEqual((result["page_count"], result["match_count"], len(result["items"])), (10, 3, 2))
-        self.assertEqual(result["by_status"], {"captured": 7, "ready": 3})
-        self.assertTrue(result["more_on_hub"])
+        self.assertEqual(
+            self.runner.argvs(),
+            [
+                [BRIGADE, "fleet", "work", "list", "--source", "github", "--limit", "100", "--json"],
+                [
+                    BRIGADE,
+                    "fleet",
+                    "work",
+                    "list",
+                    "--source",
+                    "github",
+                    "--limit",
+                    "100",
+                    "--cursor",
+                    "cursor-2",
+                    "--json",
+                ],
+            ],
+        )
+        self.assertEqual((result["page_count"], result["match_count"], len(result["items"])), (12, 5, 2))
+        self.assertEqual(result["by_status"], {"captured": 7, "ready": 5})
+        self.assertFalse(result["truncated"])
         self.assertEqual(result["items"][0]["links"], ["example/brigade#1"])
         self.assertNotIn("description", result["items"][0])
+
+    @requires_local_state
+    def test_work_list_reports_budget_truncation_and_keeps_items(self):
+        pages = {
+            "first": {"items": [dict(WORK_ITEM, work_id="wl-first")], "next_cursor": "cursor-2"},
+            "cursor-2": {"items": [dict(WORK_ITEM, work_id="wl-second")], "next_cursor": "cursor-3"},
+        }
+
+        def handler(argv, stdin):
+            cursor = argv[argv.index("--cursor") + 1] if "--cursor" in argv else "first"
+            return CommandResult(0, json.dumps(pages[cursor]).encode())
+
+        self.runner.handler = handler
+        with patch.object(hub_module, "MAX_WORK_LIST_PAGES", 2):
+            result = self.call("fleet_work_list", status="ready")
+        self.assertEqual([item["work_id"] for item in result["items"]], ["wl-first", "wl-second"])
+        self.assertEqual(result["page_count"], 2)
+        self.assertTrue(result["truncated"])
+        self.assertEqual(result["pages_read"], 2)
+
+    @requires_local_state
+    def test_work_list_preserves_all_items_when_first_page_is_complete(self):
+        items = [dict(WORK_ITEM, work_id=f"wl-{i}") for i in range(4)]
+        self.runner.handler = reply({"items": items})
+        result = self.call("fleet_work_list", limit=10)
+        self.assertEqual([item["work_id"] for item in result["items"]], [f"wl-{i}" for i in range(4)])
+        self.assertFalse(result["truncated"])
 
     @requires_local_state
     def test_work_show_and_hub_error_envelope(self):
