@@ -54,6 +54,7 @@ def _observation(
     subject: Any = "unknown",
     reason: str | None = None,
     source_digest: str | None = None,
+    population: Any = "passed",
 ) -> control_readiness.ArtifactObservation:
     reasons = [reason] if reason else []
     return control_readiness.ArtifactObservation(
@@ -65,10 +66,32 @@ def _observation(
             signature=signature,
             authorization=authorization,
             subject=subject,
-            population="passed",
+            population=population,
         ),
         reasons,
         source_digest_sha256=source_digest,
+    )
+
+
+def incomplete_signed_receipt_observation(
+    relpath: str,
+    receipt: dict[str, Any] | None,
+    result: attestation.AttestationVerifyResult,
+    subject_ok: bool,
+) -> control_readiness.ArtifactObservation | None:
+    """Return the status-gated observation for a valid signed receipt, if needed."""
+    status = receipt.get("status") if receipt is not None else None
+    if result.status != attestation.STATUS_SIGNED_OK or not subject_ok or status not in {"canceled", "busy"}:
+        return None
+    return _observation(
+        relpath,
+        "incomplete",
+        integrity="passed",
+        signature="passed",
+        authorization="passed",
+        subject="passed",
+        reason=f"status_{status}",
+        population="not_applicable",
     )
 
 
@@ -223,10 +246,18 @@ def verify_cosign_bundle(_target: Path, bundle_path: Path) -> control_readiness.
         "source_digest": digest,
     }
     receipt_status = snapshot.receipt.get("status")
-    if not isinstance(receipt_status, str) or receipt_status not in {"completed", "failed", "rejected", "canceled"}:
+    if not isinstance(receipt_status, str) or receipt_status not in {
+        "completed",
+        "failed",
+        "rejected",
+        "canceled",
+        "busy",
+    }:
         return _observation(relpath, "incomplete", **verified_trust, reason="status_not_terminal")
     if receipt_status == "canceled":
         return _observation(relpath, "incomplete", **verified_trust, reason="status_canceled")
+    if receipt_status == "busy":
+        return _observation(relpath, "incomplete", **verified_trust, reason="status_busy")
     if not isinstance(commands, list) or not commands:
         return _observation(relpath, "incomplete", **verified_trust, reason="empty_commands")
     if not isinstance(planned, list) or not planned or not all(isinstance(item, str) and item for item in planned):
