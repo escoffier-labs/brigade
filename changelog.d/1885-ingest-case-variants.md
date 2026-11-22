@@ -1,2 +1,0 @@
-- Ingest no longer skips an untracked handoff on a case-sensitive filesystem just because a tracked handoff in the same inbox differs from it only by letter case.
-- Keep the fail-closed comparison when an indexed name or file identity cannot be confirmed, including a case alias deleted and recreated during the check, and on filesystems that alias case spellings.

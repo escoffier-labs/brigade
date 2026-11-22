@@ -11,6 +11,8 @@ Validation errors exit 2, with a stable code in text or `error.code` in JSON.
 Tasks that `brigade t3 open` refuses as `t3-unsupported` belong here, submitted
 as a separate request with its own admission, budget and receipts. See
 [work T3 cannot run](t3-governed-delegation.md#work-t3-cannot-run).
+Tasks that `brigade orca open` refuses as `orca-unsupported` also belong here.
+See [governed Orca delegation](orca-governed-delegation.md).
 
 ```json
 {

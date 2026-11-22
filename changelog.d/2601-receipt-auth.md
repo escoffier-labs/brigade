@@ -1,1 +1,0 @@
-- Require confined workspace signatures and matching producer work sessions for automatic lesson evidence. Recheck in-flight user corrections before publication, retain failed verification observations, and validate failing patch evidence historically while keeping lessons in review.

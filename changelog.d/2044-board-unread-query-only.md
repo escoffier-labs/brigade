@@ -1,1 +1,0 @@
-- Keep the fleet board machine and agent unread-count reads query-only: both helpers exclude expired messages through their read predicates instead of relying on retention cleanup, so the counts work on a read-only SQLite connection and leave expired stored rows untouched (#2044).

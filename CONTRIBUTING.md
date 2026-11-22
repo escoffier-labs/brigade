@@ -24,6 +24,8 @@ CI changes must preserve these behaviors:
 
 Exercise the event and gate behavior when changing selection. Matching YAML text alone does not establish which jobs GitHub will schedule.
 
+The [workflow guard](docs/workflow-guard.md) checks changes to CI machinery from the pull request's base branch.
+
 ## Pull requests
 
 `main` is branch-protected. A dispatched session cannot supply the review artifact required by its own pull request. GitHub enforces the configured required checks, conversation resolution, and review requirements. Follow the current branch protection and any explicit maintainer review requirements. This document does not authorize bypassing them.

@@ -1,2 +1,0 @@
-- Keep a Fleet Hub subscription's failure streak across same-secret `events/subscribe` refreshes, so a callback that keeps failing is still dropped after `MAX_FAILED_STREAK` permanent failures even when the client refreshes between failures (#1963).
-- Reset the streak only after a successful delivery or a fresh callback verification challenge, including a new secret or a newly created subscription (#1963).

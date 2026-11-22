@@ -1,1 +1,0 @@
-- Documentation-only pull requests now skip the heavy CI jobs even though they carry the required changelog fragment.

@@ -1,1 +1,0 @@
-- Fleet Hub request logs now include bounded HTTP method and route labels, including for proxied endpoints and early refusals. Route labels omit query strings and path parameters.

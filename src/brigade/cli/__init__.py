@@ -34,7 +34,7 @@ def __getattr__(name: str):
         from ..prompt import prompt_for_selection as value
     elif name.startswith("_") and name.endswith("_group") and name[1:-6] in _FAMILY_MODULES:
         value = _family_module(name[1:-6])
-    elif name in _FAMILY_MODULES:
+    elif name in _FAMILY_MODULES or name == "run_cloud":
         value = _family_module(name)
     else:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

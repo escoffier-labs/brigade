@@ -77,6 +77,7 @@ Thumbs.db
 !/scripts/ci_hub_paths.yml
 !/scripts/ci_hub_select.py
 !/scripts/changelog_fragments.py
+!/scripts/workflow_guard.py
 !/scripts/windows_affected_tests.py
 !/scripts/windows_pytest.py
 !/scripts/windows_pytest_diagnostics.py
