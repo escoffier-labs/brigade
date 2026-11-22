@@ -10,6 +10,10 @@ dist/
 *.egg
 .eggs/
 
+# Local environment files
+.env
+.env.local
+
 # venv
 .venv/
 venv/
