@@ -438,7 +438,8 @@ def test_test_filenames_are_not_pytest_argument_files(repo, capsys):
 @pytest.mark.parametrize("long_paths", [False, True])
 def test_hint_limits_file_count_and_command_length(repo, capsys, long_paths):
     target, _ = repo
-    name = "a" * 120 if long_paths else "a"
+    # 93 letters keeps deep temporary paths under Windows limits; Windows CI remains unverified until CI runs.
+    name = "a" * 93 if long_paths else "a"
     files = [f"tests/{name}{i:03}.py" for i in range(130 if long_paths else 200)]
     for path in files:
         write(target, path, "")
