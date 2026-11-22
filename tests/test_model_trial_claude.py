@@ -45,7 +45,13 @@ from tests._child_publish import PUBLISH_SOURCE, process_is_running
 from tests._posix import requires_process_groups
 from tests.paired_live_fake import GOOD_STEPS, make_fake, records, render_script
 
-pytestmark = pytest.mark.allow_agent_cli  # launches only the fake claude from tests/paired_live_fake.py
+pytestmark = [
+    pytest.mark.allow_agent_cli,  # launches only the fake claude from tests/paired_live_fake.py
+    pytest.mark.skipif(
+        os.name == "nt",
+        reason="native Windows: the fake CLI waits on its MCP server and never exits (issue #2793)",
+    ),
+]
 
 FIXTURES = Path(__file__).parents[1] / "src/brigade/fixtures/paired-brigade-work"
 LIVE = FIXTURES / "live-claude.json"
