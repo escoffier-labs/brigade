@@ -26,7 +26,7 @@ assert.equal(metadata.sourceCommit,process.env.GITHUB_SHA,'artifact packaging co
 const version=metadata.runtime.version;
 // Fails before any registry read unless the run is in the Brigade repository (by immutable ID) on an accepted name.
 const repositoryUrl=publishingPackageRepositoryUrl(process.env);
-assert.equal(version,'0.31.0');assert.equal(metadata.runtime.payloadVersion,version);
+assert.equal(version,'0.32.0');assert.equal(metadata.runtime.payloadVersion,version);
 const artifacts=metadata.artifacts;
 assert.equal(artifacts.length,6);assert.equal(new Set(artifacts.map(a=>a.name)).size,6);
 const companions=artifacts.filter(a=>a.platform),launchers=artifacts.filter(a=>!a.platform);
