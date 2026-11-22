@@ -16,8 +16,8 @@ Rules that apply to every slice:
 
 - Old names live on as compatibility shims or legacy readers for at most two
   releases (v0.31 and v0.32, including their patch releases). They are removed
-  in v0.33.0. The one proposed exception is the evidence data directory. See
-  [Open questions](#open-questions).
+  at the v0.33.0 release cut. The one proposed exception is the evidence data
+  directory. See [Open questions](#open-questions).
 - Historical receipts, memory cards, and evidence are never rewritten, and old
   evidence is never re-signed to change branding (ROADMAP, "Finish engine
   identity before moving existing data").
@@ -601,9 +601,10 @@ waits for R2, R3 and R4. R6 is last.
   `tests/fixtures/retired-engine-names-allowlist.json`. Each entry gives a path
   glob, a reason (`frozen`, `shim`, `history`, `fixture`), and, for `frozen`
   and `shim` entries, the exact allowed literals. A match outside the
-  allowlist fails. `shim` entries carry `"remove_in": "0.33.0"`. A version
-  check fails once the package version reaches 0.33.0 while a `shim` entry
-  remains, so removal cannot be forgotten.
+  allowlist fails. Ordinary CI checks the allowlist, including the
+  `"remove_in": "0.33.0"` deadline on every `shim` entry. The stable release
+  guard enforces removal at the 0.33.0 release cut and rejects any remaining
+  `shim` entry for later stable releases.
 - Tests: the guard against a temporary repository, plus the skill sync,
   managed snapshot and template profile checks.
 - Acceptance: the guard passes, `brigade evidence --help` and `brigade code

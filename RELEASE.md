@@ -64,15 +64,20 @@ Commit on a feature branch, push it, open a PR, wait for required checks, and me
 
 ## 5. Tag the merged commit
 
-Fetch `origin/main`, confirm its declared version, create an annotated tag on that exact commit, push only the tag, and wait for the publish workflow:
+Start in a clean checkout of the merged release commit. Fetch `origin/main`,
+confirm the checkout matches it, and run the shim expiry guard before tagging.
+The stable publish workflow repeats the guard after validating tag identity.
 
 ```bash
 (
   set -euo pipefail
   git fetch origin main --tags
+  release_commit="$(git rev-parse origin/main)"
+  test "$(git rev-parse HEAD)" = "$release_commit"
+  test -z "$(git status --porcelain)"
   version="$(.venv/bin/python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
-  git show origin/main:pyproject.toml | grep -F "version = \"$version\""
-  git tag -a "v$version" origin/main -m "v$version"
+  .venv/bin/python scripts/retired_engine_names.py --release-version "$version"
+  git tag -a "v$version" "$release_commit" -m "v$version"
   git push origin "v$version"
 
   run_id=""
