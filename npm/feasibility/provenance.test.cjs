@@ -46,18 +46,23 @@ test('a policy without a repository ID is refused before any certificate is trus
   }
 });
 test('publishing identity binds the Brigade repository ID and an accepted name',()=>{
-  const {publishingIdentity,REPOSITORY_ID,ACCEPTED_REPOSITORIES}=require('./provenance.cjs');
+  const {archiveIdentity,publishingPackageRepositoryUrl,publishingIdentity,REPOSITORY_ID,ACCEPTED_REPOSITORIES}=require('./provenance.cjs');
   assert.equal(REPOSITORY_ID,'1238165856');
   const env={GITHUB_REPOSITORY:'escoffier-labs/brigade',GITHUB_REPOSITORY_ID:'1238165856',GITHUB_SHA:'a'.repeat(40)};
   for(const name of ACCEPTED_REPOSITORIES) {
-    const identity=publishingIdentity({...env,GITHUB_REPOSITORY:name},'brigadestack','0.32.0',verifier);
+    const publishingEnv={...env,GITHUB_REPOSITORY:name};
+    const identity=publishingIdentity(publishingEnv,'brigadestack','0.32.0',verifier);
     assert.equal(identity.repositoryId,'1238165856');
     assert.equal(identity.san,`https://github.com/${name}/.github/workflows/npm-publish.yml@refs/heads/main`);
+    const url=publishingPackageRepositoryUrl(publishingEnv);
+    assert.equal(url,`git+https://github.com/${name}.git`);
+    assert.deepEqual(archiveIdentity(url,env.GITHUB_SHA,'brigadestack','0.32.0',verifier),identity);
   }
   // A reused name carries another ID, and an unknown name is never accepted.
   assert.throws(()=>publishingIdentity({...env,GITHUB_REPOSITORY_ID:'999'},'brigadestack','0.32.0',verifier),/repository ID/);
   assert.throws(()=>publishingIdentity({...env,GITHUB_REPOSITORY_ID:undefined},'brigadestack','0.32.0',verifier),/repository ID/);
   assert.throws(()=>publishingIdentity({...env,GITHUB_REPOSITORY:'other/brigade'},'brigadestack','0.32.0',verifier),/accepted Brigade repository name/);
+  assert.throws(()=>publishingPackageRepositoryUrl({...env,GITHUB_REPOSITORY_ID:undefined}),/repository ID/);
 });
 test('signed subject rejects a different local archive digest',async()=>{
   await assert.rejects(verifyResponse(response,'0'.repeat(128),expected),/subject/);

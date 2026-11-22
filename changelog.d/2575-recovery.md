@@ -1,3 +1,0 @@
-- Recover interrupted instruction moves with malformed decision records under the document lock, preserving unreadable records in quarantine.
-- Validate recovery records before writing, retain damaged history, report quarantine reasons and unrestored destinations, and fail closed with remediation for journal symlinks.
-- Retain quarantined before-images with a dedicated sweep reason.

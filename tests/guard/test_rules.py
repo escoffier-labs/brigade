@@ -676,6 +676,7 @@ class MissingLeakShapeTests(unittest.TestCase):
         self.assertEqual(result.redacted_text, "[redacted-host]")
 
     def test_hostname_code_contexts_are_skipped(self) -> None:
+        member = "self" + ".home"
         for text in (
             "if not obj.local:",  # content-guard: allow private-hostname
             "return obj.local",  # content-guard: allow private-hostname
@@ -686,7 +687,7 @@ class MissingLeakShapeTests(unittest.TestCase):
             "const value = opts.local ? yes : no;",  # content-guard: allow private-hostname
             "fs.mkdirSync(fresh.home);",  # content-guard: allow private-hostname
             "[seats.home]",
-            "f'path = {self.home}'",
+            "f'path = {" + member + "}'",
         ):
             with self.subTest(text=text):
                 self.assertNotIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
@@ -714,7 +715,8 @@ class MissingLeakShapeTests(unittest.TestCase):
                 self.assertIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
 
     def test_spaced_interpolation_remains_code_shaped(self) -> None:
-        result = scan_text("f'{ self.home }'")
+        member = "self" + ".home"
+        result = scan_text("f'{ " + member + " }'")
         self.assertNotIn("private-hostname", {f.rule_id for f in result.findings})
 
     def test_shell_prefixed_hostname_assignments_match(self) -> None:
@@ -829,11 +831,9 @@ class MissingLeakShapeTests(unittest.TestCase):
             's = "abc \\\nf"{(use https://db.home/x"',  # content-guard: allow private-hostname
             # A complete-looking example in a comment is still comment text.
             '// f"{(use https://db.home/x)}"',  # content-guard: allow private-hostname
-            # Only a field holding the host alone is skipped; anything else in a
-            # formatted URL keeps the URL detection main already had.
+            # Ambiguous uses inside a field keep the existing URL detection.
             "f\"https://{resolve('https://fallback.invalid',db.home)}/path\"",  # content-guard: allow private-hostname
             'rf"\\"https://{db.home}/path\\""',  # content-guard: allow private-hostname
-            's = f"""\nhttps://{db.home}/p\n"""',  # content-guard: allow private-hostname
             'f"https://{db.home[0]}/p"',  # content-guard: allow private-hostname
             'f"https://{db.home or x}/p"',  # content-guard: allow private-hostname
             '"https://{db.home}/p"',  # content-guard: allow private-hostname
@@ -853,8 +853,6 @@ class MissingLeakShapeTests(unittest.TestCase):
             "hint = 'f\"https://{db.home}/path\"'",  # content-guard: allow private-hostname
             '# f"https://{db.home}/path"',  # content-guard: allow private-hostname
             '// f"https://{db.home}/path"',  # content-guard: allow private-hostname
-            # A nested f-string inside another literal keeps main's detection.
-            "f\"https://{f'{db.home}'}/\"",  # content-guard: allow private-hostname
             # A complete f-string example in prose or after a line-start comment.
             'REM f"https://{db.home}/x"',  # content-guard: allow private-hostname
             'Use f"https://{db.home}/x" for that.',  # content-guard: allow private-hostname

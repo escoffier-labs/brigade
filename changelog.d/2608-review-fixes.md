@@ -1,2 +1,0 @@
-- Require healthy local read coverage and validated use evidence before unused-card transitions. Exclude search results and saved run output, protect instruction and workflow references, retain identity aliases, and make stale undo durable.
-- Preserve configured path filters when searching archived cards and report the local-only search scope.

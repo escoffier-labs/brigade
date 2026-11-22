@@ -106,6 +106,7 @@ REASON_CODES = frozenset(
         "sod_failed",
         "sod_indeterminate",
         "status_canceled",
+        "status_busy",
         "status_failed",
         "status_not_terminal",
         "status_rejected",

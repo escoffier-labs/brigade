@@ -8,8 +8,6 @@ from the ``[project].version`` source of truth:
   - ``src/brigade/__init__.py``      -> ``__version__ = "X"``
   - ``src/brigade/templates/**/*.json`` -> ``"_brigade_version": "X"``
   - ``mcp-registry/*/server.json``    -> ``"version": "X"`` (server and package)
-  - ``distribution/brigade-cli/pypi/pyproject.toml`` -> the PyPI compatibility package
-                                        version and its ``brigadestack==X`` pin
   - recorded demo assets             -> a ``brigade X.Y.Z`` token baked into the
                                         rendered frames (``.cast`` and ``.svg``)
 
@@ -68,14 +66,11 @@ PLUGIN_LOCATIONS = [
     ("plugins/brigade/.mcp.json", r'"brigadestack@([^"]+)"'),
     ("plugins/brigade/codex.mcp.json", r'"brigadestack@([^"]+)"'),
 ]
-# The PyPI compatibility package: its own version and its exact brigadestack pins (base and forwarded extras).
+# The PyPI brigade-cli distribution has no version of its own to sync: the release build stamps a
+# temporary copy of this tree (scripts/stamp_brigade_cli.py), so it always carries pyproject.toml's version.
 # The npm compatibility package is deliberately absent. npm publishes from the promotion PR of
 # RELEASE.md section 8, which moves npm/feasibility/runtime.json, so its version follows that
 # file, not pyproject.toml. tests/test_brigadestack_distribution.py gates that on every PR.
-COMPAT_PACKAGE_LOCATIONS = [
-    ("distribution/brigade-cli/pypi/pyproject.toml", r'(?m)^version\s*=\s*"([^"]+)"'),
-    ("distribution/brigade-cli/pypi/pyproject.toml", r'"brigadestack(?:\[[a-z]+\])?==([^"]+)"'),
-]
 # ---------------------------------------------------------------------------
 
 
@@ -94,7 +89,6 @@ def _locations() -> list[tuple[str, str]]:
         locs.append((path.relative_to(ROOT).as_posix(), MCP_SERVER_PATTERN))
     locs.extend(RECORDINGS)
     locs.extend(PLUGIN_LOCATIONS)
-    locs.extend(COMPAT_PACKAGE_LOCATIONS)
     return locs
 
 

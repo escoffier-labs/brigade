@@ -199,7 +199,11 @@ def test_a_failed_receipt_write_is_not_reported_as_completed(tmp_path, monkeypat
     assert json.loads((Path(receipt["path"]) / "receipt.json").read_text())["status"] == "failed"
 
 
-def test_tree_fields_follow_what_the_command_did(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("changed_path", "tree_stable"),
+    [("written-during-run.txt", False), (".brigade/code-graph/state.db", True)],
+)
+def test_tree_fields_follow_what_the_command_did(tmp_path, monkeypatch, changed_path, tree_stable):
     from tests.work_cmd_test_helpers import _init_git_repo
 
     _init_git_repo(tmp_path)
@@ -226,12 +230,14 @@ def test_tree_fields_follow_what_the_command_did(tmp_path, monkeypatch):
     assert stable["tree_fingerprint_after"] == stable["tree_fingerprint"]
 
     def child_that_edits(*args, **kwargs):
-        (tmp_path / "written-during-run.txt").write_text("changed")
+        path = tmp_path / changed_path
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("changed")
         return ("completed", 0, "", "")
 
     monkeypatch.setattr(verify_runtime, "_run_verify_child_process", child_that_edits)
     moved, _ = verification._run_verify_commands(tmp_path, [["python", "-V"]], 30, code_graph_timeout=1)
-    assert moved["tree_stable"] is False
+    assert moved["tree_stable"] is tree_stable
     assert moved["tree_fingerprint_after"] != moved["tree_fingerprint"]
 
 

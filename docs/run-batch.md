@@ -11,6 +11,8 @@ Validation errors exit 2, with a stable code in text or `error.code` in JSON.
 Tasks that `brigade t3 open` refuses as `t3-unsupported` belong here, submitted
 as a separate request with its own admission, budget and receipts. See
 [work T3 cannot run](t3-governed-delegation.md#work-t3-cannot-run).
+Tasks that `brigade orca open` refuses as `orca-unsupported` also belong here.
+See [governed Orca delegation](orca-governed-delegation.md).
 
 ```json
 {
@@ -722,6 +724,7 @@ as each worker finishes, as the same sanitized projection the run receipt uses
 (no raw stdout or stderr captures). Failed workers retain their result receipt too. Skipped
 tasks remain queued in the journal, have `not_run: true`, and have no result reference. Cancellation
 and timeout preserve completed results and report unresolved tasks as stored.
+Per-task cancellation is described in [Cancellation](#cancellation).
 Exit 0 requires every task to be completed successfully and the run to pass
 finalization. Worker failures, cancellation, and timeout exit 1. Preflight and
 run-guard refusals retain their nonzero dispatch exit code and stderr reason.
@@ -729,6 +732,97 @@ Batch runs retain normal drift checkpoints, worker-result artifacts, final
 receipts, artifact collection, and lineage metadata without calling synthesis.
 Synthesis execution exits 2 with `synthesis-not-implemented`. Dry run still shows
 its requested seat. No synthesis model call or budget is created.
+
+## Cancellation
+
+`brigade runs tasks cancel <run> <task_id>... [--reason operator|parent|budget] [--json]`
+requests cancellation of the selected assignments. Each request targets one
+task. `--reason` accepts the tokens shown above.
+
+The journal records intent as `task.cancel-requested` and the worker outcome
+separately as `task.observed`. The inbox reserves the `ack` kind and refuses it
+with `ack-unsupported`.
+
+A task journal may only be written by the active run owner. A cancel request
+often comes from another process, so it never journals directly. It is first
+written as one closed `brigade.task_inbox_request.v1` document under
+`<run_dir>/task-inbox/`: kind, task id, reason token and a UTC timestamp, with no
+paths and no free text. Requests are created with an exclusive no-follow create
+and are never overwritten, so the first request for a task wins and a repeated
+request is a no-op. They are also never deleted, because the file is the replay
+source.
+
+The owner drains the inbox before each launch claim and every 0.5 seconds
+while dispatch is active. A journaled request for an unclaimed task blocks the
+launch. Brigade records one `cancelled` observation with containment
+`not-launched` on the task's deterministic attempt. Replay and resume drain
+the inbox before preparing another dispatch.
+
+For a claimed task, Brigade decides between completion and cancellation at
+the worker result handoff. If the result reaches the batch before the watcher
+claims cancellation, Brigade keeps the worker's status and result. A journaled
+intent then appears as `cancel.too_late: true` in `runs tasks show` and
+`runs tasks list`. If the watcher wins, Brigade terminates subprocesses
+registered to that task and attempt, or requests interruption of that exact
+app-server turn. On Windows it uses each subprocess's existing Job Object to
+terminate the owned process tree. A worker or turn registering after the
+watcher wins is also cancelled.
+
+Once the worker returns, Brigade collects partial worktree changes through
+the usual artifact collection path and records one `cancelled` observation.
+When the stop was not confirmed (`still_active` or `error`), the worker may
+still be writing its checkout, so Brigade commits nothing from it: the
+observation rests on the receipt and the worktree is left as it is.
+Containment reports `interrupted`, `still_active`, or `error` based on the
+observed stop outcome, or `unknown` when no stop outcome was available. An
+app-server interrupt acknowledgement alone does not prove that the turn
+stopped. The batch joins the watcher when dispatch ends. A failed watcher poll
+is reported and the next poll continues. A watcher that ends for any reason
+stops advertising live termination, so `runs tasks cancel` never reports
+`requested` without a watcher to act on it.
+
+Fleet remote dispatch routes each task by seat, and it cannot cancel one
+exact remote request. When a batch has a remote router, Brigade records where
+each task went. The watcher stops a task only once the router has kept it on
+this machine. A task routed to another machine, or not routed yet, is never
+stopped and never recorded as `cancelled` after launch: it keeps its real
+result, and the intent shows as `cancel.too_late: true`. The cancel command
+promises `requested` only for a task known to run here and reports
+`live-termination-unavailable` for the rest. Intent still keeps a task that
+has not launched from launching, wherever it would have run.
+
+Cancellation leaves same-seat siblings eligible to finish. It also counts as
+a decided outcome for fail-fast, so unrelated tasks in later waves still run.
+Only a cancellation the batch's own watcher performed counts. A worker that
+reports `cancelled` on its own, with no cancel request, is a failure and still
+stops later waves.
+A task that `depends_on` a cancelled task never launches. The batch reports
+it as `prerequisite-cancelled` and leaves it `queued` in the journal.
+
+An unknown task reports `unknown-task`, and a task that is already terminal
+when the command reads it reports `already-terminal`. Neither writes a request.
+
+The inbox is bounded: at most 1024 request files of at most 4 KiB each. Exceeding
+either bound refuses with `inbox-overflow`. Malformed request files are skipped
+and reported by name. A symlinked inbox directory or request file is refused with
+`inbox-refused`, and so is an entry swapped for a non-regular file after it was
+inspected. The batch treats any inbox refusal as a warning and keeps launching,
+so a damaged inbox cannot stop a batch. The `cancel` command tries to acquire
+the workspace run lock without waiting. If it acquires the lock, it journals
+the intent and reports `recorded`. An inbox or journal failure under that lock
+is a refusal with exit 2.
+
+JSON output uses `brigade.runs_tasks_cancel.v1`, with `run_id`, `reason`, a
+`tasks` list of `{task_id, outcome, reason, live_termination}`, and `refusal`.
+Closed outcomes are `recorded`, `queued`, `already-terminal`, `unknown-task` and
+`not-recorded`. A `queued` request with `live_termination: "requested"` is
+available for the live watcher to act on. `live-termination-unavailable`
+means there is no live batch watcher to stop a potentially running task.
+`null` means live termination did not apply. When writing one request fails,
+the requests already written stay
+in the answer, the failed task and any after it report `not-recorded`, and
+`refusal` names the failure.
+Exit 2 means at least one task was not recorded.
 
 See [kinds of delegated work](execution-model.md#kinds-of-delegated-work) for how
 batch tasks compare with ledger tasks, run-lineage children, remote fleet

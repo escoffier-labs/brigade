@@ -1,2 +1,0 @@
-- Report the root read-recorder sentinel and its recorded cause in `memory care status`, `memory care doctor` and `brigade doctor`, and add `brigade memory care clear-read-recorder --confirm` to refuse anything but a plain single-link sentinel, start a fresh coverage window at the clear day, clear it, and record the clear. A cleared record that cannot be read fails closed (#2619).
-- Coalesce repeated read-recorder failures into one marker per day with a running count, keep the interval unhealthy, and never delete a marker changed after the pass that listed it (#2619).

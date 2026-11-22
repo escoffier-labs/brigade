@@ -1,2 +1,0 @@
-- `brigade work dispatch` planning reads a persisted exclusion index next to the intent receipts instead of re-reading the whole local intent history twice on every tick, so a long-running watch only reads receipts that were added or rewritten since the previous tick (#1946).
-- Breaker counts and exclusions are unchanged. The index rebuilds from the receipts when the journal gets shorter, its prefix fingerprint does not match, the reset receipts change, or the index file is missing or corrupt (#1946).

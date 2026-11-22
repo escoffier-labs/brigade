@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import subprocess
 import sys
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
@@ -118,6 +119,13 @@ def test_negative_review_revalidates_current_bindings(tmp_path, failed_card, cap
     if drift == "manifest":
         manifest = tmp_path / "verify/manifests/negative-card.json"
         manifest.write_text(manifest.read_text().replace("report-failing-tests", "changed-case"))
+        # Manifests are read from the Git base, so drift means a committed change.
+        subprocess.run(
+            ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qam", "drift"],
+            cwd=tmp_path,
+            check=True,
+            capture_output=True,
+        )
     elif drift == "timestamp":
         ledger = tmp_path / log.LOG_PATH
         row = json.loads(ledger.read_text())

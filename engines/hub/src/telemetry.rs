@@ -2,6 +2,7 @@
 use crate::writer::WriterStats;
 use std::{
     collections::BTreeMap,
+    fmt,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
@@ -334,6 +335,8 @@ pub struct RequestLog {
     pub telemetry: std::sync::Arc<Telemetry>,
     pub id: u64,
     pub family: &'static str,
+    pub method: &'static str,
+    pub route: &'static str,
     pub status: u16,
     pub credential_kind: &'static str,
     /// The phase the request had reached. A cancelled request keeps the phase
@@ -414,8 +417,49 @@ pub fn mark(parts: &axum::http::request::Parts, stage: Stage) {
 }
 impl RequestLog {
     /// The one request line this log writes, before it is emitted.
-    pub fn line(&self) -> serde_json::Value {
-        serde_json::json!({"event":"request","request_id":self.id,"family":self.family,"status":self.status,"latency_seconds":self.start.elapsed().as_secs_f64(),"credential_kind":self.credential_kind,"stage":self.stage.get().label(),"request_bytes":self.request_bytes.load(Ordering::Relaxed),"response_bytes":self.response_bytes})
+    pub fn line(&self) -> RequestLine<'_> {
+        RequestLine {
+            log: self,
+            latency_seconds: self.start.elapsed().as_secs_f64(),
+        }
+    }
+}
+
+pub struct RequestLine<'a> {
+    log: &'a RequestLog,
+    latency_seconds: f64,
+}
+impl fmt::Display for RequestLine<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let log = self.log;
+        // Keep the legacy key order. Serde writes all values to one buffer
+        // from borrowed labels, without building a map or owned label strings.
+        let mut line = Vec::with_capacity(256);
+        line.push(b'{');
+        macro_rules! fields {
+            ($($key:literal => $value:expr),+ $(,)?) => {
+                $(
+                    line.extend_from_slice(concat!("\"", $key, "\":").as_bytes());
+                    serde_json::to_writer(&mut line, &$value).map_err(|_| fmt::Error)?;
+                    line.push(b',');
+                )+
+            };
+        }
+        fields!(
+            "credential_kind" => log.credential_kind,
+            "event" => "request",
+            "family" => log.family,
+            "latency_seconds" => self.latency_seconds,
+            "request_bytes" => log.request_bytes.load(Ordering::Relaxed),
+            "request_id" => log.id,
+            "response_bytes" => log.response_bytes,
+            "stage" => log.stage.get().label(),
+            "status" => log.status,
+            "method" => log.method,
+            "route" => log.route,
+        );
+        *line.last_mut().expect("request log fields") = b'}';
+        f.write_str(std::str::from_utf8(&line).map_err(|_| fmt::Error)?)
     }
 }
 impl Drop for RequestLog {
@@ -423,11 +467,8 @@ impl Drop for RequestLog {
         let line = self.line();
         // The histogram reads the same latency the line carries, so the metric
         // and the log never disagree.
-        self.telemetry.request(
-            self.family,
-            self.status,
-            line["latency_seconds"].as_f64().unwrap_or_default(),
-        );
+        self.telemetry
+            .request(self.family, self.status, line.latency_seconds);
         eprintln!("{line}");
     }
 }
@@ -471,6 +512,8 @@ mod tests {
             telemetry: Arc::new(Telemetry::default()),
             id: 7,
             family: "status",
+            method: "GET",
+            route: "/status",
             status: 500,
             credential_kind: "unchecked",
             stage: slot.clone(),
@@ -478,7 +521,8 @@ mod tests {
             response_bytes: 0,
             start: Instant::now(),
         };
-        assert_eq!(log.line()["stage"], "received");
+        let line = || serde_json::from_str::<serde_json::Value>(&log.line().to_string()).unwrap();
+        assert_eq!(line()["stage"], "received");
         for (stage, label) in [
             (Stage::CredentialLookup, "credential-lookup"),
             (Stage::Handler, "handler"),
@@ -487,14 +531,52 @@ mod tests {
             (Stage::Replying, "replying"),
         ] {
             slot.set(stage);
-            assert_eq!(log.line()["stage"], label);
+            assert_eq!(line()["stage"], label);
             assert_eq!(slot.get(), stage);
         }
         // The earlier fields keep their meaning and stay on the line.
-        let line = log.line();
+        let line = line();
+        assert_eq!(line["method"], "GET");
+        assert_eq!(line["route"], "/status");
         assert_eq!(line["credential_kind"], "unchecked");
         assert_eq!(line["family"], "status");
         assert_eq!(line["status"], 500);
+    }
+
+    #[test]
+    fn request_line_escapes_labels_and_appends_fields_after_the_legacy_order() {
+        let log = RequestLog {
+            telemetry: Arc::default(),
+            id: 7,
+            family: "family\"fixture",
+            method: "NEW\nMETHOD",
+            route: "/fixture/\"\\path",
+            status: 503,
+            credential_kind: "credential\\fixture",
+            stage: StageSlot::default(),
+            request_bytes: Arc::default(),
+            response_bytes: 0,
+            start: Instant::now(),
+        };
+        let line = |latency_seconds| {
+            RequestLine {
+                log: &log,
+                latency_seconds,
+            }
+            .to_string()
+        };
+        assert_eq!(
+            line(0.5),
+            concat!(
+                r#"{"credential_kind":"credential\\fixture","event":"request","family":"family\"fixture","#,
+                r#""latency_seconds":0.5,"request_bytes":0,"request_id":7,"response_bytes":0,"#,
+                r#""stage":"received","status":503,"method":"NEW\nMETHOD","route":"/fixture/\"\\path"}"#,
+            )
+        );
+        for latency_seconds in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let decoded: serde_json::Value = serde_json::from_str(&line(latency_seconds)).unwrap();
+            assert!(decoded["latency_seconds"].is_null());
+        }
     }
 
     #[test]

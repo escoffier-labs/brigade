@@ -2137,6 +2137,7 @@ def test_ec12_classifies_a_missing_manifest_listed_entry_as_snapshot_mismatch(tm
         ("canceled", lambda receipt: receipt["commands"][0].update(status="interrupted"), "status_canceled"),
         ("canceled", lambda receipt: receipt.update(commands=[]), "status_canceled"),
         ("canceled", lambda receipt: receipt.update(planned_commands=["first", "second"]), "status_canceled"),
+        ("busy", lambda receipt: None, "status_busy"),
     ],
 )
 def test_ec03_classifies_incomplete_receipts(tmp_path, monkeypatch, receipt_status, mutate, reason):
@@ -2180,6 +2181,7 @@ def test_ec03_classifies_incomplete_receipts(tmp_path, monkeypatch, receipt_stat
         ("failed", "timed_out", 124, "status_failed"),
         ("failed", "timed_out", None, "status_failed"),
         ("rejected", "rejected", 2, "status_rejected"),
+        ("failed", "busy", 75, "status_failed"),
     ],
 )
 def test_ec03_preserves_signed_terminal_command_failures(
@@ -2705,6 +2707,32 @@ def test_signed_ok_rederived_validates_and_verifier_exception_is_unavailable(tmp
     readiness = _assess(target, "EC-02")
     assert readiness["outcome"] == "unavailable"
     assert readiness["reason"] == "verifier_error"
+
+
+@pytest.mark.parametrize(("status", "reason"), [("busy", "status_busy"), ("canceled", "status_canceled")])
+def test_signed_attestation_does_not_validate_incomplete_receipt_status(tmp_path, monkeypatch, status, reason):
+    from brigade import attestation
+
+    monkeypatch.setattr(control_crosswalk, "_ssh_keygen_available", lambda: True)
+    target = _ec02_target(tmp_path)
+    run_dir = _verify_dir(target, "v1")
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["status"] = status
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    _write_json(receipt_path, receipt)
+    _stub_attestation(
+        monkeypatch,
+        attestation.AttestationVerifyResult(status=attestation.STATUS_SIGNED_OK, rederived=True, run_id="v1"),
+    )
+
+    readiness = _assess(target, "EC-02")
+
+    assert readiness["outcome"] == "incomplete"
+    assert readiness["reason"] == reason
 
 
 def test_passed_signature_cannot_override_failed_prerequisite():
@@ -3386,12 +3414,22 @@ def test_ec10_period_uses_real_outcome_record_ts(tmp_path):
         ("failed", "failed", "status_failed", "evidenced_failed"),
         ("rejected", "failed", "status_rejected", "evidenced_failed"),
         ("canceled", "incomplete", "status_canceled", "untested"),
+        ("busy", "incomplete", "status_busy", "untested"),
         ("running", "incomplete", "status_not_terminal", "untested"),
     ],
 )
 def test_verify_receipt_terminal_states_stay_distinct(tmp_path, status, outcome, reason, state):
     target = _ws(tmp_path)
-    _write_verify_receipt(_verify_dir(target, "v1"), run_id="v1", status=status)
+    run_dir = _verify_dir(target, "v1")
+    _write_verify_receipt(run_dir, run_id="v1", status=status)
+    if status == "busy":
+        receipt_path = run_dir / "receipt.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["digests"] = {
+            "algorithm": "sha256",
+            "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+        }
+        _write_json(receipt_path, receipt)
     readiness = _assess(target, "EC-01")
     assert (readiness["outcome"], readiness["reason"], readiness["legacy_state"]) == (outcome, reason, state)
 

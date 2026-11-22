@@ -198,6 +198,9 @@ _STATUS_NEUTRAL_EVENT_TYPES: frozenset[str] = frozenset(
         # changes the aggregate run status.
         "task.disposed",
         "task.artifact-collected",
+        # A recorded cancel intent blocks a future launch; it never changes the
+        # aggregate run status by itself.
+        "task.cancel-requested",
         # Governed native T3 claim, correlation and hold facts change task
         # custody, not the aggregate run status.
         "task.native-claimed",

@@ -79,6 +79,7 @@ def reusable_receipt(
         fingerprint is None
         or latest is None
         or latest.get("status") != "completed"
+        or latest.get("tree_stable") is False
         or latest.get("tree_fingerprint") != fingerprint
         or latest.get("planned_commands") != planned_display
     ):

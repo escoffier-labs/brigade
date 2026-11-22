@@ -1,9 +1,10 @@
 # brigade-cli
 
-`brigade-cli` is the compatibility name for [`brigadestack`](https://pypi.org/project/brigadestack/),
-the Brigade CLI. `brigade-cli==0.32.0` depends on exactly `brigadestack==0.32.0` and installs the
-same `brigade` command. Existing installs keep working, and `pipx upgrade brigade-cli` and
-`brigade update` keep upgrading under this name.
+`brigade-cli` is the old PyPI name of [`brigadestack`](https://pypi.org/project/brigadestack/),
+the Brigade CLI. Through 0.33 it is a full build of the same source under the old name: the same
+`brigade` command, Python imports, dependencies, extras, workspace files and storage formats as
+`brigadestack` at the same version. `pipx upgrade brigade-cli` stays an ordinary in-place upgrade,
+and `brigade update` moves an install to `brigadestack`.
 
 Install `brigadestack` for new setups:
 
@@ -12,13 +13,14 @@ pipx install brigadestack
 brigadestack --version
 ```
 
-This package contains metadata and console scripts only. It declares `brigade`, `brigade-cli`
-and `brigade-hook` because pipx exposes only the installed package's own scripts. Python imports
-remain under `brigade`, and the workspace files and storage formats do not change.
+The release workflow builds both distributions from the same tree, so the `brigade` package files
+are identical. This name declares the `brigade`, `brigade-cli` and `brigade-hook` commands, and
+`brigadestack` declares `brigade`, `brigadestack` and `brigade-hook`. Install only one of the two
+globally, because both link a `brigade` command.
 
 Requires Python 3.11 or newer.
 
-[Homepage](https://brigade.tools) |
+[Homepage](https://brigadestack.com) |
 [Documentation](https://brigade.tools/docs) |
-[Source](https://github.com/escoffier-labs/brigade/tree/main/distribution/brigade-cli/pypi) |
+[Source](https://github.com/escoffier-labs/brigade) |
 [Issues](https://github.com/escoffier-labs/brigade/issues)

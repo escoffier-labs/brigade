@@ -129,7 +129,9 @@ def test_list_json_contract_has_schema_and_stable_keys(populated, capsys):
         "result_id",
         "artifact_kind",
         "artifact_digest",
+        "cancel",
     }
+    assert rows["done"]["cancel"] == {"requested": False, "queued": False, "reason": None}
     assert rows["queued"]["status"] == "queued"
     assert rows["queued"]["attempt_id"] is None
     assert rows["queued"]["terminal"] is False

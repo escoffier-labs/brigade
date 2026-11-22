@@ -1,1 +1,0 @@
-- Doctor detail now names every claude hook issue when session directory integrity is refused, not only the refusal itself.

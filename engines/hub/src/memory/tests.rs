@@ -464,6 +464,39 @@ async fn status_names_the_principal_and_the_readable_scopes() {
 }
 
 #[tokio::test]
+async fn principal_revoked_after_authentication_cannot_write() {
+    let h = Hub::new();
+    let scope = "repo:example/one";
+    assert_eq!(
+        h.call(
+            ADMIN_TOKEN,
+            json!({"action":"grant","principal":"agent:dot","scope":scope,
+                   "rights":["write"],"client_event_id":h.id()}),
+        )
+        .await
+        .status,
+        200
+    );
+    let store = h.store.as_ref().unwrap();
+    let credential = store.authenticate(AGENT_TOKEN).await.unwrap();
+    let raw = json!({"action":"put","scope":scope,"card_id":"revoked",
+                     "text":"example text","client_event_id":h.id()});
+    let prepared = store
+        .prepare(&credential, "put", raw.as_object().unwrap(), &raw)
+        .unwrap();
+    Connection::open(&h.hub)
+        .unwrap()
+        .execute("UPDATE fleet_message_principals SET revoked_at='revoked' WHERE principal_id='agent:dot'", [])
+        .unwrap();
+
+    let refused = store.write(prepared).await;
+    assert_eq!(
+        (refused.status, refused.body),
+        (401, json!({"error":"unauthorized"}))
+    );
+}
+
+#[tokio::test]
 async fn admin_put_stores_agent_unreviewed_and_import_needs_the_grant() {
     let h = Hub::new();
     let put = h

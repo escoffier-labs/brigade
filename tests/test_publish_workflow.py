@@ -112,23 +112,110 @@ def test_publish_workflow_builds_the_complete_native_matrix_then_attests_and_rel
     assert assemble < release < release_gate < pypi < acceptance
 
 
-def test_build_and_publish_builds_both_distributions_into_one_trusted_upload():
-    text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
-    job = text[text.index("  build-and-publish:") : text.index("  verify-version-check-endpoint:")]
+def _run_text(job):
+    return "\n".join(step.get("run", "") for step in job["steps"])
 
-    root_build = job.index("python -m build --outdir dist\n")
-    compat_build = job.index("python -m build --outdir dist distribution/brigade-cli/pypi")
-    version_check = job.index("Check both distributions share the release version")
-    publish = job.index("      - name: Publish to PyPI")
-    assert root_build < compat_build < version_check < publish
-    # One upload step, default dist/ directory, so both distributions ship together.
-    assert job.count("pypa/gh-action-pypi-publish@") == 1
-    assert "packages-dir" not in job
+
+def _uses(job, action):
+    return [step for step in job["steps"] if step.get("uses", "").startswith(action)]
+
+
+def test_python_distributions_are_built_checked_and_published_by_three_separate_jobs():
+    workflow = _load_workflow_yaml(ROOT / ".github" / "workflows" / "publish.yml")
+    jobs = workflow["jobs"]
+    build, gate, publish = jobs["build-python-dist"], jobs["check-cli-upgrade"], jobs["build-and-publish"]
+    text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
+
+    assert build["needs"] == "release-asset-gate"
+    assert gate["needs"] == "build-python-dist"
+    assert set(publish["needs"]) == {"build-python-dist", "check-cli-upgrade"}
+    # PyPI matches the workflow file and environment, so the publishing job keeps its id.
+    assert publish["environment"] == "pypi"
+    assert jobs["verify-version-check-endpoint"]["needs"] == "build-and-publish"
+    assert jobs["published-artifact-acceptance"]["needs"] == "build-and-publish"
+
+    # Build: root wheel, then the stamped brigade-cli copy, then the version and file-set check.
+    build_run = _run_text(build)
+    root_build = build_run.index("python -m build --outdir dist\n")
+    stamp = build_run.index('python scripts/stamp_brigade_cli.py "$RUNNER_TEMP/brigade-cli-src"')
+    stamped_build = build_run.index('python -m build --outdir dist "$RUNNER_TEMP/brigade-cli-src"')
+    version_check = build_run.index("expected = {")
+    assert root_build < stamp < stamped_build < version_check
     for artifact in ("brigadestack-{version}-py3-none-any.whl", "brigade_cli-{version}-py3-none-any.whl"):
-        assert artifact in job
-    assert "Python package: brigadestack==${VERSION} (brigade-cli==${VERSION} is the compatibility name)" in text
-    # The tag check also covers the compatibility package version.
-    assert '"distribution/brigade-cli/pypi/pyproject.toml"' in text
+        assert artifact in build_run
+    assert "distribution/brigade-cli/pypi" not in text.replace("distribution/brigade-cli/pypi/README.md", "")
+    assert 'python scripts/check_cli_upgrade.py --dist dist --version "${TAG#v}"' in _run_text(gate)
+
+    # The gate runs a previous PyPI release's code with the runner's artifact credentials, which could
+    # replace a same-named artifact. So both downstream jobs download by the immutable ID the build job
+    # exposes as a job output, and the publish job verifies the files against a build-job manifest.
+    [uploaded] = _uses(build, "actions/upload-artifact@")
+    assert uploaded["id"] == "upload"
+    assert uploaded["with"]["name"] == "python-dist" and uploaded["with"]["path"] == "dist/"
+    assert build["outputs"] == {
+        "artifact-id": "${{ steps.upload.outputs.artifact-id }}",
+        "artifact-digest": "${{ steps.upload.outputs.artifact-digest }}",
+        "dist-manifest": "${{ steps.manifest.outputs.dist-manifest }}",
+    }
+    manifest = next(step for step in build["steps"] if step.get("id") == "manifest")
+    assert "sha256sum" in manifest["run"] and "sort" in manifest["run"]
+    assert "dist-manifest<<" in manifest["run"] and '"$GITHUB_OUTPUT"' in manifest["run"]
+    steps = [step.get("id") for step in build["steps"]]
+    assert steps.index("manifest") < steps.index("upload")
+    by_id = "${{ needs.build-python-dist.outputs.artifact-id }}"
+    for job in (gate, publish):
+        [downloaded] = _uses(job, "actions/download-artifact@")
+        assert downloaded["with"]["artifact-ids"] == by_id
+        assert "name" not in downloaded["with"]
+        assert downloaded["with"]["path"] == "dist"
+        assert downloaded["with"]["merge-multiple"] is True
+    verify = next(step for step in publish["steps"] if step.get("name", "").startswith("Verify dist/"))
+    assert verify["env"] == {"DIST_MANIFEST": "${{ needs.build-python-dist.outputs.dist-manifest }}"}
+    assert "needs.build-python-dist.outputs.dist-manifest" not in verify["run"]  # env, never interpolated
+    for check in ("unexpected file", "missing file", "hashes to", "rglob"):
+        assert check in verify["run"]
+    names = [step.get("name") for step in publish["steps"]]
+    assert names.index(verify["name"]) < names.index("Publish to PyPI")
+    assert [step.get("name") for step in publish["steps"] if "run" in step] == [verify["name"]]
+    # No download anywhere addresses python-dist by name, where a replaced artifact would be picked up.
+    for name, job in jobs.items():
+        for step in _uses(job, "actions/download-artifact@"):
+            assert step["with"].get("name") != "python-dist", name
+    assert "digest-mismatch" not in text  # the action's default is to fail on a mismatch
+    # One upload step in the publishing job, default dist/ directory, so all four files ship together.
+    [upload] = [step for step in publish["steps"] if step.get("uses", "").startswith("pypa/gh-action-pypi-publish@")]
+    assert "packages-dir" not in upload.get("with", {})
+    assert text.count("pypa/gh-action-pypi-publish@") == 1
+    assert (
+        "Python package: brigadestack==${VERSION} (brigade-cli==${VERSION} is the same code under the old name)" in text
+    )
+    # The tag check covers the root version; the stamped copy cannot drift from it.
+    assert '"pyproject.toml"' in text
+
+
+def test_no_job_with_an_oidc_token_runs_code_from_a_pypi_release():
+    # The upgrade gate installs and runs the previous brigade-cli release from PyPI, so it must never
+    # share a job with id-token: write.
+    workflow = _load_workflow_yaml(ROOT / ".github" / "workflows" / "publish.yml")
+    oidc = {name: job for name, job in workflow["jobs"].items() if "id-token" in job.get("permissions", {})}
+    assert "build-and-publish" in oidc
+    assert "check-cli-upgrade" not in oidc and "build-python-dist" not in oidc
+    for name, job in oidc.items():
+        run = _run_text(job)
+        assert "check_cli_upgrade" not in run, name
+        assert not re.search(r"pip\b.*\binstall", run), name
+        assert "brigade-cli" not in run, name
+    # The gate runs outside the registry environment too.
+    gate = workflow["jobs"]["check-cli-upgrade"]
+    assert "environment" not in gate
+    assert gate["permissions"] == {"contents": "read"}
+    assert "environment" not in workflow["jobs"]["build-python-dist"]
+
+
+def test_dev_publish_stays_brigadestack_only():
+    text = (ROOT / ".github" / "workflows" / "publish-dev.yml").read_text()
+    for name in ("brigade-cli", "brigade_cli", "stamp_brigade_cli", "check_cli_upgrade"):
+        assert name not in text
 
 
 def test_go_native_build_disables_setup_go_cache_for_the_cross_platform_matrix():
@@ -561,6 +648,12 @@ def test_npm_release_workflow_has_dispatch_source_oidc_and_native_gates():
     build = "\n".join(s.get("run", "") for s in jobs["build"]["steps"])
     assert "refs/heads/main" in build and "EXPECTED_SHA" in build and "RELEASE_TAG" in build
     assert "gh attestation verify" in build
+    prepare = next(line for line in build.splitlines() if '"npm/feasibility/prepare.py"' in line and '"--out"' in line)
+    assert '"--stamp-publishing-repository"' in prepare
+    compat_pack = next(s["run"] for s in jobs["publish-compat"]["steps"] if "npm pack " in s.get("run", ""))
+    stamp, pack = compat_pack.split(" && npm pack ", 1)
+    assert 'npm pkg set "repository.url=$repository_url" "bugs.url=$issues_url"' in stamp
+    assert pack.startswith("--ignore-scripts ")
     publish = "\n".join(s.get("run", "") for s in jobs["publish"]["steps"])
     assert "publish.cjs" in publish
     assert 'test "$GITHUB_REF" = refs/heads/main' in publish
