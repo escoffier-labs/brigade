@@ -539,9 +539,9 @@ def test_live_cancel_retains_partial_work_and_same_seat_siblings(site, capsys, m
     watchers = []
     watch = BatchExecution._watch_cancels
 
-    def watch_and_record(self, stopped):
+    def watch_and_record(self, stopped, **kwargs):
         watchers.append(threading.current_thread())
-        watch(self, stopped)
+        watch(self, stopped, **kwargs)
 
     monkeypatch.setattr(BatchExecution, "_watch_cancels", watch_and_record)
 
@@ -687,3 +687,48 @@ def test_pending_intent_drained_after_terminal_observation_keeps_result(held_run
     assert result.status == "completed"
     assert result.result_id == observed.result_id
     assert result.cancel_too_late
+
+
+def test_a_worker_that_reports_cancelled_on_its_own_still_aborts_later_waves(site, capsys, monkeypatch):
+    # No cancel was requested: a provider-originated "cancelled" is a failure,
+    # so fail-fast still skips the later wave. Only the batch's own watcher
+    # outcome (task-cancelled) is exempt.
+    tasks = accept_batch(site, [site.task(name, read_only=True) for name in ("a", "b", "c")])
+
+    def model(agent, prompt, **kwargs):
+        if "Batch task_id: a\n" in prompt:
+            return agents.AgentResult(text="", ok=False, status="cancelled")
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", model)
+    rc, result, err = invoke(site, capsys, tasks["tasks"])
+
+    assert rc != 0, err
+    assert launched(site, "c") == 0
+    assert result["tasks"]["c"]["status"] == "queued"
+    assert facts(site.run_dir(), "task.cancel-requested") == []
+
+
+def test_remote_routed_watcher_only_journals_intent_and_never_terminates():
+    from types import SimpleNamespace
+
+    stopped = threading.Event()
+    drains: list[int] = []
+
+    def drain():
+        drains.append(1)
+        stopped.set()
+        return True
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("a remote-routed batch must not claim live termination")
+
+    fake = SimpleNamespace(
+        _drain_inbox=drain,
+        processes=SimpleNamespace(cancel_task=forbidden),
+        turns=SimpleNamespace(interrupt=forbidden),
+        runtime={},
+        run_dir=None,
+    )
+    BatchExecution._watch_cancels(fake, stopped, terminate=False)
+    assert drains == [1]

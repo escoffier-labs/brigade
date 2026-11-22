@@ -33,7 +33,7 @@ from . import (
     runguard,
 )
 from .run_batch import BatchError
-from .run_transport import Assignment, WorkerResult
+from .run_transport import TASK_CANCELLED_STATUS, Assignment, WorkerResult
 from .roster import Roster, read_only_cloud_mutation_error
 
 
@@ -281,9 +281,13 @@ class BatchExecution:
             print(f"warning: task cancel inbox refused: {exc.code}: {exc.detail}", file=sys.stderr)
             return False
 
-    def _watch_cancels(self, stopped: threading.Event) -> None:
+    def _watch_cancels(self, stopped: threading.Event, *, terminate: bool = True) -> None:
         while not stopped.wait(_CANCEL_POLL_SECONDS):
             self._drain_inbox()
+            if not terminate:
+                # A remote route has no exact per-task cancel, so a running
+                # task keeps its real result and the intent shows as too late.
+                continue
             try:
                 states = run_tasks.read_tasks(self.run_dir)
             except run_tasks.TaskJournalError as exc:
@@ -409,7 +413,7 @@ class BatchExecution:
             if runtime.containment is None:
                 runtime.containment = self._cancel_containment(task_id, attempt_id, result)
             containment = runtime.containment
-            result = replace(result, ok=False, status="cancelled")
+            result = replace(result, ok=False, status=TASK_CANCELLED_STATUS)
         self._publish_result(result, task_id, containment)
         return result
 
@@ -423,7 +427,7 @@ class BatchExecution:
             # Keep the scheduling decision on a write failure. Finish retries
             # observation and reports any error that persists.
             print(f"warning: task {task_id} cancellation observation failed", file=sys.stderr)
-            return replace(result, ok=False, status="cancelled")
+            return replace(result, ok=False, status=TASK_CANCELLED_STATUS)
 
     def _publish_result(self, result: WorkerResult, task_id: str, cancel_containment: str | None) -> None:
         if task_id in self.prerequisite_cancelled:
@@ -576,11 +580,23 @@ class BatchExecution:
             self._drain_inbox()
             self.prepare_workspaces(stack)
             stopped = threading.Event()
+            # Fleet remote dispatch cannot cancel one exact remote request, so a
+            # remote-routed batch never claims live termination: the watcher
+            # only journals intent, and `runs tasks cancel` reports
+            # live-termination-unavailable because no live watcher is advertised.
+            terminate = kwargs.get("remote_transport") is None
             ctx = contextvars.copy_context()
             watcher = threading.Thread(
-                target=ctx.run, args=(self._watch_cancels, stopped), name="batch-task-cancel", daemon=True
+                target=ctx.run,
+                args=(self._watch_cancels, stopped),
+                kwargs={"terminate": terminate},
+                name="batch-task-cancel",
+                daemon=True,
             )
-            with run_task_inbox.live_watcher(self.run_dir, self.workspace):
+            advertise = (
+                run_task_inbox.live_watcher(self.run_dir, self.workspace) if terminate else contextlib.nullcontext()
+            )
+            with advertise:
                 watcher.start()
                 try:
                     return planning.dispatch(waves, roster, **kwargs)

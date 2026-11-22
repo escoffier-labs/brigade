@@ -61,8 +61,12 @@ class Assignment:
     attempt_id: str | None = None
 
 
-# Decided cancellations and the launch refusals they cause do not abort later waves.
-NON_ABORTING_STATUSES = frozenset({"cancelled", "cancelled-before-launch", "prerequisite-cancelled"})
+# The status a batch gives a running task its own cancel watcher stopped. It is
+# distinct from a provider's generic "cancelled", which stays a failure.
+TASK_CANCELLED_STATUS = "task-cancelled"
+# Decided cancellations and the launch refusals they cause do not abort later
+# waves. A worker that reports "cancelled" on its own still aborts them.
+NON_ABORTING_STATUSES = frozenset({TASK_CANCELLED_STATUS, "cancelled-before-launch", "prerequisite-cancelled"})
 
 
 class LaunchRefused(Exception):

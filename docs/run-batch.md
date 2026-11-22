@@ -773,8 +773,18 @@ observed stop outcome, or `unknown` when no stop outcome was available. An
 app-server interrupt acknowledgement alone does not prove that the turn
 stopped. The batch joins the watcher when dispatch ends.
 
+A batch routed through Fleet remote dispatch cannot cancel one exact remote
+request. Its watcher still journals intent, so a task that has not launched
+never launches, but it never stops a running remote task and never records
+one as `cancelled`. The running task keeps its real result, the intent shows
+as `cancel.too_late: true`, and `runs tasks cancel` reports
+`live-termination-unavailable` because no live watcher is advertised.
+
 Cancellation leaves same-seat siblings eligible to finish. It also counts as
 a decided outcome for fail-fast, so unrelated tasks in later waves still run.
+Only a cancellation the batch's own watcher performed counts. A worker that
+reports `cancelled` on its own, with no cancel request, is a failure and still
+stops later waves.
 A task that `depends_on` a cancelled task never launches. The batch reports
 it as `prerequisite-cancelled` and leaves it `queued` in the journal.
 
