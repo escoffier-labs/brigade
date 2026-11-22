@@ -56,6 +56,10 @@ jobs:
               print(f"::error::{path} declares {value}, tag says {expected}")
           sys.exit(1 if mismatched else 0)
           EOF
+      - name: Enforce shim expiry at the stable release cut
+        env:
+          TAG: ${{ github.ref_name }}
+        run: python3 scripts/retired_engine_names.py --release-version "${TAG#v}"
 
   build-rust-native:
     name: Rust native (${{ matrix.platform }})
