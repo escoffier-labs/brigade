@@ -184,7 +184,7 @@ For a remote T3 controller journal already available locally, configure an alias
 
 Each journal row may provide `state`, `started_at`, and `last_updated_at`. Center uses generic provider and task labels for controller data, so untrusted journal text cannot appear in the payload. It never follows that path outside the selected workspace, and it does not attempt network discovery or control remote agents.
 
-Browse the public template index in [`templates/`](../templates/).
+Browse the [starter template index](starter-templates.md).
 The installable source files live under `src/brigade/templates/`; root workspace files are local dogfood state and stay ignored.
 
 See [`ROADMAP.md`](../ROADMAP.md) for the daily-driver, scanner inbox, chat-surface scanner, and memory-card decay roadmap. The active phase queue for roadmap completion hardening is tracked in [`docs/phase-61-100-plan.md`](phase-61-100-plan.md).

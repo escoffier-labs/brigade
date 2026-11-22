@@ -1,6 +1,6 @@
 # Brigade Templates
 
-This folder is the public index for Brigade's starter templates.
+Use this index to find Brigade's starter templates.
 
 The canonical installable files live under [`src/brigade/templates`](../src/brigade/templates/) because the Python package loads them from there. Keep edits in that package directory so `brigade init` and release builds install the same files people see in the repo.
 
