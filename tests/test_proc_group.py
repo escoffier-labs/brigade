@@ -211,3 +211,110 @@ def test_clean_drain_records_descendants_reaped():
     assert result.code == 0
     assert result.incomplete_process_group is False
     assert result.descendants_reaped is True
+
+
+TOKEN_KEY = "BRIGADE_PAIRED_CELL"
+
+
+@requires_pidfd
+def test_kill_strays_rechecks_the_token_after_the_pidfd_open(monkeypatch):
+    """The token is read again once the pidfd is held, so a marker that vanished is not signalled."""
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        fields = proc_group._stat_fields(process.pid)
+        assert fields is not None
+        started = int(fields[19])
+        monkeypatch.setattr(proc_group, "_carries_token", lambda pid, wanted: pid == process.pid)
+        records = proc_group.stray_processes(TOKEN_KEY, "t0ken")
+        assert records == [(process.pid, started)]
+        monkeypatch.setattr(proc_group, "_carries_token", lambda pid, wanted: False)
+        sent = []
+        monkeypatch.setattr(proc_group.signal, "pidfd_send_signal", lambda fd, sig: sent.append(sig), raising=False)
+        assert proc_group.kill_strays(records, signal.SIGKILL, TOKEN_KEY, "t0ken") == 0
+        assert sent == [] and process.poll() is None
+    finally:
+        process.kill()
+        process.wait(timeout=10)
+
+
+def _only_proc(monkeypatch, pid):
+    """Point the scan at one pid, so an unrelated process on the host cannot decide the result."""
+    real_listdir = os.listdir
+
+    def listdir(path):
+        return [str(pid)] if str(path) == "/proc" else real_listdir(path)
+
+    monkeypatch.setattr(proc_group.os, "listdir", listdir)
+
+
+def _unreadable_environ(monkeypatch, process):
+    target = f"/proc/{process.pid}/environ"
+    real_read_bytes = Path.read_bytes
+
+    def read_bytes(self):
+        if str(self) == target:
+            raise PermissionError(errno.EACCES, "denied")
+        return real_read_bytes(self)
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+
+
+def test_a_same_user_unreadable_environ_in_the_cell_is_unconfirmed(monkeypatch, tmp_path):
+    """A blind same-user process inside the cell's work dir might carry the token, so it fails closed."""
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=tmp_path)
+    try:
+        _only_proc(monkeypatch, process.pid)
+        _unreadable_environ(monkeypatch, process)
+        assert proc_group.stray_processes(TOKEN_KEY, "t0ken", not_before=0, root=tmp_path) is None
+    finally:
+        process.kill()
+        process.wait(timeout=10)
+
+
+def test_a_blind_process_with_no_cell_signal_is_skipped(monkeypatch, tmp_path):
+    """An unrelated same-user process keeps its environ unreadable by design, so it is not a cell stray."""
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=tmp_path)
+    try:
+        _only_proc(monkeypatch, process.pid)
+        _unreadable_environ(monkeypatch, process)
+        assert proc_group.stray_processes(TOKEN_KEY, "t0ken", not_before=0, root=tmp_path / "other") == []
+    finally:
+        process.kill()
+        process.wait(timeout=10)
+
+
+def test_an_older_same_user_unreadable_environ_is_skipped(monkeypatch, tmp_path):
+    """A process that predates the run cannot be its descendant, so its blind environ is not a failure."""
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=tmp_path)
+    try:
+        _only_proc(monkeypatch, process.pid)
+        _unreadable_environ(monkeypatch, process)
+        started = proc_group.process_start_time(process.pid)
+        assert started is not None
+        assert proc_group.stray_processes(TOKEN_KEY, "t0ken", not_before=started + 1, root=tmp_path) == []
+    finally:
+        process.kill()
+        process.wait(timeout=10)
+
+
+def test_another_users_unreadable_environ_is_skipped(monkeypatch, tmp_path):
+    """Another user's process cannot be signalled by us, so an unreadable environ there is not ours."""
+    process = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], cwd=tmp_path)
+    real_stat = os.stat
+
+    def fake_stat(path, *args, **kwargs):
+        result = real_stat(path, *args, **kwargs)
+        if str(path) == f"/proc/{process.pid}":
+            fields = list(result)
+            fields[4] = os.getuid() + 1
+            return os.stat_result(fields)
+        return result
+
+    try:
+        _only_proc(monkeypatch, process.pid)
+        _unreadable_environ(monkeypatch, process)
+        monkeypatch.setattr(proc_group.os, "stat", fake_stat)
+        assert proc_group.stray_processes(TOKEN_KEY, "t0ken", not_before=0, root=tmp_path) == []
+    finally:
+        process.kill()
+        process.wait(timeout=10)

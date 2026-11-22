@@ -195,6 +195,7 @@ def test_each_arm_is_fresh_and_the_child_env_is_allowlisted(good):
         assert env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1" and env["DISABLE_AUTOUPDATER"] == "1"
         assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
         allowed = {*ENV_PASSTHROUGH, *FIXED_ENV, TOKEN_ENV, "HOME", "USERPROFILE", "CLAUDE_CONFIG_DIR", "TMPDIR"}
+        allowed.add(model_trial_claude.CELL_TOKEN_ENV)
         allowed |= {"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"}
         # On Windows build_env also roots these inside the arm directory (never copied from the parent).
         allowed |= {"APPDATA", "LOCALAPPDATA", "TEMP", "TMP"}
@@ -202,6 +203,8 @@ def test_each_arm_is_fresh_and_the_child_env_is_allowlisted(good):
         assert not [key for key in env if key.startswith("ANTHROPIC_")]
         assert env["USERPROFILE"] == env["HOME"]
         assert list(run["config"]["mcpServers"]) == ["brigade-paired"]
+    # The leftover scan names a cell's processes by this token, so two cells never share one.
+    assert len({r["env"][model_trial_claude.CELL_TOKEN_ENV] for r in runs}) == 2
 
 
 def test_argv_has_the_exclusive_flags_and_none_of_the_forbidden_ones(good):
@@ -519,10 +522,11 @@ def test_live_refuses_before_launching_without_subscription_token_or_full_model(
 
 def test_build_env_requires_no_parent_secrets_beyond_the_token():
     arm = Path("/arm")
-    env = build_env({"CLAUDE_CODE_OAUTH_TOKEN": "t", "AWS_SECRET_ACCESS_KEY": "s", "PATH": "/p"}, arm)
+    env = build_env({"CLAUDE_CODE_OAUTH_TOKEN": "t", "AWS_SECRET_ACCESS_KEY": "s", "PATH": "/p"}, arm, cell_token="c")
     assert "AWS_SECRET_ACCESS_KEY" not in env and env["PATH"] == "/p"
     assert env["HOME"] == str(arm / "home")  # str(Path) so the separator is the platform's
     assert env["USERPROFILE"] == env["HOME"]
+    assert env[model_trial_claude.CELL_TOKEN_ENV] == "c"
 
 
 def test_build_env_copies_only_named_variables_and_roots_windows_dirs_in_the_arm():
@@ -531,7 +535,7 @@ def test_build_env_copies_only_named_variables_and_roots_windows_dirs_in_the_arm
     parent.update({name: "parent-secret" for name in secrets} | {TOKEN_ENV: "t"})
     arm = Path("/arm")
     for windows in (False, True):
-        env = build_env(parent, arm, windows=windows)
+        env = build_env(parent, arm, windows=windows, cell_token="c")
         assert all(value != "parent-secret" for value in env.values())  # no unlisted parent variable survives
         assert {k for k, v in env.items() if v.startswith("parent-")} == set(ENV_PASSTHROUGH)
         assert ("LOCALAPPDATA" in env) is windows and ("TEMP" in env) is windows
@@ -545,7 +549,7 @@ def test_build_env_copies_only_named_variables_and_roots_windows_dirs_in_the_arm
 def test_build_env_disables_the_update_refresh_in_every_arm(tmp_path):
     """A cell needs no network, so its server must not spawn a detached refresh into the arm home."""
     for windows in (False, True):
-        env = build_env({TOKEN_ENV: "t"}, tmp_path / "arm", windows=windows)
+        env = build_env({TOKEN_ENV: "t"}, tmp_path / "arm", windows=windows, cell_token="c")
         assert env["BRIGADE_NO_UPDATE_CHECK"] == "1"
 
 
@@ -555,7 +559,7 @@ def test_an_arm_mcp_server_leaves_no_update_refresh_in_its_home(tmp_path):
     (arm / "state").mkdir()
     target = tmp_path / "target"
     target.mkdir()
-    env = build_env(ENVIRON, arm)
+    env = build_env(ENVIRON, arm, cell_token="c")
     config = model_trial_claude.mcp_config("passing-verify", target, FIXTURES / "baseline", arm / "state")
     server = config["mcpServers"]["brigade-paired"]
     # A dead proxy makes any refresh child fail its request at once, so a leak cannot linger.
@@ -1222,6 +1226,51 @@ def _kill_published(path):
             os.kill(pid, signal.SIGKILL)
         except OSError:
             pass
+
+
+def _bystanders(monkeypatch):
+    """Start a same-user process per cell work dir, with that dir as its cwd and no cell token.
+
+    Nothing in the cell started it, so it is exactly what a cwd-based scan would mistake for a
+    stray. It must survive the cell and must never be reported.
+    """
+    started = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def tracking(*args, **kwargs):
+        path = real_mkdtemp(*args, **kwargs)
+        started.append(
+            subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                cwd=path,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        )
+        return path
+
+    monkeypatch.setattr(model_trial_claude.tempfile, "mkdtemp", tracking)
+    return started
+
+
+@requires_process_groups
+@pytest.mark.skipif(not drain_supported(), reason="the leftover scan needs /proc")
+def test_a_same_user_process_in_the_work_dir_without_the_token_is_not_a_stray(tmp_path, monkeypatch):
+    """The leftover scan is keyed by the cell's own random token, never by a working directory."""
+    bystanders = _bystanders(monkeypatch)
+    exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS)
+    try:
+        result = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        assert len(bystanders) == 2
+        assert all(process.poll() is None for process in bystanders), "a cell stopped a process it did not start"
+        assert all(a["failure"] is None for a in result["attempts"])
+        reported = [row for a in result["attempts"] for row in a["live"]["diagnostics"]]
+        assert not [row for row in reported if row.startswith("stray_pids:")]
+    finally:
+        for process in bystanders:
+            process.kill()
+            process.wait(timeout=10)
 
 
 @requires_process_groups

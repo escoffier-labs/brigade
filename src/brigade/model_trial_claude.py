@@ -37,6 +37,7 @@ from .proc_group import (
     group_has_live_members,
     kill_group_members,
     kill_strays,
+    process_start_time,
     stray_processes,
 )
 from .memory_verify_seat import CLAUDE_BUILTIN_AGENTS, CLAUDE_SETTINGS, open_executable
@@ -80,7 +81,7 @@ STRAY_DRAIN_SECONDS = 2.0
 DRAIN_FAILURE = "process_group_drain_failed"
 # A descendant that kept the arm's pipe open past the deadline: the trial goes on with the next cell.
 DESCENDANT_PIPES_FAILURE = "descendant_held_pipes"
-# A process the arm started was still inside the cell's work dir, or on its pipe, after teardown.
+# A process the arm started still carried the cell's token after teardown.
 DESCENDANT_SURVIVED_FAILURE = "descendant_survived"
 # Windows has no tree kill here, so give a grandchild's handles up to about 7 s to be released.
 WINDOWS_REMOVE_ATTEMPTS = 8
@@ -131,6 +132,9 @@ ENV_PASSTHROUGH = (
 )
 PROXY_ENV = tuple(key for key in ENV_PASSTHROUGH if key.lower().endswith("_proxy") and key.lower() != "no_proxy")
 TOKEN_ENV = "CLAUDE_CODE_OAUTH_TOKEN"
+# A random per-cell marker, inherited by every process the arm starts. The leftover scan uses it to
+# name the cell's own processes, so a same-user process the cell did not start is never touched.
+CELL_TOKEN_ENV = "BRIGADE_PAIRED_CELL"
 FIXED_ENV = {
     "BRIGADE_NO_UPDATE_CHECK": "1",  # A cell has no network need and must not spawn a refresh under its home.
     "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
@@ -342,12 +346,16 @@ def build_argv(
     return argv + ["--disallowedTools", "Task", "Agent"]
 
 
-def build_env(source: Mapping[str, str], arm_dir: Path, *, windows: bool = os.name == "nt") -> dict[str, str]:
+def build_env(
+    source: Mapping[str, str], arm_dir: Path, *, cell_token: str, windows: bool = os.name == "nt"
+) -> dict[str, str]:
     """The child environment: the named ``ENV_PASSTHROUGH`` variables and arm-local paths, nothing else.
 
-    No other parent variable is copied. On Windows the per-user and temp roots come from the arm
-    directory too, because the Brigade commands behind the MCP server need ``LOCALAPPDATA`` for their
-    authority key and receipts, and the parent's profile must not be reachable from a cell.
+    No other parent variable is copied. ``cell_token`` is a fresh random value per cell, and every
+    process the arm starts inherits it, so the post-teardown scan can name the cell's leftovers.
+    On Windows the per-user and temp roots come from the arm directory too, because the Brigade
+    commands behind the MCP server need ``LOCALAPPDATA`` for their authority key and receipts, and
+    the parent's profile must not be reachable from a cell.
     """
     env = {key: source[key] for key in ENV_PASSTHROUGH if key in source}
     home = arm_dir / "home"
@@ -371,6 +379,7 @@ def build_env(source: Mapping[str, str], arm_dir: Path, *, windows: bool = os.na
             "USERPROFILE": str(home),  # Windows Path.home() ignores HOME; the MCP server needs a home.
             "TMPDIR": str(arm_dir / "tmp"),
             TOKEN_ENV: source[TOKEN_ENV],
+            CELL_TOKEN_ENV: cell_token,
             **FIXED_ENV,
         }
     )
@@ -808,21 +817,25 @@ def _pipe_inodes(child: subprocess.Popen[bytes]) -> frozenset[int]:
     return frozenset(inodes)
 
 
-def _stop_strays(root: Path, pipe_inodes: frozenset[int]) -> tuple[list[int], bool]:
+def _stop_strays(
+    key: str, token: str, not_before: int | None, pipes: frozenset[int], root: Path
+) -> tuple[list[int], bool]:
     """Stop every process the arm left behind, bounded, and report its pids.
 
-    ``stray_processes`` names a process by a working directory inside the cell's work dir or by a
-    descriptor on one of the cell's pipes. That catches a descendant which called ``setsid`` and so
-    left both the group and the session the drain owns. Each is signalled through its pidfd, then
-    the scan repeats, because a survivor can fork while the scan runs. The second element is False
-    when the process table could not be read or a stray outlived the drain, which the caller must
-    treat as "not confirmed quiet".
+    ``stray_processes`` names a process by the exact ``key=token`` environment entry that every
+    descendant inherits. That catches a descendant which called ``setsid`` and so left both the
+    group and the session the drain owns, or which changed its working directory. Each is signalled
+    through its pidfd, then the scan repeats, because a survivor can fork while the scan runs.
+    ``pipes`` and ``root`` never decide a kill. They only say whether a process whose environ cannot
+    be read is plausibly the cell's, and ``not_before`` drops one that predates the cell. The
+    second element is False when cleanup cannot be confirmed, which the caller turns into a failed
+    cell that keeps its work dir.
     """
     deadline = time.monotonic() + STRAY_DRAIN_SECONDS
     found: list[int] = []
     while True:
         try:
-            records = stray_processes(root, pipe_inodes)
+            records = stray_processes(key, token, not_before=not_before, pipes=pipes, root=root)
         except ProcessGroupUnreadable:
             return found, False
         if records is None:
@@ -831,7 +844,7 @@ def _stop_strays(root: Path, pipe_inodes: frozenset[int]) -> tuple[list[int], bo
             return found, True
         found = sorted({*found, *(pid for pid, _ in records)})
         try:
-            kill_strays(records, signal.SIGKILL)
+            kill_strays(records, signal.SIGKILL, key, token)
         except ProcessGroupUnreadable:
             return found, False
         if time.monotonic() >= deadline:
@@ -849,14 +862,16 @@ def _run_process(
     token: str,
     *,
     pass_fds: tuple[int, ...] = (),
+    cell_token: str | None = None,
     root: Path | None = None,
 ) -> _ArmRun:
     """Run one arm. Stdout and stderr stay in memory, redacted, and bounded line by line and in total.
 
-    ``root`` is the cell's work dir, scanned after teardown for anything the arm left running
-    outside its group and session. The result carries the drain and deadline outcomes, which the
-    caller turns into a cell failure and keeps the work dir for when they did not confirm a quiet
-    cell.
+    ``cell_token`` is the cell's random environment marker. When it is set, everything that still
+    carries it after teardown is a process the arm started and left running outside its group and
+    session. ``root`` is the cell's work dir, used only to judge a process whose environ cannot be
+    read. The result carries the drain and deadline outcomes, which the caller turns into a cell
+    failure and keeps the work dir for when they did not confirm a quiet cell.
     """
     raw: list[bytes] = []
     size = 0
@@ -873,7 +888,11 @@ def _run_process(
         **extra,
     )
     deadline = time.monotonic() + max(timeout, 0.0)
-    pipes = _pipe_inodes(child) if drain_supported() else frozenset()
+    # Every descendant of the arm starts at or after its leader, so this bound separates a stray
+    # from a long-lived same-user process whose environ is unreadable (sshd, a compositor).
+    scanning = drain_supported() and bool(cell_token)
+    cell_started = process_start_time(child.pid) if scanning else None
+    pipes = _pipe_inodes(child) if scanning else frozenset()
     timed_out = threading.Event()
     # Every kill, and every reap, holds this lock: a signal is never sent for a pid that was just reaped.
     expiry = threading.Lock()
@@ -979,9 +998,11 @@ def _run_process(
         kill()
         drain_once()
         cleanup_failed = drain_failure is not None
-        if drain_supported():
-            # After the drain, anything still in the cell's work dir or on its pipes escaped both.
-            stray, quiet = _stop_strays(Path(os.path.realpath(root or cwd)), pipes)
+        if scanning and cell_token:
+            # After the drain, anything still carrying the cell's token escaped both group and session.
+            stray, quiet = _stop_strays(
+                CELL_TOKEN_ENV, cell_token, cell_started, pipes, Path(os.path.realpath(root or cwd))
+            )
             cleanup_failed = cleanup_failed or not quiet
         try:
             drainer.join(timeout=EXIT_GRACE)
@@ -1110,6 +1131,7 @@ def run_cell(
     )
     cwd = Path(os.path.realpath(work / "cwd"))
     token = ctx["environ"][TOKEN_ENV]
+    cell_token = uuid.uuid4().hex
     observer = _Observer(expected_model=ctx["expected_model"], session_id=session_id, version=ctx["version"], cwd=cwd)
     blocked = ancestor_instruction_file(cwd)
     if blocked is not None:  # Never launch: the CLI would load this file as instructions.
@@ -1118,13 +1140,14 @@ def run_cell(
         executable.verify()  # What runs is the file hashed at the start, never a replacement.
         run = _run_process(
             executable.command(argv),
-            build_env(ctx["environ"], work),
+            build_env(ctx["environ"], work, cell_token=cell_token),
             cwd,
             user_message(cell["case"]),
             ctx["timeout"],
             observer,
             token,
             pass_fds=executable.pass_fds,
+            cell_token=cell_token,
             root=work,
         )
     stream, stderr, code = run.stream, run.stderr, run.code
