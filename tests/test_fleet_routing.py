@@ -472,6 +472,25 @@ def test_wrong_owner_cannot_renew_or_release(conn):
     assert renewed["state"] == "active"
 
 
+def test_selected_target_must_accept_before_release(conn):
+    _fresh_quota(conn)
+    _observe_linux_fleet(conn)
+    decision = _route(conn, session_id="session-unaccepted-release")
+    request = {
+        "reservation_id": decision["reservation_id"],
+        "decision_id": decision["decision_id"],
+        "session_id": "session-unaccepted-release",
+    }
+
+    with pytest.raises(FleetHubForbidden, match="only an accepted target reservation may be released"):
+        fleet_hub_routing.release_reservation(conn, request, caller_node=NODE_LINUX)
+
+    fleet_hub_routing.claim_dispatch_intent(conn, request, caller_node=NODE_LINUX)
+    released = fleet_hub_routing.release_reservation(conn, request, caller_node=NODE_LINUX)
+    assert released["reservation_id"] == request["reservation_id"]
+    assert released["state"] == "released"
+
+
 def test_originating_controller_may_cancel_unclaimed_intent_only(conn):
     _fresh_quota(conn)
     _observe_linux_fleet(conn)

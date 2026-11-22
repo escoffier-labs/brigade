@@ -86,6 +86,11 @@ It uses `reservation renew` during execution and `reservation release` when the
 work ends, with the same IDs. The Hub checks that all three operations come
 from the selected target and requires acceptance before renew or release.
 
+Acceptance commits the slot. An accepted reservation occupies node capacity
+until release, even after its lease expires, so the target must release it on
+every exit path. The accept reply has `state: "accepted"`. A renew reply has
+`state: "active"`.
+
 ## Result states and handoff
 
 `result.state` is preserved exactly. `succeeded`, `failed`, `interrupted`,
