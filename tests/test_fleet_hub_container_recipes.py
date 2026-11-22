@@ -91,14 +91,9 @@ def test_compose_recipe_publishes_no_port_and_keeps_the_token_out_of_environment
     assert "ports:" not in text
     assert text.count('network_mode: "service:netns"') == 2
     assert "file: ./secrets/admin-token.txt" in text and "      - admin_token\n" in text
-    assert dockerignore == [
-        "**",
-        "!ops/",
-        "!ops/fleet-hub/",
-        "!ops/fleet-hub/Containerfile",
-        "!ops/fleet-hub/bin/",
-        "!ops/fleet-hub/bin/source-tree-digest.py",
-    ]
+    # Only file-level exceptions: a directory exception such as `!ops/` re-includes the whole
+    # tree, which sent ops/fleet-hub/secrets/admin-token.txt to the builder.
+    assert dockerignore == ["**", "!ops/fleet-hub/Containerfile", "!ops/fleet-hub/bin/source-tree-digest.py"]
     # Only the digest script is copied from the build context.
     assert not any(line.startswith("ADD ") for line in containerfile)
     assert [line for line in containerfile if line.startswith("COPY ") and not line.startswith("COPY --from=")] == [
