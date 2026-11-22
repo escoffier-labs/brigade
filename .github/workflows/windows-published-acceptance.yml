@@ -1,0 +1,37 @@
+name: Windows published acceptance recheck
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Published stable version without the v prefix (for example, 0.32.0)
+        type: string
+        required: true
+
+permissions:
+  contents: read
+  attestations: read
+
+jobs:
+  windows-published-acceptance:
+    if: github.repository_id == '1238165856' && github.ref == 'refs/heads/main'
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        with:
+          python-version: '3.12'
+      - name: Recheck published Windows artifacts and prove MCP encoding
+        shell: powershell
+        env:
+          BRIGADE_VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:BRIGADE_VERSION
+          if ($version -cnotmatch '\A(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}\z') {
+            throw 'version must be a stable X.Y.Z release without a v prefix'
+          }
+          & .\scripts\windows-native-acceptance.ps1 -InstallMode pypi -BrigadeVersion $version -ProveCanonicalMcpEncoding
