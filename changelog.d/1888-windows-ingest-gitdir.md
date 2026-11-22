@@ -1,0 +1,1 @@
+- Fix Windows handoff tracking when a relative `.git` file points to metadata for a configured worktree rooted elsewhere.
