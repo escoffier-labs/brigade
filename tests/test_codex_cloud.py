@@ -365,6 +365,18 @@ def test_cli_cloud_launch_refuses_hub_on_windows(monkeypatch, tmp_path, capsys):
 
 
 @pytest.mark.parametrize(
+    "launch_mode",
+    [
+        pytest.param(
+            "cli",
+            marks=pytest.mark.skipif(
+                not getattr(codex_cloud.os, "O_NOFOLLOW", 0), reason="CLI prompt files require O_NOFOLLOW"
+            ),
+        ),
+        "direct",
+    ],
+)
+@pytest.mark.parametrize(
     ("requested", "gh_result", "git_result", "expected", "reason", "lookups"),
     [
         (
@@ -418,16 +430,13 @@ def test_cli_cloud_launch_refuses_hub_on_windows(monkeypatch, tmp_path, capsys):
     ],
     ids=["private-default", "missing-gh", "explicit-gh", "absent", "offline", "ambiguous-404"],
 )
-def test_cli_cloud_launch_codex_cloud_submission(
-    monkeypatch, tmp_path, capsys, requested, gh_result, git_result, expected, reason, lookups
+def test_codex_cloud_launch_branch_selection(
+    monkeypatch, tmp_path, capsys, requested, gh_result, git_result, expected, reason, lookups, launch_mode
 ):
-    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
     codex_cloud.save_environment_config(tmp_path, environment_id="env-cli")
-    prompt_file = tmp_path / "prompt.txt"
-    prompt_file.write_text("private prompt", encoding="utf-8")
-    prompt_file.chmod(0o600)
     calls = _grant_hub(monkeypatch)
-    if sys.platform == "win32":
+    hub_configured = launch_mode == "cli" and sys.platform != "win32"
+    if not hub_configured:
         monkeypatch.setattr(codex_cloud, "_hub_configured", lambda: False)
     seen = {}
     branch_lookups = []
@@ -454,45 +463,53 @@ def test_cli_cloud_launch_codex_cloud_submission(
         return _result(stdout="task_cli_launch99")
 
     monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
-    rc = cli.main(
-        [
-            "run",
-            "cloud",
-            "launch",
-            "--target",
-            str(tmp_path),
-            "--provider",
-            "codex-cloud",
-            "--repo",
-            "owner/repo",
-            "--label",
-            "cli-codex",
-            "--prompt-file",
-            str(prompt_file),
-            "--json",
-            *(["--branch", requested] if requested is not None else []),
-        ]
-    )
-
-    output = capsys.readouterr()
-    payload = json.loads(output.out)
-    if expected is None:
-        assert rc == 1
-        assert payload["reason"] == reason
+    if launch_mode == "cli":
+        monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+        prompt_file = tmp_path / "prompt.txt"
+        prompt_file.write_bytes(b"private prompt")
+        prompt_file.chmod(0o600)
+        rc = cli.main(
+            [
+                "run",
+                "cloud",
+                "launch",
+                "--target",
+                str(tmp_path),
+                "--provider",
+                "codex-cloud",
+                "--repo",
+                "owner/repo",
+                "--label",
+                "cli-codex",
+                "--prompt-file",
+                str(prompt_file),
+                "--json",
+                *(["--branch", requested] if requested is not None else []),
+            ]
+        )
+        output = capsys.readouterr()
+        payload = json.loads(output.out)
+        assert rc == (1 if expected is None else 0), payload
+        assert payload["provider"] == "codex-cloud"
+        assert "holder" not in payload
         assert "private transport diagnostic" not in output.out + output.err
-        assert branch_lookups == lookups
+    else:
+        payload = codex_cloud.launch_task(
+            "private prompt", target=tmp_path, repo="owner/repo", label="cli-codex", branch=requested
+        )
+
+    assert payload["ok"] is (expected is not None)
+    assert branch_lookups == lookups
+    if expected is None:
+        assert payload["reason"] == reason
         assert not seen
         assert not any(calls.values())
         assert not cloud_tracker.load_registry(tmp_path)["entries"]
         return
-    assert rc == 0
-    assert branch_lookups == lookups
     assert payload["task_id"] == "task_cli_launch99"
-    assert payload["provider"] == "codex-cloud"
-    assert "holder" not in payload
     assert seen["argv"] == ["codex", "cloud", "exec", "--env", "env-cli", "--branch", expected, "-"]
     assert seen["stdin"] == b"private prompt"
-    assert len(calls["admit"]) == len(calls["bind"]) == int(sys.platform != "win32")
+    assert len(calls["admit"]) == len(calls["bind"]) == int(hub_configured)
 
 
 def test_cli_register_codex_cloud_acquires_one_lease(monkeypatch, tmp_path, capsys):
