@@ -23,8 +23,12 @@ and the standard-library collector.
 - Use a dedicated local workspace with no competing governed workers. Keep
   all raw receipts and the roster private, outside the source checkout.
 - Pin the Brigade executable commit and workload source revision separately.
-  Match the same seat, model, effort, task inputs, read-only worktree
-  isolation and concurrency of three throughout the experiment.
+  Match the same seat, model, effort, task inputs, worktree isolation and
+  concurrency of three throughout the experiment. Arm A asks workers to leave
+  the checkout unchanged in the prompt. Its worker-start argv has no read-only
+  enforcement. Arm B requires hard read-only enforcement through Brigade's
+  batch policy. Verify both arms' worktrees stayed clean after task execution
+  and record the enforcement levels with the results.
 - Use Codex GPT 6.2 Sol at medium effort for the first series. Codex Luna 6
   or opencode DeepSeek V4.1 Flash may be evaluated in a separate matched
   series only if both routes support the same selection and isolation.
@@ -42,8 +46,8 @@ and the standard-library collector.
 In the dedicated source checkout, commit three UTF-8 files under
 `qualification-inputs/` using the text below, with one LF-terminated line
 per field. Pin that commit as the source revision. Use the same checkout and
-revision in all batches. Confirm each worker's checkout starts at that revision
-and stays clean.
+revision in all batches. Confirm each worker's checkout starts at that revision. Check its worktree
+for changes after execution and before release or disposal.
 
 | File | First line | Second line | Exact expected result |
 | --- | --- | --- | --- |
@@ -71,7 +75,8 @@ timing. Do not start the workers during staging.
 ```
 
 Use the workspace's `.brigade/roster.toml` for both arms, including status
-queries. Configure `limits.max_workers = 3`. Pin the worker's Codex model and
+queries. Configure `limits.max_workers = 3` and `limits.sandbox = "read-only"`.
+Pin the worker's Codex model and
 `reasoning = "medium"` in `[agents.worker]`. Set the following native binding.
 Use the exact model identifier accepted by both providers and confirm the
 effective model and effort from local evidence before accepting a match.
@@ -107,17 +112,37 @@ response and bind each Brigade task to its already staged native task.
 
 ```bash
 brigade orca open "$batch" --target "$ws" > "$out/open.json"
-brigade orca claim "$run" "$task" --orca-run "$orca_run" --orca-task "$orca_task" --target "$ws"
+brigade orca claim "$run" "$task" --orca-run "$orca_run" --orca-task "$orca_task" --target "$ws" > "$out/$task-claim.json"
 ```
 
-For each task, the coordinator runs the exact argv returned by `claim`,
-which has this shape. Save the full JSON and actual exit code. Dispatch the
-three tasks without awaiting completion between starts.
+For each task, use the saved claim's `retry_request` as the retry key and
+execute its exact `argv` array. This runs `orca-ide orchestration worker-start`
+with Brigade's pinned target and `--retry-request` value. Save the full JSON
+and actual exit code. Dispatch the three tasks without awaiting completion
+between starts.
 
 ```bash
-orca-ide orchestration worker-start --environment local --retry-request "$key" --run "$orca_run" --task "$orca_task" --worktree new-child --base-branch "$source_revision" --agent codex --model gpt-6.2-sol --effort medium --json --full > "$out/$task-start.json"
-brigade orca accepted "$run" "$task" --native-json "$out/$task-start.json" --exit-code "$start_rc" --target "$ws"
+key=$(python -c 'import json, sys; print(json.load(open(sys.argv[1]))["retry_request"])' "$out/$task-claim.json")
+if python -c 'import json, subprocess, sys; sys.exit(subprocess.run(json.load(open(sys.argv[1]))["argv"], check=False).returncode)' "$out/$task-claim.json" > "$out/$task-start.json"; then
+  start_rc=0
+else
+  start_rc=$?
+fi
+brigade orca accepted "$run" "$task" --native-json "$out/$task-start.json" --exit-code "$start_rc" --target "$ws" > "$out/$task-accepted.json"
 ```
+
+If `accepted` returns a definite `circuit-broken`, `start-refused` or
+`start-failed` outcome, take `result_id` from that response and acknowledge
+it immediately. This releases the slot held for acknowledgement. Count it
+as an error and skip worker observation for that refusal.
+
+```bash
+brigade orca ack "$run" "$task" --result-id "$result_id" --target "$ws"
+```
+
+A lost reply reuses the same saved argv and the same `--retry-request`
+value in `$key`. Follow the governed recovery procedure and keep the
+original claim and receipts.
 
 On a coordinator wake, run the exact returned `observe_argv` into the
 task's show file. Observe it first, then use the returned `observe_argv`,
@@ -136,9 +161,8 @@ brigade orca finalize "$run" --target "$ws"
 brigade orca status "$run" --json --target "$ws" > "$out/orca-status.json"
 ```
 
-Definite start refusals return a terminal result to acknowledge and count
-as errors. For lost replies, stop requests, release uncertainty or other
-exceptions, follow the recovery commands in the
+For stop requests, release uncertainty or other exceptions, follow
+the recovery commands in the
 [governed delegation guide](../../orca-governed-delegation.md).
 Save status even when finalization refuses. Never bypass the circuit breaker
 with a fresh Run or Task, launch through the baseline as recovery, or count
@@ -199,6 +223,7 @@ only after reviewing coordinator and receipt history for bypasses.
   "model": "gpt-6.2-sol",
   "effort": "medium",
   "concurrency": 3,
+  "isolation": "worktree",
   "verification_passed": false,
   "verified_completion_seconds": null,
   "circuit_breaker_routed_around": null,
@@ -215,6 +240,13 @@ python -m brigade.orca_qualification "$arm" "$run_dir" "$out/orca-status.json" "
 
 Set `arm` to `orca` or `run-batch`. The collector uses journal-backed
 task outcomes and the saved Orca status, plus the coordinator measurements.
+It compares the sheet's model, effort, revision, concurrency and isolation
+with local run evidence. If any field disagrees or lacks corroboration,
+`configuration_mismatch` is true, `mismatched_fields` names those fields,
+and verified completion time is null. Concurrency comes from the saved
+workspace worker limit. Check the coordinator's per-seat limit and dispatch
+order in the local evidence as well. Arm B also needs a successful terminal
+run status.
 It emits a closed record of aggregate counts, timings and pinned settings.
 Only the projected record may leave the machine. It includes no prompt
 bodies, credentials, paths or run/task identifiers. An error exit means
