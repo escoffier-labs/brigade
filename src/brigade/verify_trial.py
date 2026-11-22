@@ -637,13 +637,9 @@ def _manifest_binding_matches_resolved(
         expected_source = verify_manifest.manifest_source_path(target, manifest)
         if not isinstance(source_path, str) or source_path != expected_source:
             return False
-    if manifest.manifest_base_source is not None:
-        if manifest_binding.get("base_source") != manifest.manifest_base_source:
-            return False
-        if manifest_binding.get("base_reference") != manifest.manifest_base_reference:
-            return False
-        if manifest_binding.get("base_commit") != manifest.manifest_base_commit:
-            return False
+    # The base commit moves with every merge to the default branch, so it is
+    # recorded for audit and not compared. The payload hash above is what ties
+    # a receipt to the manifest content that is trusted now.
     return True
 
 

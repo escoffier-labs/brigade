@@ -409,7 +409,12 @@ def _discover_workspace_manifest_files(
 ) -> list[Path]:
     del tracked_only
     resolution = base or verify_manifest_git.resolve_base(target)
-    return verify_manifest_git.list_base_manifests(target, resolution)
+    try:
+        return verify_manifest_git.list_base_manifests(target, resolution)
+    except verify_manifest_git.ManifestGitError:
+        # No trusted base means no registered workspace manifests. Resolving one
+        # by id or path still reports why (see resolve_manifest).
+        return []
 
 
 def _discover_manifest_files(target: Path, *, tracked_only: bool = False) -> list[Path]:
@@ -425,8 +430,12 @@ def trusted_workspace_manifests(target: Path) -> list[VerifyManifest]:
     resolution = verify_manifest_git.resolve_base(target)
     manifests: list[VerifyManifest] = []
     for path in _discover_workspace_manifest_files(target, base=resolution):
-        base = verify_manifest_git.load_base_manifest(target, path, resolution)
-        manifests.append(manifest_from_payload(base.payload, path=path, base=base))
+        try:
+            base = verify_manifest_git.load_base_manifest(target, path, resolution)
+            manifests.append(manifest_from_payload(base.payload, path=path, base=base))
+        except (verify_manifest_git.ManifestGitError, ValueError):
+            # One unusable manifest must not hide the others.
+            continue
     return manifests
 
 
@@ -434,16 +443,14 @@ def registered_manifest_ids(target: Path) -> list[str]:
     base_resolution = verify_manifest_git.resolve_base(target)
     ids: list[str] = []
     for path in _discover_builtin_manifest_files() + _discover_workspace_manifest_files(target, base=base_resolution):
-        base = (
-            None
-            if _is_builtin_manifest(path)
-            else verify_manifest_git.load_base_manifest(target, path, base_resolution)
-        )
-        payload = (
-            _load_manifest_file(path)
-            if base is None and _is_builtin_manifest(path)
-            else (base.payload if base else None)
-        )
+        payload: dict[str, Any] | None
+        if _is_builtin_manifest(path):
+            payload = _load_manifest_file(path)
+        else:
+            try:
+                payload = verify_manifest_git.load_base_manifest(target, path, base_resolution).payload
+            except verify_manifest_git.ManifestGitError:
+                continue
         if not isinstance(payload, dict):
             continue
         manifest_id = payload.get("manifest_id")
@@ -480,18 +487,28 @@ def resolve_manifest(target: Path, manifest_id: str) -> tuple[VerifyManifest | N
                 return None, str(exc)
     base_resolution = verify_manifest_git.resolve_base(target)
     try:
-        workspace_paths = _discover_workspace_manifest_files(target, base=base_resolution)
-        for path in workspace_paths:
-            base = verify_manifest_git.load_base_manifest(target, path, base_resolution)
-            relative_path = path.relative_to(target).as_posix()
-            if str(base.payload.get("manifest_id") or "") != selector and relative_path != selector.replace("\\", "/"):
-                continue
-            try:
-                matches.append(manifest_from_payload(base.payload, path=path, base=base))
-            except ValueError as exc:
-                return None, str(exc)
+        workspace_paths = verify_manifest_git.list_base_manifests(target, base_resolution)
     except verify_manifest_git.ManifestGitError as exc:
+        # A built-in manifest needs no Git base. A workspace one cannot be trusted without it.
+        if matches:
+            return (matches[0], None) if len(matches) == 1 else (None, f"verify manifest id is ambiguous: {selector}")
         return None, f"{exc.reason}: {exc}"
+    selector_path = selector.replace("\\", "/")
+    for path in workspace_paths:
+        relative_path = path.relative_to(target).as_posix()
+        try:
+            base = verify_manifest_git.load_base_manifest(target, path, base_resolution)
+        except verify_manifest_git.ManifestGitError as exc:
+            # One unusable manifest must not block the others. Name it only when it was asked for.
+            if relative_path == selector_path:
+                return None, f"{exc.reason}: {exc}"
+            continue
+        if str(base.payload.get("manifest_id") or "") != selector and relative_path != selector_path:
+            continue
+        try:
+            matches.append(manifest_from_payload(base.payload, path=path, base=base))
+        except ValueError as exc:
+            return None, str(exc)
     if matches:
         if len(matches) > 1:
             return None, f"verify manifest id is ambiguous: {selector}"
@@ -559,22 +576,23 @@ def manifests_matching_paths(target: Path, paths: Sequence[str]) -> list[VerifyM
         return []
     matches: list[VerifyManifest] = []
     resolution = verify_manifest_git.resolve_base(target)
-    try:
-        manifest_paths = _discover_workspace_manifest_files(target, base=resolution)
-        loaded = [verify_manifest_git.load_base_manifest(target, path, resolution) for path in manifest_paths]
-    except verify_manifest_git.ManifestGitError:
-        return []
     manifests: list[VerifyManifest] = []
-    for path, base in zip(manifest_paths, loaded, strict=True):
+    for path in _discover_workspace_manifest_files(target, base=resolution):
         try:
+            base = verify_manifest_git.load_base_manifest(target, path, resolution)
             manifests.append(manifest_from_payload(base.payload, path=path, base=base))
         except ValueError:
+            # Covers ManifestGitError too. One unusable manifest must not hide the others.
             continue
-    ambiguous = {
-        item.manifest_id for item in manifests if sum(other.manifest_id == item.manifest_id for other in manifests) > 1
-    }
+    # Two base manifests can share an id. Keep the first in path order, as before:
+    # the caller names it by its source path, which still resolves, where the bare
+    # id would be ambiguous.
+    seen: set[str] = set()
     for manifest in manifests:
-        if manifest.manifest_id not in ambiguous and any(path_in_manifest_scope(manifest, item) for item in candidates):
+        if manifest.manifest_id in seen:
+            continue
+        if any(path_in_manifest_scope(manifest, item) for item in candidates):
+            seen.add(manifest.manifest_id)
             matches.append(manifest)
     return matches
 
