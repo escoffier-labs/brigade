@@ -613,13 +613,20 @@ def test_live_cancel_retains_partial_work_and_same_seat_siblings(site, capsys, m
 def test_cancel_after_worker_result_handoff_is_too_late(site, capsys, monkeypatch):
     tasks, _ = prepare_batch_run(site, ["a"])
     record_launches(monkeypatch, [])
-    handed_off, journaled, submitted = threading.Event(), threading.Event(), threading.Event()
+    journaled = threading.Event()
+    request = None
+    journaled_before_publication = False
     publish = BatchExecution._publish_result
     drain = BatchExecution._drain_inbox
 
     def pause_publication(self, result, task_id, containment):
-        handed_off.set()
-        assert journaled.wait(10) and submitted.wait(10)
+        nonlocal request, journaled_before_publication
+        # observe() has marked the handoff. Start cancellation here so batch
+        # startup is outside the wait, and submit only once if finish observes again.
+        if request is None:
+            request = pool.submit(inbox.cancel, self.run_dir, [task_id], workspace=self.workspace)
+            request.result(timeout=10)
+            journaled_before_publication = journaled.wait(10)
         publish(self, result, task_id, containment)
 
     def signal_drain(self):
@@ -631,19 +638,13 @@ def test_cancel_after_worker_result_handoff_is_too_late(site, capsys, monkeypatc
     monkeypatch.setattr(BatchExecution, "_publish_result", pause_publication)
     monkeypatch.setattr(BatchExecution, "_drain_inbox", signal_drain)
 
-    def request_cancel():
-        assert handed_off.wait(10)
-        try:
-            return inbox.cancel(site.run_dir(), ["a"], workspace=site.repo)
-        finally:
-            submitted.set()
-
     with ThreadPoolExecutor(max_workers=1) as pool:
-        request = pool.submit(request_cancel)
         rc, result, err = invoke(site, capsys, tasks["tasks"])
+        assert request is not None, err
         assert row(request.result(timeout=10), "a")["live_termination"] == "requested"
 
     assert rc == 0, err
+    assert journaled_before_publication, "the live batch did not drain cancellation before publication"
     assert result["tasks"]["a"]["status"] == "completed"
     assert len(facts(site.run_dir(), "task.observed")) == 1
     for mode in (["show", str(site.run_dir()), "a"], ["list", str(site.run_dir())]):
