@@ -96,14 +96,14 @@ For protected CI changes, the author does not approve the change and a builder t
   `python scripts/version_sync.py --check` to verify the sync.
 - Committing: use conventional commits. In escoffier-labs organizations and original solomonneas repositories, commits for substantial coding work should carry the coding agent's co-author trailer. External repositories and upstream third-party PRs remain trailer-free.
 - Posting or editing an issue, pull request, or GitHub comment on an agent's
-  behalf: end it with the attribution block shown in `CONTRIBUTING.md`
-  ("Agent attribution"): `Sent by: <orchestrator model> (via <client>)`, then a
-  `Models used` list with `Implementation/build`, `Test/verification`, and
-  `Review` entries. Name only models that did that work, with the provider when
-  the name is ambiguous, and write `none` for a role no model filled. Report
-  the exact checks and their observed results in the body, or say `not run`.
-  Do not credit a model for checks it only wrote. This applies to every issue
-  body, PR body, and comment. The human author identity stays as it is.
+  behalf: use the attribution block in `CONTRIBUTING.md` ("Agent attribution").
+  Start with `Sent on behalf of Solomon by <orchestrator model> via <harness> in <client>`.
+  Name the harness for every model in `Models used`. Name only models that
+  performed the work, include the provider if the model name is ambiguous, and
+  list each review pass. Put the observed checks in the body above the block or
+  say `not run`. Do not credit a model for checks it only wrote. Every agent-written
+  review comment and summary includes
+  `Review by <model> via <harness> in <client>`. Keep the human author identity.
 
 ## Orientation
 
