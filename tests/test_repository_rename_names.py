@@ -162,13 +162,11 @@ def test_revalidate_workflow_accepts_either_name_but_binds_the_run_to_the_curren
     assert "run['repository']['id'] == run['head_repository']['id'] == 1238165856" in text
 
 
-def test_fleet_hub_containerfile_warns_that_the_archive_digest_changes_with_the_rename():
+def test_fleet_hub_containerfile_fetches_the_renamed_repository():
     text = (ROOT / "ops/fleet-hub/Containerfile").read_text()
-    assert "needs a new BRIGADE_SHA256" in text
-    # The pins themselves are untouched by the rename work.
-    assert re.search(
-        r"^ARG BRIGADE_SHA256=5a0cd597e970d17eedf3597cfd33d1a909c1e8f33f9077184abb421cedf3e67f$", text, re.M
-    )
+    assert "https://github.com/escoffier-labs/brigadestack/archive/${BRIGADE_REF}.tar.gz" in text
+    assert "https://github.com/escoffier-labs/brigade/archive/" not in text
+    assert 'org.opencontainers.image.source="https://github.com/escoffier-labs/brigadestack"' in text
 
 
 # `brigade bug --submit` talks to GitHub search and issue creation, which do not follow a rename.

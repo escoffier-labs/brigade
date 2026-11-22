@@ -1032,7 +1032,10 @@ def _base_env(args: argparse.Namespace) -> dict[str, str]:
     }
     if args.brigade_ref:
         if not args.brigade_sha256:
-            raise SetupError("--brigade-ref needs --brigade-sha256, the reviewed source archive digest")
+            raise SetupError(
+                "--brigade-ref needs --brigade-sha256, the reviewed source tree digest. "
+                "Compute it with ops/fleet-hub/bin/source-tree-digest.py --ref <sha>."
+            )
         # The image label carries it; without it Compose labels any ref with its default.
         if not args.brigade_version or not re.fullmatch(r"[0-9]+(\.[0-9]+)*[0-9A-Za-z.+-]*", args.brigade_version):
             raise SetupError("--brigade-ref needs --brigade-version, the version in that commit's pyproject.toml")
@@ -1179,7 +1182,11 @@ def parser() -> argparse.ArgumentParser:
     init.add_argument("--keep-hourly", type=int, default=48, help="From `brigade fleet backup --plan`.")
     init.add_argument("--min-free-gib", type=float, default=20)
     init.add_argument("--brigade-ref", default=None, help="Reviewed Brigade commit the image installs.")
-    init.add_argument("--brigade-sha256", default=None, help="SHA-256 of that commit's source archive.")
+    init.add_argument(
+        "--brigade-sha256",
+        default=None,
+        help="Source tree digest from ops/fleet-hub/bin/source-tree-digest.py --ref <sha>.",
+    )
     init.add_argument("--brigade-version", default=None, help="Version in that commit's pyproject.toml.")
     init.set_defaults(func=cmd_init)
 

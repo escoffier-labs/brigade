@@ -2294,7 +2294,9 @@ def test_containerfile_builds_brigade_hub_in_a_pinned_rust_stage_and_copies_only
     assert images["source"] == images["python-hub"]
     # The Rust stage builds from the same checked archive as the Python hub.
     source = _stage_body(text, "source")
-    assert "hashlib.sha256(data).hexdigest() == '${BRIGADE_SHA256}'" in source
+    assert 'actual="$(python /tmp/source-tree-digest.py /tmp/brigade.tar.gz)"' in source
+    assert source.index('if [ "$actual" != "$BRIGADE_SHA256" ]') < source.index("tar -xzf")
+    assert "COPY --from=source /tmp/brigade.tar.gz /tmp/brigade.tar.gz" in _stage_body(text, "python-hub")
     assert "archive/${BRIGADE_REF}.tar.gz" in source
     build = _stage_body(text, "hub-build")
     assert "COPY --from=source /src /src" in build
@@ -2360,7 +2362,7 @@ def test_containerfile_stage_defaults_match_the_compose_pin():
         assert f"ARG BRIGADE_SHA256={pins['BRIGADE_SHA256']}\n" in body, stage
     assert f"ARG BRIGADE_VERSION={pins['BRIGADE_VERSION']}\n" in _stage_body(text, "python-hub")
     assert pins["BRIGADE_REF"] == "a7746b6da2eec257890674de30635ca5036a2115"
-    assert pins["BRIGADE_SHA256"] == "5a0cd597e970d17eedf3597cfd33d1a909c1e8f33f9077184abb421cedf3e67f"
+    assert pins["BRIGADE_SHA256"] == "886090adadf2ad00870d9c535f820ec468655573851da56fd09159ede242d2b2"
 
 
 backup_job = _load("brigade_hub_backup_job", RECIPE / "hub" / "backup.py")
