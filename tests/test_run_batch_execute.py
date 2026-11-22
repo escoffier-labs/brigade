@@ -11,6 +11,11 @@ from brigade import aboyeur, agents, cli, run_tasks
 from brigade.run_batch import SCHEMA
 
 
+# Real implementations captured before the guarded fixture replaces them, so a
+# test can exercise the production orchestrator path instead of a mock.
+ORIGINALS: dict[str, object] = {}
+
+
 @pytest.fixture
 def setup(tmp_path, monkeypatch):
     monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "home"))
@@ -26,6 +31,8 @@ role = "plan"
 cli = "codex"
 role = "implement"
 """)
+    ORIGINALS["plan"] = aboyeur.planning.plan
+    ORIGINALS["_run_orchestrator"] = aboyeur.planning._run_orchestrator
     monkeypatch.setattr(aboyeur.planning, "plan", Mock(side_effect=AssertionError("planner called")))
     monkeypatch.setattr(aboyeur.planning, "_run_orchestrator", Mock(side_effect=AssertionError("synthesis called")))
     calls = []

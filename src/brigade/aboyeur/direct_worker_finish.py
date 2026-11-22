@@ -143,10 +143,11 @@ def write_failed_run_receipt(
     worker: str | None,
     roster: Roster,
     base: Mapping[str, Any],
+    final_txt_published: bool = False,
 ) -> None:
     terminal_base = _final_tree_base(base)
     output_text = _final_output_text(base, final)
-    if direct_worker or "final_output_text" in base:
+    if (direct_worker or "final_output_text" in base) and not final_txt_published:
         (output_dir / "final.txt").write_text(output_text + "\n")
     write_json(
         output_dir / "run.json",
@@ -177,6 +178,7 @@ def write_completed_run_receipt(
     transport_warning: dict[str, object] | None,
     base: Mapping[str, Any],
     extra: Mapping[str, Any],
+    final_txt_published: bool = False,
 ) -> None:
     terminal_base = _final_tree_base(base)
     failed_seats = [result.worker for result in worker_results if not result.ok]
@@ -188,7 +190,8 @@ def write_completed_run_receipt(
         final_status = "artifact-collection" if defer_artifact_collection else "ok"
         finished_at = None if defer_artifact_collection or pending_handoff else datetime.now(timezone.utc)
         run_status = "handoff" if pending_handoff else final_status
-    (output_dir / "final.txt").write_text(_final_output_text(base, final) + "\n")
+    if not final_txt_published:
+        (output_dir / "final.txt").write_text(_final_output_text(base, final) + "\n")
     write_json(
         output_dir / "run.json",
         payload(

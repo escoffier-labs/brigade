@@ -486,6 +486,9 @@ def run(
     output_dir = output_dir.expanduser() if output_dir is not None else None
     handoff_inbox = handoff_inbox.expanduser() if handoff_inbox is not None else None
     direct_worker = worker is not None
+    # A synthesis-only retry reuses the accepted batch and re-plans nothing, so
+    # every artifact derived from assignments must stay exactly as accepted.
+    synthesis_only = batch_execution is not None and batch_execution.synthesis_only
     admission_coordinator = model_admission.RuntimeAdmissionCoordinator.for_run(output_dir)
     # Judge the command-line sandbox override rather than the static declaration.
     effective_sandbox = sandbox if sandbox is not None else ("read-only" if read_only else None)
@@ -1068,7 +1071,7 @@ def run(
     if drift_rc is not None:
         return drift_rc
 
-    if output_dir is not None:
+    if output_dir is not None and not synthesis_only:
         attempts_payload: dict[str, object] = {"attempts": plan_attempts or []}
         if direct_worker:
             attempts_payload["mode"] = "direct-worker"
@@ -1101,7 +1104,7 @@ def run(
             plan_doc["run_budget"] = dict(budget_for_plan)
         run_io._write_json(output_dir / "plan.json", plan_doc)
 
-    if cwd is not None and output_dir is not None:
+    if cwd is not None and output_dir is not None and not synthesis_only:
         from .. import candidate_set as candidate_set_mod
 
         assignments, _candidate_decision, candidate_failure = planning._apply_candidate_set_gate(
@@ -1701,7 +1704,6 @@ def run(
         sandbox=sandbox,
     )
     ground_truth["suspected_noop"] = suspected_noop
-    synthesis_only = batch_execution is not None and batch_execution.synthesis_only
     if not synthesis_only:
         # A synthesis-only retry reuses the recorded results; it must not
         # re-mark them or rewrite the worker-result receipts it read.
@@ -1881,6 +1883,9 @@ def run(
         # The completed synthesis text is the batch's final answer; the task
         # summary stays in the batch result and synthesis.json.
         finish_base["final_output_text"] = batch_execution.synthesis_text
+    # Synthesis publishes final.txt itself, atomically and as exact bytes. The
+    # terminal receipts must not rewrite it through the text path.
+    final_txt_published = batch_execution is not None and batch_execution.synthesis_text is not None
     finish_extra: dict[str, Any] = {
         "control_socket": control_socket,
         "control_transport": control_transport,
@@ -1915,6 +1920,7 @@ def run(
                 worker=worker,
                 roster=roster,
                 base=finish_base,
+                final_txt_published=final_txt_published,
             )
         direct_worker_finish.report_terminal_failure(final, direct_worker=direct_worker)
         return 2
@@ -1940,6 +1946,7 @@ def run(
             transport_warning=direct_result.transport_warning if direct_worker else None,
             base=finish_base,
             extra=finish_extra,
+            final_txt_published=final_txt_published,
         )
     if handoff_inbox is not None and workers_ok:
         try:

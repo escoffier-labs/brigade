@@ -425,7 +425,7 @@ class BatchExecution:
         synthesis = self.plan.get("synthesis")
         if synthesis is None:
             return
-        from .aboyeur import artifacts
+        from .aboyeur import artifacts, planning
 
         seat = str(synthesis["seat"])
         error = artifacts._direct_worker_error(seat, roster, read_only=True)
@@ -434,6 +434,10 @@ class BatchExecution:
             error = read_only_cloud_mutation_error(agent)
         if error is None and agent is not None:
             error = _read_only_enforcement_error("synthesis", agent, roster, read_only=True)
+        if error is None and agent is not None:
+            # Exactly the admission the runtime orchestrator call applies, so a
+            # seat that would be rejected there refuses before any task launches.
+            error = planning.orchestrator_seat_error(agent, roster) or planning.orchestrator_provider_error(agent)
         if error is not None:
             self.refusal = ("invalid-seat", f"synthesis seat {seat!r}: {error}")
             raise BatchError(*self.refusal)
@@ -734,7 +738,13 @@ class BatchExecution:
     def resolve_health_routing(self, roster: Roster, results: Any, **kwargs: Any) -> Any:
         from .aboyeur import orchestrator
 
-        for seat in sorted({t["seat"] for t in self.plan["tasks"]}):
+        # The synthesis seat is gated like a task seat: an unhealthy seat refuses
+        # the batch before a wave launches tasks that could never be summarized.
+        seats = {t["seat"] for t in self.plan["tasks"]}
+        synthesis = self.plan.get("synthesis")
+        if synthesis is not None:
+            seats.add(str(synthesis["seat"]))
+        for seat in sorted(seats):
             routing = orchestrator.resolve_orchestrator_health_routing(
                 roster, results, pinned_seats=frozenset({seat}), worker_seat=seat
             )
@@ -838,11 +848,13 @@ class BatchExecution:
             )
         except (KeyboardInterrupt, SystemExit):
             raise
-        except Exception:
+        except Exception as exc:
+            # A retained run lock is the real diagnosis and must keep propagating.
+            runguard.raise_if_retained_run_lock(exc)
             # The reservation may already be durable, so the honest fact is
             # indeterminate. Every task result still stands.
             try:
-                self.synthesis = run_batch_synthesis.write_indeterminate(self.plan, self.run_dir)
+                self.synthesis = run_batch_synthesis.write_error_indeterminate(self.plan, self.run_dir, exc)
             except OSError:
                 self.synthesis = None
         if self.synthesis is not None and self.synthesis.status == run_batch_synthesis.COMPLETED:
@@ -938,7 +950,11 @@ def stored_result(
         "tasks": tasks,
         # Additive: null when synthesis was not requested, otherwise the
         # sidecar projection. A task's status and result are unaffected.
-        "synthesis": run_batch_synthesis.summary(run_dir) if plan.get("synthesis") is not None else None,
+        "synthesis": (
+            run_batch_synthesis.summary(run_dir, seat=str(plan["synthesis"]["seat"]))
+            if plan.get("synthesis") is not None
+            else None
+        ),
     }
 
 
@@ -1065,8 +1081,15 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
             state = run_batch_synthesis.pending(plan, run_dir)
             if state == run_batch_synthesis.PENDING_INDETERMINATE:
                 # A reserved call without a sidecar may already have run. Record
-                # that fact and never call again.
-                run_batch_synthesis.write_indeterminate(plan, run_dir)
+                # that fact and never call again. If the fact cannot be recorded,
+                # the run still refuses to call: the diagnosis stays closed.
+                try:
+                    run_batch_synthesis.write_indeterminate(plan, run_dir)
+                except OSError as exc:
+                    raise BatchError(
+                        "synthesis-unrecorded",
+                        "synthesis dispatch reservation cannot be recorded; refusing to call again",
+                    ) from exc
             elif state == run_batch_synthesis.PENDING_RUN:
                 execution = BatchExecution(plan, run_dir, workspace)
                 execution.synthesis_only = True
@@ -1106,7 +1129,15 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
         state = synthesis.get("status") if synthesis is not None else "not-run"
         print(f"synthesis: {state}", file=sys.stderr)
     if dispatch_rc:
-        if any(t["status"] == "failed" for t in result["tasks"].values()):
+        # A task that settled unknown is as terminal as a failure: when a
+        # synthesis-only retry reads it back from the journal, the batch exits 1
+        # like a failed task, never the pre-launch code 2.
+        settled_unknown = (
+            execution is not None
+            and execution.synthesis_only
+            and any(t["status"] == "unknown" for t in result["tasks"].values())
+        )
+        if any(t["status"] == "failed" for t in result["tasks"].values()) or settled_unknown:
             return 1
         return 1 if dispatch_rc in {3, 130} else dispatch_rc
     return (

@@ -327,6 +327,27 @@ def resolve_run_sandbox(
     return "read-only" if read_only else None
 
 
+def orchestrator_seat_error(agent: Agent, roster: Roster) -> str | None:
+    """Why this seat cannot carry a conversational orchestrator call, or None.
+
+    The same admission runs before a batch launches its requested synthesis
+    seat, so a seat the runtime would reject refuses the batch instead of
+    spending a task wave first.
+    """
+    if agent.cli is None or not is_cli_allowed(agent.cli, roster):
+        return f"{agent.cli} is not allowed by limits.allow_models"
+    if agent.cli.startswith("codex-cloud:"):
+        # A cloud task returns a status report plus diff, not a plan or a
+        # synthesis; the orchestrator seat must be a conversational CLI.
+        return "codex-cloud seats are workers only; pick a local CLI for the orchestrator"
+    return None
+
+
+def orchestrator_provider_error(agent: Agent) -> str | None:
+    """The provider-config refusal the runtime applies before an orchestrator call."""
+    return agents.cloudflare_ai_gateway_preflight_detail(agent.model)
+
+
 def _run_orchestrator(
     roster: Roster,
     prompt: str,
@@ -342,21 +363,10 @@ def _run_orchestrator(
     seat_name = seat or roster.orchestrator
     orchestrator = roster.agents[seat_name]
     transport = codex_transport or roster.codex_transport
-    if orchestrator.cli is None or not is_cli_allowed(orchestrator.cli, roster):
-        return agents.AgentResult(
-            text="",
-            ok=False,
-            detail=f"{orchestrator.cli} is not allowed by limits.allow_models",
-        )
-    if orchestrator.cli.startswith("codex-cloud:"):
-        # A cloud task returns a status report plus diff, not a plan or a
-        # synthesis; the orchestrator seat must be a conversational CLI.
-        return agents.AgentResult(
-            text="",
-            ok=False,
-            detail="codex-cloud seats are workers only; pick a local CLI for the orchestrator",
-        )
-    cloudflare_detail = agents.cloudflare_ai_gateway_preflight_detail(orchestrator.model)
+    seat_error = orchestrator_seat_error(orchestrator, roster)
+    if seat_error is not None:
+        return agents.AgentResult(text="", ok=False, detail=seat_error)
+    cloudflare_detail = orchestrator_provider_error(orchestrator)
     if cloudflare_detail is not None:
         return agents.AgentResult(
             text="",
