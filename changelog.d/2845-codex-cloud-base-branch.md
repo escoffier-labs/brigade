@@ -1,0 +1,1 @@
+- Codex Cloud launch accepts a base branch and verifies it on GitHub before requesting a fleet lease. It uses the repository's default branch when no branch is supplied.

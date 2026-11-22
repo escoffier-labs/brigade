@@ -353,7 +353,35 @@ def _attach_registered_lease_holder(target: Path, task_id: str, holder: str) -> 
             cloud_tracker.save_registry(target, registry)
 
 
-def launch_task(prompt: str, *, target: Path, repo: str, label: str) -> dict[str, Any]:
+def _resolve_launch_branch(target: Path, repo: str, branch: str | None) -> str | None:
+    """Ask the requested GitHub repository for its default or an exact branch ref."""
+    url = f"https://github.com/{repo}"
+    if not _GITHUB_REPO_RE.fullmatch(url):
+        return None
+    if branch is not None and (not branch or branch.startswith("-")):
+        return None
+    prefix = "refs/heads/"
+    argv = (
+        ["git", "ls-remote", "--symref", "--", url, "HEAD"]
+        if branch is None
+        else ["git", "ls-remote", "--refs", "--", url, f"{prefix}{branch}"]
+    )
+    result = proc.run(argv, timeout=10.0, cwd=target, env={**os.environ, "GIT_TERMINAL_PROMPT": "0"})
+    if result.code != 0:
+        return None
+    refs = [line.partition("\t") for line in result.stdout.splitlines()]
+    if branch is not None:
+        return branch if any(ref == f"{prefix}{branch}" for _, _, ref in refs) else None
+    if not any(ref == "HEAD" and not value.startswith("ref: ") for value, _, ref in refs):
+        return None
+    for value, _, ref in refs:
+        if ref == "HEAD" and value.startswith(f"ref: {prefix}"):
+            default = value.removeprefix(f"ref: {prefix}")
+            return default if default and not default.startswith("-") else None
+    return None
+
+
+def launch_task(prompt: str, *, target: Path, repo: str, label: str, branch: str | None = None) -> dict[str, Any]:
     """Submit one task from stdin and bind its Codex provider lease."""
     from . import cloud_tracker
 
@@ -365,7 +393,10 @@ def launch_task(prompt: str, *, target: Path, repo: str, label: str) -> dict[str
         return {"ok": False, "reason": "registry-unwritable"}
     env_id = resolve_environment_id(CONFIGURED_SELECTOR, target=target)
     prompt_hash = cloud_tracker.prompt_hash(prompt)
-    canonical_repo = repo.removeprefix("https://github.com/").removesuffix(".git").strip("/")
+    canonical_repo = repo.removeprefix("https://github.com/").strip("/").removesuffix(".git")
+    base_branch = _resolve_launch_branch(target, canonical_repo, branch)
+    if base_branch is None:
+        return {"ok": False, "reason": "branch-unavailable"}
     lease_id: str | None = None
     holder: str | None = None
     if hub_configured:
@@ -391,7 +422,7 @@ def launch_task(prompt: str, *, target: Path, repo: str, label: str) -> dict[str
 
     try:
         result = proc.run(
-            ["codex", "cloud", "exec", "--env", env_id, "-"],
+            ["codex", "cloud", "exec", "--env", env_id, "--branch", base_branch, "-"],
             timeout=SUBMIT_TIMEOUT,
             cwd=target,
             stdin=prompt.encode("utf-8"),
