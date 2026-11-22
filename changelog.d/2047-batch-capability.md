@@ -1,0 +1,4 @@
+- A task in an explicit batch may name one admitted roster capability instead of a seat. `brigade run batch` resolves it once at acceptance to the first eligible seat in roster order, persists the choice in `batch-request.json`, and reuses it on retry instead of resolving again (#2047).
+- A capability with no eligible seat is refused before launch as `capability-unavailable`. A retry whose recorded seat the roster no longer declares is refused as `capability-seat-missing` rather than silently moved (#2047).
+- Batch waves also cap same-seat members by that seat's remaining Hub capacity when the fleet is enrolled and the Hub answers; the launch-time lease stays the final admission check. Batch result JSON and `brigade runs tasks show` report each task's `selection` (#2047).
+- Batches whose tasks all name a seat keep their existing request fingerprint byte for byte (#2047).

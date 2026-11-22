@@ -34,7 +34,7 @@ def _fields(value: object, allowed: set[str], label: str) -> dict[str, Any]:
     return value
 
 
-def _selection(value: dict[str, Any], label: str) -> dict[str, str]:
+def _selection(value: dict[str, Any], label: str, *, capability: bool = True) -> dict[str, str]:
     text = value.get("text")
     if not isinstance(text, str) or not text.strip():
         raise BatchError("empty-text", f"{label}.text must be non-empty text")
@@ -44,7 +44,20 @@ def _selection(value: dict[str, Any], label: str) -> dict[str, str]:
         raise BatchError("invalid-payload", f"{label}.text must be valid Unicode") from exc
     if size > MAX_TEXT_BYTES:
         raise BatchError("text-limit", f"{label}.text exceeds {MAX_TEXT_BYTES} UTF-8 bytes")
+    tag = value.get("capability")
     seat = value.get("seat")
+    if tag is not None:
+        if not capability or seat is not None:
+            raise BatchError("invalid-selection", f"{label} must name exactly one of seat or capability")
+        from .roster import is_capability_tag
+
+        if not is_capability_tag(tag):
+            raise BatchError(
+                "invalid-capability", f"{label}.capability must be a roster capability tag such as research.plan"
+            )
+        return {"text": text, "capability": tag}
+    if capability and seat is None:
+        raise BatchError("invalid-selection", f"{label} must name exactly one of seat or capability")
     if not isinstance(seat, str) or not journal.token(seat):
         raise BatchError("invalid-seat", f"{label}.seat must be a 1-512 character ASCII token")
     return {"text": text, "seat": seat}
@@ -97,10 +110,11 @@ def validate_batch(payload: object) -> dict[str, Any]:
     """Validate and return canonical data. IDs map directly to TaskSpec.task_id.
 
     Task/dependency order is not semantic. Text bytes are preserved exactly.
-    Seat names are syntactically checked, not admitted against a live roster.
-    Isolation and read-only defaults are filled into the canonical row, but the
-    fingerprint omits those defaults so existing request fingerprints are
-    unchanged.
+    A task names exactly one of ``seat`` or ``capability``. Seat names are
+    syntactically checked, not admitted against a live roster, and a capability
+    is resolved to a seat once, at acceptance. Isolation and read-only defaults
+    are filled into the canonical row, but the fingerprint omits those defaults
+    and any capability field so existing request fingerprints are unchanged.
     """
     obj = _fields(payload, {"schema", "request_id", "tasks", "synthesis"}, "batch")
     if obj.get("schema") != SCHEMA:
@@ -113,7 +127,9 @@ def validate_batch(payload: object) -> dict[str, Any]:
     tasks: list[dict[str, Any]] = []
     ids: set[str] = set()
     for index, row in enumerate(rows):
-        row = _fields(row, {"task_id", "text", "seat", "depends_on", "isolation", "read_only"}, f"tasks[{index}]")
+        row = _fields(
+            row, {"task_id", "text", "seat", "capability", "depends_on", "isolation", "read_only"}, f"tasks[{index}]"
+        )
         task_id = row.get("task_id")
         if not isinstance(task_id, str) or not journal.task_id(task_id):
             raise BatchError("invalid-task-id", f"tasks[{index}].task_id must be a 1-128 character ASCII identifier")
@@ -158,7 +174,7 @@ def validate_batch(payload: object) -> dict[str, Any]:
     if synthesis is not None:
         if not isinstance(synthesis, dict):
             raise BatchError("invalid-synthesis", "synthesis must be null or an explicit text/seat object")
-        synthesis = _selection(_fields(synthesis, {"text", "seat"}, "synthesis"), "synthesis")
+        synthesis = _selection(_fields(synthesis, {"text", "seat"}, "synthesis"), "synthesis", capability=False)
     return {"schema": SCHEMA, "request_id": obj["request_id"], "tasks": tasks, "synthesis": synthesis}
 
 
@@ -299,7 +315,7 @@ def dry_run_cli(args) -> int:
         print(f"fingerprint: {plan['fingerprint']}")
         if plan["base_sha"] is not None:
             print(f"base: {plan['base_sha']}")
-        seats = {task["task_id"]: task["seat"] for task in plan["tasks"]}
+        seats = {task["task_id"]: task.get("seat") or f"capability:{task['capability']}" for task in plan["tasks"]}
         for index, layer in enumerate(plan["layers"], 1):
             print(f"layer {index}: " + ", ".join(f"{task_id} ({seats[task_id]})" for task_id in layer))
         print("synthesis: " + (plan["synthesis"]["seat"] if plan["synthesis"] else "off"))
