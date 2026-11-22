@@ -178,6 +178,7 @@ def test_missing_bare_program_does_not_block_reuse(verify_target, monkeypatch, c
         "status": "completed",
         "tree_fingerprint": "unchanged",
         "planned_commands": ["probe"],
+        "commands": [{"status": "completed", "exit_code": 0}],
         "argv_file_hashes": {},
     }
     assert verify_argv_files.reusable_receipt(verify_target, [command], ["probe"], "unchanged", latest)

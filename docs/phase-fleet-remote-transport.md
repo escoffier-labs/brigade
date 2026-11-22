@@ -71,11 +71,20 @@ binding is a `t3-binding-missing` routing rejection, not a reason to guess.
 
 The source owns the orchestration receipt and a read-only model plan
 projection. It never leases a model seat, calls a provider, renews a
-reservation, or releases one for a remote branch. Reservation release is
-target-only and the Hub enforces that, so a blocked source route leaves the
-reservation to its own TTL rather than attempting an unauthorized release. The
-target performs prepare -> context application -> ack -> launch proof ->
-provider execution and renews its own reservation as the execution claim.
+reservation, or releases one for a remote branch. A blocked source route leaves
+the unaccepted reservation to expire at its TTL.
+
+At launch admission, the selected target uses its own node credentials to
+accept the reservation with the IDs from the routing decision and its session.
+
+```bash
+brigade fleet policy reservation accept --reservation-id R --decision-id D --session-id S --json
+```
+
+The target must receive `state: accepted` before starting provider execution.
+It uses `reservation renew` during execution and `reservation release` when the
+work ends, with the same IDs. The Hub checks that all three operations come
+from the selected target and requires acceptance before renew or release.
 
 ## Result states and handoff
 

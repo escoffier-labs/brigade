@@ -23,6 +23,7 @@ SIGNAL_RULES: dict[tuple[str, str], int] = {
     ("verify", "failed"): -1,
     ("verify", "timed_out"): -1,
     ("verify", "canceled"): 0,
+    ("verify", "busy"): 0,
     ("run", "ok"): 1,
     ("run", "error"): -1,
     ("run", "failed"): -1,

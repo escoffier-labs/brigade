@@ -788,7 +788,7 @@ def test_scope_globs_reject_whole_repo_wildcards():
     assert route_policy.validate_scope_globs(("src/**",)) is None
 
 
-def test_candidate_rejects_invalid_scope_globs(scoreable_target):
+def test_uncommitted_route_scope_edit_is_ignored(scoreable_target):
     _prepare_candidate_skill(scoreable_target, scope_globs=["src/**"])
     path = scoreable_target / "verify" / "manifests" / f"{_SCORECARD_MANIFEST_ID}.json"
     payload = verify_manifest._load_manifest_file(path)
@@ -801,11 +801,8 @@ def test_candidate_rejects_invalid_scope_globs(scoreable_target):
         route_brief=_route_brief(),
         now=datetime(2026, 7, 20, tzinfo=timezone.utc),
     )
-    assert not any(item.exploratory for item in decision.assignments)
-    assert any(
-        entry["artifact_id"] == "brigade-work" and entry["reason"] == "invalid_scope_glob"
-        for entry in decision.accept_reject
-    )
+    assignment = next(item for item in decision.assignments if item.exploratory)
+    assert assignment.scope_globs == ("src/**",)
 
 
 def test_shadow_exploration_quota_blocks_with_proven_route(scoreable_target):

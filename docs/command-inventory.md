@@ -30,7 +30,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade dogfood` (extras): 1 command path(s)
 - `brigade evidence`: 12 command path(s)
 - `brigade extras`: 3 command path(s)
-- `brigade fleet`: 101 command path(s)
+- `brigade fleet`: 102 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade governance`: 1 command path(s)
 - `brigade guard`: 1 command path(s)
@@ -47,6 +47,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade node`: 1 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
 - `brigade operator`: 21 command path(s)
+- `brigade orca`: 9 command path(s)
 - `brigade outcome`: 14 command path(s)
 - `brigade pantry` (extras): 5 command path(s)
 - `brigade profiles`: 2 command path(s)
@@ -62,7 +63,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade route`: 1 command path(s)
 - `brigade run`: 48 command path(s)
 - `brigade runbook` (extras): 5 command path(s)
-- `brigade runs`: 27 command path(s)
+- `brigade runs`: 28 command path(s)
 - `brigade scrub`: 1 command path(s)
 - `brigade search`: 6 command path(s)
 - `brigade security`: 16 command path(s)
@@ -76,7 +77,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade untrusted` (extras): 2 command path(s)
 - `brigade update`: 1 command path(s)
 - `brigade version`: 1 command path(s)
-- `brigade work`: 163 command path(s)
+- `brigade work`: 164 command path(s)
 - `brigade workflow` (extras): 3 command path(s)
 
 ## Commands
@@ -265,6 +266,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet policy pr-rules`
 - `brigade fleet policy preview`
 - `brigade fleet policy quota ingest`
+- `brigade fleet policy reservation accept`
 - `brigade fleet policy reservation release`
 - `brigade fleet policy reservation renew`
 - `brigade fleet policy resolve`
@@ -476,6 +478,15 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade operator sync-mcp`
 - `brigade operator sync-tools`
 - `brigade operator verify-harness`
+- `brigade orca accepted`
+- `brigade orca ack`
+- `brigade orca cancel`
+- `brigade orca claim`
+- `brigade orca finalize`
+- `brigade orca hold-resolve`
+- `brigade orca observe`
+- `brigade orca open`
+- `brigade orca status`
 - `brigade outcome backfill scorecard`
 - `brigade outcome capture`
 - `brigade outcome diff`
@@ -723,6 +734,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runs serve`
 - `brigade runs show`
 - `brigade runs steer`
+- `brigade runs tasks cancel`
 - `brigade runs tasks collect`
 - `brigade runs tasks dispose`
 - `brigade runs tasks integrate`
@@ -1013,6 +1025,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade work task edge remove`
 - `brigade work task plan`
 - `brigade work tasks`
+- `brigade work verify ci`
 - `brigade work verify plan`
 - `brigade work verify run`
 - `brigade work verify runs`

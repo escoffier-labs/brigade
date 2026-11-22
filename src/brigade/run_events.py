@@ -32,12 +32,13 @@ from brigade.receipt_schema import RUN_EVENT_SCHEMA, RUN_EVENT_SCHEMA_VERSION, R
 SCHEMA = RUN_EVENT_SCHEMA
 SCHEMA_VERSION = RUN_EVENT_SCHEMA_VERSION
 LEGACY_SCHEMA_VERSION = 1
-# Schema version 3 introduces the per-task worktree facts and nothing else:
-# ``task.workspace-bound``, ``task.integrated``, ``task.disposed`` and
+# Schema version 3 introduces the per-task worktree, integration, disposal,
+# cancellation and collection facts and nothing else: ``task.workspace-bound``,
+# ``task.integrated``, ``task.disposed``, ``task.cancel-requested`` and
 # ``task.artifact-collected``. It is reserved for journals that record per-task
-# batch worktrees, explicit integrations and their disposal, so an older binary
-# refuses only those journals instead of every journal written after this
-# change.
+# batch worktrees, explicit integrations and their disposal, recorded
+# cancellation intent, so an older binary refuses only those journals instead of
+# every journal written after this change.
 WORKSPACE_SCHEMA_VERSION = RUN_EVENT_WORKSPACE_SCHEMA_VERSION
 SUPPORTED_SCHEMA_VERSIONS = frozenset({LEGACY_SCHEMA_VERSION, SCHEMA_VERSION, WORKSPACE_SCHEMA_VERSION})
 
@@ -218,6 +219,9 @@ _TASK_EVENT_TYPES = frozenset(
         "task.workspace-bound",
         "task.integrated",
         "task.disposed",
+        # One recorded cancellation intent. The fact stops a launch that has not
+        # happened yet; it never changes the task status by itself.
+        "task.cancel-requested",
         "task.artifact-collected",
     }
 )
@@ -234,6 +238,7 @@ EVENT_TYPES.update(
                 "attempt_id",
                 "dispatch_attempt",
                 "parent_thread",
+                "orca_task_id",
                 "template_digest",
                 "intent_digest",
                 # Digests-only admission evidence: the roster digest that
@@ -263,6 +268,7 @@ EVENT_TYPES.update(
         "task.native-held": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
         "task.native-cancel-requested": frozenset({"task_id", "attempt_id", "handle_digest", "cancel_key"}),
         "task.native-hold-resolved": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
+        "task.native-capacity": frozenset({"task_id", "attempt_id", "reason"}),
         # Native T3 enrollment holds one immutable delegation input asset
         # outside the journal. Only its relative name and digests are retained
         # here, never task text, options values, or raw native JSON.
@@ -280,6 +286,10 @@ EVENT_TYPES.update(
         # One explicit disposal of a task worktree, with the closed mode that
         # justified it and whether its branch survived.
         "task.disposed": frozenset({"task_id", "mode", "branch_kept"}),
+        # One recorded cancellation intent and the closed reason for it. It
+        # carries no free text and no evidence, so it can never leak prompt or
+        # operator notes into the journal.
+        "task.cancel-requested": frozenset({"task_id", "reason"}),
         # One recovered artifact collection: the sidecar digest, the candidate
         # (or null) and the delivery the collection recorded, so a commit
         # artifact can be read from either the observation or this fact.
@@ -318,12 +328,19 @@ _NATIVE_T3_EVENT_TYPES = frozenset(
         "task.native-held",
         "task.native-cancel-requested",
         "task.native-hold-resolved",
+        "task.native-capacity",
     }
 )
 # The only event types written under schema version 3. A v3 envelope must carry
 # one of these, and every other event type keeps the v2 envelope.
 _SCHEMA_V3_EVENT_TYPES = frozenset(
-    {"task.workspace-bound", "task.integrated", "task.disposed", "task.artifact-collected"}
+    {
+        "task.workspace-bound",
+        "task.integrated",
+        "task.disposed",
+        "task.cancel-requested",
+        "task.artifact-collected",
+    }
 )
 _SCHEMA_V2_EVENT_TYPES = (
     frozenset({"approval", "run.ship", "run.merge"}) | _TASK_EVENT_TYPES | _NATIVE_T3_EVENT_TYPES
@@ -362,6 +379,7 @@ _REQUIRED_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "task.native-held": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
     "task.native-cancel-requested": frozenset({"task_id", "attempt_id", "handle_digest", "cancel_key"}),
     "task.native-hold-resolved": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
+    "task.native-capacity": frozenset({"task_id", "attempt_id", "reason"}),
 }
 
 # Private-data exclusion list: these payload key names are never part of any
@@ -591,6 +609,8 @@ def _validate_native_t3_payload(event_type: str, payload: Mapping[str, Any]) -> 
             raise CanonicalizationError("task.native-claimed dispatch attempt is invalid")
         if not run_task_journal.provider_reference(payload.get("parent_thread")):
             raise CanonicalizationError("task.native-claimed parent thread is invalid")
+        if "orca_task_id" in payload and not run_task_journal.provider_reference(payload["orca_task_id"]):
+            raise CanonicalizationError("task.native-claimed Orca task is invalid")
         for field in ("template_digest", "intent_digest"):
             if not run_task_journal.digest(payload.get(field)):
                 raise CanonicalizationError(f"task.native-claimed {field} is invalid")
@@ -608,6 +628,13 @@ def _validate_native_t3_payload(event_type: str, payload: Mapping[str, Any]) -> 
         for field in ("handle_digest", "cancel_key"):
             if not run_task_journal.digest(payload.get(field)):
                 raise CanonicalizationError(f"task.native-cancel-requested {field} is invalid")
+        return
+    if event_type == "task.native-capacity":
+        from .native_child_observations import RESOURCE_STATES
+
+        reason = payload.get("reason")
+        if not isinstance(reason, str) or reason not in RESOURCE_STATES:
+            raise CanonicalizationError("task.native-capacity reason is invalid")
         return
     if event_type == "task.native-hold-resolved":
         if payload.get("reason") != "accept-conflict":

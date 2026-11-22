@@ -649,6 +649,36 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_tasks_collect.add_argument(
         "--json", action="store_true", help="Emit the brigade.runs_tasks_collect.v1 JSON contract."
     )
+    p_tasks_cancel = tasks_sub.add_parser(
+        "cancel",
+        help=(
+            "Record cancellation intent for selected tasks. A task that has not launched is never launched; "
+            "a running worker is not stopped in this release."
+        ),
+    )
+    p_tasks_cancel.add_argument("run", help="Run directory path, run id under --runs-dir, or 'latest'.")
+    p_tasks_cancel.add_argument("task_ids", nargs="+", metavar="task_id", help="Task ids to cancel, in order.")
+    p_tasks_cancel.add_argument(
+        "--reason",
+        choices=("operator", "parent", "budget"),
+        default="operator",
+        help="Closed reason token recorded with the intent. Default: operator.",
+    )
+    p_tasks_cancel.add_argument(
+        "--cwd",
+        type=Path,
+        default=Path("."),
+        help="Workspace whose default .brigade/runs directory should be used for run ids.",
+    )
+    p_tasks_cancel.add_argument(
+        "--runs-dir",
+        type=Path,
+        default=None,
+        help="Explicit runs directory for run ids. Defaults to .brigade/runs under --cwd.",
+    )
+    p_tasks_cancel.add_argument(
+        "--json", action="store_true", help="Emit the brigade.runs_tasks_cancel.v1 JSON contract."
+    )
     p_runs.set_defaults(func=dispatch)
 
 

@@ -95,8 +95,8 @@ Readers: `outcome_cmd._read_run_receipt` (run.json for capture), `load_records`
 
 | Receipt type | Path | Names | Ordering | Append-only | Schema version | Tag |
 | --- | --- | --- | --- | --- | --- | --- |
-| Work verify run | `.brigade/work/verify-runs/<id>/receipt.json` | Stable snake_case, command objects use fixed keys and a fixed identity tuple | `helpers._write_json` (`sort_keys=True`) | Finalization now writes once, but `_prune_verify_runs` deletes receipts beyond the newest 50 | `schema_version: 2` | names **compliant**, ordering **compliant**, write-once **fixed-here**, retention **needs-follow-up-issue**, version **compliant** |
-| Work verify reuse | same layout | Copies prior `commands`, same key set and a fresh identity tuple | same | New directory per reuse, followed by the same retention pruning | `schema_version: 2` | names **compliant**, ordering **compliant**, append-only **needs-follow-up-issue**, version **compliant** |
+| Work verify run | `.brigade/work/verify-runs/<id>/receipt.json` | Stable snake_case, command objects use fixed keys and before and after identity fields | `helpers._write_json` (`sort_keys=True`) | Finalization now writes once, but `_prune_verify_runs` deletes receipts beyond the newest 50 | `schema_version: 2` | names **compliant**, ordering **compliant**, write-once **fixed-here**, retention **needs-follow-up-issue**, version **compliant** |
+| Work verify reuse | same layout | Copies prior `commands`, including test outcomes, with a fresh stable identity tuple | same | New directory per reuse, followed by the same retention pruning | `schema_version: 2` | names **compliant**, ordering **compliant**, append-only **needs-follow-up-issue**, version **compliant** |
 | Work closeout | `.brigade/work/closeouts/<id>/closeout.json` | Stable keys, nested session/verification summaries | `helpers._write_json` | Written once per closeout | `schema_version: 1` | names **compliant**, ordering **compliant**, append-only **compliant**, version **fixed-here** |
 
 Notes:

@@ -193,22 +193,24 @@ def _candidate_rank_key(item: dict[str, Any]) -> tuple[float, int, str]:
     )
 
 
-def _verification_command_prefix(target: Path) -> str | None:
-    """Return a combined-command prefix when it matches ``_default_verify_commands``.
+_PYTHON_PROJECT_MARKERS = ("pyproject.toml", "pytest.ini", "setup.cfg", "setup.py", "tox.ini", "conftest.py")
 
-    When the plan default is ``npm test`` (package.json without a Python test
-    layout), return ``None`` so graph impact does not promote a combined command
-    over the plan-level default.
+
+def _verification_command_prefix(target: Path) -> str | None:
+    """Return a pytest prefix to which the ranked file selectors are appended.
+
+    Return ``None`` outside a recognized Python layout. For npm projects, list
+    candidates individually because test scripts vary in how they handle file
+    arguments.
     """
     if (target / "pyproject.toml").is_file() and (target / "tests").is_dir():
         if (target / "src").is_dir():
             return "PYTHONPATH=src python3 -m pytest -q"
         return "python3 -m pytest -q"
-    if (target / "pytest.ini").is_file() or (target / "tests").is_dir():
+    if (target / "tests").is_dir() or any((target / name).is_file() for name in _PYTHON_PROJECT_MARKERS):
         return "python3 -m pytest -q"
-    if (target / "package.json").is_file():
-        return None
-    return "python3 -m pytest -q"
+    # No Python project marker: do not guess a runner. The caller then asks for a command.
+    return None
 
 
 def _candidate_command_prefix(target: Path) -> str | None:

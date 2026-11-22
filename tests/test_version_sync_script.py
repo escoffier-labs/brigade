@@ -19,7 +19,6 @@ def _load_version_sync_module(repo_root: Path):
     module.ROOT = repo_root
     module.RECORDINGS = []
     module.PLUGIN_LOCATIONS = []
-    module.COMPAT_PACKAGE_LOCATIONS = []
     return module
 
 
@@ -69,38 +68,14 @@ def test_version_sync_checks_and_rewrites_mcp_server_manifests(tmp_path, capsys)
     assert server.read_text().count('"version": "1.0.0"') == 2
 
 
-def test_version_sync_locks_the_compat_package_version_and_brigadestack_pin(tmp_path, capsys):
-    repo = tmp_path / "repo"
-    (repo / "src/brigade/templates/components").mkdir(parents=True)
-    compat = repo / "distribution/brigade-cli/pypi/pyproject.toml"
-    compat.parent.mkdir(parents=True)
-    (repo / "pyproject.toml").write_text('[project]\nversion = "1.0.0"\n')
-    (repo / "src/brigade/__init__.py").write_text('__version__ = "1.0.0"\n')
-    (repo / "src/brigade/templates/components/manifest-v1.json").write_text('{"brigade_version": "1.0.0"}\n')
-    compat.write_text('[project]\nname = "brigade-cli"\nversion = "0.9.0"\ndependencies = ["brigadestack==0.9.0"]\n')
-
-    module = _load_version_sync_module(repo)
-    module.COMPAT_PACKAGE_LOCATIONS = [
-        ("distribution/brigade-cli/pypi/pyproject.toml", r'(?m)^version\s*=\s*"([^"]+)"'),
-        ("distribution/brigade-cli/pypi/pyproject.toml", r'"brigadestack==([^"]+)"'),
-    ]
-    assert module.check("1.0.0") == 1
-    err = capsys.readouterr().err
-    assert err.count("distribution/brigade-cli/pypi/pyproject.toml declares 0.9.0") == 2
-
-    assert module.write("1.0.0") == 0
-    assert 'version = "1.0.0"' in compat.read_text()
-    assert '"brigadestack==1.0.0"' in compat.read_text()
-    assert module.check("1.0.0") == 0
-
-
-def test_shipped_version_sync_covers_the_compat_package():
+def test_shipped_version_sync_has_no_separate_brigade_cli_location():
     spec = importlib.util.spec_from_file_location("version_sync_shipped", ROOT / "scripts/version_sync.py")
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     paths = {path for path, _pattern in module._locations()}
-    assert "distribution/brigade-cli/pypi/pyproject.toml" in paths
+    # brigade-cli is stamped from the root tree at release time, so it has no version to sync.
+    assert not any(path.startswith("distribution/brigade-cli/") for path in paths)
     # The npm compatibility package follows npm/feasibility/runtime.json, not pyproject.toml.
     assert not any(path.startswith("distribution/escoffier-labs-brigade/") for path in paths)
     assert module.check(module._expected()) == 0

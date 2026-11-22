@@ -57,8 +57,8 @@ SYNTHESIS_SCHEMA_VERSION = 1
 
 RUN_EVENT_SCHEMA = "brigade.run_event.v1"
 # The default envelope version for every event. Version 3 is reserved for the
-# ``task.workspace-bound`` and ``task.integrated`` facts so journals without
-# per-task worktrees or integrations stay readable by older binaries.
+# per-task worktree, integration, disposal, cancellation and collection facts so
+# journals without them stay readable by older binaries.
 RUN_EVENT_SCHEMA_VERSION = 2
 RUN_EVENT_WORKSPACE_SCHEMA_VERSION = 3
 
