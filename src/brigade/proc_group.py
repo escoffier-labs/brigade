@@ -5,6 +5,14 @@ output when the direct child exits. Draining waits, bounded, for them instead
 of reaping the group mid-write, and keeps the leader's pid and process group id
 reserved for the whole wait, so a recycled id can never be probed or signalled
 (#2286).
+
+A descendant that calls ``setsid`` leaves both the group and the session, so a
+group drain cannot reach it (#2847). Each supervised run gets a random token in
+its environment, which every descendant inherits, so ``stray_processes`` names
+what the run left behind by that token even after it changes its working
+directory. ``kill_strays`` signals each one through the same pinned pidfd
+pattern as ``kill_group_members``. Only a token carrier is ever signalled, so a
+same-user process the run did not start is left alone.
 """
 
 from __future__ import annotations
@@ -14,6 +22,7 @@ import os
 import signal
 import subprocess
 import time
+from collections.abc import Collection, Sequence
 from pathlib import Path
 
 
@@ -181,3 +190,162 @@ def wait_for_group(process: subprocess.Popen[bytes], timeout: float) -> bool:
         if remaining <= 0:
             return True
         time.sleep(min(0.02, remaining))
+
+
+def stray_processes(
+    key: str,
+    token: str,
+    *,
+    not_before: int | None = None,
+    pipes: Collection[int] = (),
+    root: Path | None = None,
+) -> list[tuple[int, int]] | None:
+    """(pid, starttime) for every live process whose environment carries ``key=token``.
+
+    This is the post-teardown scan for a process that left the group and the session, so neither a
+    group kill nor a session drain could reach it. The token is a random per-run environment entry
+    every descendant inherits, so it names the run's own processes without relying on ancestry,
+    which a new session breaks, or on a working directory, which the run can leave. A process
+    without the exact entry is never a stray, and only a token carrier is ever signalled (#2847).
+
+    ``None`` means cleanup cannot be confirmed. That is the process table unreadable, or a
+    same-user environ unreadable on a process that started at or after ``not_before`` and also
+    holds one of ``pipes`` or runs inside ``root``. Those two signals never decide a kill. They
+    only narrow the blind case, because unrelated same-user processes start during a run on a
+    normal desktop and keep their environ unreadable by design (sshd, a compositor). A process that
+    predates the run cannot be its descendant, so its blind environ is skipped.
+    """
+    wanted = f"{key}={token}".encode()
+    try:
+        entries = os.listdir("/proc")
+    except OSError:
+        return None
+    target = Path(os.path.realpath(root)) if root is not None else None
+    mine = os.getpid()
+    found: list[tuple[int, int]] = []
+    try:
+        for entry in entries:
+            if not entry.isdigit() or int(entry) == mine:
+                continue
+            fields = _stat_fields(int(entry))
+            if fields is None or len(fields) <= 19 or fields[0] in (b"Z", b"X", b"x"):
+                continue
+            try:
+                started = int(fields[19])
+            except ValueError:
+                continue
+            carries = _carries_token(int(entry), wanted)
+            if carries is None:
+                if not_before is not None and started < not_before:
+                    continue
+                blind = _holds_pipe(int(entry), pipes) or (target is not None and _inside(target, int(entry)))
+                if blind:
+                    return None
+                continue
+            if carries:
+                found.append((int(entry), started))
+    except OSError:
+        return None
+    return found
+
+
+def kill_strays(records: Sequence[tuple[int, int]], sig: int, key: str, token: str) -> int:
+    """Signal each recorded process through its pidfd, after re-reading its identity and token.
+
+    The pidfd pins the process itself, so a recycled number cannot redirect the signal. The stat
+    re-read drops a pid whose starttime moved or which became a zombie since the scan, and the
+    environ re-read drops a pid that no longer carries the run's token. Returns how many were
+    signalled. Raises ``ProcessGroupUnreadable`` when the process table cannot be read.
+    """
+    wanted = f"{key}={token}".encode()
+    pidfd_open = getattr(os, "pidfd_open", None)
+    pidfd_send_signal = getattr(signal, "pidfd_send_signal", None)
+    if pidfd_open is None or pidfd_send_signal is None:
+        return 0
+    signalled = 0
+    for pid, started in records:
+        try:
+            descriptor = pidfd_open(pid)
+        except OSError:
+            continue
+        try:
+            fields = _stat_fields(pid)
+            if fields is None or len(fields) <= 19:
+                continue
+            try:
+                started_now = int(fields[19])
+            except ValueError:
+                continue
+            if started_now != started or fields[0] in (b"Z", b"X", b"x"):
+                continue
+            if _carries_token(pid, wanted) is not True:
+                continue
+            try:
+                pidfd_send_signal(descriptor, sig)
+            except OSError:
+                continue
+            signalled += 1
+        finally:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+    return signalled
+
+
+def _carries_token(pid: int, wanted: bytes) -> bool | None:
+    """Whether ``pid`` holds the exact ``KEY=token`` entry. ``None`` when ours but unreadable."""
+    try:
+        environ = Path(f"/proc/{pid}/environ").read_bytes()
+    except (FileNotFoundError, ProcessLookupError):
+        return False
+    except OSError:
+        if _owned_by_us(pid):
+            # A same-user process whose environ cannot be read is not confirmed quiet.
+            return None
+        return False  # Another user's process cannot be signalled by us, so it is not our stray.
+    return wanted in environ.split(b"\0")
+
+
+def _inside(root: Path, pid: int) -> bool:
+    """Whether the process in ``pid`` runs with a working directory inside ``root``."""
+    try:
+        return Path(os.readlink(f"/proc/{pid}/cwd")).is_relative_to(root)
+    except OSError:
+        return False
+
+
+def _holds_pipe(pid: int, inodes: Collection[int]) -> bool:
+    """Whether any descriptor of ``pid`` is one of the listed pipes."""
+    if not inodes:
+        return False
+    try:
+        names = os.listdir(f"/proc/{pid}/fd")
+    except OSError:
+        return False
+    for name in names:
+        try:
+            target = os.readlink(f"/proc/{pid}/fd/{name}")
+        except OSError:
+            continue
+        if target.startswith("pipe:[") and target.endswith("]"):
+            try:
+                if int(target[6:-1]) in inodes:
+                    return True
+            except ValueError:
+                continue
+    return False
+
+
+def process_start_time(pid: int) -> int | None:
+    """The process starttime in clock ticks since boot, or None when it cannot be read."""
+    try:
+        fields = _stat_fields(pid)
+    except ProcessGroupUnreadable:
+        return None
+    if fields is None or len(fields) <= 19:
+        return None
+    try:
+        return int(fields[19])
+    except ValueError:
+        return None

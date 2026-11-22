@@ -41,9 +41,10 @@ from brigade.model_trial_claude import (
     module_hashes,
 )
 from brigade.model_trial_paired import TOOLS, _pairs, digest
-from tests._child_publish import PUBLISH_SOURCE, process_is_running
+from tests._child_publish import PUBLISH_SOURCE, process_is_running, wait_for_text
 from tests._posix import requires_process_groups
 from tests.paired_live_fake import GOOD_STEPS, make_fake, records, render_script
+from tests.thread_sync import join_thread, start_thread
 
 pytestmark = [
     pytest.mark.allow_agent_cli,  # launches only the fake claude from tests/paired_live_fake.py
@@ -206,6 +207,7 @@ def test_each_arm_is_fresh_and_the_child_env_is_allowlisted(good):
         assert env["CLAUDE_CODE_DISABLE_AUTO_MEMORY"] == "1" and env["DISABLE_AUTOUPDATER"] == "1"
         assert env["CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC"] == "1"
         allowed = {*ENV_PASSTHROUGH, *FIXED_ENV, TOKEN_ENV, "HOME", "USERPROFILE", "CLAUDE_CONFIG_DIR", "TMPDIR"}
+        allowed.add(model_trial_claude.CELL_TOKEN_ENV)
         allowed |= {"XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME"}
         # On Windows build_env also roots these inside the arm directory (never copied from the parent).
         allowed |= {"APPDATA", "LOCALAPPDATA", "TEMP", "TMP"}
@@ -213,6 +215,8 @@ def test_each_arm_is_fresh_and_the_child_env_is_allowlisted(good):
         assert not [key for key in env if key.startswith("ANTHROPIC_")]
         assert env["USERPROFILE"] == env["HOME"]
         assert list(run["config"]["mcpServers"]) == ["brigade-paired"]
+    # The leftover scan names a cell's processes by this token, so two cells never share one.
+    assert len({r["env"][model_trial_claude.CELL_TOKEN_ENV] for r in runs}) == 2
 
 
 def test_argv_has_the_exclusive_flags_and_none_of_the_forbidden_ones(good):
@@ -552,10 +556,11 @@ def test_live_refuses_before_launching_without_subscription_token_or_full_model(
 
 def test_build_env_requires_no_parent_secrets_beyond_the_token():
     arm = Path("/arm")
-    env = build_env({"CLAUDE_CODE_OAUTH_TOKEN": "t", "AWS_SECRET_ACCESS_KEY": "s", "PATH": "/p"}, arm)
+    env = build_env({"CLAUDE_CODE_OAUTH_TOKEN": "t", "AWS_SECRET_ACCESS_KEY": "s", "PATH": "/p"}, arm, cell_token="c")
     assert "AWS_SECRET_ACCESS_KEY" not in env and env["PATH"] == "/p"
     assert env["HOME"] == str(arm / "home")  # str(Path) so the separator is the platform's
     assert env["USERPROFILE"] == env["HOME"]
+    assert env[model_trial_claude.CELL_TOKEN_ENV] == "c"
 
 
 def test_build_env_copies_only_named_variables_and_roots_windows_dirs_in_the_arm():
@@ -564,7 +569,7 @@ def test_build_env_copies_only_named_variables_and_roots_windows_dirs_in_the_arm
     parent.update({name: "parent-secret" for name in secrets} | {TOKEN_ENV: "t"})
     arm = Path("/arm")
     for windows in (False, True):
-        env = build_env(parent, arm, windows=windows)
+        env = build_env(parent, arm, windows=windows, cell_token="c")
         assert all(value != "parent-secret" for value in env.values())  # no unlisted parent variable survives
         assert {k for k, v in env.items() if v.startswith("parent-")} == set(ENV_PASSTHROUGH)
         assert ("LOCALAPPDATA" in env) is windows and ("TEMP" in env) is windows
@@ -578,7 +583,7 @@ def test_build_env_copies_only_named_variables_and_roots_windows_dirs_in_the_arm
 def test_build_env_disables_the_update_refresh_in_every_arm(tmp_path):
     """A cell needs no network, so its server must not spawn a detached refresh into the arm home."""
     for windows in (False, True):
-        env = build_env({TOKEN_ENV: "t"}, tmp_path / "arm", windows=windows)
+        env = build_env({TOKEN_ENV: "t"}, tmp_path / "arm", windows=windows, cell_token="c")
         assert env["BRIGADE_NO_UPDATE_CHECK"] == "1"
 
 
@@ -588,7 +593,7 @@ def test_an_arm_mcp_server_leaves_no_update_refresh_in_its_home(tmp_path):
     (arm / "state").mkdir()
     target = tmp_path / "target"
     target.mkdir()
-    env = build_env(ENVIRON, arm)
+    env = build_env(ENVIRON, arm, cell_token="c")
     config = model_trial_claude.mcp_config("passing-verify", target, FIXTURES / "baseline", arm / "state")
     server = config["mcpServers"]["brigade-paired"]
     # A dead proxy makes any refresh child fail its request at once, so a leak cannot linger.
@@ -910,7 +915,7 @@ def test_windows_arm_has_a_deadline_even_when_a_descendant_holds_the_pipes(
         start = time.monotonic()
         result = _run_process(*args, **kwargs)
         assert time.monotonic() - start < 1
-        outcomes.append(result[2:])
+        outcomes.append((result.code, result.timed_out, result.cleanup_failed))
         return result
 
     exe = make_fake(tmp_path / "fake")
@@ -1054,7 +1059,14 @@ def test_windows_arm_declares_all_win32_job_and_thread_prototypes(monkeypatch, t
 
     monkeypatch.setattr(model_trial_claude.subprocess, "Popen", launch)
     observer = _Observer(expected_model="m", session_id="s", version="v", cwd=tmp_path)
-    assert _run_process(["fake"], {}, tmp_path, "", 2, observer, "tok") == (b"\n", b"diagnostic", 0, False, False)
+    run = _run_process(["fake"], {}, tmp_path, "", 2, observer, "tok")
+    assert (run.stream, run.stderr, run.code, run.timed_out, run.cleanup_failed) == (
+        b"\n",
+        b"diagnostic",
+        0,
+        False,
+        False,
+    )
     assert calls == [
         ("CreateJobObjectW", None),
         ("SetInformationJobObject", job_handle),
@@ -1090,12 +1102,10 @@ def test_windows_job_stops_a_descendant_that_inherits_both_arm_output_pipes(tmp_
     )
     observer = _Observer(expected_model="m", session_id="s", version="v", cwd=tmp_path)
     env = {key: os.environ[key] for key in ENV_PASSTHROUGH if key in os.environ}
-    stream, stderr, code, timed_out, drain_failed = _run_process(
-        [sys.executable, "-c", script], env, tmp_path, "", 10, observer, "tok"
-    )
-    assert stream.strip() == b"" and stream
-    assert stderr.splitlines() == [b"diagnostic"]
-    assert (code, timed_out, drain_failed) == (0, False, False)
+    run = _run_process([sys.executable, "-c", script], env, tmp_path, "", 10, observer, "tok")
+    assert run.stream.strip() == b"" and run.stream
+    assert run.stderr.splitlines() == [b"diagnostic"]
+    assert (run.code, run.timed_out, run.cleanup_failed) == (0, False, False)
 
 
 @requires_process_groups
@@ -1124,10 +1134,8 @@ def test_expiry_cannot_flip_a_finished_cell_or_signal_a_recycled_group(monkeypat
     monkeypatch.setattr(model_trial_claude, "_kill", lambda proc: kills.append(proc.pid))
     observer = _Observer(expected_model="m", session_id="s", version="v", cwd=tmp_path)
     env = {key: os.environ[key] for key in ENV_PASSTHROUGH if key in os.environ}
-    _, _, code, timed_out, drain_failed = _run_process(
-        [sys.executable, "-c", "pass"], env, tmp_path, "", 30, observer, "tok"
-    )
-    assert (code, timed_out, drain_failed) == (0, False, False)
+    run = _run_process([sys.executable, "-c", "pass"], env, tmp_path, "", 30, observer, "tok")
+    assert (run.code, run.timed_out, run.cleanup_failed) == (0, False, False)
     assert events.index("cancel") < events.index("wait")  # the timer is gone before we reap
     before = list(kills)
     callbacks[0]()  # a late expiry for a process that already exited
@@ -1533,6 +1541,153 @@ def test_a_finished_cell_stops_a_descendant_that_left_its_process_group(tmp_path
             shutil.rmtree(path, ignore_errors=True)
 
 
+def _orphan_source(pid_file, ready_base):
+    """A fake-arm descendant that leaves the CLI's session and stays alive for 30 s.
+
+    ``setsid`` puts it outside both the arm's process group and its session, so no group or session
+    signal reaches it. It inherits the CLI's stdout and stderr unless the scenario is quiet, and it
+    publishes readiness by CLI pid, so the fake only exits once the orphan is provably alive.
+    """
+    return PUBLISH_SOURCE + (
+        "import os, time\n"
+        "os.setsid()\n"
+        f"pid_file = {str(pid_file)!r}\n"
+        f"ready = {str(ready_base)!r} + '.' + str(os.getppid())\n"
+        "publish(pid_file, str(os.getpid()))\n"
+        "publish(ready, 'ready')\n"
+        "time.sleep(30)\n"
+    )
+
+
+def _published_pids(path):
+    try:
+        return [int(line) for line in path.read_text().split() if line.strip().isdigit()]
+    except OSError:
+        return []
+
+
+def _kill_published(path):
+    for pid in _published_pids(path):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except OSError:
+            pass
+
+
+def _bystanders(monkeypatch):
+    """Start a same-user process per cell work dir, with that dir as its cwd and no cell token.
+
+    Nothing in the cell started it, so it is exactly what a cwd-based scan would mistake for a
+    stray. It must survive the cell and must never be reported.
+    """
+    started = []
+    real_mkdtemp = tempfile.mkdtemp
+
+    def tracking(*args, **kwargs):
+        path = real_mkdtemp(*args, **kwargs)
+        started.append(
+            subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(30)"],
+                cwd=path,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        )
+        return path
+
+    monkeypatch.setattr(model_trial_claude.tempfile, "mkdtemp", tracking)
+    return started
+
+
+@requires_process_groups
+@pytest.mark.skipif(not drain_supported(), reason="the leftover scan needs /proc")
+def test_a_same_user_process_in_the_work_dir_without_the_token_is_not_a_stray(tmp_path, monkeypatch):
+    """The leftover scan is keyed by the cell's own random token, never by a working directory."""
+    bystanders = _bystanders(monkeypatch)
+    exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS)
+    try:
+        result = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        assert len(bystanders) == 2
+        assert all(process.poll() is None for process in bystanders), "a cell stopped a process it did not start"
+        assert all(a["failure"] is None for a in result["attempts"])
+        reported = [row for a in result["attempts"] for row in a["live"]["diagnostics"]]
+        assert not [row for row in reported if row.startswith("stray_pids:")]
+    finally:
+        for process in bystanders:
+            process.kill()
+            process.wait(timeout=10)
+
+
+@requires_process_groups
+@pytest.mark.skipif(not drain_supported(), reason="the leftover scan needs /proc")
+def test_a_descendant_that_leaves_the_session_cannot_stretch_the_cell_deadline(tmp_path, monkeypatch):
+    """A setsid holder keeps the arm's stdout open, so EOF never arrives and the cell must time out.
+
+    The holder is the fake arm's own child: it starts a new session, publishes its pid, and keeps
+    the inherited stdout and stderr open for 30 s. A group or session kill cannot reach it, so the
+    deadline has to end the read and the leftover scan has to stop it.
+    """
+    pid_file = tmp_path / "orphan.pid"
+    ready_base = tmp_path / "orphan.ready"
+    work_dirs = _track_work_dirs(monkeypatch)
+    orphan = _orphan_source(pid_file, ready_base)
+    exe = make_fake(
+        tmp_path / "fake",
+        steps=[{"call": "receipt"}],  # A short arm: the leader must exit well inside the deadline.
+        session_orphan={"code": orphan, "ready": str(ready_base)},
+    )
+    outcome = {}
+
+    def run():
+        outcome["result"] = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=6)
+
+    worker = start_thread(run)
+    try:
+        published = wait_for_text(pid_file, timeout=15)
+        assert published is not None, "the arm's descendant never published its pid"
+        assert process_is_running(int(published)), "the descendant must be alive while the cell runs"
+        join_thread(worker, description="the cell deadline ends a streaming arm")
+        pids = {int(published), *_published_pids(pid_file)}
+        leaked = sorted(pid for pid in pids if process_is_running(pid))
+        assert leaked == [], f"the holder outlived its cell: {leaked}"
+        assert _failures(outcome["result"]) == [model_trial_claude.DESCENDANT_PIPES_FAILURE]
+        assert len(work_dirs) == 2 and all(path.is_dir() for path in work_dirs)
+    finally:
+        _kill_published(pid_file)
+        for path in work_dirs:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+@requires_process_groups
+@pytest.mark.skipif(not drain_supported(), reason="the leftover scan needs /proc")
+def test_a_descendant_left_in_the_cell_work_dir_fails_the_cell_and_is_stopped(tmp_path, monkeypatch):
+    """A quiet setsid survivor holds no pipe, so only the work-dir scan can find it after teardown."""
+    pid_file = tmp_path / "orphan.pid"
+    ready_base = tmp_path / "orphan.ready"
+    work_dirs = _track_work_dirs(monkeypatch)
+    orphan = _orphan_source(pid_file, ready_base)
+    exe = make_fake(
+        tmp_path / "fake",
+        steps=GOOD_STEPS,
+        session_orphan={"code": orphan, "ready": str(ready_base), "quiet": True},
+    )
+    try:
+        result = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        pids = _published_pids(pid_file)
+        assert pids, "the descendant never published its pid"
+        leaked = [pid for pid in pids if process_is_running(pid)]
+        assert leaked == [], f"the survivor outlived its cell: {leaked}"
+        assert _failures(result) == [model_trial_claude.DESCENDANT_SURVIVED_FAILURE]
+        reported = [row for a in result["attempts"] for row in a["live"]["diagnostics"]]
+        assert any(row.startswith("stray_pids:") for row in reported)
+        assert len(work_dirs) == 2 and all(path.is_dir() for path in work_dirs)
+    finally:
+        _kill_published(pid_file)
+        for path in work_dirs:
+            shutil.rmtree(path, ignore_errors=True)
+
+
 @requires_process_groups
 def test_a_drain_failure_keeps_the_original_error_and_reaps_the_leader(monkeypatch, tmp_path):
     threads, events, children = [], [], []
@@ -1610,6 +1765,57 @@ def test_a_drain_failure_fails_only_its_cell_and_keeps_its_work_dir(tmp_path, mo
     finally:
         for path in work_dirs:
             shutil.rmtree(path, ignore_errors=True)
+
+
+@pytest.mark.skipif(not sys.platform.startswith("linux"), reason="Linux always exposes a process table")
+def test_a_cell_with_no_process_table_fails_and_keeps_its_work_dir(tmp_path, monkeypatch):
+    """A Linux cell that cannot scan /proc has no leftover check, so it must not pass silently."""
+    exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS)
+    work_dirs = _track_work_dirs(monkeypatch)
+    monkeypatch.setattr(model_trial_claude, "drain_supported", lambda: False)
+    try:
+        result = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=60)
+        assert _failures(result) == [model_trial_claude.DRAIN_FAILURE]
+        assert len(work_dirs) == 2 and all(path.is_dir() for path in work_dirs)
+    finally:
+        for path in work_dirs:
+            shutil.rmtree(path, ignore_errors=True)
+
+
+def test_a_leader_that_never_reports_exit_is_not_waited_on_forever(monkeypatch, tmp_path):
+    """After a bounded reap, the second wait is bounded too, so an unkillable leader cannot block."""
+    children = []
+    real_wait = subprocess.Popen.wait
+
+    class SpyPopen(subprocess.Popen):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            children.append(self)
+
+    def blocked_wait(self, timeout=None):
+        if timeout is None:
+            raise AssertionError("unbounded wait on a leader that will not exit")
+        time.sleep(min(timeout, 0.05))
+        raise subprocess.TimeoutExpired(self.args, timeout)
+
+    def expired_reap(process, timeout, *, drain=None):
+        raise subprocess.TimeoutExpired(process.args, timeout)
+
+    monkeypatch.setattr(model_trial_claude.subprocess, "Popen", SpyPopen)
+    monkeypatch.setattr(model_trial_claude, "_reap", expired_reap)
+    monkeypatch.setattr(model_trial_claude, "EXIT_GRACE", 0.2)
+    monkeypatch.setattr(subprocess.Popen, "wait", blocked_wait)
+    observer = _Observer(expected_model="m", session_id="s", version="v", cwd=tmp_path)
+    env = {key: os.environ[key] for key in ENV_PASSTHROUGH if key in os.environ}
+    try:
+        started = time.monotonic()
+        run = _run_process([sys.executable, "-c", "pass"], env, tmp_path, "", 30, observer, "tok")
+        elapsed = time.monotonic() - started
+    finally:
+        for child in children:
+            real_wait(child, timeout=10)
+    assert elapsed < 2, f"the bounded waits took {elapsed:.2f}s"
+    assert run.timed_out is True and run.cleanup_failed is True and run.code is None
 
 
 def test_the_bounded_drain_re_signals_members_on_every_poll(monkeypatch):
