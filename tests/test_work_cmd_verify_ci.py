@@ -305,7 +305,7 @@ def test_ci_treats_pathologically_nested_json_as_unknown(checkout, monkeypatch, 
     assert json.loads(capsys.readouterr().out)["state"] == "unknown"
 
 
-@pytest.mark.parametrize("conclusion", ["neutral", "skipped", "cancelled", "timed_out", "action_required", None])
+@pytest.mark.parametrize("conclusion", ["neutral", "skipped", "timed_out", "action_required", None])
 def test_ci_counts_only_success_as_passed(checkout, monkeypatch, capsys, conclusion):
     target, head, _ = checkout
     _fake_gh(monkeypatch, head, _check(head, conclusion=conclusion))
@@ -347,3 +347,31 @@ def test_ci_says_when_git_cannot_report_the_tree(checkout, monkeypatch, capsys):
     assert "could not read the working tree state" in error
     assert "Commit and push" not in error
     assert not _record(target, head).exists()
+
+
+@pytest.mark.parametrize(
+    "older,expected_code,expected_state",
+    [("success", 0, "passed"), ("failure", 1, "failed")],
+)
+def test_ci_ignores_a_cancelled_run_and_reads_the_one_before_it(
+    checkout, monkeypatch, capsys, older, expected_code, expected_state
+):
+    target, head, _ = checkout
+    _fake_gh(
+        monkeypatch,
+        head,
+        _check(head, run_id=101, conclusion=older),
+        _check(head, run_id=202, conclusion="cancelled"),
+    )
+    assert _ci(target) == expected_code
+    payload = json.loads(capsys.readouterr().out)
+    assert (payload["state"], payload["check_run_id"]) == (expected_state, 101)
+
+
+def test_ci_is_unknown_when_every_run_was_cancelled(checkout, monkeypatch, capsys):
+    target, head, _ = checkout
+    _fake_gh(monkeypatch, head, _check(head, conclusion="cancelled"))
+    assert _ci(target) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "unknown"
+    assert "cancelled" in payload["reason"]

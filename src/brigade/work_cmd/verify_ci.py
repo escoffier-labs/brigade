@@ -113,8 +113,16 @@ def _fetch_check(target: Path, repository: str, head: str, check_name: str) -> d
     if not runs:
         return {"reason": "No check run with that name was found for HEAD."}
 
+    # A cancelled run says nothing about the commit. A push to main, for example,
+    # often starts a second run for a commit the merge queue already tested, and
+    # the next merge cancels it. Decide from the runs that were not cancelled.
+    decisive = [
+        item for item in runs if not (item.get("status") == "completed" and item.get("conclusion") == "cancelled")
+    ]
+    if not decisive:
+        return {"reason": "Every check run with that name for HEAD was cancelled."}
     # Run IDs increase with creation order, including for runs still queued.
-    run = max(runs, key=lambda item: item["id"])
+    run = max(decisive, key=lambda item: item["id"])
     if run.get("head_sha") != head:
         return {"reason": "The newest check run belongs to a different head."}
     status, conclusion, url = run.get("status"), run.get("conclusion"), run.get("html_url")

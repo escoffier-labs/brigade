@@ -18,6 +18,12 @@ checkout is refused before contacting GitHub or writing a record.
 | `pending` | 2 | The check is queued or in progress. |
 | `unknown` | 2 | Brigade could not obtain a matching check result. |
 
+A cancelled run is ignored, because it says nothing about the commit. Brigade
+takes the newest run that was not cancelled, so a passed merge-queue run still
+counts after a later run for the same commit is cancelled, and a failed run is
+not hidden by a cancelled retry. When every run was cancelled the state is
+`unknown`.
+
 A checkout or record-writing error also returns 2 and reports the error on
 standard error. Only `passed` for the required check on the exact head commit
 counts as suite evidence. Local verification receipts describe local checks.
