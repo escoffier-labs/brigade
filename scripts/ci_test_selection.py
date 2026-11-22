@@ -36,10 +36,13 @@ import argparse
 import ast
 import hashlib
 import json
+import multiprocessing
 import re
 import subprocess
 import sys
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from pathlib import Path, PurePosixPath
 from typing import Sequence
 
@@ -147,7 +150,7 @@ def dotted_name(path: str, root: str, prefix: str) -> tuple[str, bool]:
 class Graph:
     """Static import graph over src, scripts and tests."""
 
-    def __init__(self, repo: Path, test_files: dict[str, Path]) -> None:
+    def __init__(self, repo: Path, test_files: dict[str, Path], *, parallel: bool = True) -> None:
         self.repo = repo
         self.paths: dict[str, Path] = {}  # node -> file
         self.is_package: dict[str, bool] = {}
@@ -171,8 +174,13 @@ class Graph:
         self.top: dict[str, set[str]] = defaultdict(set)  # import-time (or test-run-time) edges
         self.lazy: dict[str, set[str]] = defaultdict(set)  # imports deferred into a function body
         self.parse_errors: list[str] = []
-        for node, path in self.paths.items():
-            self._read(node, path)
+        if parallel and len(self.paths) >= 128:
+            try:
+                self._read_parallel()
+            except (OSError, BrokenProcessPool, NotImplementedError):
+                self._read_serial()
+        else:
+            self._read_serial()
         # conftest imports apply to every test at or below its directory.
         for rel, node in self.test_nodes.items():
             for conftest in self._conftests_above(rel):
@@ -200,6 +208,31 @@ class Graph:
                     ".".join(local.split(".")[:i]) for i in range(1, len(local.split(".")) + 1)
                 } & self.paths.keys()
         return found
+
+    def _read_serial(self) -> None:
+        for node, path in self.paths.items():
+            self._read(node, path)
+
+    def _read_parallel(self) -> None:
+        nodes = list(self.paths)
+        batches = [nodes[start : start + 64] for start in range(0, len(nodes), 64)]
+        # Spawn avoids inheriting interpreter state and works on Windows. Each batch
+        # gets a copy of the graph's module map and runs the same extractor as serial.
+        with ProcessPoolExecutor(max_workers=6, mp_context=multiprocessing.get_context("spawn")) as pool:
+            results = list(pool.map(self._read_batch, batches))
+        # Merge in scan order after every worker succeeds, so a retry starts clean.
+        for top, lazy, text, errors in results:
+            self.top.update(top)
+            self.lazy.update(lazy)
+            self.text.update(text)
+            self.parse_errors.extend(errors)
+
+    def _read_batch(
+        self, nodes: list[str]
+    ) -> tuple[dict[str, set[str]], dict[str, set[str]], dict[str, str], list[str]]:
+        for node in nodes:
+            self._read(node, self.paths[node])
+        return self.top, self.lazy, self.text, self.parse_errors
 
     def _read(self, node: str, path: Path) -> None:
         try:

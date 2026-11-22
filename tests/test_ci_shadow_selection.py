@@ -1,6 +1,7 @@
 """Contracts for shadow-mode Linux test selection: fail-open selection, escape accounting, evaluation."""
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -135,6 +136,19 @@ def test_dynamic_import_with_a_computed_name_reaches_the_modules_the_file_names(
     write(repo, "tests/test_lazy.py", "from brigade import lazy\n")
     plan = selector.select(repo, ["src/brigade/a.py"])
     assert plan["selected"]["tests/test_lazy.py"] == ["closure:1"]
+
+
+def test_parallel_graph_matches_serial_on_repository_sources(monkeypatch):
+    project = Path(__file__).resolve().parents[1]
+    serial = selector.Graph(project, {}, parallel=False)
+
+    def unexpected_serial(self):
+        pytest.fail("the parallel graph must use the process pool")
+
+    monkeypatch.setattr(selector.Graph, "_read_serial", unexpected_serial)
+    parallel = selector.Graph(project, {})
+
+    assert vars(parallel) == vars(serial)
 
 
 def test_cli_entry_main_writes_a_plan_even_when_git_fails(tmp_path, repo):

@@ -474,14 +474,19 @@ def test_bundled_planner_reads_committed_sources(repo, capsys):
     for name in config["planner_files"]:
         write(target, name, (project / name).read_text(encoding="utf-8"))
     write(target, "src/brigade/a.py", "value = 1\n")
+    # Exercise worker startup from the copied planner as well as the selector entry point.
+    for i in range(128):
+        write(target, f"src/brigade/filler_{i}.py", "")
     write(target, "tests/test_a.py", "from brigade import a\n")
     write(target, "tests/test_module_size_ratchet.py", "")
     pin_base(target, commit(target, "install bundled planner"))
     write(target, "src/brigade/a.py", "value = 2\n")
     commit(target, "change a module")
     write(target, "tests/test_a.py", "\n")
+    write(target, "scripts/ci_test_selection.py", "raise AssertionError('loaded the working-tree planner')\n")
     result = run(target, capsys)
     assert result["tests"] == ["tests/test_a.py", "tests/test_module_size_ratchet.py"]
+    assert result["base_trusted"] is True
     assert result["covers_worktree"] is False
 
 
