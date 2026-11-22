@@ -109,9 +109,10 @@ tree blocks closeout and names the run.
 When the trusted Git base declares a required check, the newest applicable
 receipt must carry an eligible verdict for the current policy. A newer
 ineligible receipt blocks closeout even when an older receipt passed. Closeout
-reports the reason and shows the command to rerun when the policy can be read.
-If the repository has no declaration, a completed receipt without a verdict
-can still count.
+reports the reason and shows the command to rerun when it reads a valid
+declaration. If the repository has no declaration, a completed receipt can
+count regardless of its stamp. An unreadable declaration blocks closeout
+with the file and error. If policy lookup times out, run closeout again.
 
 When tree fingerprints differ, verification and closeout compare the paths
 in the Git trees. Changes confined to `.brigade/` count as the same tree,

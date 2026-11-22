@@ -13,6 +13,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import cached_property
 from pathlib import Path
+from time import monotonic
 from typing import Any, Literal
 
 from .. import localio, verify_manifest_git
@@ -20,6 +21,7 @@ from .. import localio, verify_manifest_git
 _DECLARATION_PATH = "verify/required-check.json"
 _DECLARATION_SCHEMA = "brigade.verify_required_check.v1"
 STOP_POLICY_BUDGET_SECONDS = 2.0
+_CLOSEOUT_POLICY_BUDGET_SECONDS = 60.0
 _HEAD_FALLBACK_BUDGET_SECONDS = 1.0
 
 
@@ -282,9 +284,10 @@ _INELIGIBLE_NOTICE = {
 def _receipt_policy_verdict(receipt: Mapping[str, Any], policy: _GatePolicy) -> tuple[bool, str]:
     if policy.mode == "unresolved":
         return False, policy.reason
+    if policy.mode == "audit_only":
+        problem = _blocked_reason(receipt)
+        return problem is None, problem or "audit_only"
     eligible, reason = receipt_is_gating(receipt)
-    if reason == "missing_gating" and "gating" not in receipt and policy.mode == "audit_only":
-        return True, "audit_only"
     stamp = receipt.get("gating")
     if isinstance(stamp, dict) and reason != "invalid_gating" and not _blocked_reason(receipt):
         if not policy.matches(stamp):
@@ -300,31 +303,31 @@ def _suggested_argv(policy: _GatePolicy) -> list[str]:
 
 def _policy_error(policy: _GatePolicy) -> str:
     detail = policy.error or "Git timed out reading the required check"
-    return f"could not load {_DECLARATION_PATH}: {detail}."
+    return f"Could not load {_DECLARATION_PATH}: {detail}."
 
 
 def receipt_counts_for_policy(target: Path, receipt: Mapping[str, Any]) -> tuple[bool, str | None]:
     """Check a receipt against the current policy and explain a rejection with rerun guidance."""
-    policy = _load_policy(target)
+    policy = _load_policy(target, deadline=monotonic() + _CLOSEOUT_POLICY_BUDGET_SECONDS)
     eligible, reason = _receipt_policy_verdict(receipt, policy)
     if eligible:
         return True, None
+    if reason == "policy_timeout" and policy.mode == "unresolved":
+        return False, "Git timed out while reading the required check, so run closeout again."
     if policy.mode == "unresolved":
-        return False, _policy_error(policy)
+        return False, f"The repository's required check could not be read. {_policy_error(policy)}"
     explanation = _INELIGIBLE_NOTICE.get(reason, "The last run has an ineligible required-check verdict.")
-    command = shlex.join(
-        [
-            "brigade",
-            "work",
-            "verify",
-            "run",
-            "--target",
-            str(target),
-            "--argv-json",
-            json.dumps(_suggested_argv(policy)),
-        ]
+    if policy.mode == "audit_only":
+        return False, explanation
+    command = (
+        f"brigade work verify run --target {shlex.quote(str(target))} "
+        f"--argv-json {shlex.quote(json.dumps(_suggested_argv(policy)))}"
     )
-    return False, f"{explanation} Run `{command}` in a POSIX shell."
+    return (
+        False,
+        "The latest verification run for this session is not the repository's required check. "
+        f"{explanation} Run `{command}` in a POSIX shell.",
+    )
 
 
 class StopGate:
