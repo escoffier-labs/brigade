@@ -276,3 +276,48 @@ def test_a_busy_retry_does_not_clear_an_older_uncaptured_failure(tmp_path, monke
     monkeypatch.setattr(verification, "_verify_receipt_has_outcome_capture", lambda target, receipt: False)
     identity = verification._receipt_planned_commands_identity(failed)
     assert verification._find_uncaptured_failed_verify_receipt(tmp_path, identity) is failed
+
+
+def test_busy_marker_is_found_on_either_stream():
+    marker = verify_receipt_details.BUSY_MARKER
+    assert verify_receipt_details.is_busy_exit(75, "", f"merged output\n{marker}\n")
+    assert verify_receipt_details.is_busy_exit(75, f"{marker}\r\n", "")
+    assert not verify_receipt_details.is_busy_exit(75, "busy", "busy")
+    assert not verify_receipt_details.is_busy_exit(1, marker, marker)
+
+
+def test_pytest_outcomes_read_a_colored_summary():
+    colored = "\x1b[32m\x1b[32m\x1b[1m3 passed\x1b[0m\x1b[32m in 0.01s\x1b[0m\n"
+    result = verify_receipt_details.pytest_outcomes(colored)
+    assert (result["passed"], result["no_tests_ran"]) == (3, False)
+
+
+def test_passing_records_with_a_nonzero_code_are_not_busy():
+    receipt = {"planned_commands": ["one"], "commands": [{"status": "completed", "exit_code": 0}]}
+    assert verify_receipt_details.terminal_status(receipt, 75) == ("rejected", 1)
+
+
+def test_a_failed_receipt_write_gets_the_incomplete_failure_kind(tmp_path, monkeypatch):
+    _quiet_graph(monkeypatch)
+    _children(monkeypatch, ("completed", 0, "ok\n", ""))
+    original = helpers._write_json
+    failed_once = []
+
+    def fail_first_receipt_write(path, payload, *args, **kwargs):
+        if Path(path).name == "receipt.json" and not failed_once:
+            failed_once.append(path)
+            raise OSError("simulated full disk")
+        return original(path, payload, *args, **kwargs)
+
+    monkeypatch.setattr(helpers, "_write_json", fail_first_receipt_write)
+    receipt, _ = verification._run_verify_commands(tmp_path, [["python", "-V"]], 30, code_graph_timeout=1)
+    assert (receipt["failure_class"], receipt["failure_kind"]) == ("infrastructure", "receipt_incomplete")
+
+
+def test_reused_receipt_keeps_or_omits_the_inherited_environment():
+    carried = {"inherited_test_env": {"pythonpath_set": False}}
+    verify_receipt_details.stamp_reused_tree(carried, {"tree_fingerprint": "abc"})
+    assert carried["inherited_test_env"] == {"pythonpath_set": False}
+    legacy = {"inherited_test_env": None}
+    verify_receipt_details.stamp_reused_tree(legacy, {"tree_fingerprint": "abc"})
+    assert "inherited_test_env" not in legacy

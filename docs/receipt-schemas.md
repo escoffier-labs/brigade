@@ -246,7 +246,7 @@ before them are still valid version 2 receipts, so a reader must treat the
 fields as optional.
 
 Each command object uses `busy` when its process exits 75 and prints the line
-`brigade-verify: busy` on standard error, which the full-gate slot lock does. Exit
+`brigade-verify: busy` on either output stream, which the full-gate slot lock does. Exit
 75 without that line is an ordinary failure. A receipt is `busy` only when every
 planned command has a record and the only commands that did not pass are busy.
 

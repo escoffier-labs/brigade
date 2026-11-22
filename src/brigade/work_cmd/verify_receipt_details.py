@@ -20,6 +20,7 @@ _NO_TESTS = re.compile(rf"^(?:=+ )?no tests ran{_DURATION}(?: =+)?$")
 # The full gate prints one combined line for all shards (scripts/verify_parallel.py).
 _AGGREGATE = re.compile(rf"^Aggregate: (?P<body>{_ITEM}(?:, {_ITEM})*)$")
 _COUNT = re.compile(r"(?P<count>\d+) (?P<name>[a-z]+)")
+_ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 _ENV_VALUE_LIMIT = 2048
 BUSY_EXIT_CODE = 75
@@ -28,9 +29,14 @@ BUSY_EXIT_CODE = 75
 BUSY_MARKER = "brigade-verify: busy"
 
 
-def is_busy_exit(exit_code: int | None, stderr: str) -> bool:
-    """Return whether a command reported a busy verification slot."""
-    return exit_code == BUSY_EXIT_CODE and any(line.strip() == BUSY_MARKER for line in stderr.splitlines())
+def is_busy_exit(exit_code: int | None, *streams: str) -> bool:
+    """Return whether a command reported a busy verification slot.
+
+    Both output streams are checked, because a wrapper may merge them.
+    """
+    return exit_code == BUSY_EXIT_CODE and any(
+        line.strip() == BUSY_MARKER for stream in streams for line in stream.splitlines()
+    )
 
 
 def inherited_test_env(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
@@ -52,7 +58,8 @@ def pytest_outcomes(stdout: str) -> dict[str, int | bool] | None:
     and a test may print "no tests ran" itself.
     """
     for raw in reversed(stdout.splitlines()):
-        line = raw.strip()
+        # pytest colors the summary when asked to, even when its output is captured.
+        line = _ANSI.sub("", raw).strip()
         if _NO_TESTS.match(line):
             return {**dict.fromkeys(_OUTCOMES, 0), "no_tests_ran": True}
         match = _SUMMARY.match(line) or _AGGREGATE.match(line)
@@ -87,7 +94,11 @@ def terminal_status(receipt: Mapping[str, Any], rc: int) -> tuple[str, int]:
     nonpassing = [record for record in records if not _passed(record)]
     if recorded and not nonpassing and rc == 0:
         return "completed", 0
-    if recorded and all(isinstance(record, dict) and record.get("status") == "busy" for record in nonpassing):
+    if (
+        recorded
+        and nonpassing
+        and all(isinstance(record, dict) and record.get("status") == "busy" for record in nonpassing)
+    ):
         return "busy", BUSY_EXIT_CODE
     if rc in (0, BUSY_EXIT_CODE):
         # A real failure must not exit 0, and must not read as a busy slot.
@@ -113,6 +124,9 @@ def stamp_reused_tree(receipt: dict[str, Any], identity: Mapping[str, Any]) -> N
     """Record the tree for a reused receipt. No command ran, so stability was not observed."""
     receipt["tree_fingerprint_after"] = identity.get("tree_fingerprint")
     receipt["tree_stable"] = None
+    # A receipt written before the field existed has nothing to copy. Leave the key out.
+    if receipt.get("inherited_test_env") is None:
+        receipt.pop("inherited_test_env", None)
 
 
 def stamp_tree_after(target: Any, receipt: dict[str, Any]) -> None:

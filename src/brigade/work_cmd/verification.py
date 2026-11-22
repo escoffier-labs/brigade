@@ -608,6 +608,9 @@ def _safe_finalize_verify_receipt(
             rc = verify_runtime._VERIFY_CANCELED_RC
         else:
             rc = verify_receipt_details.fail_closed_fallback(receipt, rc)
+            # The status changed after these were stamped, so stamp them again.
+            verify_trial.stamp_verify_receipt_failure_taxonomy(receipt)
+            _stamp_verification_contract_outcomes(receipt)
         receipt.setdefault("completed_at", helpers._now().isoformat())
         # Keep a valid digest/signature if fallback did not change the payload.
         # A completed digest must never authenticate a newly canceled receipt.
@@ -1620,7 +1623,9 @@ def _run_verify_commands(
                     command_completed = helpers._now()
                     command_result.update(
                         {
-                            "status": "busy" if verify_receipt_details.is_busy_exit(exit_code, stderr) else status,
+                            "status": "busy"
+                            if verify_receipt_details.is_busy_exit(exit_code, stderr, stdout)
+                            else status,
                             "exit_code": exit_code,
                             "completed_at": command_completed.isoformat(),
                             "duration_seconds": (command_completed - command_started).total_seconds(),
