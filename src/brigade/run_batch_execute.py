@@ -51,6 +51,19 @@ class _TaskRuntime:
     cancel_done: threading.Event | None = None
     attempt_id: str | None = None
     containment: str | None = None
+    # Where the task runs once a remote router has decided: "local" or
+    # "remote". None means no decision yet; without a router every task is local.
+    routing: str | None = None
+
+
+_BATCH_TASK_PREFIX = "Batch task_id: "
+
+
+def _batch_task_id(task: str) -> str | None:
+    """The task id from a batch assignment's text, which always starts with it."""
+    if not task.startswith(_BATCH_TASK_PREFIX):
+        return None
+    return task[len(_BATCH_TASK_PREFIX) :].split("\n", 1)[0] or None
 
 
 def _reference(value: str | None) -> str | None:
@@ -93,6 +106,8 @@ class BatchExecution:
         self.workspace = workspace
         self.runtime = {task["task_id"]: _TaskRuntime() for task in plan["tasks"]}
         self.processes = proc.ProcessRegistry()
+        # True when a remote router may send tasks to another machine.
+        self.routed = False
         self.turns: run_control.LiveTurnRegistry | None = None
         # The prepared handle and its journal version, captured at the launch point.
         self.prepared: dict[str, tuple[run_tasks.TaskHandle, str]] = {}
@@ -283,6 +298,22 @@ class BatchExecution:
             print(f"warning: task cancel inbox refused: {exc.code}: {exc.detail}", file=sys.stderr)
             return False
 
+    def _route_recorder(self, router: Any) -> Any:
+        """Wrap the per-seat remote router to record each task's routing decision."""
+
+        def routed(seat: str, task: str, prompt: str) -> Any:
+            task_id = _batch_task_id(task)
+            runtime = self.runtime.get(task_id) if task_id is not None else None
+            dispatched = router(seat, task, prompt)
+            if runtime is not None:
+                with runtime.lock:
+                    runtime.routing = "local" if dispatched is None else "remote"
+                if dispatched is None and task_id is not None:
+                    run_task_inbox.mark_local_task(self.run_dir, self.workspace, task_id)
+            return dispatched
+
+        return routed
+
     def _watch_cancels(self, stopped: threading.Event, *, terminate: bool = True) -> None:
         try:
             self._watch_cancels_loop(stopped, terminate=terminate)
@@ -322,6 +353,11 @@ class BatchExecution:
                 continue
             with runtime.lock:
                 if runtime.handed_off or runtime.cancel_done is not None:
+                    continue
+                if self.routed and runtime.routing != "local":
+                    # A remote request has no exact per-task cancel, and an
+                    # undecided route is retried on the next poll. Only a task
+                    # known to run on this machine is ever stopped.
                     continue
                 done = runtime.cancel_done = threading.Event()
                 runtime.attempt_id = attempt_id
@@ -407,7 +443,7 @@ class BatchExecution:
         return [
             Assignment(
                 worker=t["seat"],
-                task=f"Batch task_id: {t['task_id']}\n\n{t['text']}",
+                task=f"{_BATCH_TASK_PREFIX}{t['task_id']}\n\n{t['text']}",
                 stage=layers[t["task_id"]],
                 task_id=t["task_id"],
                 attempt_id=attempts[t["task_id"]],
@@ -595,28 +631,28 @@ class BatchExecution:
             self.turns = run_control.LiveTurnRegistry()
         kwargs["process_registry"] = self.processes
         kwargs["control_registry"] = self.turns
+        if kwargs.get("remote_transport") is not None:
+            self.routed = True
+            kwargs["remote_transport"] = self._route_recorder(kwargs["remote_transport"])
         with contextlib.ExitStack() as stack:
             # Resume/replay: an intent that survived a crash is journaled, and
             # the task is recorded as cancelled before any checkout or launch.
             self._drain_inbox()
             self.prepare_workspaces(stack)
             stopped = threading.Event()
-            # Fleet remote dispatch cannot cancel one exact remote request, so a
-            # remote-routed batch never claims live termination: the watcher
-            # only journals intent, and `runs tasks cancel` reports
-            # live-termination-unavailable because no live watcher is advertised.
-            terminate = kwargs.get("remote_transport") is None
+            # Fleet remote dispatch routes per seat and cannot cancel one exact
+            # remote request. Each task's routing decision is recorded: the
+            # watcher stops only tasks that run on this machine, and a task
+            # routed remote is listed in the live marker so `runs tasks cancel`
+            # reports live-termination-unavailable for it.
             ctx = contextvars.copy_context()
             watcher = threading.Thread(
                 target=ctx.run,
                 args=(self._watch_cancels, stopped),
-                kwargs={"terminate": terminate},
                 name="batch-task-cancel",
                 daemon=True,
             )
-            advertise = (
-                run_task_inbox.live_watcher(self.run_dir, self.workspace) if terminate else contextlib.nullcontext()
-            )
+            advertise = run_task_inbox.live_watcher(self.run_dir, self.workspace, routed=self.routed)
             with advertise:
                 watcher.start()
                 try:

@@ -29,10 +29,11 @@ import json
 import os
 import re
 import stat
+import threading
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Iterator, Mapping, Sequence
+from typing import Any, Callable, Iterator, Mapping, Sequence
 from uuid import uuid4
 
 from . import dirfd, localio, run_events, run_journal, runguard
@@ -462,7 +463,7 @@ def _ordered(task_ids: Sequence[str]) -> tuple[str, ...]:
 
 
 @contextlib.contextmanager
-def live_watcher(run_dir: Path, workspace: Path) -> Iterator[None]:
+def live_watcher(run_dir: Path, workspace: Path, *, routed: bool = False) -> Iterator[None]:
     """Advertise live cancellation only for this workspace lock's owner."""
     # A batch also holds nested worktree locks. Name the caller's lock
     # directly, since the context's innermost lock may belong to a worktree.
@@ -472,11 +473,35 @@ def live_watcher(run_dir: Path, workspace: Path) -> Iterator[None]:
         yield
         return
     marker = lock / _WATCHER_MARKER
-    localio.write_json(marker, {"owner_token": owner["owner_token"]})
+    # With a remote router, only tasks recorded as local are stoppable.
+    localio.write_json(marker, {"owner_token": owner["owner_token"], "routed": routed, "local_tasks": []})
     try:
         yield
     finally:
         marker.unlink(missing_ok=True)
+
+
+_MARKER_LOCK = threading.Lock()
+
+
+def mark_local_task(run_dir: Path, workspace: Path, task_id: str) -> None:
+    """Record that a routed batch kept this task on this machine, so it is stoppable."""
+    lock = runguard.lock_path(workspace)
+    owner = runguard.read_lock_owner(lock)
+    if owner is None or owner.get("pid") != os.getpid() or not runguard._owner_matches_run(owner, run_dir):
+        return
+    marker = lock / _WATCHER_MARKER
+    with _MARKER_LOCK:
+        try:
+            current = json.loads(marker.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return
+        if not isinstance(current, dict) or current.get("owner_token") != owner["owner_token"]:
+            return
+        local = sorted(set(current.get("local_tasks") or []) | {task_id})
+        localio.write_json(
+            marker, {"owner_token": owner["owner_token"], "routed": bool(current.get("routed")), "local_tasks": local}
+        )
 
 
 def retire_live_watcher(run_dir: Path, workspace: Path) -> None:
@@ -491,22 +516,40 @@ def retire_live_watcher(run_dir: Path, workspace: Path) -> None:
         pass
 
 
-def _has_live_watcher(run_dir: Path, workspace: Path) -> bool:
+def _live_watcher_stoppable(run_dir: Path, workspace: Path) -> Callable[[str], bool] | None:
+    """Which tasks a live watcher can stop, or None when no live watcher exists."""
     lock = runguard.lock_path(workspace)
     owner = runguard.read_lock_owner(lock)
     if not runguard._owner_matches_run(owner, run_dir) or owner is None:
-        return False
+        return None
     pid, token = owner.get("pid"), owner.get("owner_token")
     if type(pid) is not int or pid <= 0 or not isinstance(token, str) or not runguard._pid_is_active(pid):
-        return False
+        return None
     try:
         descriptor = dirfd.open_directory_nofollow(lock, writable=False)
         try:
-            return _read(descriptor, _WATCHER_MARKER, lock) == {"owner_token": token}
+            marker = _read(descriptor, _WATCHER_MARKER, lock)
         finally:
             os.close(descriptor)
     except (OSError, TaskInboxError):
-        return False
+        return None
+    if not isinstance(marker, dict) or set(marker) != {"owner_token", "routed", "local_tasks"}:
+        return None
+    routed, local = marker["routed"], marker["local_tasks"]
+    if marker["owner_token"] != token or not isinstance(routed, bool) or not isinstance(local, list):
+        return None
+    if not all(isinstance(item, str) for item in local):
+        return None
+    if not routed:
+        return lambda task_id: True
+    known_local = frozenset(local)
+    # A routed task that is not yet known to run here may go remote, where
+    # no exact cancel exists, so it is never promised a live stop.
+    return lambda task_id: task_id in known_local
+
+
+def _has_live_watcher(run_dir: Path, workspace: Path) -> bool:
+    return _live_watcher_stoppable(run_dir, workspace) is not None
 
 
 def cancel(
@@ -556,7 +599,7 @@ def cancel(
     # answer behind a bare refusal.
     failure: TaskInboxError | None = None
     committed: list[run_tasks.TaskResult] = []
-    live = bool(submitted) and _has_live_watcher(run_dir, workspace)
+    stoppable = _live_watcher_stoppable(run_dir, workspace) if submitted else None
     for state in submitted:
         if failure is None:
             try:
@@ -593,8 +636,8 @@ def cancel(
                         "journal-unreadable", f"task journal in run {run_dir.name} is not readable"
                     ) from exc
 
-    if drained is None and submitted and not live:
-        live = _has_live_watcher(run_dir, workspace)
+    if drained is None and submitted and stoppable is None:
+        stoppable = _live_watcher_stoppable(run_dir, workspace)
     for state in submitted:
         row = rows[state.handle.spec.task_id]
         if drained is None:
@@ -602,6 +645,7 @@ def cancel(
             # so a request this process could not journal is reported as
             # possibly running, never as safely stopped before launch.
             row["outcome"] = OUTCOME_QUEUED
+            live = stoppable is not None and stoppable(state.handle.spec.task_id)
             row["live_termination"] = "requested" if live else LIVE_TERMINATION_UNAVAILABLE
             continue
         outcome = drained.get(state.handle.spec.task_id)

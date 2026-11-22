@@ -779,12 +779,15 @@ is reported and the next poll continues. A watcher that ends for any reason
 stops advertising live termination, so `runs tasks cancel` never reports
 `requested` without a watcher to act on it.
 
-A batch routed through Fleet remote dispatch cannot cancel one exact remote
-request. Its watcher still journals intent, so a task that has not launched
-never launches, but it never stops a running remote task and never records
-one as `cancelled`. The running task keeps its real result, the intent shows
-as `cancel.too_late: true`, and `runs tasks cancel` reports
-`live-termination-unavailable` because no live watcher is advertised.
+Fleet remote dispatch routes each task by seat, and it cannot cancel one
+exact remote request. When a batch has a remote router, Brigade records where
+each task went. The watcher stops a task only once the router has kept it on
+this machine. A task routed to another machine, or not routed yet, is never
+stopped and never recorded as `cancelled` after launch: it keeps its real
+result, and the intent shows as `cancel.too_late: true`. The cancel command
+promises `requested` only for a task known to run here and reports
+`live-termination-unavailable` for the rest. Intent still keeps a task that
+has not launched from launching, wherever it would have run.
 
 Cancellation leaves same-seat siblings eligible to finish. It also counts as
 a decided outcome for fail-fast, so unrelated tasks in later waves still run.

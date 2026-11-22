@@ -710,29 +710,70 @@ def test_a_worker_that_reports_cancelled_on_its_own_still_aborts_later_waves(sit
     assert facts(site.run_dir(), "task.cancel-requested") == []
 
 
-def test_remote_routed_watcher_only_journals_intent_and_never_terminates():
+def test_routed_batch_stops_only_tasks_known_to_run_here(monkeypatch):
+    # With a remote router, a task routed remote or not yet routed is never
+    # stopped; a task the router kept on this machine is.
     from types import SimpleNamespace
 
-    stopped = threading.Event()
-    drains: list[int] = []
+    from brigade import run_batch_execute
 
-    def drain():
-        drains.append(1)
-        stopped.set()
-        return True
+    def state(task_id):
+        return SimpleNamespace(
+            cancel_requested=True,
+            launch_claim=object(),
+            result_id=None,
+            handle=SimpleNamespace(spec=SimpleNamespace(task_id=task_id), attempt_id=f"att-{task_id}"),
+        )
 
-    def forbidden(*args, **kwargs):
-        raise AssertionError("a remote-routed batch must not claim live termination")
-
+    monkeypatch.setattr(run_batch_execute.run_tasks, "read_tasks", lambda run_dir: [state(n) for n in "lru"])
+    cancelled: list[str] = []
+    runtime = {name: run_batch_execute._TaskRuntime() for name in "lru"}
+    runtime["l"].routing = "local"
+    runtime["r"].routing = "remote"
     fake = SimpleNamespace(
-        _drain_inbox=drain,
-        processes=SimpleNamespace(cancel_task=forbidden),
-        turns=SimpleNamespace(interrupt=forbidden),
-        runtime={},
+        _drain_inbox=lambda: True,
+        processes=SimpleNamespace(cancel_task=lambda task_id, attempt_id: cancelled.append(task_id)),
+        turns=None,
+        runtime=runtime,
+        routed=True,
         run_dir=None,
     )
-    BatchExecution._watch_once(fake, stopped, terminate=False)
-    assert drains == [1]
+    BatchExecution._watch_once(fake, threading.Event(), terminate=True)
+    assert cancelled == ["l"]
+    assert runtime["r"].cancel_done is None and runtime["u"].cancel_done is None
+
+
+def test_route_recorder_records_each_tasks_decision(monkeypatch):
+    from types import SimpleNamespace
+
+    from brigade import run_batch_execute
+
+    marked: list[str] = []
+    monkeypatch.setattr(
+        run_batch_execute.run_task_inbox, "mark_local_task", lambda run_dir, workspace, task_id: marked.append(task_id)
+    )
+    runtime = {name: run_batch_execute._TaskRuntime() for name in ("a", "b")}
+    fake = SimpleNamespace(runtime=runtime, run_dir=None, workspace=None)
+    routed = BatchExecution._route_recorder(
+        fake, lambda seat, task, prompt: object() if "b" in task.split()[2] else None
+    )
+    assert routed("coder", "Batch task_id: a\n\ndo a", "p") is None
+    assert routed("coder", "Batch task_id: b\n\ndo b", "p") is not None
+    assert (runtime["a"].routing, runtime["b"].routing) == ("local", "remote")
+    assert marked == ["a"]
+
+
+def test_routed_live_marker_promises_a_stop_only_for_known_local_tasks(held_run):
+    run_dir, workspace = held_run
+    with inbox.live_watcher(run_dir, workspace, routed=True):
+        stoppable = inbox._live_watcher_stoppable(run_dir, workspace)
+        assert stoppable is not None and not stoppable("a")
+        inbox.mark_local_task(run_dir, workspace, "a")
+        stoppable = inbox._live_watcher_stoppable(run_dir, workspace)
+        assert stoppable("a") and not stoppable("b")
+    with inbox.live_watcher(run_dir, workspace):
+        assert inbox._live_watcher_stoppable(run_dir, workspace)("b")
+    assert inbox._live_watcher_stoppable(run_dir, workspace) is None
 
 
 def test_a_watcher_poll_error_is_survived_and_a_dead_watcher_stops_advertising(held_run, monkeypatch):
