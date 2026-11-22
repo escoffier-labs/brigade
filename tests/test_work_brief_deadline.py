@@ -88,9 +88,20 @@ def test_work_brief_times_out_a_provider_that_swallows_exceptions(tmp_path, monk
 
 
 def test_work_brief_stops_calling_sections_after_its_total_budget(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    from brigade.work_cmd.session import briefing
+
+    clock = SimpleNamespace(now=0.0)
+    monkeypatch.setattr(briefing, "time", SimpleNamespace(monotonic=lambda: clock.now))
     first = threading.Event()
     second = threading.Event()
-    monkeypatch.setattr(memory_cmd, "health", _stalled_health(first))
+
+    def stalled_memory(target):
+        clock.now = 2.0
+        return _stalled_health(first)(target)
+
+    monkeypatch.setattr(memory_cmd, "health", stalled_memory)
     # The stalled section consumes the whole budget, so later sections are
     # skipped instead of starting another provider call.
     _brief_env(monkeypatch, section="2", budget="1")

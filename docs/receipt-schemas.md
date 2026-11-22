@@ -219,7 +219,7 @@ merged, pushed or published. Integration is described in
 | `baseline_commit` | string \| null | yes | Verified Git baseline, or `null` when identity capture is unavailable |
 | `tree_fingerprint` | string \| null | yes | Verified Git tree hash, or `null` with the unavailable identity tuple |
 | `tree_fingerprint_after` | string \| null | no (additive) | Git tree fingerprint captured after a non-canceled run |
-| `tree_stable` | boolean \| null | no (additive) | Whether the before and after fingerprints match. `null` when either is unavailable, and on a reused receipt, where no command ran |
+| `tree_stable` | boolean \| null | no (additive) | Whether the fingerprints match or the Git trees differ only under `.brigade/`. `false` if different fingerprints cannot be compared. `null` when either fingerprint is unavailable or the receipt was reused |
 | `tree_fingerprint_head` | string \| null | yes | Fingerprint-time HEAD commit used to reset excluded evidence paths, or `null` with the unavailable identity tuple |
 | `changes_patch_sha256` | string \| null | yes | SHA-256 of `changes.patch`, or `null` with the unavailable identity tuple |
 | `git` | object | no | `{head, branch, dirty_files}` |
@@ -290,7 +290,7 @@ explicit command and use `source: manifest_checks` (the manifest's own checks).
 | `artifact_kind` | string | `skill` or `card` |
 | `artifact_id` | string | Verifier-owned subject id |
 | `content_fingerprint` | string | Subject content fingerprint at verify time |
-| `manifest_binding` | object | `{manifest_id, payload_sha256, source_path?}` for the exact tracked verifier manifest |
+| `manifest_binding` | object | `{manifest_id, payload_sha256, source_path?, manifest_worktree_modified?, manifest_worktree_missing?, base_source?, base_reference?, base_commit?, base_payload_sha256?}` for the exact tracked verifier manifest. Workspace manifests identify whether the trusted base came from `default_branch` or `no_remote`, name its reference and commit, and report whether the working copy is modified or missing. The payload hashes cover the exact base blob bytes. Built-in manifests omit the base fields. |
 | `patch_source` | string | `worktree` or `generated` (patch-backed only) |
 | `generated_patch_quarantine` | object | Required for scoreable `patch_source: generated` receipts (#507). See below. |
 | `producer_binding` | object | `{work_session_id, owned_delta_sha256, subject_clean_at_start, start_git}` for patch-backed runs |
@@ -318,7 +318,10 @@ check (`generated_patch_missing_repository_tests`). See
 
 Ad hoc `--command` / `--argv-json` runs omit `subject_binding` and remain audit-only (non-scoreable).
 
-Tracked workspace verifier manifests live under `verify/manifests/*.json`. A manifest owns its
+Tracked workspace verifier manifests live under `verify/manifests/*.json`. Brigade executes their
+content from the merge base with the remote default branch, not the working-tree copy. The Claude
+hook manifest gate uses that same base content when it resolves subjects, so its suggestion matches
+the command that verification will execute. A manifest owns its
 subject, ordered checks, required utility ids, optional scoped-write globs, and optional route
 opt-in (`route_paths` or exact `route_classes`). Untracked manifests cannot produce scoreable
 receipts or routing authority.
@@ -422,12 +425,22 @@ directory with the same files and file hashes as the source.
 
 **Verification summary** (`verification` object, when present)
 
+The summary references the newest completed receipt that belongs to the work
+session and covers the current tree. If none qualifies, it can reference the
+newest receipt for that session with a reason in `blockers`. The work session
+record can carry an optional `harness_session` object with `harness` and
+`fingerprint` fields for receipt matching.
+
 | Field | Type | Notes |
 | --- | --- | --- |
-| `run_id` | string | Latest verify run id |
+| `run_id` | string | Selected verify run id |
 | `status` | string | Verify receipt status |
 | `path` | string | Verify run directory |
 | `command_count` | integer | Number of command records |
+
+Verify plans and receipts can also include an `evidence.latest_verify` compact
+reference to the previous workspace receipt. Its additive `command_count`
+integer is the number of command records in that previous receipt.
 
 ---
 

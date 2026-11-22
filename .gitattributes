@@ -8,3 +8,6 @@
 
 # The memory scan ruleset is identified by the SHA-256 of its bytes, so no checkout may rewrite its line endings.
 /src/brigade/guard/memory-rules.json -text
+
+# The ledger is compared byte for byte with a recomputed ledger, so no checkout may rewrite its line endings.
+/outcome-ledger/*.json text eol=lf

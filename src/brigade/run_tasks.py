@@ -209,6 +209,14 @@ class TaskResult:
     integrations: tuple[TaskIntegration, ...] = ()
     disposal: TaskDisposal | None = None
     collected: TaskCollectedArtifact | None = None
+    # Cancellation intent is recorded separately from the task's state. It
+    # blocks a launch that has not happened yet and never rewrites a result.
+    cancel_requested: bool = False
+    cancel_reason: str | None = None
+
+    @property
+    def cancel_too_late(self) -> bool:
+        return self.cancel_requested and self.status in journal.TERMINAL and self.status != "cancelled"
 
     @property
     def native_enrolled(self) -> bool:
@@ -250,7 +258,7 @@ class _TaskHistory:
 
 @dataclass(frozen=True)
 class TaskLaunchDecision:
-    outcome: Literal["granted", "already-claimed", "terminal"]
+    outcome: Literal["granted", "already-claimed", "terminal", "cancelled-before-launch"]
     task: TaskResult
 
 
@@ -478,6 +486,12 @@ def _fold_history(run_id: str, events: list[run_journal.RunEvent]) -> _TaskHisto
             if current.disposal is not None and current.disposal != disposed:
                 raise TaskJournalError("task disposal conflicts with recorded disposal")
             results[task_id] = replace(current, disposal=disposed)
+        elif event.event_type == "task.cancel-requested":
+            # A queued request can be drained after the terminal observation.
+            # Intent never changes the worker's status or result identity.
+            if current.cancel_requested and current.cancel_reason != p["reason"]:
+                raise TaskJournalError("task cancel intent conflicts with recorded intent")
+            results[task_id] = replace(current, cancel_requested=True, cancel_reason=p["reason"])
         elif event.event_type == "task.artifact-collected":
             # A recovered collection is a late, closed record of an artifact the
             # interrupted collection would have observed. It never rewrites the
@@ -728,6 +742,12 @@ def claim_task_launch(
         binding = TaskLaunchBinding(seat, dispatch_attempt)
         if seat != handle.spec.seat or (current.launch_claim is not None and current.launch_claim != binding):
             raise TaskJournalError("task launch binding identity conflict")
+        if current.launch_claim is None and current.cancel_requested:
+            # A recorded cancel intent owns the decision, even when it landed
+            # after ``task.attempt-prepared`` and the caller's captured version
+            # is now stale. It is never reported as a generic history error, and
+            # nothing is written: the batch records the terminal cancellation.
+            return TaskLaunchDecision("cancelled-before-launch", current)
         if not journal.digest(expected_version) or expected_version != current.version:
             raise TaskJournalError("stale task launch: expected version does not match")
         used = {

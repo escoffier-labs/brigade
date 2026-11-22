@@ -31,15 +31,21 @@ stores stdout, stderr, and the receipt under the following directory.
 
 `verify runs` and `verify show` inspect those receipts.
 
+If the tree changes while Brigade prepares a reused receipt, verification runs
+the commands again. The rerun proceeds even if cleanup of the unused receipt
+directory fails.
+
 `work closeout` writes a closeout record under:
 
 ```text
 .brigade/work/closeouts/
 ```
 
-The closeout reports the latest local checks and the CI result for the current
-commit and tree. It includes the work session, task acceptance criteria when
-present, scanner sweep and review state, handoff draft state, and blockers.
+The closeout reports local checks for the work session and the CI result for
+the current commit and tree. The Markdown summary and JSON record include the
+number of command records in the local receipt. Closeout also includes the
+work session, task acceptance criteria when present, scanner sweep and review
+state, handoff draft state, and blockers.
 The session's `session.json` stores a compact closeout reference. See
 [CI evidence for HEAD](verify-ci.md).
 
@@ -80,13 +86,32 @@ Full field list: [receipt schemas](receipt-schemas.md).
 A closeout is ready when:
 
 - the work session is ended
-- the latest verification receipt completed
+- the newest applicable verification for the work session and current tree
+  completed without a recorded change outside `.brigade/` during the run
 - the consumed task has acceptance criteria when task evidence is present
 - the latest scanner sweep has not failed and has no unresolved review issue
 - code review has no unclosed review run and no unresolved imported finding
 - handoff draft health has no open issue
 
 Blocked closeouts are still written, so the operator has a local record of what remains.
+
+Run local checks before ending the work session so the receipt carries that
+session's ID. A receipt with the work session ID can count across different
+terminals or harness sessions. A receipt with only a harness fingerprint can
+count if the fingerprint matches and the run took place within the work
+session. Receipts without either binding are unattributed.
+
+Closeout skips busy and canceled runs and looks for the newest remaining
+receipt for the current tree. A failed, rejected, or timed-out run for that
+tree blocks closeout and names the run.
+
+When tree fingerprints differ, verification and closeout compare the paths
+in the Git trees. Changes confined to `.brigade/` count as the same tree,
+including the session records written by `work end`. Closeout blocks if it
+cannot read the current fingerprint or compare the Git trees. When a tree
+comparison is unavailable, the blocker notes that only Brigade state may have
+changed. If a receipt for the session is available, closeout includes its
+summary for diagnosis.
 
 ## Boundary
 

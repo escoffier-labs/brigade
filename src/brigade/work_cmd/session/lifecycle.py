@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
-from ... import dogfood_cmd, localio
+from ... import agent_identity, dogfood_cmd, localio
 from ...install import apply_gitignore
 from .. import constants, helpers, ledger as ledger_mod, config as config_mod, services as services_mod
 from .. import scanners as scanners_mod, reviews as reviews_mod, session_resume as session_resume_mod
@@ -399,6 +399,8 @@ def start(
         "started_at": started.isoformat(),
         "start": helpers._session_snapshot(target),
     }
+    if fingerprint := agent_identity.claude_session_fingerprint():
+        payload["harness_session"] = {"harness": "claude", "fingerprint": fingerprint}
     if task_snapshot is not None:
         payload["task"] = task_snapshot
     helpers._write_json(session_dir / "session.json", payload)

@@ -73,6 +73,13 @@ def test_subcommand_help_still_lists_subcommands(capsys):
     assert "tasks" in out
 
 
+def test_work_verify_help_lists_required_planning(capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["work", "verify", "--help"])
+    assert exc.value.code == 0
+    assert "required" in capsys.readouterr().out
+
+
 def test_guard_command_delegates_to_embedded_guard(monkeypatch):
     calls = []
 

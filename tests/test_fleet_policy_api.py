@@ -6,6 +6,7 @@ import copy
 import http.client
 import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
@@ -119,6 +120,50 @@ def _save_policy(hub) -> dict:
     )
     assert status == 200, payload
     return payload
+
+
+def _route_reservation(hub, session_id: str) -> dict[str, str]:
+    from brigade import fleet_hub_policy_api, fleet_hub_routing
+
+    db = fleet_hub.open_db(hub[2])
+    try:
+        document = _document()
+        document["routing"] = {
+            "enabled": True,
+            "workload_requirements": {"general": {"os": "linux", "capabilities": []}},
+        }
+        fleet_hub_policy.save_policy(db, document, expected_version=1, actor="test", reason="route")
+        fleet_hub_routing.observe_machine(
+            db,
+            {
+                "node_id": NODE_A,
+                "observed_at": fleet_hub_routing._iso(),
+                "status": "available",
+                "credential_state": "ok",
+                "usable_seats": ["seat-alpha"],
+            },
+            NODE_A,
+        )
+        _, routed = fleet_hub_policy_api.handle_policy(
+            db,
+            {
+                "action": "route",
+                "consumer": "t3-code",
+                "repo_identity": "repo/public",
+                "session_id": session_id,
+                "origin": "worker-linux-1",
+                "workload": "general",
+            },
+            caller_node=NODE_A,
+            is_admin=False,
+        )
+    finally:
+        db.close()
+    return {
+        "reservation_id": routed["reservation_id"],
+        "decision_id": routed["decision_id"],
+        "session_id": session_id,
+    }
 
 
 def test_policy_requires_auth_and_never_returns_a_token(tmp_path):
@@ -1162,8 +1207,8 @@ def test_inventory_ingest_without_collectors_is_denied(tmp_path):
         assert "not configured" in denied["error"]["message"]
 
 
-def test_reservation_accept_client_uses_node_authenticated_transport(tmp_path, monkeypatch):
-    from brigade import fleet_client_policy, fleet_hub_policy_api, fleet_hub_routing
+def test_reservation_cli_lifecycle_requires_selected_target(tmp_path, monkeypatch, capsys):
+    from brigade import cli, fleet_client_policy, fleet_hub_policy_api, fleet_hub_routing
 
     with _hub(tmp_path) as hub:
         token = _enroll(hub)
@@ -1211,18 +1256,178 @@ def test_reservation_accept_client_uses_node_authenticated_transport(tmp_path, m
         for auth, expected in [(None, 401), (ADMIN_TOKEN, 403), (other, 403)]:
             status, refused = _request(hub, "POST", "/policy", token=auth, body={"action": "reservation-accept", **ids})
             assert status == expected, refused
-        calls = []
+        for auth in (token, ADMIN_TOKEN):
+            for action in ("reservation-renew", "reservation-release"):
+                status, refused = _request(hub, "POST", "/policy", token=auth, body={"action": action, **ids})
+                assert status == 403, (action, refused)
+                assert refused["error"]["code"] == "auth-failed"
 
         def configured_transport(*, admin):
-            calls.append(admin)
+            assert admin is False
             return f"http://{hub[0]}:{hub[1]}", token
 
         monkeypatch.setattr(fleet_client_policy, "_hub_and_token", configured_transport)
-        accepted = fleet_client_policy.accept_reservation(**ids)
+
+        def run_reservation(action):
+            args = ["fleet", "policy", "reservation", action, "--json"]
+            for name, value in ids.items():
+                args.extend((f"--{name.replace('_', '-')}", value))
+            assert cli.main(args) == 0
+            return json.loads(capsys.readouterr().out)
+
+        accepted = run_reservation("accept")
         assert accepted["state"] == "accepted"
         assert accepted["reservation_id"] == ids["reservation_id"]
-        assert fleet_client_policy.accept_reservation(**ids) == accepted
-        assert calls == [False, False]
+        assert run_reservation("accept") == accepted
+
+        for auth in (other, ADMIN_TOKEN):
+            for action in ("reservation-renew", "reservation-release"):
+                status, refused = _request(hub, "POST", "/policy", token=auth, body={"action": action, **ids})
+                assert status == 403, (action, refused)
+                assert refused["error"]["code"] == "auth-failed"
+
+        renewed = run_reservation("renew")
+        assert renewed["reservation_id"] == ids["reservation_id"]
+        assert renewed["state"] == "active"
+        released = run_reservation("release")
+        assert released["reservation_id"] == ids["reservation_id"]
+        assert released["state"] == "released"
+
+
+def test_reservation_cli_refuses_release_before_accept_and_renew_after_release(tmp_path, monkeypatch, capsys):
+    from brigade import cli, fleet_client_policy
+
+    with _hub(tmp_path) as hub:
+        token = _enroll(hub, NODE_A)
+        ids = _route_reservation(hub, "accept-cli-lifecycle")
+
+        def configured_transport(*, admin):
+            assert admin is False
+            return f"http://{hub[0]}:{hub[1]}", token
+
+        monkeypatch.setattr(fleet_client_policy, "_hub_and_token", configured_transport)
+
+        refused = cli.main(
+            [
+                "fleet",
+                "policy",
+                "reservation",
+                "release",
+                "--reservation-id",
+                ids["reservation_id"],
+                "--decision-id",
+                ids["decision_id"],
+                "--session-id",
+                ids["session_id"],
+                "--json",
+            ]
+        )
+        assert refused != 0
+        refusal = json.loads(capsys.readouterr().out)
+        assert refusal["error"]["code"] == "auth-failed"
+
+        status, accepted = _request(
+            hub,
+            "POST",
+            "/policy",
+            token=token,
+            body={"action": "reservation-accept", **ids},
+        )
+        assert status == 200, accepted
+        status, released = _request(
+            hub,
+            "POST",
+            "/policy",
+            token=token,
+            body={"action": "reservation-release", **ids},
+        )
+        assert status == 200, released
+        assert released["state"] == "released"
+
+        after_release_rc = cli.main(
+            [
+                "fleet",
+                "policy",
+                "reservation",
+                "renew",
+                "--reservation-id",
+                ids["reservation_id"],
+                "--decision-id",
+                ids["decision_id"],
+                "--session-id",
+                ids["session_id"],
+                "--json",
+            ]
+        )
+        assert after_release_rc != 0
+        after_release = json.loads(capsys.readouterr().out)
+        assert after_release["error"]["code"] == "invalid-request"
+
+        db = fleet_hub.open_db(hub[2])
+        try:
+            row = db.execute(
+                "SELECT accepted, state FROM fleet_reservations WHERE reservation_id=?",
+                (ids["reservation_id"],),
+            ).fetchone()
+        finally:
+            db.close()
+        assert row is not None
+        assert (row[0], row[1]) == (1, "released")
+
+
+def test_concurrent_reservation_accept_is_idempotent_over_real_http(tmp_path, monkeypatch):
+    from brigade import fleet_hub_routing
+
+    with _hub(tmp_path) as hub:
+        token = _enroll(hub, NODE_A)
+        ids = _route_reservation(hub, "concurrent-accept")
+        original_claim = fleet_hub_routing.claim_dispatch_intent
+        claim_calls = 0
+        claim_calls_lock = threading.Lock()
+
+        def count_claim(*args, **kwargs):
+            nonlocal claim_calls
+            with claim_calls_lock:
+                claim_calls += 1
+            return original_claim(*args, **kwargs)
+
+        monkeypatch.setattr(fleet_hub_routing, "claim_dispatch_intent", count_claim)
+        start = threading.Barrier(2)
+
+        def accept_concurrently():
+            start.wait()
+            return _request(
+                hub,
+                "POST",
+                "/policy",
+                token=token,
+                body={"action": "reservation-accept", **ids},
+            )
+
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [executor.submit(accept_concurrently) for _ in range(2)]
+            results = [future.result() for future in futures]
+
+        assert [status for status, _ in results] == [200, 200]
+        responses = [payload for _, payload in results]
+        assert responses[0] == responses[1]
+        assert responses[0]["state"] == "accepted"
+        assert claim_calls == 1
+
+        db = fleet_hub.open_db(hub[2])
+        try:
+            reservation = db.execute(
+                "SELECT accepted, state FROM fleet_reservations WHERE reservation_id=?",
+                (ids["reservation_id"],),
+            ).fetchone()
+            intent = db.execute(
+                "SELECT state FROM fleet_dispatch_intents WHERE decision_id=?",
+                (ids["decision_id"],),
+            ).fetchone()
+        finally:
+            db.close()
+        assert reservation is not None and (reservation[0], reservation[1]) == (1, "active")
+        assert intent is not None and intent[0] == "accepted"
 
 
 def test_memory_auto_apply_is_refused_without_a_policy_revision(tmp_path):

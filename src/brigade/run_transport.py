@@ -61,12 +61,25 @@ class Assignment:
     attempt_id: str | None = None
 
 
+# The status a batch gives a running task its own cancel watcher stopped. It is
+# distinct from a provider's generic "cancelled", which stays a failure.
+TASK_CANCELLED_STATUS = "task-cancelled"
+# Decided cancellations and the launch refusals they cause do not abort later
+# waves. A worker that reports "cancelled" on its own still aborts them.
+NON_ABORTING_STATUSES = frozenset({TASK_CANCELLED_STATUS, "cancelled-before-launch", "prerequisite-cancelled"})
+
+
 class LaunchRefused(Exception):
     """A dispatch-requested callback refuses this launch.
 
     Raised before route resolution, model lease or provider execution. The
     worker is recorded as refused and nothing falls back to another seat or route.
+    A closed ``code`` from ``NON_ABORTING_STATUSES`` becomes the result status.
     """
+
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 @dataclass(frozen=True)
@@ -613,7 +626,7 @@ def dispatch(
     remote_transport: RemoteTransport | None = None,
     coordinator_prompt_sha256: str | None = None,
     codex_transport: str | None = None,
-    on_result: Callable[[WorkerResult], None] | None = None,
+    on_result: Callable[[WorkerResult], WorkerResult | None] | None = None,
     allow_reinvocation: bool = True,
     policy_workspace: Path | None = None,
     recording_policy_workspace: Path | None = None,
@@ -840,7 +853,13 @@ def dispatch(
         ) -> agents.AgentResult:
             assert selected_agent.cli is not None
             cli_ref = selected_agent.cli
-            seat_process_registry = process_registry.for_seat(selected_agent.name)
+            if assignment.task_id is not None and assignment.attempt_id is not None:
+                seat_process_registry = process_registry.for_task(
+                    assignment.task_id, assignment.attempt_id, selected_agent.name
+                )
+                seat_process_registry.check_cancellation()
+            else:
+                seat_process_registry = process_registry.for_seat(selected_agent.name)
             cloud_dispatch_kwargs = {"cloud_safe_mode": selected_agent.cloud_safe_mode}
             session_binding_id = (
                 resume_session_id or str(uuid.uuid4())
@@ -1131,7 +1150,7 @@ def dispatch(
                         text="",
                         ok=False,
                         detail=str(exc),
-                        status="refused",
+                        status=exc.code if exc.code in NON_ABORTING_STATUSES else "refused",
                         failure_phase="dispatch",
                         failure_kind="launch-refused",
                         transport=_receipt_transport(selected_agent, appserver=appserver),
@@ -1402,16 +1421,19 @@ def dispatch(
 
     recorded_run_one = run_one
 
+    def observe_result(result: WorkerResult) -> WorkerResult:
+        if on_result is not None:
+            try:
+                return on_result(result) or result
+            except Exception as exc:
+                print(f"warning: worker result observation failed: {exc}", file=sys.stderr)
+        return result
+
     def observed_run_one(assignment: Assignment, prior_results: list[WorkerResult]) -> WorkerResult:
         result = recorded_run_one(assignment, prior_results)
         if assignment.task_id is not None:
             result = replace(result, task_id=assignment.task_id)
-        if on_result is not None:
-            try:
-                on_result(result)
-            except Exception as exc:
-                print(f"warning: worker result observation failed: {exc}", file=sys.stderr)
-        return result
+        return observe_result(result)
 
     run_one = observed_run_one
 
@@ -1482,14 +1504,19 @@ def dispatch(
                     raise
                 except Exception as exc:  # pragma: no cover - defensive boundary
                     assignment = stage_assignments[index]
-                    stage_results_by_index[index] = WorkerResult(
+                    # A launch-point refusal with a closed decided code keeps
+                    # that code as its status, so fail-fast can tell it apart.
+                    code = getattr(exc, "code", None)
+                    result = WorkerResult(
                         worker=assignment.worker,
                         task=assignment.task,
                         text="",
                         ok=False,
                         detail=str(exc)[:200],
+                        status=code if code in NON_ABORTING_STATUSES else "",
                         task_id=assignment.task_id,
                     )
+                    stage_results_by_index[index] = observe_result(result) if assignment.task_id is not None else result
         except KeyboardInterrupt as exc:
             try:
                 if on_interrupt is not None:
@@ -1511,7 +1538,7 @@ def dispatch(
             executor.shutdown(wait=True)
         stage_results = [stage_results_by_index[index] for index in range(len(stage_assignments))]
         all_results.extend(stage_results)
-        if fail_fast and any(not result.ok for result in stage_results):
+        if fail_fast and any(not result.ok and result.status not in NON_ABORTING_STATUSES for result in stage_results):
             abort_after_stage = stage
     return all_results
 

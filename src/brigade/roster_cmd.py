@@ -406,10 +406,9 @@ def ready(
         try:
             resolution = roster_mod.resolve_roster(target, roster_path)
             loaded = replace(roster_mod.load_roster(resolution.path), resolution=resolution)
-            # Governed T3 claim admission reads the roster without the cached
-            # run-preference overlay. Evaluate route t3 against that same roster
-            # so readiness and claim cannot disagree about the orchestrator.
-            if route != "t3":
+            # Governed native claims read the roster without the cached
+            # run-preference overlay. Use that same roster for native readiness.
+            if route == "brigade":
                 loaded = run_preference.apply_to_roster(loaded, run_preference.load_cached())
             request = roster_readiness.ReadinessRequest(
                 workers, concurrency, route, isolation, capability, read_only=False
@@ -451,9 +450,11 @@ def ready(
     if json_output:
         print(json.dumps(report, sort_keys=True, allow_nan=False))
     else:
-        t3_ready = report["status"] == "ready" and (report.get("request") or {}).get("route") == "t3"
-        if t3_ready:
+        ready_route = (report.get("request") or {}).get("route") if report["status"] == "ready" else None
+        if ready_route == "t3":
             print("ready (parent-reported route support; non-reserving snapshot)")
+        elif ready_route == "orca":
+            print("ready (local Orca route support; non-reserving snapshot)")
         else:
             print(f"readiness: {report['status']} (exit {report['exit_code']})")
         print(f"scope: {report.get('scope')}")

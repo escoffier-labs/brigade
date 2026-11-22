@@ -1,4 +1,0 @@
-- Require a workspace receipt key for lesson review and discard keyless prompt spools.
-- Order observations by authenticated history and acknowledge prompts only after the final persisted event check.
-- Authenticate prepared lesson publications before recovery and preserve portable receipt paths and patch bytes.
-- Gate automatic lesson admission until the non-rollbackable hub anchor in #2620 exists.

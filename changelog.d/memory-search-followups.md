@@ -1,1 +1,0 @@
-- Memory search follow-up hints now open fused scoped matches by card id. Search JSON documentation now covers local publication ids.

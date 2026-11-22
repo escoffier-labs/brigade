@@ -29,12 +29,12 @@ def launch_recorder(
     """Build the ``record_requested`` callback for one task's reservation."""
     task_id = assignment.task_id if assignment is not None else None
 
-    def refuse(reason: str) -> LaunchRefused:
+    def refuse(reason: str, code: str | None = None) -> LaunchRefused:
         # An explicit check, not an assert: it must hold under python -O too.
         if task_id is None:
             return LaunchRefused(f"batch launch refused: no task identity ({reason})")
         on_refused(task_id)
-        return LaunchRefused(f"task {task_id} launch refused: {reason}")
+        return LaunchRefused(f"task {task_id} launch refused: {reason}", code=code)
 
     def record(attempt: int) -> int | None:
         if (
@@ -56,7 +56,7 @@ def launch_recorder(
         except run_tasks.TaskJournalError as exc:
             raise refuse(f"journal rejected the claim ({exc})") from exc
         if decision.outcome != "granted":
-            raise refuse(decision.outcome)
+            raise refuse(decision.outcome, code=decision.outcome)
         # A crash here leaves the claim durable without a requested fact. A retry
         # then sees "already-claimed" and never relaunches.
         return record_requested(attempt)

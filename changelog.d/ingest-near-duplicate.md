@@ -1,2 +1,0 @@
-- Handoff ingest checks reflect's near-duplicate settings before filing cards and names the matched card in review receipts. Duplicate handoffs in one ingest run share a pending review item.
-- Keep complete handoffs requiring human review separate from near-duplicate drafts. Reinforcement retries remove failed new receipts and avoid repeated merged source pointers.

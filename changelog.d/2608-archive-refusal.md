@@ -1,3 +1,0 @@
-- An occupied or refused archive destination now skips only that card. The lifecycle pass and later tending stages keep running.
-- Automatic recovery holds a prepared decision that overlaps another unfinished operation for named recovery instead of stopping the tend run.
-- Once automatic recovery hands a decision to an operator after a conflict or a blocking projection, later automatic runs keep it held even if the conflict clears. Only named recovery can finish it.

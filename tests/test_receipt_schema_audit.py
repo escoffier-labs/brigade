@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import aboyeur, outcome_cmd, receipt_schema, runguard
+from brigade import aboyeur, localio, outcome_cmd, receipt_schema, runguard
 from brigade.work_cmd import helpers, verification as verify_mod
 
 
@@ -444,18 +444,23 @@ def test_verify_receipt_emits_tree_fingerprint_head_inside_git(tmp_path, capsys,
 
 
 def test_write_reused_receipt_omits_reused_from_without_source_run_id(tmp_path):
+    _init_git_repo(tmp_path)
+    fingerprint = localio.tree_fingerprint(tmp_path)
+    assert fingerprint
     receipt, rc = verify_mod._write_reused_receipt(
         tmp_path,
         {"commands": [], "status": "completed"},
         ["true"],
         60,
+        admitted_fingerprint=fingerprint,
     )
     assert rc == 0
+    assert receipt is not None
     assert "reused_from" not in receipt
-    assert receipt["baseline_commit"] is None
-    assert receipt["tree_fingerprint"] is None
-    assert receipt["tree_fingerprint_head"] is None
-    assert receipt["changes_patch_sha256"] is None
+    assert receipt["baseline_commit"]
+    assert receipt["tree_fingerprint"] == fingerprint
+    assert receipt["tree_fingerprint_head"] == receipt["baseline_commit"]
+    assert receipt["changes_patch_sha256"]
 
 
 def test_work_closeout_emits_schema_version(tmp_path, monkeypatch):
@@ -477,7 +482,7 @@ def test_work_closeout_emits_schema_version(tmp_path, monkeypatch):
                 "run_id": "verify-run",
                 "status": "completed",
                 "path": str(tmp_path / "verify"),
-                "commands": [{"command": "true"}],
+                "command_count": 1,
             },
             "task": {"id": "task-one", "text": "Audit"},
             "task_acceptance": ["Done"],

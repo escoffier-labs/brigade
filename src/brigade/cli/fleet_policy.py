@@ -94,9 +94,18 @@ def register(fleet_sub: argparse._SubParsersAction) -> None:
     p_route.add_argument("--json", action="store_true", help="Emit JSON.")
     p_route.set_defaults(func=_dispatch_route)
 
-    p_reservation = policy_sub.add_parser("reservation", help="Renew or release a routing reservation.")
+    p_reservation = policy_sub.add_parser("reservation", help="Accept, renew, or release a routing reservation.")
     reservation_sub = p_reservation.add_subparsers(dest="policy_reservation_command", metavar="<reservation-command>")
     reservation_sub.required = True
+    p_accept = reservation_sub.add_parser(
+        "accept",
+        help="Accept a routing reservation as the selected target. Its slot stays held until release.",
+    )
+    p_accept.add_argument("--reservation-id", required=True, dest="reservation_id")
+    p_accept.add_argument("--decision-id", required=True, dest="decision_id")
+    p_accept.add_argument("--session-id", required=True, dest="session_id")
+    p_accept.add_argument("--json", action="store_true", help="Emit JSON.")
+    p_accept.set_defaults(func=_dispatch_reservation_accept)
     p_renew = reservation_sub.add_parser("renew", help="Renew a routing reservation.")
     p_renew.add_argument("--reservation-id", required=True, dest="reservation_id")
     p_renew.add_argument("--decision-id", required=True, dest="decision_id")
@@ -381,6 +390,18 @@ def _dispatch_route(args: argparse.Namespace) -> int:
         return _fail(exc)
     _emit(payload, json_out=True)
     return 0 if payload.get("selected") else 1
+
+
+def _dispatch_reservation_accept(args: argparse.Namespace) -> int:
+    try:
+        payload = fleet_client_policy.accept_reservation(
+            reservation_id=args.reservation_id,
+            decision_id=args.decision_id,
+            session_id=args.session_id,
+        )
+    except Exception as exc:
+        return _fail(exc)
+    return _emit(payload, json_out=True)
 
 
 def _dispatch_reservation_renew(args: argparse.Namespace) -> int:
