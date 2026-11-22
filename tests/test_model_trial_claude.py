@@ -1,5 +1,6 @@
 """Live paired adapter, driven by a fake `claude` that emits recorded-style stream-json."""
 
+import ctypes
 import errno
 import hashlib
 import io
@@ -13,11 +14,12 @@ import tempfile
 import threading
 import time
 import types
+from ctypes import wintypes
 from pathlib import Path
 
 import pytest
 
-from brigade import cli, model_trial_claude, model_trials, proc, proc_group
+from brigade import cli, model_trial_claude, model_trials, proc, proc_group, proc_windows_job
 from brigade.memory_verify_seat import CLAUDE_SETTINGS
 from brigade.proc_group import drain_supported
 from brigade.model_trial_claude import (
@@ -831,9 +833,9 @@ def test_windows_arm_has_a_deadline_even_when_a_descendant_holds_the_pipes(
         return job
 
     monkeypatch.setattr(model_trial_claude, "os", types.SimpleNamespace(name="nt"))
-    monkeypatch.setattr(proc, "create_owned_windows_job", create_job)
+    monkeypatch.setattr(proc_windows_job, "create_windows_child_job", create_job)
     monkeypatch.setattr(proc, "suspended_process_group_kwargs", lambda: {"creationflags": 4})
-    monkeypatch.setattr(proc, "bind_owned_windows_child", bind)
+    monkeypatch.setattr(proc_windows_job, "bind_suspended_windows_child", bind)
     monkeypatch.setattr(model_trial_claude.subprocess, "Popen", launch)
     observer = _Observer(expected_model="m", session_id="s", version="v", cwd=tmp_path)
     start = time.monotonic()
@@ -846,6 +848,88 @@ def test_windows_arm_has_a_deadline_even_when_a_descendant_holds_the_pipes(
         assert actions == ["create", ("launch", 4), "bind", "terminate", "close"]
     finally:
         released.set()
+
+
+def test_windows_arm_declares_all_win32_job_and_thread_prototypes(monkeypatch, tmp_path):
+    handle, dword, boolean = wintypes.HANDLE, wintypes.DWORD, wintypes.BOOL
+    job_handle, process_handle, snapshot, thread_handle = (0x1_0000_0000 + offset for offset in range(4))
+    calls = []
+    resumed = iter([1, 0])
+    child = types.SimpleNamespace(
+        _handle=process_handle,
+        pid=4242,
+        stdin=io.BytesIO(),
+        stdout=io.BytesIO(b"\n"),
+        stderr=io.BytesIO(b"diagnostic"),
+        poll=lambda: 0,
+    )
+
+    class Win32Function:
+        def __init__(self, name, argtypes, restype, implementation):
+            self.name = name
+            self.expected = (argtypes, restype)
+            self.implementation = implementation
+            self.argtypes = self.restype = None
+
+        def __call__(self, *args):
+            assert (self.argtypes, self.restype) == self.expected, self.name
+            calls.append((self.name, args[0]))
+            return self.implementation(*args)
+
+    def thread_next(_snapshot, entry):
+        entry._obj.th32OwnerProcessID = child.pid
+        entry._obj.th32ThreadID = 777
+        return True
+
+    signatures = {
+        "CreateJobObjectW": ([wintypes.LPVOID, wintypes.LPCWSTR], handle, lambda *_: job_handle),
+        "SetInformationJobObject": ([handle, ctypes.c_int, wintypes.LPVOID, dword], boolean, lambda *_: True),
+        "AssignProcessToJobObject": ([handle, handle], boolean, lambda _, process: process == process_handle),
+        "TerminateJobObject": ([handle, wintypes.UINT], boolean, lambda *_: True),
+        "CloseHandle": ([handle], boolean, lambda *_: True),
+        "CreateToolhelp32Snapshot": ([dword, dword], handle, lambda *_: snapshot),
+        "Thread32First": ([handle, wintypes.LPVOID], boolean, lambda *_: True),
+        "Thread32Next": ([handle, wintypes.LPVOID], boolean, thread_next),
+        "OpenThread": ([dword, boolean, dword], handle, lambda *_: thread_handle),
+        "ResumeThread": ([handle], dword, lambda _: next(resumed)),
+    }
+    kernel32 = types.SimpleNamespace(**{name: Win32Function(name, *spec) for name, spec in signatures.items()})
+    windows = types.SimpleNamespace(name="nt")
+    monkeypatch.setattr(proc, "os", windows)
+    monkeypatch.setattr(proc_windows_job, "os", windows)
+    monkeypatch.setattr(model_trial_claude, "os", windows)
+    monkeypatch.setattr(ctypes, "WinDLL", lambda *_args, **_kwargs: kernel32, raising=False)
+
+    def legacy_wrapper(*_args):
+        pytest.fail("the trial should call proc_windows_job directly")
+
+    monkeypatch.setattr(proc, "create_owned_windows_job", legacy_wrapper)
+    monkeypatch.setattr(proc, "bind_owned_windows_child", legacy_wrapper)
+
+    def launch(_command, **kwargs):
+        assert kwargs["creationflags"] & 4  # CREATE_SUSPENDED
+        calls.append(("launch", None))
+        return child
+
+    monkeypatch.setattr(model_trial_claude.subprocess, "Popen", launch)
+    observer = _Observer(expected_model="m", session_id="s", version="v", cwd=tmp_path)
+    assert _run_process(["fake"], {}, tmp_path, "", 2, observer, "tok") == (b"\n", b"diagnostic", 0, False, False)
+    assert calls == [
+        ("CreateJobObjectW", None),
+        ("SetInformationJobObject", job_handle),
+        ("launch", None),
+        ("AssignProcessToJobObject", job_handle),
+        ("CreateToolhelp32Snapshot", 4),
+        ("Thread32First", snapshot),
+        ("Thread32Next", snapshot),
+        ("OpenThread", 2),
+        ("ResumeThread", thread_handle),
+        ("ResumeThread", thread_handle),
+        ("CloseHandle", thread_handle),
+        ("CloseHandle", snapshot),
+        ("TerminateJobObject", job_handle),
+        ("CloseHandle", job_handle),
+    ]
 
 
 @pytest.mark.skipif(os.name != "nt", reason="exercises native Windows job and inherited pipes")

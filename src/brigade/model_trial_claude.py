@@ -30,7 +30,7 @@ from pathlib import Path
 from typing import Any, BinaryIO, Callable, Iterator, Mapping, Sequence, cast
 from urllib.parse import unquote
 
-from . import dirfd, proc
+from . import dirfd, proc, proc_windows_job
 from .proc_group import ProcessGroupUnreadable, drain_supported, group_has_live_members, kill_group_members
 from .memory_verify_seat import CLAUDE_BUILTIN_AGENTS, CLAUDE_SETTINGS, open_executable
 from .model_trial_paired import (
@@ -48,7 +48,6 @@ from .paired_mcp import RECEIPT_FILE, SERVER_NAME, TRACE_FILE
 from .paired_output import inspect_tree, safe_output
 from .paired_output import write as safe_write
 from .model_trial_paired import collect_package
-from .proc_windows_job import abort_windows_launch
 from .skills_cmd.registry import _package_identity
 
 ADAPTER_ID = "brigade.claude-cli-live.v1"
@@ -743,7 +742,7 @@ def _run_windows_process(
     token: str,
 ) -> tuple[bytes, bytes, int | None, bool, bool]:
     deadline = time.monotonic() + timeout
-    job = proc.create_owned_windows_job()
+    job = proc_windows_job.create_windows_child_job()
     if job is None:
         raise OSError("could not create an owned Windows job for the trial arm")
     child: subprocess.Popen[bytes] | None = None
@@ -757,11 +756,11 @@ def _run_windows_process(
             stderr=subprocess.PIPE,
             **proc.suspended_process_group_kwargs(),
         )
-        bind_error = proc.bind_owned_windows_child(job, child, command)
+        bind_error = proc_windows_job.bind_suspended_windows_child(job, child, command)
         if bind_error is not None:
             raise OSError(bind_error)
     except BaseException:
-        abort_windows_launch(child, job)
+        proc_windows_job.abort_windows_launch(child, job)
         if child is not None:
             for pipe in (child.stdin, child.stdout, child.stderr):
                 if pipe is not None:
