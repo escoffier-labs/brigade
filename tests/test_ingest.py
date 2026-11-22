@@ -1620,6 +1620,120 @@ def test_ingest_leaves_git_tracked_handoffs_in_place(tmp_target: Path):
     assert status.stdout == ""
 
 
+def test_ingest_scans_an_unchanged_index_once(tmp_target: Path, monkeypatch):
+    inbox = _seed(tmp_target)
+    _git(tmp_target, "init", "-q")
+    tracked = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    _git(tmp_target, "add", "-f", "--", str(tracked.relative_to(tmp_target)))
+    names = ["first.md", "second.md", "third.md"]
+    for name in names:
+        (inbox / name).write_text(_PLAIN_HANDOFF)
+
+    real_run = subprocess.run
+    scans = []
+
+    def count_scans(cmd, **kwargs):
+        if "ls-files" in cmd:
+            scans.append(cmd)
+        return real_run(cmd, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", count_scans)
+    stats = ingest_mod.IngestStats()
+    assert ingest_mod.ingest_into(source=tmp_target, owner=tmp_target, stats=stats) == 0
+    assert stats.inboxed == 3
+    assert stats.skipped == 1
+    assert tracked.is_file()
+    assert all((inbox / "processed" / name).is_file() for name in names)
+    assert len(scans) == 1
+
+
+@pytest.mark.parametrize("split_index", [False, True])
+def test_ingest_refreshes_index_after_destination_write(tmp_target: Path, monkeypatch, split_index):
+    inbox = _seed(tmp_target)
+    _git(tmp_target, "init", "-q")
+    indexed = tmp_target / "indexed.txt"
+    indexed.write_text("indexed elsewhere")
+    _git(tmp_target, "add", "--", indexed.name)
+    if split_index:
+        _git(tmp_target, "update-index", "--split-index")
+
+    handoff = inbox / "staged-at-archive.md"
+    handoff.write_text(_PLAIN_HANDOFF)
+    original_write = ingest_mod._write_review_draft
+
+    def stage_after_write(*args):
+        draft = original_write(*args)
+        _git(tmp_target, "add", "-f", "--", str(handoff.relative_to(tmp_target)))
+        return draft
+
+    monkeypatch.setattr(ingest_mod, "_write_review_draft", stage_after_write)
+    stats = ingest_mod.IngestStats()
+    assert ingest_mod.ingest_into(source=tmp_target, owner=tmp_target, stats=stats) == 0
+    assert stats.skipped == 1
+    assert handoff.is_file()
+    assert not (inbox / "processed" / handoff.name).exists()
+
+
+def test_ingest_rechecks_indexed_parent_alias_after_destination_write(tmp_target: Path, monkeypatch):
+    inbox = _seed(tmp_target)
+    _git(tmp_target, "init", "-q")
+    handoff = inbox / "aliased-at-archive.md"
+    handoff.write_text(_PLAIN_HANDOFF)
+    alias = tmp_target / "alias"
+    alias.mkdir()
+    indexed = alias / handoff.name
+    indexed.write_text(_PLAIN_HANDOFF)
+    _git(tmp_target, "add", "--", str(indexed.relative_to(tmp_target)))
+    indexed.unlink()
+    alias.rmdir()
+    try:
+        alias.symlink_to(inbox, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("directory symlinks unavailable")
+    alias.unlink()
+    original_write = ingest_mod._write_review_draft
+
+    def alias_after_write(*args):
+        draft = original_write(*args)
+        alias.symlink_to(inbox, target_is_directory=True)
+        return draft
+
+    monkeypatch.setattr(ingest_mod, "_write_review_draft", alias_after_write)
+    stats = ingest_mod.IngestStats()
+    assert ingest_mod.ingest_into(source=tmp_target, owner=tmp_target, stats=stats) == 0
+    assert stats.skipped == 1
+    assert handoff.is_file()
+    assert not (inbox / "processed" / handoff.name).exists()
+
+
+def test_ingest_refuses_listing_if_index_changes_during_scan(tmp_target: Path, monkeypatch, capsys):
+    inbox = _seed(tmp_target)
+    _git(tmp_target, "init", "-q")
+    indexed = tmp_target / "indexed.txt"
+    indexed.write_text("indexed elsewhere")
+    _git(tmp_target, "add", "--", indexed.name)
+    handoff = inbox / "staged-during-scan.md"
+    handoff.write_text(_PLAIN_HANDOFF)
+    real_run = subprocess.run
+    staged = False
+
+    def stage_during_scan(cmd, **kwargs):
+        nonlocal staged
+        result = real_run(cmd, **kwargs)
+        if "ls-files" in cmd and not staged:
+            staged = True
+            _git(tmp_target, "add", "-f", "--", str(handoff.relative_to(tmp_target)))
+        return result
+
+    monkeypatch.setattr(subprocess, "run", stage_during_scan)
+    stats = ingest_mod.IngestStats()
+    assert ingest_mod.ingest_into(source=tmp_target, owner=tmp_target, stats=stats) == 0
+    assert stats.skipped == 1
+    assert handoff.is_file()
+    assert not (inbox / "processed" / handoff.name).exists()
+    assert "git index changed during handoff tracking check" in capsys.readouterr().err
+
+
 def test_ingest_tracking_check_does_not_run_fsmonitor_hook(tmp_path: Path):
     inbox = tmp_path / "inbox"
     inbox.mkdir()
