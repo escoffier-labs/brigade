@@ -57,7 +57,20 @@ def digest_ref(ref: str, repo_dir: str) -> str:
     commit = subprocess.check_output(
         ["git", "rev-parse", "--verify", "--end-of-options", f"{ref}^{{commit}}"], cwd=repo_dir, text=True
     ).strip()
-    command = ["git", "archive", "--format=tar", "--prefix=source/", commit]
+    # git archive applies the local line-ending settings, so a Windows checkout with
+    # core.autocrlf=true would write CRLF files and give a different pin. GitHub builds
+    # its archives without them, so turn them off to match.
+    command = [
+        "git",
+        "-c",
+        "core.autocrlf=false",
+        "-c",
+        "core.eol=lf",
+        "archive",
+        "--format=tar",
+        "--prefix=source/",
+        commit,
+    ]
     with subprocess.Popen(command, cwd=repo_dir, stdout=subprocess.PIPE) as process:
         assert process.stdout is not None
         with process.stdout:

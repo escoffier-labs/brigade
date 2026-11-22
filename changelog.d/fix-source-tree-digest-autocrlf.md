@@ -1,0 +1,1 @@
+- `ops/fleet-hub/bin/source-tree-digest.py --ref` now gives the same pin on a Windows checkout with `core.autocrlf=true` as on Linux and as GitHub archives.

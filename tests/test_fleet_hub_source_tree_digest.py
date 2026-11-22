@@ -90,13 +90,22 @@ def test_source_tree_digest_rejects_a_top_level_file():
 
 
 def test_digest_ref_matches_the_archive_of_the_same_commit(tmp_path):
-    def git(*args):
-        return subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True, text=True).stdout
+    def git(*args, data=None):
+        return (
+            subprocess.run(["git", *args], cwd=tmp_path, input=data, check=True, capture_output=True)
+            .stdout.decode()
+            .strip()
+        )
 
+    # Plumbing writes the exact blob and symlink entries; a working-tree symlink and
+    # `git add` store something else on Windows (core.symlinks, autocrlf).
     git("init", "-q")
-    (tmp_path / "file").write_bytes(b"hello\n")
-    (tmp_path / "link").symlink_to("file")
-    git("add", "file", "link")
+    # A Windows checkout often sets this; the pin must not depend on it.
+    git("config", "core.autocrlf", "true")
+    file_blob = git("hash-object", "-w", "--stdin", data=b"hello\n")
+    link_blob = git("hash-object", "-w", "--stdin", data=b"file")
+    git("update-index", "--add", "--cacheinfo", f"100644,{file_blob},file")
+    git("update-index", "--add", "--cacheinfo", f"120000,{link_blob},link")
     git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "t")
     expected = MODULE.source_tree_digest(tree("other"))
     assert MODULE.digest_ref("HEAD", str(tmp_path)) == expected
