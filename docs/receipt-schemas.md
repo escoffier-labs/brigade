@@ -264,8 +264,8 @@ boolean `no_tests_ran`. The parser uses the full captured standard output.
 | `eligible` | boolean | Whether the receipt can satisfy the Stop gate, subject to the hook's session, target, time, and tree checks |
 | `reason` | string | Machine-readable verdict such as `passed_required_check`, `no_tests_passed`, or `declaration_invalid` |
 | `declaration_sha256` | string | SHA-256 of the original declaration bytes, present when the declaration was loaded |
-| `base_commit` | string | Commit that supplied the declaration, present when loaded from the Git base or local HEAD |
-| `fallback_source` | string | Present when the Git base could not be resolved. `head` uses local HEAD, `worktree` uses the working tree, and `none` means neither contains a declaration |
+| `base_commit` | string | Commit that supplied the declaration, present when loaded from a Git commit |
+| `fallback_source` | string | Present when the Git base could not be resolved. `default_branch_tip` uses the fetched default branch, `head` uses local HEAD, `worktree` uses the working tree, and `none` means no fallback contained a declaration |
 | `plan_coverage` | string | `not_checked`. The verdict evaluates the recorded command and its results. |
 
 A reused receipt copies its source verdict when the policy mode, declaration

@@ -174,13 +174,16 @@ def test_unresolved_base_without_declaration_audits(repo, monkeypatch, capsys, t
             unrelated = _git(repo, "commit-tree", "HEAD^{tree}", "-m", "unrelated")
             _git(repo, "update-ref", "refs/remotes/origin/main", unrelated)
     stop, _ = _start(repo, monkeypatch)
+    block = runtime.handle_payload("Stop", stop)
     receipt = _run(repo, monkeypatch, capsys, ["true"])
 
     _verdict(receipt, "audit_only", True, "audit_only")
     assert receipt["gating"]["fallback_source"] == "none"
     result = runtime.handle_payload("Stop", stop)
-    assert result.get("decision") != "block"
-    notice = result["hookSpecificOutput"]["additionalContext"]
+    assert result is None or result.get("decision") is None
+    assert "Git base was unresolved" not in json.dumps(result)
+    assert block["decision"] == "block"
+    notice = block["reason"]
     assert "Git base was unresolved" in notice
     assert "either local HEAD or the working tree" in notice
     if topology in {"upstream", "custom_default"}:
@@ -215,6 +218,38 @@ def test_unresolved_base_enforces_local_declaration(repo, monkeypatch, capsys, s
     assert runtime.handle_payload("Stop", stop).get("decision") != "block"
 
 
+@pytest.mark.parametrize("valid", [True, False])
+def test_shallow_clone_uses_default_branch_tip(repo, valid):
+    _git(repo, "branch", "-m", "main")
+    (repo / DECLARATION).write_bytes(_declaration() if valid else b"{")
+    _commit(repo)
+    tip = _git(repo, "rev-parse", "HEAD")
+    _git(repo, "switch", "-c", "feature")
+    (repo / DECLARATION).unlink()
+    _commit(repo)
+    _git(repo, "switch", "main")
+
+    clone = repo.parent / "shallow"
+    _git(repo, "clone", "--depth=1", "--branch=feature", repo.as_uri(), str(clone))
+    _git(clone, "fetch", "--depth=1", "origin", "main:refs/remotes/origin/main")
+    assert _git(clone, "rev-parse", "--is-shallow-repository") == "true"
+    assert verify_manifest_git.resolve_base(clone).status == "no_merge_base"
+    assert not (clone / DECLARATION).exists()
+
+    receipt = {"status": "completed", "commands": [{"argv": ["true"]}]}
+    verify_gate.stamp_gating(clone, receipt)
+    assert receipt["gating"]["fallback_source"] == "default_branch_tip"
+    gate = verify_gate.StopGate(clone)
+    assert "default branch tip" in gate.notice()
+    if valid:
+        _verdict(receipt, "required_check", False, "not_the_required_check")
+        assert receipt["gating"]["base_commit"] == tip
+        assert gate.command() == PREFIX + ["tests/test_example.py"]
+    else:
+        _verdict(receipt, "unresolved", False, "declaration_invalid")
+        assert DECLARATION in gate.block_guidance("", None)
+
+
 @pytest.mark.parametrize("source", ["base", "head", "worktree"])
 def test_invalid_declaration_is_unresolved(repo, monkeypatch, capsys, source):
     if source == "worktree":
@@ -235,6 +270,18 @@ def test_invalid_declaration_is_unresolved(repo, monkeypatch, capsys, source):
     if source != "base":
         assert "Git base was unresolved" in result["reason"]
         assert receipt["gating"]["fallback_source"] == source
+
+
+@pytest.mark.parametrize("character", ["`", "\n", "\r", "\t", "\b", "\0", "\x1b", "\x7f", "\x85", "\u2028", "\u2029"])
+def test_unsafe_argv_prefix_blocks_stop(repo, monkeypatch, character):
+    (repo / DECLARATION).write_bytes(_declaration([*PREFIX, f"arg{character}value"]))
+    _commit(repo)
+    stop, _ = _start(repo, monkeypatch)
+
+    result = runtime.handle_payload("Stop", stop)
+    assert result["decision"] == "block"
+    assert DECLARATION in result["reason"]
+    assert "argv_prefix" in result["reason"]
 
 
 @pytest.mark.parametrize("declared", [False, True])
@@ -374,12 +421,11 @@ def test_stop_policy_git_timeout_is_bounded(repo, monkeypatch, head_available):
         assert "Git base was unresolved" in result["reason"]
         assert "HEAD" in result["reason"]
     else:
-        assert result.get("decision") != "block"
-        assert "timed out" in result["hookSpecificOutput"]["additionalContext"]
+        assert result is None
 
 
 def test_stop_guidance_round_trips_argv(repo, monkeypatch):
-    prefix = ["python", "folder with spaces/check.py", "a'b", 'a"b', r"a"]
+    prefix = ["python", "folder with spaces/check.py", "a'b", 'a"b', r"a\b"]
     (repo / DECLARATION).write_bytes(_declaration(prefix))
     _commit(repo)
     stop, _ = _start(repo, monkeypatch)

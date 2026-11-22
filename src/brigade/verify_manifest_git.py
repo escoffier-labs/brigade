@@ -20,6 +20,7 @@ class BaseResolution:
     reference: str | None = None
     commit: str | None = None
     message: str | None = None
+    default_branch_tip: str | None = None
 
 
 @dataclass(frozen=True)
@@ -73,25 +74,31 @@ def resolve_base(target: Path, *, deadline: float | None = None) -> BaseResoluti
         if full.startswith("refs/remotes/origin/"):
             candidates.append(full)
     candidates.extend(["refs/remotes/origin/main", "refs/remotes/origin/master"])
-    reference = next(
-        (
-            item
-            for item in dict.fromkeys(candidates)
-            if git("rev-parse", "--verify", f"{item}^{{commit}}").returncode == 0
-        ),
-        None,
-    )
-    if reference is None:
+    for reference in dict.fromkeys(candidates):
+        tip = git("rev-parse", "--verify", f"{reference}^{{commit}}")
+        if tip.returncode == 0 and tip.stdout.strip():
+            tip_commit = tip.stdout.decode("ascii").strip()
+            break
+    else:
         return BaseResolution(
             "unresolved_default_branch",
             message="verify manifest default branch is unresolved; run git fetch origin <branch> or git remote set-head origin -a",
         )
-    merged = git("merge-base", "HEAD", reference)
+    try:
+        merged = git("merge-base", "HEAD", tip_commit)
+    except subprocess.TimeoutExpired:
+        return BaseResolution(
+            "no_merge_base",
+            reference=reference,
+            message=f"Git timed out while finding the merge base for {reference}.",
+            default_branch_tip=tip_commit,
+        )
     if merged.returncode != 0 or not merged.stdout.strip():
         return BaseResolution(
             "no_merge_base",
             reference=reference,
             message=f"verify manifest default branch has no merge base with HEAD: {reference}",
+            default_branch_tip=tip_commit,
         )
     return BaseResolution("resolved", "default_branch", reference, merged.stdout.decode("ascii").strip())
 

@@ -6,6 +6,7 @@ import hashlib
 import json
 import stat
 import subprocess
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -30,7 +31,7 @@ class _GatePolicy:
     needs_passed_tests: bool = False
     base_commit: str | None = None
     declaration_sha256: str | None = None
-    fallback_source: Literal["head", "worktree", "none"] | None = None
+    fallback_source: Literal["default_branch_tip", "head", "worktree", "none"] | None = None
     base_message: str | None = None
     error: str | None = None
 
@@ -65,10 +66,16 @@ def _parse_declaration(raw: bytes, commit: str | None = None) -> _GatePolicy:
     if (
         not isinstance(prefix, list)
         or not prefix
-        or not all(isinstance(arg, str) and "\0" not in arg for arg in prefix)
+        or not all(isinstance(arg, str) for arg in prefix)
         or not prefix[0].strip()
     ):
         return _GatePolicy("unresolved", "declaration_invalid", error="argv_prefix must be a nonempty command array")
+    if any(char == "`" or unicodedata.category(char) in {"Cc", "Zl", "Zp"} for arg in prefix for char in arg):
+        return _GatePolicy(
+            "unresolved",
+            "declaration_invalid",
+            error="argv_prefix cannot contain backticks, line breaks, or control characters",
+        )
     if not isinstance(needs_arguments, bool) or not isinstance(needs_passed_tests, bool):
         return _GatePolicy(
             "unresolved", "declaration_invalid", error="needs_arguments and needs_passed_tests must be booleans"
@@ -126,8 +133,14 @@ def _worktree_policy(target: Path) -> _GatePolicy:
     return replace(policy, fallback_source="worktree")
 
 
-def _fallback_policy(target: Path, deadline: float | None, base_message: str | None) -> _GatePolicy:
+def _fallback_policy(
+    target: Path, deadline: float | None, base_message: str | None, *, default_branch_tip: str | None = None
+) -> _GatePolicy:
     try:
+        if default_branch_tip is not None:
+            policy = _committed_policy(target, default_branch_tip, deadline)
+            if policy is not None:
+                return replace(policy, fallback_source="default_branch_tip", base_message=base_message)
         head = verify_manifest_git._git(target, "rev-parse", "--verify", "--quiet", "HEAD^{commit}", deadline=deadline)
         if head.returncode == 0 and head.stdout.strip():
             policy = _committed_policy(target, head.stdout.decode("ascii").strip(), deadline)
@@ -145,7 +158,7 @@ def _load_policy(target: Path, *, deadline: float | None = None) -> _GatePolicy:
     except subprocess.TimeoutExpired:
         return _fallback_policy(target, deadline, "Git timed out while resolving the base.")
     if base.status != "resolved" or not base.commit:
-        return _fallback_policy(target, deadline, base.message)
+        return _fallback_policy(target, deadline, base.message, default_branch_tip=base.default_branch_tip)
     try:
         return _committed_policy(target, base.commit, deadline) or _GatePolicy("audit_only", "audit_only")
     except subprocess.TimeoutExpired:
@@ -320,6 +333,7 @@ class StopGate:
         if policy.fallback_source is None and policy.base_message is None:
             return None
         source = {
+            "default_branch_tip": "Using the declaration from the fetched default branch tip.",
             "head": "Using the declaration from local HEAD.",
             "worktree": "Using the declaration from the working tree.",
             "none": "There is no declaration in either local HEAD or the working tree.",

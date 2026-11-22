@@ -18,18 +18,20 @@ repository's default branch. For example, Brigade uses this declaration.
 
 Brigade first looks for the declaration at the merge base with the remote
 default branch. If it resolves that base, it uses only the committed contents.
-If it cannot resolve the base, it trusts local state. It reads the declaration
-from local `HEAD` first. If `HEAD` has no copy, there is no commit, or Git is
-unavailable, it looks in the working tree. Without either copy, the repository
-is audit-only. The receipt stamp records the fallback source and Stop explains
+If it cannot resolve the base, it checks for the declaration at the fetched
+default-branch tip, then at local `HEAD`, then in the working tree. This lets a
+shallow clone enforce the declaration in the fetched branch even if it lacks
+the history to find a merge base. Without a copy, the repository is audit-only.
+The receipt stamp records the fallback source. When Stop blocks, it explains
 why the base was unresolved and which copy was used. A malformed declaration
 from any source blocks Stop with the file path and parse error.
 
 Stop gives policy lookup a two-second budget, including time reserved for the
 local fallback. If Git runs out of time before the policy can be read, Stop
-skips the check for that target and reports the timeout.
+skips the check for that target. Stop includes the timeout detail if another check blocks.
 
 At least one recorded command must start with the exact `argv_prefix`.
+The prefix cannot contain backticks, line breaks, or control characters.
 `needs_arguments` requires at least one argument after the prefix.
 `needs_passed_tests` requires a pytest summary with at least one passed test,
 zero failed, zero errors, and `no_tests_ran` false. Stop prints a suggested

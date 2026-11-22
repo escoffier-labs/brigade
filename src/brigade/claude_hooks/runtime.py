@@ -2531,7 +2531,6 @@ def _handle_event(
                 "Verification is recorded for this session. Closeout is not blocked because a concurrent "
                 "session changed the shared worktree.",
                 *shared_tree_notes,
-                *policy_notes,
             ]
             if handoff_target is not None:
                 records.append(_handoff_stop_note(handoff_target))
@@ -2542,15 +2541,13 @@ def _handle_event(
                 session_id=session_id,
                 records=records,
             )
-        if handoff_target is not None or policy_notes:
-            if handoff_target is not None:
-                policy_notes.append(_handoff_stop_record(handoff_target, verified=handoff_target != unverified_handoff))
+        if handoff_target is not None:
             return _additional_context(
                 "Stop",
                 "",
-                target=handoff_target or target,
+                target=handoff_target,
                 session_id=session_id,
-                records=policy_notes,
+                records=[_handoff_stop_record(handoff_target, verified=handoff_target != unverified_handoff)],
             )
     return None
 
