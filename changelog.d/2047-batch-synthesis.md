@@ -2,4 +2,5 @@
 - Synthesis reserves exactly one dispatch unit from the run budget before the call and records it as its own dispatch fact. A spent ceiling leaves every task result intact and reports `refused-budget` without a call.
 - The call writes `batch-synthesis.json` (schema `brigade.batch_synthesis.v1`) with the seat, status, input task and result IDs, and output digest and byte count, plus the completed text in `final.txt`. The batch result JSON gains an additive `synthesis` member; the existing per-task `synthesis.json` summary is unchanged.
 - A retry never relaunches a task for synthesis. A settled batch with an owed call runs only that call; a reserved call without a sidecar is reported `indeterminate` and never called twice.
+- Synthesis waits until every accepted task is terminal. A fail-fast run that leaves tasks queued records `not-run` with reason `tasks-unfinished`, reserves no dispatch unit, and makes no call; a retry that settles those tasks still runs the one owed call.
 - `brigade run batch` accepts `--run-budget` so a batch declaration bounds both task and synthesis dispatch.

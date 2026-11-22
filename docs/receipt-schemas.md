@@ -218,7 +218,7 @@ never overwritten; synthesis reports `indeterminate` with `sidecar-invalid` or
 | `schema` | string | Always `brigade.batch_synthesis.v1` |
 | `request_id` | string | The batch request identity |
 | `seat` | string | The requested synthesis seat, never the orchestrator when they differ |
-| `status` | string | `completed`, `failed`, `refused-budget`, or `indeterminate` |
+| `status` | string | `completed`, `failed`, `refused-budget`, `not-run`, or `indeterminate` |
 | `inputs` | array of object | `{task_id, result_id}` rows in task-ID order; `result_id` is null for a task with no result |
 | `output_ref` | string \| null | `final.txt` when the completed text was written, else null |
 | `output_sha256` | string \| null | SHA-256 of the written `final.txt` bytes |
@@ -228,7 +228,8 @@ never overwritten; synthesis reports `indeterminate` with `sidecar-invalid` or
 
 `reason` is one of `sidecar-invalid`, `marker-invalid`, `reservation-held`,
 `budget-unavailable`, `seat-unavailable`, `call-failed`, `output-conflict`,
-`output-write-failed`, or `synthesis-error`. It never carries free text.
+`output-write-failed`, `synthesis-error`, or `tasks-unfinished`. It never
+carries free text.
 `error_class` is one of `os-error`, `budget-error`, `journal-error`,
 `value-error`, or `unexpected-error`, and is present only with
 `synthesis-error`, so a failed run is diagnosable without storing a message.
@@ -238,6 +239,12 @@ recorded digest and byte count describe that file on every platform, and the
 planned-run terminal receipts do not rewrite it afterwards. A `completed`
 record always names `final.txt` with both values; every other status leaves all
 three output fields null.
+
+`not-run` with `tasks-unfinished` is the one non-final record: it is written when
+the run stops with an accepted task still `queued`, so synthesis reserved no
+dispatch unit and made no call. A retry whose journal shows every accepted task
+terminal replaces it with the outcome of the owed call, so it never blocks that
+call. Every other status is final, and a `completed` record is never replaced.
 
 `batch-synthesis-dispatch.json` is exactly `{seat, attempt}` with a non-empty
 seat and a positive integer attempt. An exclusive reservation that finds the

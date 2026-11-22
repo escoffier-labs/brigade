@@ -208,6 +208,68 @@ def test_settled_retry_runs_synthesis_only(setup, capsys, monkeypatch):
     assert synth_receipt(run_dir)["status"] == "completed"
 
 
+def test_fail_fast_defers_synthesis_until_every_task_is_terminal(setup, capsys, monkeypatch):
+    from brigade import run_receipts, run_tasks, runguard
+    from brigade.run_transport import WorkerResult
+
+    root, calls = setup
+    add_writer(root)
+    seats = synthesized(setup, monkeypatch)
+
+    def model(agent, prompt, **kwargs):
+        calls.append(prompt)
+        return agents.AgentResult(text="retained", ok="task_id: b" not in prompt)
+
+    monkeypatch.setattr(agents, "run_agent", model)
+    tasks = [task("a"), task("b"), task("c", ["b"])]
+    rc, first, err = run(setup, capsys, tasks, synthesis=SYNTHESIS)
+
+    assert rc == 1, err
+    assert first["tasks"]["b"]["status"] == "failed"
+    assert first["tasks"]["c"]["status"] == "queued"
+    # Fail-fast left c queued, so synthesis makes no reservation and no call.
+    assert seats == []
+    assert len(task_calls(calls)) == 2
+    run_dir = run_dir_of(setup, first)
+    assert not (run_dir / "batch-synthesis-dispatch.json").exists()
+    assert dispatch_attempts(run_dir, "writer") == []
+    assert first["synthesis"]["status"] == "not-run"
+    assert first["synthesis"]["reason"] == "tasks-unfinished"
+    assert synth_receipt(run_dir)["reason"] == "tasks-unfinished"
+    assert "synthesis: not-run" in err
+
+    # Settle the task the fail-fast left queued, as a resumed run owner would,
+    # then retry: the non-final not-run fact never blocks the one owed call.
+    with runguard.run_lock(root, run_dir=run_dir):
+        handle = run_tasks.prepare_attempt(run_dir, workspace=root, task_id="c")
+        run_tasks.observe_task(
+            run_dir,
+            workspace=root,
+            handle=handle,
+            observation=run_tasks.TaskObservation(
+                status="completed", artifact_kind="unavailable", containment="quiescent"
+            ),
+        )
+    result = WorkerResult(
+        worker="coder", task="Batch task_id: c\n\nDo the same work", text="done", ok=True, task_id="c"
+    )
+    (run_dir / f"batch-result-{hashlib.sha256(b'c').hexdigest()}.json").write_text(
+        json.dumps(run_receipts.worker_payload_one(result))
+    )
+
+    rc, second, err = run(setup, capsys, tasks, synthesis=SYNTHESIS)
+
+    assert rc == 1, err
+    assert second["tasks"]["c"]["status"] == "completed"
+    # The owed call ran exactly once, and no task relaunched.
+    assert seats == ["writer"] and calls.count("synthesis") == 1
+    assert len(task_calls(calls)) == 2
+    receipt = synth_receipt(run_dir)
+    assert receipt["status"] == "completed"
+    assert [entry["task_id"] for entry in receipt["inputs"]] == ["a", "b", "c"]
+    assert second["synthesis"]["status"] == "completed"
+
+
 def test_reserved_dispatch_without_receipt_is_indeterminate(setup, capsys, monkeypatch):
     root, calls = setup
     add_writer(root)

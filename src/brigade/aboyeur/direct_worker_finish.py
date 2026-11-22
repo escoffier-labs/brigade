@@ -30,8 +30,6 @@ PayloadBuilder = Callable[..., dict[str, object]]
 def _final_tree_base(base: Mapping[str, Any]) -> dict[str, Any]:
     """Return terminal receipt fields with the final non-evidence Git tree when available."""
     result = dict(base)
-    # final.txt override is a writer instruction, not a receipt field.
-    result.pop("final_output_text", None)
     if result.get("dry_run") is True:
         return result
     cwd = result.get("cwd")
@@ -127,12 +125,6 @@ def synthesis_document_payload(
     return payload
 
 
-def _final_output_text(base: Mapping[str, Any], final: agents.AgentResult) -> str:
-    """The text `final.txt` receives: an explicit override, else the final text."""
-    override = base.get("final_output_text")
-    return override if isinstance(override, str) else final.text
-
-
 def write_failed_run_receipt(
     output_dir: Path,
     *,
@@ -143,12 +135,10 @@ def write_failed_run_receipt(
     worker: str | None,
     roster: Roster,
     base: Mapping[str, Any],
-    final_txt_published: bool = False,
 ) -> None:
     terminal_base = _final_tree_base(base)
-    output_text = _final_output_text(base, final)
-    if (direct_worker or "final_output_text" in base) and not final_txt_published:
-        (output_dir / "final.txt").write_text(output_text + "\n")
+    if direct_worker:
+        (output_dir / "final.txt").write_text(final.text + "\n")
     write_json(
         output_dir / "run.json",
         payload(
@@ -191,7 +181,7 @@ def write_completed_run_receipt(
         finished_at = None if defer_artifact_collection or pending_handoff else datetime.now(timezone.utc)
         run_status = "handoff" if pending_handoff else final_status
     if not final_txt_published:
-        (output_dir / "final.txt").write_text(_final_output_text(base, final) + "\n")
+        (output_dir / "final.txt").write_text(final.text + "\n")
     write_json(
         output_dir / "run.json",
         payload(

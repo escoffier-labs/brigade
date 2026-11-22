@@ -3,7 +3,10 @@
 Synthesis is a separate fact from task execution. It never changes a task's
 status or result. One accepted batch runs at most one synthesis call: the
 reservation is recorded before the call, and a retry that finds the reservation
-without a sidecar reports ``indeterminate`` instead of calling again.
+without a sidecar reports ``indeterminate`` instead of calling again. Synthesis
+also waits until every accepted task is terminal: a fail-fast run that leaves
+tasks queued records ``not-run`` with reason ``tasks-unfinished``, never reserves
+a dispatch unit, and never calls.
 
 Both receipts are read and written as untrusted local state: a symlinked, malformed,
 oversized, or otherwise non-regular ``batch-synthesis.json`` or
@@ -35,8 +38,10 @@ COMPLETED = "completed"
 FAILED = "failed"
 REFUSED_BUDGET = "refused-budget"
 INDETERMINATE = "indeterminate"
+# The one non-final status: synthesis waited because a task was not terminal yet.
+NOT_RUN = "not-run"
 
-STATUSES = frozenset({COMPLETED, FAILED, REFUSED_BUDGET, INDETERMINATE})
+STATUSES = frozenset({COMPLETED, FAILED, REFUSED_BUDGET, INDETERMINATE, NOT_RUN})
 
 # Closed reasons for a non-completed synthesis fact. Nothing free-form is stored.
 REASON_SIDECAR_INVALID = "sidecar-invalid"
@@ -48,6 +53,7 @@ REASON_CALL_FAILED = "call-failed"
 REASON_OUTPUT_CONFLICT = "output-conflict"
 REASON_OUTPUT_UNWRITTEN = "output-write-failed"
 REASON_SYNTHESIS_ERROR = "synthesis-error"
+REASON_TASKS_UNFINISHED = "tasks-unfinished"
 
 REASONS = frozenset(
     {
@@ -60,6 +66,7 @@ REASONS = frozenset(
         REASON_OUTPUT_CONFLICT,
         REASON_OUTPUT_UNWRITTEN,
         REASON_SYNTHESIS_ERROR,
+        REASON_TASKS_UNFINISHED,
     }
 )
 
@@ -299,6 +306,11 @@ def _all_terminal(plan: Mapping[str, Any], run_dir: Path) -> bool:
     )
 
 
+def _unfinished(payload: Mapping[str, Any] | None) -> bool:
+    """True for the one non-final fact: synthesis waited on a task that was not terminal."""
+    return payload is not None and payload.get("status") == NOT_RUN and payload.get("reason") == REASON_TASKS_UNFINISHED
+
+
 def read(run_dir: Path) -> dict[str, Any] | None:
     """The valid batch synthesis sidecar, or None when absent or not closed."""
     state, payload, _raw = _read_sidecar(run_dir)
@@ -360,14 +372,16 @@ def pending(plan: Mapping[str, Any], run_dir: Path) -> str:
     """Classify what a retry owes an accepted batch's synthesis request."""
     if plan.get("synthesis") is None:
         return PENDING_NONE
-    state, _payload, _raw = _read_sidecar(run_dir)
-    if state == _OK:
+    state, payload, _raw = _read_sidecar(run_dir)
+    if state == _OK and not _unfinished(payload):
         return PENDING_DONE
     if state == _INVALID:
         # An untrusted sidecar may hide a completed call; never reserve again.
         return PENDING_INDETERMINATE
     if marker_present(run_dir):
         return PENDING_INDETERMINATE
+    # No sidecar, or the non-final not-run fact that reserved nothing: a retry
+    # whose journal shows every accepted task terminal still owes the one call.
     return PENDING_RUN if _all_terminal(plan, run_dir) else PENDING_BLOCKED
 
 
@@ -464,6 +478,67 @@ def _write_marker(run_dir: Path, seat: str, attempt: int) -> bool:
     # The reservation identity is allocated once; an existing marker is the
     # fact a retry reads, so leave it exactly as written.
     return _write_exclusive(run_dir / DISPATCH_MARKER, {"seat": seat, "attempt": attempt})
+
+
+def finish_batch(
+    batch: Any,
+    results: list[WorkerResult],
+    *,
+    output_dir: Path | None,
+    roster: Any,
+    budget: run_budget.BudgetCoordinator | None,
+    record_dispatch: Callable[[str, Any, int | None], int | None],
+    ground_truth: Mapping[str, Any],
+    cwd: Path | None,
+    codex_transport: str | None,
+    process_registry: Any,
+    model_lease: Any,
+) -> agents.AgentResult:
+    """Finish a batch run: its task summary plus its one optional synthesis call."""
+    context = (
+        batch.synthesis_context(
+            roster=roster,
+            budget=budget,
+            record_dispatch=record_dispatch,
+            ground_truth=ground_truth,
+            cwd=cwd,
+            codex_transport=codex_transport,
+            process_registry=process_registry,
+            model_lease=model_lease,
+        )
+        if output_dir is not None
+        else None
+    )
+    return batch.finish(results, synthesis=context)
+
+
+def published_final(batch: Any) -> bool:
+    """True when a batch's completed synthesis already published final.txt."""
+    return batch is not None and batch.synthesis_text is not None
+
+
+def synthesis_retry(batch: Any) -> bool:
+    """True on a retry that owes only its accepted batch's synthesis call."""
+    return batch is not None and bool(batch.synthesis_only)
+
+
+def _clear_unfinished(run_dir: Path) -> bool:
+    """Remove the non-final not-run fact so the owed call can record its own.
+
+    Only a sidecar this module validated as ``not-run``/``tasks-unfinished``
+    reaches here. It reserved no budget and made no call, so clearing it cannot
+    allow a second call. Unlinking never follows a symlink, and a crash before
+    the replacement sidecar is written leaves the batch with no final fact, which
+    a retry reads as the still-owed call.
+    """
+    try:
+        os.unlink(run_dir / SIDECAR)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return False
+    run_journal._fsync_directory(run_dir)
+    return True
 
 
 def _call(
@@ -576,12 +651,12 @@ def perform(
     seat = str(synthesis["seat"])
 
     state, existing, _raw = _read_sidecar(run_dir)
-    if state == _OK and existing is not None:
-        return _outcome(existing)
     if state == _INVALID:
         # The sidecar path is occupied by something untrusted. Do not reserve
         # budget and do not call: the run cannot prove the call never ran.
         return Outcome(status=INDETERMINATE, seat=seat, reason=REASON_SIDECAR_INVALID)
+    if state == _OK and existing is not None and not _unfinished(existing):
+        return _outcome(existing)
 
     marker_state, marker = _read_marker(run_dir)
     if marker_state == _INVALID:
@@ -589,6 +664,21 @@ def perform(
     if marker_state == _OK and marker is not None:
         # A reserved dispatch without a sidecar means the call may have run.
         return write_indeterminate(plan, run_dir, reason=REASON_RESERVATION_HELD)
+
+    if not _all_terminal(plan, run_dir):
+        # Fail-fast can leave later tasks queued and never launched. Synthesis
+        # runs only after every accepted task is terminal, so record why, and
+        # reserve no dispatch unit and make no call. This fact is non-final: it
+        # reserved nothing, so a retry that settles the remaining tasks still
+        # owes the one call.
+        return _write_sidecar(plan, run_dir, seat, NOT_RUN, reason=REASON_TASKS_UNFINISHED)
+
+    if state == _OK and existing is not None:
+        # The recorded not-run fact is non-final. Clear it before the owed call
+        # so the sidecar this call writes is its own outcome, never the stale one.
+        if not _clear_unfinished(run_dir):
+            return _outcome(existing)
+
     if context.budget is None:
         # A batch without a coordinator cannot reserve its synthesis unit.
         return _write_sidecar(plan, run_dir, seat, REFUSED_BUDGET, reason=REASON_BUDGET_UNAVAILABLE)
@@ -644,6 +734,7 @@ __all__ = [
     "ERROR_CLASSES",
     "FAILED",
     "INDETERMINATE",
+    "NOT_RUN",
     "Outcome",
     "PENDING_BLOCKED",
     "PENDING_DONE",
@@ -657,11 +748,14 @@ __all__ = [
     "STATUSES",
     "Context",
     "error_class",
+    "finish_batch",
     "marker_present",
     "pending",
     "perform",
+    "published_final",
     "read",
     "summary",
+    "synthesis_retry",
     "write_error_indeterminate",
     "write_indeterminate",
 ]

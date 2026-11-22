@@ -765,10 +765,18 @@ spent, the task results stand and synthesis is `refused-budget`; no call is
 made. A task and the synthesis may share one seat: each reservation mints its own
 dispatch attempt, so the second identity never reuses the first.
 
+Synthesis runs only after every accepted task is terminal. Fail-fast stops later
+waves, so a wave failure leaves those tasks `queued` and never launched. Such a
+run reserves no dispatch unit, writes no dispatch marker, and makes no model
+call: it records `not-run` with the closed reason `tasks-unfinished` instead.
+That fact is non-final, because it reserved nothing. A later retry whose journal
+shows every accepted task terminal clears it and runs the owed call exactly once.
+Until then, every retry reports the same `not-run` fact.
+
 The call is recorded in `batch-synthesis.json` (schema
 `brigade.batch_synthesis.v1`) beside the batch result receipts. It holds the
-request ID, seat, `status` (`completed`, `failed`, `refused-budget`, or
-`indeterminate`), a closed `reason`, a closed `error_class` instead of any
+request ID, seat, `status` (`completed`, `failed`, `refused-budget`, `not-run`,
+or `indeterminate`), a closed `reason`, a closed `error_class` instead of any
 exception text, the input task IDs with their result IDs, and the completed
 output's digest and byte count. A completed call also publishes its text to
 `final.txt`. That write is exclusive, atomic, and byte-exact: the trailing
