@@ -25,6 +25,14 @@ SCHEMA = "brigade.roster_readiness.v1"
 OPERATION_TTL_SECONDS = 30.0
 SOURCE_BRIGADE_GOVERNANCE = "brigade-governance"
 SOURCE_PARENT_REPORTED = "parent-reported"
+SOURCE_ORCA_LOCAL_PROBE = "orca-local-probe"
+ORCA_CHECKS = ("orca-binary", "orca-version", "orca-retry-request", "orca-agent")
+ORCA_QUALIFIERS = {
+    "assurance": "local-probe",
+    "launch_guaranteed": False,
+    "capacity_reserved": False,
+    "parent_active": "unverified",
+}
 # Route t3 never proves that the parent is active, that a launch happened, or
 # that capacity is reserved. The evaluator attaches these qualifiers and refuses
 # ready when any of them is missing.
@@ -53,8 +61,9 @@ class Observation:
     ``observed_at`` is Unix time; ``scope`` comes from operation_scope.
     Status is passed, failed, denied, unsupported, or unknown. Capacity is
     required only for a passed capacity observation. ``source`` is required:
-    route support may be ``parent-reported``, while isolation, admission and
-    capacity must be ``brigade-governance``. No admission is reserved.
+    T3 route support may be ``parent-reported``, Orca checks use
+    ``orca-local-probe``, and isolation, admission and capacity must be
+    ``brigade-governance``. No admission is reserved.
     """
 
     status: str
@@ -67,7 +76,11 @@ class Observation:
     source: str = field(kw_only=True)
 
     def __post_init__(self) -> None:
-        if type(self.source) is not str or self.source not in {SOURCE_BRIGADE_GOVERNANCE, SOURCE_PARENT_REPORTED}:
+        if type(self.source) is not str or self.source not in {
+            SOURCE_BRIGADE_GOVERNANCE,
+            SOURCE_PARENT_REPORTED,
+            SOURCE_ORCA_LOCAL_PROBE,
+        }:
             raise ValueError("invalid observation source")
         if self.seat is not None and (type(self.seat) is not str or not self.seat):
             raise ValueError("invalid observation seat")
@@ -142,6 +155,15 @@ def operation_scope(
         )
         material.pop("received_at", None)
         inputs["t3"] = material
+    elif request.route == "orca":
+        inputs["orca"] = {
+            "command": roster.orca_command,
+            "agents": {
+                name: agent if isinstance(agent, str) else None
+                for name in request.workers
+                if (agent := roster.orca_targets.get(name, {}).get("agent")) is not None
+            },
+        }
     return "sha256:" + hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 
@@ -184,8 +206,8 @@ def _request_error(request: ReadinessRequest) -> str | None:
         return "Select at least one named worker with --worker."
     if type(request.concurrency) is not int or request.concurrency < 1:
         return "Concurrency must be a positive integer."
-    if not isinstance(request.route, str) or request.route not in {"brigade", "t3"}:
-        return "Route must be brigade or t3."
+    if not isinstance(request.route, str) or request.route not in {"brigade", "t3", "orca"}:
+        return "Route must be brigade, t3, or orca."
     if not isinstance(request.isolation, str) or request.isolation not in {"shared", "worktree"}:
         return "Isolation must be shared or worktree."
     if request.capability is not None and (
@@ -212,10 +234,10 @@ def evaluate_readiness(
     """Evaluate facts supplied by selected-seat health and route integrations.
 
     ``inspect_readiness`` produces live read-only ``admission``, ``capacity``,
-    and ``isolation`` observations for ``route == "brigade"``, and
-    parent-reported route support plus Brigade governance for
-    ``route == "t3"``. Embedding callers may still inject explicit
-    observations.
+    and ``isolation`` observations for ``route == "brigade"``,
+    parent-reported route support plus Brigade governance for ``route == "t3"``,
+    and local Orca observations for ``route == "orca"``. Embedding callers may
+    still inject explicit observations.
     """
     now = time.time() if now is None else now
     evidence: list[dict[str, Any]] = []
@@ -258,6 +280,8 @@ def evaluate_readiness(
         }
         if getattr(request, "route", None) == "t3":
             malformed.update(T3_QUALIFIERS)
+        elif getattr(request, "route", None) == "orca":
+            malformed.update(ORCA_QUALIFIERS)
         return malformed
     request = replace(request, workers=tuple(dict.fromkeys(request.workers)))
     if request.concurrency > roster.max_workers:
@@ -338,7 +362,7 @@ def evaluate_readiness(
                 freshness="current",
             )
 
-        if request.route != "t3":
+        if request.route == "brigade":
             result = health.get(name)
             if not _health_result_valid(result):
                 result = None
@@ -404,10 +428,24 @@ def evaluate_readiness(
     scope = operation_scope(roster, request, workspace, t3_context=t3_context)
     admitted_capacities: list[int] = []
     isolation_incompatible = any(item["category"] == "isolation" and item["status"] == "failed" for item in evidence)
-    for category in ("route-support", "isolation", "admission", "capacity"):
+    categories = ORCA_CHECKS if request.route == "orca" else ("route-support", "isolation", "admission", "capacity")
+    expected_source = SOURCE_ORCA_LOCAL_PROBE if request.route == "orca" else SOURCE_BRIGADE_GOVERNANCE
+    for category in categories:
         raw = observations.get(category)
         if raw is None:
-            if category == "route-support" and request.route == "brigade":
+            if request.route == "orca":
+                skipped = any(item["status"] != "passed" for item in evidence)
+                for seat in request.workers if category == "orca-agent" else (None,):
+                    add(
+                        category,
+                        "skipped" if skipped else "unknown",
+                        "orca-prerequisite-not-passed" if skipped else "orca-probe-unobserved",
+                        "" if skipped else "Obtain fresh Orca route evidence.",
+                        source=SOURCE_ORCA_LOCAL_PROBE,
+                        freshness="missing",
+                        **({"seat": seat} if seat is not None else {}),
+                    )
+            elif category == "route-support" and request.route == "brigade":
                 add(category, "passed", "brigade-route-declared", freshness="current", source=SOURCE_BRIGADE_GOVERNANCE)
             elif category == "isolation" and request.route == "brigade" and request.isolation == "shared":
                 add(
@@ -449,7 +487,7 @@ def evaluate_readiness(
                 or not isinstance(observation.scope, str)
                 or not isinstance(observation.detail, str)
                 or (
-                    observation.source != SOURCE_BRIGADE_GOVERNANCE
+                    observation.source != expected_source
                     and not (category == "route-support" and observation.source == SOURCE_PARENT_REPORTED)
                 )
             ):
@@ -560,6 +598,8 @@ def evaluate_readiness(
                 report["t3_received_at"] = t3_context.get("received_at")
         if report["status"] == "ready" and any(report.get(key) != value for key, value in T3_QUALIFIERS.items()):
             report["status"], report["exit_code"], report["limiting_reason"] = "unverified", 3, "t3-qualifier-missing"
+    elif request.route == "orca":
+        report.update(ORCA_QUALIFIERS)
     return report
 
 
@@ -619,13 +659,21 @@ def inspect_readiness(
             t3_context=context,
         )
     initial = evaluate_readiness(roster, request, workspace=workspace, hub_discovery_possible=hub_discovery_possible)
-    if (
-        initial["status"] == "blocked"
-        or request.route != "brigade"
-        or any(seat["selection_role"] == "unresolved" for seat in initial["selected_seats"])
+    if initial["status"] == "blocked" or any(
+        seat["selection_role"] == "unresolved" for seat in initial["selected_seats"]
     ):
         return initial
     request = replace(request, workers=tuple(dict.fromkeys(request.workers)))
+    if request.route == "orca":
+        from .roster_readiness_orca import orca_route_observations
+
+        return evaluate_readiness(
+            roster,
+            request,
+            workspace=workspace,
+            observations=orca_route_observations(roster, request, scope=initial["scope"]),
+            hub_discovery_possible=hub_discovery_possible,
+        )
     # A separate checkout is not a read-only sandbox. Confirm only Git
     # eligibility here, without creating a worktree or asserting disk capacity.
     if request.isolation == "worktree" and not runguard.is_git_checkout_with_commit(workspace):

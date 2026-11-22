@@ -25,9 +25,9 @@ Use `--target` to select the workspace and `--roster` for an explicit file.
 The report names the effective source (`explicit`, `workspace`,
 `worktree-parent`, or `user`) and path. Resolution follows the same precedence
 as other roster commands. It never scaffolds a roster over a fallback.
-Before classifying seats it applies `run_preference.load_cached()` through
-`apply_to_roster`, matching the cached role overlay used by `run`. It never
-refreshes that cache, so a newer Hub preference remains outside this report.
+The Brigade route applies the cached run preference before classifying seats,
+matching `brigade run`. The native routes use the resolved roster directly,
+matching native claim admission.
 
 ## Results
 
@@ -290,6 +290,39 @@ parent thread's ceiling, or that a later claim will be granted. No claim of T3
 integration with Brigade budgets follows, and no automatic Brigade fallback is
 authorized. Fleet placement is not included in this report.
 
+## Route orca
+
+```console
+brigade roster ready --route orca --worker builder --json
+```
+
+The Orca route checks local CLI support and the selected seats' Orca declarations.
+It runs these checks in order:
+
+1. Resolve the roster's top-level `orca_command` executable (default `orca-ide`).
+   Set this field to a command name or executable path if the install uses a
+   different name or location. On Linux, the GNOME `orca` screen reader can be on
+   the same PATH. Readiness only resolves the configured command.
+2. Run `--version` and compare its output with the Orca adapter's supported
+   versions.
+3. Run `orchestration worker-start --help` and check that the help lists
+   `--retry-request`.
+4. Check that each selected seat declares an `agent` in
+   `[orca_targets.<seat>]` and that the Brigade Orca adapter supports it.
+
+Each CLI probe has a five-second timeout. A timed-out, failed, or unrecognized
+probe produces `unknown` evidence and exit 3 (`unverified`). A missing
+executable, unsupported version, absent retry flag, or disabled target agent
+produces exit 2 (`blocked`). Subsequent checks appear as `skipped` in both
+output formats when a prerequisite prevents them from running. The JSON schema
+is `brigade.roster_readiness.v1`. Orca evidence is tagged `orca-local-probe`.
+
+`ready` describes the local probe and roster snapshot. The route leaves admitted
+capacity unset and reports `launch_guaranteed: false` and
+`capacity_reserved: false`. Orca still decides live agent enablement. Brigade
+checks the target's isolation declaration, admission, capacity, and budget
+at claim time. The probe reserves nothing and starts no worker.
+
 ## Integration interface
 
 `brigade.roster_readiness` exposes these Python interfaces for an admitted
@@ -314,6 +347,11 @@ For `route == "t3"`, `t3_report` is the parsed
 `roster_readiness_t3.load_capabilities`. `Observation.source` is required and
 must be `parent-reported` for route support or `brigade-governance` for
 isolation, admission and capacity.
+
+For `route == "orca"`, the inspector observes `orca-binary`, `orca-version`,
+`orca-retry-request`, and `orca-agent` with source `orca-local-probe`. Scope
+also binds the configured Orca command and selected target agents. The pure
+evaluator consumes the resulting observations without running CLI probes.
 
 `health` maps selected seat names to existing `SeatHealthResult` instances.
 Their fingerprints must match the current seat declaration. Health uses the
