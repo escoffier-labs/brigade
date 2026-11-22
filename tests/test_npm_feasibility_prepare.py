@@ -6,9 +6,9 @@ import hashlib
 import importlib.util
 import io
 import json
-import tarfile
 import subprocess
 import sys
+import tarfile
 import zipfile
 from pathlib import Path
 
@@ -323,6 +323,8 @@ def test_stable_payload_audit_binds_tag_inventory_and_only_release_manifest(tmp_
         "malformed-integrity",
         "reused-name-id",
         "unaccepted-name",
+        "mismatched-repository-url",
+        "missing-repository-url",
     ],
 )
 def test_registry_publisher_reconciles_immutable_archives_before_launcher(tmp_path, state):
@@ -331,9 +333,19 @@ def test_registry_publisher_reconciles_immutable_archives_before_launcher(tmp_pa
 
     packages = []
     for i in range(6):
-        data = f"original-{i}".encode()
+        manifest = {"repository": {"url": "git+https://github.com/escoffier-labs/brigade.git"}}
+        if i == 5 and state == "mismatched-repository-url":
+            manifest["repository"]["url"] = "git+https://github.com/escoffier-labs/brigadestack.git"
+        if i == 5 and state == "missing-repository-url":
+            del manifest["repository"]["url"]
         filename = f"package-{i}.tgz"
-        (tmp_path / filename).write_bytes(data)
+        archive = tmp_path / filename
+        manifest_bytes = json.dumps(manifest).encode()
+        with tarfile.open(archive, "w:gz") as tar:
+            entry = tarfile.TarInfo("package/package.json")
+            entry.size = len(manifest_bytes)
+            tar.addfile(entry, io.BytesIO(manifest_bytes))
+        data = archive.read_bytes()
         artifact = {
             "name": f"@escoffier-labs/brigade-uv-test-{i}" if i < 5 else "brigadestack",
             "filename": filename,
@@ -400,7 +412,9 @@ if args[0]=='view':
     elif args[2]=='dist-tags.latest': print(json.dumps('0.29.0' if mode=='latest-mismatch' else '0.31.0'))
 else:
     assert args[0]=='publish' and '--provenance' in args and '--access' in args and 'public' in args
-    archive=Path(args[1]); assert archive.read_bytes().startswith(b'original-')
+    archive=Path(args[1])
+    import hashlib
+    assert hashlib.sha256(archive.read_bytes()).hexdigest() == next(a['sha256'] for a in metadata['artifacts'] if a['filename']==archive.name)
     (root/(archive.name+'.published')).touch()
     sys.exit(1 if mode=='uncertain' else 0)
 """
@@ -512,6 +526,9 @@ else:
     if state in {"reused-name-id", "unaccepted-name"}:
         assert not calls, "the repository identity must fail before any registry read"
         assert "repository" in result.stderr.lower()
+    if state in {"mismatched-repository-url", "missing-repository-url"}:
+        assert calls == []
+        assert f"{packages[-1]['filename']}: repository.url" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -528,6 +545,7 @@ else:
         ("wrong-repository-id", "dist.attestations", 1, "certificate repository ID"),
         ("missing-repository-id", "dist.attestations", 1, "certificate repository ID"),
         ("mismatched-san", "dist.attestations", 1, "certificate SAN"),
+        ("reverse-mismatched-san", "dist.attestations", 1, "certificate SAN"),
         ("unaccepted-repository", "dist.integrity", 0, "accepted Brigade repository"),
         ("explicit-commit", "dist.integrity", 1, None),
         ("default-mismatch", "dist.integrity", 0, "artifact packaging commit must equal"),
@@ -549,6 +567,7 @@ def test_registry_acceptance_retries_only_missing_metadata(tmp_path, state, fiel
     packages = [f"@escoffier-labs/brigade-uv-test-{i}" for i in range(5)] + ["brigadestack"]
     repository = {
         "renamed-repository": "escoffier-labs/brigadestack",
+        "reverse-mismatched-san": "escoffier-labs/brigadestack",
         "unaccepted-repository": "example/other",
     }.get(state, "escoffier-labs/brigade")
     payload = b"registry-only fixture; never installed"
@@ -701,6 +720,7 @@ console.log(JSON.stringify(args[2]==='dist.integrity'?artifact.integrity:
                 "wrong-repository-id",
                 "missing-repository-id",
                 "mismatched-san",
+                "reverse-mismatched-san",
             }
             assert len(verifications) == int(certificate_failure)
         else:
@@ -1146,6 +1166,8 @@ def test_stable_archives_stamp_the_publishing_repository(tmp_path, monkeypatch, 
             "url": f"git+https://github.com/{repository}.git",
             "directory": "npm/feasibility",
         }
+        assert manifest["bugs"] == {"url": f"https://github.com/{repository}/issues"}
+        assert manifest["homepage"] == "https://brigadestack.com"
     assert source_manifest.read_bytes() == original_manifest
 
 

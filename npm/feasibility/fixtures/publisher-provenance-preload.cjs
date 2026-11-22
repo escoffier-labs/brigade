@@ -19,7 +19,10 @@ require.cache[target].exports={...real,createVerifier:(cli)=>{
     if(state==='wrong-commit') throw new Error('certificate source commit mismatch');
     const repositoryId={'wrong-repository-id':'999','missing-repository-id':''}[state] ?? '1238165856';
     assert.equal(repositoryId,expected.repositoryId,'certificate repository ID');
-    const certificateRepository=state==='mismatched-san'?'https://github.com/escoffier-labs/brigadestack':repository;
+    const certificateRepository={
+      'mismatched-san':'https://github.com/escoffier-labs/brigadestack',
+      'reverse-mismatched-san':'https://github.com/escoffier-labs/brigade',
+    }[state] ?? repository;
     assert.equal(`${certificateRepository}/${expected.workflow}@${expected.ref}`,expected.san,'certificate SAN');
     return {sourceCommit:expected.sourceCommit};
   }};

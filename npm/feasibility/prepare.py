@@ -119,6 +119,12 @@ def write_json(path: Path, value: object) -> None:
     path.write_text(json.dumps(value, indent=2) + "\n", encoding="utf-8")
 
 
+def stamp_repository(manifest: dict, repository_url: str) -> None:
+    manifest["repository"]["url"] = repository_url
+    repository = repository_url.removeprefix("git+").removesuffix(".git")
+    manifest.setdefault("bugs", {})["url"] = f"{repository}/issues"
+
+
 def pack(directory: Path, output: Path) -> dict[str, object]:
     # Windows installs npm as npm.cmd, which CreateProcess does not resolve from a bare "npm".
     npm = shutil.which("npm")
@@ -749,7 +755,7 @@ def main() -> None:
             (package / name).write_bytes(data)
         manifest = companion_package_manifest(runtime, platform)
         if repository_url is not None:
-            manifest["repository"]["url"] = repository_url
+            stamp_repository(manifest, repository_url)
         write_json(package / "package.json", manifest)
         write_json(
             package / "manifest.json",
@@ -782,8 +788,8 @@ def main() -> None:
         if args.candidate:
             manifest["version"] = runtime["version"]
             manifest["optionalDependencies"] = {p["package"]: runtime["version"] for p in runtime["platforms"].values()}
-        else:
-            manifest["repository"]["url"] = repository_url
+        elif repository_url is not None:
+            stamp_repository(manifest, repository_url)
         write_json(launcher / "package.json", manifest)
     write_json(launcher / "runtime.json", runtime)
     artifacts.append(pack(launcher, output))

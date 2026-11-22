@@ -414,9 +414,11 @@ jobs:
           out="$RUNNER_TEMP/escoffier-brigade-npm"
           stage="$RUNNER_TEMP/escoffier-brigade-npm-package"
           repository_url=$(node -p "require('./npm/feasibility/provenance.cjs').publishingPackageRepositoryUrl(process.env)")
+          issues_url="${repository_url#git+}"
+          issues_url="${issues_url%.git}/issues"
           mkdir -p "$out"
           cp -R "$COMPAT_DIR" "$stage"
-          (cd "$stage" && npm pkg set "repository.url=$repository_url" && npm pack --ignore-scripts --pack-destination "$out")
+          (cd "$stage" && npm pkg set "repository.url=$repository_url" "bugs.url=$issues_url" && npm pack --ignore-scripts --pack-destination "$out")
           test "$(ls "$out")" = "escoffier-labs-brigade-$VERSION.tgz"
           entries=$(tar -tzf "$out/escoffier-labs-brigade-$VERSION.tgz" | LC_ALL=C sort | tr '\n' ' ')
           test "$entries" = 'package/LICENSE package/README.md package/launcher.cjs package/package.json '

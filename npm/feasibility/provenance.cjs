@@ -4,6 +4,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const assert=require('node:assert/strict');
 const {createRequire}=require('node:module');
+const {execFileSync}=require('node:child_process');
 const SLSA='https://slsa.dev/provenance/v1';
 const SOURCE_DIGEST='1.3.6.1.4.1.57264.1.13';
 const SOURCE_REPOSITORY_ID='1.3.6.1.4.1.57264.1.15';
@@ -24,6 +25,13 @@ function publishingRepository(env) {
 const githubRepository=slug=>`https://github.com/${slug}`;
 const packageRepositoryUrl=repository=>`git+${repository}.git`;
 const publishingPackageRepositoryUrl=env=>packageRepositoryUrl(publishingRepository(env));
+function assertPublishingArchiveRepository(file,expectedUrl) {
+  const manifest=JSON.parse(execFileSync('tar',['-xOzf',file,'--','package/package.json'],{
+    encoding:'utf8',timeout:30000,maxBuffer:1024*1024,
+  }));
+  assert.equal(manifest?.repository?.url,expectedUrl,
+    `${path.basename(file)}: repository.url must match the publishing repository`);
+}
 function archiveRepository(url) {
   const repository=ACCEPTED_REPOSITORIES.map(githubRepository).find(repo=>packageRepositoryUrl(repo)===url);
   assert.ok(repository,'archive must name an accepted Brigade repository');
@@ -111,4 +119,4 @@ function createVerifier(npmCli,cachePath) {
   }
   return {purl:(name,version)=>npa.toPurl(`${name}@${version}`),verifyRegistry};
 }
-module.exports={createVerifier,resolveNpmCli,publishingIdentity,publishingPackageRepositoryUrl,archiveRepository,archiveIdentity,REPOSITORY_ID,ACCEPTED_REPOSITORIES};
+module.exports={createVerifier,resolveNpmCli,publishingIdentity,publishingPackageRepositoryUrl,assertPublishingArchiveRepository,archiveRepository,archiveIdentity,REPOSITORY_ID,ACCEPTED_REPOSITORIES};

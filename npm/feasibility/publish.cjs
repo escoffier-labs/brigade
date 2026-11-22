@@ -6,7 +6,7 @@ const os=require('node:os');
 const crypto=require('node:crypto');
 const assert=require('node:assert/strict');
 const {spawnSync}=require('node:child_process');
-const {resolveNpmCli,createVerifier,publishingIdentity}=require('./provenance.cjs');
+const {resolveNpmCli,createVerifier,publishingIdentity,publishingPackageRepositoryUrl,assertPublishingArchiveRepository}=require('./provenance.cjs');
 const {readbackDelays}=require('./readback.cjs');
 const index=process.argv.indexOf('--artifacts');
 assert.ok(index>=0 && process.argv[index+1],'--artifacts required');
@@ -23,12 +23,9 @@ const root=path.resolve(process.argv[index+1]);
 const metadata=JSON.parse(fs.readFileSync(path.join(root,'artifacts.json')));
 assert.match(process.env.GITHUB_SHA || '',/^[a-f0-9]{40}$/,'GITHUB_SHA must identify the packaging commit');
 assert.equal(metadata.sourceCommit,process.env.GITHUB_SHA,'artifact packaging commit must equal GITHUB_SHA');
-const npmCli=resolveNpmCli();
-const tufCache=fs.mkdtempSync(path.join(os.tmpdir(),'brigade-publish-tuf-'));
-const verifier=createVerifier(npmCli,tufCache);
 const version=metadata.runtime.version;
 // Fails before any registry read unless the run is in the Brigade repository (by immutable ID) on an accepted name.
-publishingIdentity(process.env,'brigadestack',metadata.runtime.version,verifier);
+const repositoryUrl=publishingPackageRepositoryUrl(process.env);
 assert.equal(version,'0.31.0');assert.equal(metadata.runtime.payloadVersion,version);
 const artifacts=metadata.artifacts;
 assert.equal(artifacts.length,6);assert.equal(new Set(artifacts.map(a=>a.name)).size,6);
@@ -45,8 +42,12 @@ for(const a of artifacts) {
   assert.equal(crypto.createHash('sha256').update(bytes).digest('hex'),a.sha256);
   assert.equal(crypto.createHash('sha1').update(bytes).digest('hex'),a.shasum);
   assert.equal('sha512-'+crypto.createHash('sha512').update(bytes).digest('base64'),a.integrity);
+  assertPublishingArchiveRepository(file,repositoryUrl);
   archiveDigests.set(a.name,crypto.createHash('sha512').update(bytes).digest('hex'));
 }
+const npmCli=resolveNpmCli();
+const tufCache=fs.mkdtempSync(path.join(os.tmpdir(),'brigade-publish-tuf-'));
+const verifier=createVerifier(npmCli,tufCache);
 function npm(args) {
   const result=spawnSync(process.execPath,[npmCli,...args],{encoding:'utf8',timeout:120000,maxBuffer:1024*1024,
     env:{...process.env,npm_config_registry:'https://registry.npmjs.org/',npm_config_fetch_retries:'0',npm_config_fetch_timeout:'30000'}});
