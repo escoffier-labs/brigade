@@ -12,7 +12,7 @@ import shutil
 import stat
 import subprocess
 import sys
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout, suppress
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -1714,8 +1714,9 @@ def _write_reused_receipt(
     run_dir.mkdir(parents=True, exist_ok=False)
     identity = _capture_verify_identity(target, run_dir)
     if admitted_fingerprint is None or identity.get("tree_fingerprint") != admitted_fingerprint:
-        (run_dir / "changes.patch").unlink(missing_ok=True)
-        run_dir.rmdir()
+        with suppress(OSError):
+            (run_dir / "changes.patch").unlink(missing_ok=True)
+            run_dir.rmdir()
         return None, 0
     completed_at = helpers._now()
     receipt: dict[str, Any] = {

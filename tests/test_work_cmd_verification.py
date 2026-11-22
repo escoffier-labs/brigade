@@ -17,6 +17,7 @@ from brigade import code_graph_delta
 from brigade import localio
 from brigade import receipts_cmd
 from brigade import work_cmd
+from brigade.work_cmd import verify_receipt_details
 
 from tests.work_cmd_test_helpers import (
     _write_json,
@@ -26,12 +27,23 @@ from tests.support import PRIVATE_FILE_MODE
 from tests._home import set_home
 
 
-def _init_git_repo_with_head(path):
+def _init_git_repo_with_head(path, *, ignore_brigade=True):
     _init_git_repo(path)
-    (path / ".gitignore").write_text(".brigade/\n")
-    subprocess.run(["git", "add", ".gitignore"], cwd=path, check=True, stdout=subprocess.DEVNULL)
+    if ignore_brigade:
+        (path / ".gitignore").write_text(".brigade/\n")
+        subprocess.run(["git", "add", ".gitignore"], cwd=path, check=True, stdout=subprocess.DEVNULL)
     subprocess.run(
-        ["git", "-c", "user.name=Test User", "-c", "user.email=test@example.invalid", "commit", "-m", "init"],
+        [
+            "git",
+            "-c",
+            "user.name=Test User",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
         cwd=path,
         check=True,
         stdout=subprocess.DEVNULL,
@@ -1038,11 +1050,12 @@ def test_verify_no_reuse_flag_forces_run(tmp_target, monkeypatch):
     assert "reused_from" not in receipts[0]
 
 
-def test_verify_runs_again_if_tree_changes_while_writing_reuse(tmp_target, monkeypatch):
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+def test_verify_runs_again_if_tree_changes_while_writing_reuse(tmp_target, monkeypatch, cleanup_fails):
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-code-graph"))
     commands = [[sys.executable, "-c", "print('ran')"]]
     assert verification.verify_run(target=tmp_target, commands=commands) == 0
     old_tree = localio.tree_fingerprint(tmp_target)
@@ -1053,20 +1066,30 @@ def test_verify_runs_again_if_tree_changes_while_writing_reuse(tmp_target, monke
         return capture_identity(target, run_dir)
 
     monkeypatch.setattr(verification, "_capture_verify_identity", change_tree_before_capture)
+    if cleanup_fails:
+        rmdir = Path.rmdir
+
+        def fail_reuse_cleanup(path):
+            if path.parent.name == "verify-runs":
+                raise PermissionError("simulated cleanup failure")
+            rmdir(path)
+
+        monkeypatch.setattr(Path, "rmdir", fail_reuse_cleanup)
     assert verification.verify_run(target=tmp_target, commands=commands) == 0
     newest, original = verification._verify_receipts(tmp_target)
     assert "reused_from" not in newest
     assert newest["commands"][0]["stdout_summary"] == "ran"
     assert newest["tree_fingerprint"] == localio.tree_fingerprint(tmp_target) != old_tree
     assert original["tree_fingerprint"] == old_tree
-    assert {path.name for path in Path(newest["path"]).parent.iterdir()} == {newest["run_id"], original["run_id"]}
+    if not cleanup_fails:
+        assert {path.name for path in Path(newest["path"]).parent.iterdir()} == {newest["run_id"], original["run_id"]}
 
 
 def test_verify_does_not_reuse_a_run_that_changed_the_tree(tmp_target, monkeypatch):
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
-    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-code-graph"))
     commands = [[sys.executable, "-c", "from pathlib import Path; Path('newfile.txt').touch()"]]
     assert verification.verify_run(target=tmp_target, commands=commands) == 0
     assert verification._verify_receipts(tmp_target)[0]["tree_stable"] is False
@@ -2836,23 +2859,36 @@ def test_work_closeout_blocks_failed_verification(tmp_path, capsys):
     ("case", "blocker"),
     [
         ("other session", "no verification receipt for this session"),
-        ("unbound", "no verification receipt for this session"),
-        ("other harness session", "no verification receipt for this session"),
+        ("unbound", "verification receipt is unattributed: no work or harness session binding"),
+        ("legacy other harness session", "no verification receipt for this session"),
         ("stale tree", "latest verification receipt for this session covers a different tree"),
         ("unstable tree", "tree changed during the verification run"),
+        ("non-git target", "could not read the current tree fingerprint"),
+        (
+            "missing tree object",
+            "could not compare verification tree fingerprints; only Brigade state may have changed",
+        ),
     ],
 )
 def test_work_closeout_rejects_mismatched_verification(tmp_path, capsys, monkeypatch, case, blocker):
-    _init_git_repo_with_head(tmp_path)
-    monkeypatch.setenv("BRIGADE_CLAUDE_SESSION", "0000000000000001")
+    if case != "non-git target":
+        _init_git_repo_with_head(tmp_path)
+    if case != "unbound":
+        monkeypatch.setenv("BRIGADE_CLAUDE_SESSION", "0000000000000001")
     if case != "unbound":
         assert work_cmd.start(target=tmp_path, title="First session", force=False) == 0
-    if case == "other harness session":
+    if case == "legacy other harness session":
         monkeypatch.setenv("BRIGADE_CLAUDE_SESSION", "0000000000000002")
     code = "from pathlib import Path; Path('newfile.txt').touch()" if case == "unstable tree" else "print('ok')"
     capsys.readouterr()
     assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-c", code]], json_output=True) == 0
     receipt = json.loads(capsys.readouterr().out)
+    if case == "legacy other harness session":
+        del receipt["producer_work_session_id"]
+        _write_json(Path(receipt["path"]) / "receipt.json", receipt)
+    if case == "missing tree object":
+        receipt["tree_fingerprint"] = "0" * len(receipt["tree_fingerprint"])
+        _write_json(Path(receipt["path"]) / "receipt.json", receipt)
     if case == "unstable tree":
         assert receipt["tree_stable"] is False
         (tmp_path / "newfile.txt").unlink()
@@ -2869,6 +2905,105 @@ def test_work_closeout_rejects_mismatched_verification(tmp_path, capsys, monkeyp
 
     assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == 1
     assert json.loads(capsys.readouterr().out)["blockers"] == [blocker]
+
+
+@pytest.mark.parametrize(
+    ("command", "exit_code", "status", "same_tree"),
+    [
+        ([sys.executable, "-c", "raise SystemExit(3)"], 3, "failed", True),
+        ([sys.executable, "-c", "raise SystemExit(3)"], 3, "failed", False),
+        ("echo hi && echo bye", 2, "rejected", True),
+        ([sys.executable, "-c", "print('brigade-verify: busy'); raise SystemExit(75)"], 75, "busy", True),
+    ],
+)
+def test_work_closeout_uses_newest_run_that_tested_current_tree(
+    tmp_path, capsys, command, exit_code, status, same_tree
+):
+    _init_git_repo_with_head(tmp_path)
+    assert work_cmd.start(target=tmp_path, title="Finish work", force=False) == 0
+    capsys.readouterr()
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True) == 0
+    passed = json.loads(capsys.readouterr().out)
+    edit = tmp_path / "edit.txt"
+    if not same_tree:
+        edit.write_text("change for the newer run")
+    assert work_cmd.verify_run(target=tmp_path, commands=[command], reuse=False, json_output=True) == exit_code
+    newer = json.loads(capsys.readouterr().out)
+    assert newer["status"] == status
+    assert (newer["tree_fingerprint"] == passed["tree_fingerprint"]) is same_tree
+    if not same_tree:
+        edit.unlink()
+    assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
+    capsys.readouterr()
+
+    blocks = same_tree and status != "busy"
+    assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == int(blocks)
+    payload = json.loads(capsys.readouterr().out)
+    if blocks:
+        assert payload["verification"]["run_id"] == newer["run_id"]
+        assert payload["blockers"] == [f"latest verification did not complete: {newer['run_id']} [{status}]"]
+    else:
+        assert payload["verification"]["run_id"] == passed["run_id"]
+
+
+def test_work_closeout_accepts_brigade_state_changes_when_unignored(tmp_path, capsys):
+    _init_git_repo_with_head(tmp_path, ignore_brigade=False)
+    assert work_cmd.start(target=tmp_path, title="Finish work", force=False) == 0
+    capsys.readouterr()
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
+    assert localio.tree_fingerprint(tmp_path) != receipt["tree_fingerprint"]
+    capsys.readouterr()
+
+    assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["verification"]["run_id"] == receipt["run_id"]
+
+
+@pytest.mark.parametrize("verify_harness", [None, "0000000000000002"])
+def test_work_closeout_accepts_producer_id_across_harness_sessions(tmp_path, capsys, monkeypatch, verify_harness):
+    _init_git_repo_with_head(tmp_path)
+    monkeypatch.setenv("BRIGADE_CLAUDE_SESSION", "0000000000000001")
+    assert work_cmd.start(target=tmp_path, title="Finish work", force=False) == 0
+    capsys.readouterr()
+    if verify_harness is None:
+        monkeypatch.delenv("BRIGADE_CLAUDE_SESSION")
+    else:
+        monkeypatch.setenv("BRIGADE_CLAUDE_SESSION", verify_harness)
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    session_id = (tmp_path / ".brigade" / "work" / "current").read_text().strip()
+    session_path = tmp_path / ".brigade" / "work" / session_id / "session.json"
+    binding = json.loads(session_path.read_text())["harness_session"]
+    assert receipt["producer_work_session_id"] == session_id
+    assert receipt.get("harness_session", {}).get("fingerprint") == verify_harness
+    assert receipt.get("harness_session") != binding
+    assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
+    capsys.readouterr()
+
+    assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verification"]["run_id"] == receipt["run_id"]
+
+
+@pytest.mark.parametrize(
+    ("changed_path", "expected"),
+    [(".brigade/code-graph/state.db", True), (".brigade-other/state.db", False), (None, None)],
+    ids=["brigade-state", "worktree-change", "missing-tree"],
+)
+def test_compare_verification_trees(tmp_path, changed_path, expected):
+    _init_git_repo_with_head(tmp_path, ignore_brigade=False)
+    before = localio.tree_fingerprint(tmp_path)
+    assert before is not None
+    if changed_path is None:
+        after = "0" * len(before)
+    else:
+        path = tmp_path / changed_path
+        path.parent.mkdir(parents=True)
+        path.write_text("changed")
+        after = localio.tree_fingerprint(tmp_path)
+        assert after is not None and after != before
+    assert verify_receipt_details.same_verification_tree(tmp_path, before, after) is expected
 
 
 @pytest.mark.parametrize("harness_only", [False, True])

@@ -219,7 +219,7 @@ merged, pushed or published. Integration is described in
 | `baseline_commit` | string \| null | yes | Verified Git baseline, or `null` when identity capture is unavailable |
 | `tree_fingerprint` | string \| null | yes | Verified Git tree hash, or `null` with the unavailable identity tuple |
 | `tree_fingerprint_after` | string \| null | no (additive) | Git tree fingerprint captured after a non-canceled run |
-| `tree_stable` | boolean \| null | no (additive) | Whether the before and after fingerprints match. `null` when either is unavailable, and on a reused receipt, where no command ran |
+| `tree_stable` | boolean \| null | no (additive) | Whether the fingerprints match or the Git trees differ only under `.brigade/`. `false` if different fingerprints cannot be compared. `null` when either fingerprint is unavailable or the receipt was reused |
 | `tree_fingerprint_head` | string \| null | yes | Fingerprint-time HEAD commit used to reset excluded evidence paths, or `null` with the unavailable identity tuple |
 | `changes_patch_sha256` | string \| null | yes | SHA-256 of `changes.patch`, or `null` with the unavailable identity tuple |
 | `git` | object | no | `{head, branch, dirty_files}` |
