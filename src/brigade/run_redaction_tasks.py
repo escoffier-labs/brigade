@@ -29,6 +29,8 @@ STRUCTURAL_FIELDS = frozenset(
         "mode",
         "branch_kept",
         "delivery",
+        # A cancel intent's reason is the same kind of closed token.
+        "reason",
     }
 )
 CONTROL_STRUCTURAL_FIELDS = frozenset({"op", "error_class"})
@@ -283,6 +285,10 @@ def prepare_requests(
             elif event.event_type == "task.disposed":
                 # Reference-only custody verdict: the mode and branch state are
                 # closed structural tokens and state is unchanged.
+                pass
+            elif event.event_type == "task.cancel-requested":
+                # Intent only: the task identity maps through, the reason is a
+                # closed token, and the folded state is unchanged.
                 pass
             elif event.event_type == "task.artifact-collected":
                 # A recovered collection names the attempt it belongs to, so its

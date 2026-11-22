@@ -22,6 +22,7 @@ from . import (
     run_journal,
     run_lifecycle,
     run_receipts,
+    run_task_inbox,
     run_task_journal,
     run_tasks,
     runguard,
@@ -80,6 +81,10 @@ class BatchExecution:
         self.read_only = {t["task_id"]: bool(t.get("read_only", False)) for t in plan["tasks"]}
         # Tasks refused at the launch point keep their journal state untouched.
         self.refused: set[str] = set()
+        # Declared prerequisites, and dependents never launched because one of
+        # them was cancelled. Those stay queued and do not abort later waves.
+        self.depends_on = {t["task_id"]: tuple(t.get("depends_on") or ()) for t in plan["tasks"]}
+        self.prerequisite_cancelled: set[str] = set()
         # Per-task worktrees created and validated before any launch, by task ID.
         self.workspaces: dict[str, run_batch_workspace.Binding] = {}
         # Per-task launch refusals, as (code, reason), including every workspace
@@ -199,8 +204,11 @@ class BatchExecution:
         paths = [run_batch_workspace.expected_path(self.workspace, self.run_dir.name, task_id) for task_id in isolated]
         for index, task_id in enumerate(isolated):
             state = states.get(task_id)
-            if state is not None and (state.handle.attempt_id is not None or state.status != "queued"):
-                # The existing relaunch fence owns this task. Never prepare a checkout for it.
+            if state is not None and (
+                state.cancel_requested or state.handle.attempt_id is not None or state.status != "queued"
+            ):
+                # The existing relaunch fence owns this task. Never prepare a
+                # checkout for it, including one cancelled before launch.
                 continue
             others = [path for position, path in enumerate(paths) if position != index]
             try:
@@ -243,9 +251,41 @@ class BatchExecution:
             raise BatchError("launch-refused", f"task {task_id} is missing from the lifecycle journal")
         return found
 
+    def _drain_inbox(self) -> None:
+        """Journal pending cancel intent; the batch owns the run lock here.
+
+        A refused inbox is reported and skipped: a malformed request must never
+        turn into a failed dispatch, and it names no task the batch may launch.
+        """
+        try:
+            run_task_inbox.drain(self.run_dir, self.workspace)
+        except run_task_inbox.TaskInboxError as exc:
+            print(f"warning: task cancel inbox refused: {exc.code}: {exc.detail}", file=sys.stderr)
+
+    def _record_cancelled(self, task_id: str) -> None:
+        """Record the one terminal cancellation observation for a gated task.
+
+        The attempt is the deterministic one the launch would have used, so the
+        cancellation names the same assignment. Replay is a no-op once the
+        terminal result exists.
+        """
+        state = self.current(task_id)
+        if state.result_id is not None or not state.cancel_requested:
+            return
+        handle = run_tasks.prepare_attempt(self.run_dir, workspace=self.workspace, task_id=task_id)
+        run_tasks.observe_task(
+            self.run_dir,
+            workspace=self.workspace,
+            handle=handle,
+            observation=run_tasks.TaskObservation(status="cancelled", containment="not-launched"),
+        )
+
     def launch_recorder(self, agent: Any, assignment: Assignment | None, record_requested: Any) -> Any:
         """The claim-then-requested recorder the orchestrator runs inside the budget reservation."""
         task_id = assignment.task_id if assignment is not None else None
+        # The owner drains before each claim, so an intent that arrived after
+        # this task's attempt was prepared is journaled before the claim folds it.
+        self._drain_inbox()
         return run_batch_launch.launch_recorder(
             run_dir=self.run_dir,
             workspace=self.workspace,
@@ -298,8 +338,16 @@ class BatchExecution:
         ]
 
     def observe(self, result: WorkerResult) -> None:
+        if result.task_id is None:
+            return
         task_id = str(result.task_id)
+        if task_id in self.prerequisite_cancelled:
+            # Never launched and never journaled: the task stays queued.
+            return
         if task_id in self.refused or result.status == "refused":
+            # A refusal is also where a cancel gate lands: record the terminal
+            # cancellation once, then leave the result untouched.
+            self._record_cancelled(task_id)
             return
         if self.current(task_id).result_id is not None:
             return
@@ -387,7 +435,20 @@ class BatchExecution:
                 # An isolated task's checkout is re-validated immediately before
                 # its launch, so a file added since creation refuses that task.
                 self._validate_at_launch(task_id)
+                blocked = sorted(
+                    dep
+                    for dep in self.depends_on.get(task_id, ())
+                    if dep in self.prerequisite_cancelled or self._cancelled(dep)
+                )
+                if blocked:
+                    self.prerequisite_cancelled.add(task_id)
+                    raise BatchError("prerequisite-cancelled", f"task {task_id} depends on cancelled task {blocked[0]}")
                 current = self.current(task_id)
+                if current.cancel_requested:
+                    # A journaled intent owns this launch: record the terminal
+                    # cancellation on the prepared attempt and never invoke.
+                    self._record_cancelled(task_id)
+                    raise BatchError("cancelled-before-launch", f"task {task_id} was cancelled before it launched")
                 if current.handle.attempt_id is not None or current.status != "queued":
                     raise BatchError(
                         "launch-refused", f"task {task_id} already has a recorded attempt; refusing relaunch"
@@ -416,6 +477,9 @@ class BatchExecution:
         kwargs["cwd_for"] = self.cwd_for
         kwargs["writable_worktree_for"] = self.writable_worktree_for
         with contextlib.ExitStack() as stack:
+            # Resume/replay: an intent that survived a crash is journaled, and
+            # the task is recorded as cancelled before any checkout or launch.
+            self._drain_inbox()
             self.prepare_workspaces(stack)
             return planning.dispatch(waves, roster, **kwargs)
 
@@ -459,6 +523,14 @@ class BatchExecution:
                 return routing
         return orchestrator.OrchestratorHealthRoutingDecision(roster=roster)
 
+    def _cancelled(self, task_id: str) -> bool:
+        """True when this task's terminal state is the recorded cancellation."""
+        try:
+            state = self.current(task_id)
+        except (BatchError, run_tasks.TaskJournalError):
+            return False
+        return state.status == "cancelled" and state.cancel_requested
+
     def finish(self, results: list[WorkerResult]) -> agents.AgentResult:
         failures: list[str] = []
         lines = []
@@ -471,10 +543,25 @@ class BatchExecution:
                 # could not be written. Keep it inside the batch summary path
                 # instead of escaping as an unexpected run failure.
                 failures.append(f"task {result.task_id} observation failed: {exc}")
+            if self._cancelled(str(result.task_id)):
+                # A recorded cancellation is a decided outcome, not a failure;
+                # the sibling results keep their own status.
+                lines.append(f"{result.task_id}: cancelled")
+                continue
+            if str(result.task_id) in self.prerequisite_cancelled:
+                # Never launched because a prerequisite was cancelled; it stays queued.
+                lines.append(f"{result.task_id}: prerequisite-cancelled")
+                continue
             lines.append(f"{result.task_id}: {'completed' if result.ok else result.status or 'failed'}")
         # Use the planned-run finish path with no synthesis invocation. It
         # records incomplete workers and retains every result and artifact.
-        ok = all(r.ok for r in results) and not failures
+        ok = (
+            all(
+                r.ok or self._cancelled(str(r.task_id)) or str(r.task_id) in self.prerequisite_cancelled
+                for r in results
+            )
+            and not failures
+        )
         detail = "; ".join(failures)
         if detail:
             lines.append(detail)
