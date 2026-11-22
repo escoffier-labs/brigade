@@ -1,1 +1,1 @@
-- The Rust hub compares message-principal credential digests in constant time.
+- The Rust hub confirms the message-principal digest from its indexed lookup with a constant-time comparison.

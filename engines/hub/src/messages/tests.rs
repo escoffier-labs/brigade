@@ -415,6 +415,54 @@ fn authenticate_matches_only_the_exact_live_principal_digest() {
 }
 
 #[test]
+fn authenticate_uses_the_unique_principal_digest_index() {
+    struct IndexedLookup {
+        memory: Memory,
+        checked: std::cell::Cell<bool>,
+    }
+
+    impl ReadTx for IndexedLookup {
+        fn query(&self, sql: &str, params: &[Value]) -> rusqlite::Result<Vec<Vec<Value>>> {
+            if sql.contains("fleet_message_principals") {
+                let mut statement = self
+                    .memory
+                    .0
+                    .prepare(&format!("EXPLAIN QUERY PLAN {sql}"))?;
+                let plan = statement
+                    .query_map(rusqlite::params_from_iter(params), |row| {
+                        row.get::<_, String>(3)
+                    })?
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                assert_eq!(plan.len(), 1, "{plan:?}");
+                assert!(
+                    plan[0].starts_with("SEARCH ") && plan[0].contains("(token_hash=?)"),
+                    "{plan:?}"
+                );
+                assert!(!self.checked.replace(true), "extra principal query");
+            }
+            self.memory.query(sql, params)
+        }
+    }
+
+    let tx = IndexedLookup {
+        memory: write_store(),
+        checked: std::cell::Cell::new(false),
+    };
+    tx.memory
+        .0
+        .execute_batch(
+            "INSERT INTO fleet_message_principals VALUES
+            ('agent:indexed', 'indexed', 'Indexed', 'principal-digest', '2026-01-01', NULL);",
+        )
+        .unwrap();
+    assert_eq!(
+        authenticate(&tx, "principal-digest", "admin-digest", false).unwrap(),
+        Ok(Some("agent:indexed".into()))
+    );
+    assert!(tx.checked.get(), "expected a principal query");
+}
+
+#[test]
 fn authenticate_prefers_admin_then_node_to_a_principal_with_the_same_digest() {
     let tx = write_store();
     tx.0.execute_batch(

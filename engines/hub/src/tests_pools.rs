@@ -140,6 +140,27 @@ fn hub_db(dir: &Path) -> PathBuf {
     path
 }
 
+#[tokio::test]
+async fn front_admission_credential_kind_and_key_for_principals() {
+    let fixture = Fixture::new("principal-classification");
+    let lookup = admission::Lookup::new(fixture.lookups.clone(), ADMIN);
+    for (token, expected_kind, expected_key) in [
+        (
+            PRINCIPAL_TOKEN,
+            "principal",
+            Some(registration::digest(PRINCIPAL_TOKEN)),
+        ),
+        (REVOKED_PRINCIPAL_TOKEN, "anonymous", None),
+        (UNKNOWN_TOKEN, "anonymous", None),
+    ] {
+        let credential = lookup.credential(Some(&bearer(token))).await.unwrap();
+        assert_eq!(
+            (credential.kind, credential.key),
+            (expected_kind, expected_key)
+        );
+    }
+}
+
 fn bearer(token: &str) -> String {
     format!("Bearer {token}")
 }

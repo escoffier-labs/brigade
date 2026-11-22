@@ -2,10 +2,9 @@
 use crate::{Counts, Slot};
 use brigade_hub::read::ReaderPool;
 use rusqlite::OptionalExtension;
-use rusqlite::types::ValueRef;
 use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Duration};
-use subtle::{Choice, ConstantTimeEq};
+use subtle::ConstantTimeEq;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 fn hex(bytes: &[u8]) -> String {
@@ -78,28 +77,20 @@ impl Lookup {
                 active.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 std::thread::sleep(Duration::from_millis(400));
             }
-            let node = connection
-                .prepare_cached(
-                    "SELECT token_sha256 FROM nodes WHERE token_sha256=?1 AND revoked_at IS NULL",
-                )?
-                .query_row([&lookup_key], |row| row.get::<_, String>(0))
-                .optional()?;
-            if let Some(stored) = node {
-                return Ok(
-                    bool::from(stored.as_bytes().ct_eq(lookup_key.as_bytes())).then_some("node")
-                );
-            }
+            // One row answers both questions: the stored digest for the
+            // constant-time comparison and the table it came from for the label.
             let mut statement = connection.prepare_cached(
-                "SELECT token_hash FROM fleet_message_principals WHERE revoked_at IS NULL",
+                "SELECT 'node', token_sha256 FROM nodes WHERE token_sha256=?1 AND revoked_at IS NULL UNION ALL SELECT 'principal', token_hash FROM fleet_message_principals WHERE token_hash=?1 AND revoked_at IS NULL LIMIT 1"
             )?;
-            let mut rows = statement.query([])?;
-            let mut principal = Choice::from(0);
-            while let Some(row) = rows.next()? {
-                if let ValueRef::Text(stored) = row.get_ref(0)? {
-                    principal |= stored.ct_eq(lookup_key.as_bytes());
-                }
-            }
-            Ok(bool::from(principal).then_some("principal"))
+            let found = statement
+                .query_row([&lookup_key], |r| {
+                    Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+                })
+                .optional()?
+                .filter(|(_, stored)| bool::from(stored.as_bytes().ct_eq(lookup_key.as_bytes())))
+                .map(|(row, _)| row);
+            drop(statement);
+            Ok(found)
         });
         let found = tokio::time::timeout_at(deadline, job)
             .await
@@ -114,7 +105,7 @@ impl Lookup {
                 key: None,
             },
             Some(row) => Credential {
-                kind: row,
+                kind: if row == "node" { "node" } else { "principal" },
                 key: Some(key),
             },
         })

@@ -54,15 +54,6 @@ pub fn resolve<T: ReadTx + ?Sized>(
     digest: &str,
     admin: &str,
 ) -> rusqlite::Result<Result<Credential, Reply>> {
-    resolve_with_principal(hub, digest, admin, None)
-}
-
-fn resolve_with_principal<T: ReadTx + ?Sized>(
-    hub: &T,
-    digest: &str,
-    admin: &str,
-    principal_id: Option<&str>,
-) -> rusqlite::Result<Result<Credential, Reply>> {
     if bool::from(digest.as_bytes().ct_eq(admin.as_bytes())) {
         return Ok(Ok(Credential::Admin));
     }
@@ -84,31 +75,22 @@ fn resolve_with_principal<T: ReadTx + ?Sized>(
             Err(unauthorized("unauthorized: node token revoked"))
         });
     }
-    // Revalidation already knows the principal ID, so it can use the primary
-    // key without comparing the digest in SQL.
-    let rows = match principal_id {
-        Some(id) => hub.query(
-            "SELECT principal_id,token_hash FROM fleet_message_principals WHERE principal_id=?1 AND revoked_at IS NULL",
-            &[Value::Text(id.into())],
-        )?,
-        None => hub.query(
-            "SELECT principal_id,token_hash FROM fleet_message_principals WHERE revoked_at IS NULL",
-            &[],
-        )?,
-    };
-    let mut principal = None;
-    for row in &rows {
-        if matches!(&row[1], Value::Text(s) if bool::from(s.as_bytes().ct_eq(digest.as_bytes()))) {
-            principal = Some(text(&row[0]));
+    let rows = hub.query(
+        "SELECT principal_id,token_hash,revoked_at FROM fleet_message_principals WHERE token_hash=?1",
+        &[key],
+    )?;
+    if let Some(row) = rows
+        .first()
+        .filter(|r| bool::from(text(&r[1]).as_bytes().ct_eq(digest.as_bytes())))
+    {
+        if row[2] == Value::Null {
+            return Ok(Ok(Credential::Principal {
+                id: text(&row[0]).into(),
+                digest: digest.into(),
+            }));
         }
     }
-    Ok(match principal {
-        Some(id) => Ok(Credential::Principal {
-            id: id.into(),
-            digest: digest.into(),
-        }),
-        None => Err(unauthorized("unauthorized")),
-    })
+    Ok(Err(unauthorized("unauthorized")))
 }
 
 /// True when the credential that was valid at admission is still the same,
@@ -118,18 +100,15 @@ pub fn still_valid<T: ReadTx + ?Sized>(
     credential: &Credential,
     admin: &str,
 ) -> rusqlite::Result<Result<(), Reply>> {
-    let (digest, principal_id) = match credential {
+    let digest = match credential {
         Credential::Admin => return Ok(Ok(())),
-        Credential::Node { digest, .. } => (digest, None),
-        Credential::Principal { id, digest } => (digest, Some(id.as_str())),
+        Credential::Node { digest, .. } | Credential::Principal { digest, .. } => digest,
     };
-    Ok(
-        match resolve_with_principal(hub, digest, admin, principal_id)? {
-            Ok(current) if &current == credential => Ok(()),
-            Ok(_) => Err(unauthorized("unauthorized")),
-            Err(refusal) => Err(refusal),
-        },
-    )
+    Ok(match resolve(hub, digest, admin)? {
+        Ok(current) if &current == credential => Ok(()),
+        Ok(_) => Err(unauthorized("unauthorized")),
+        Err(refusal) => Err(refusal),
+    })
 }
 
 fn defaults(credential: &Credential, scope: &str) -> &'static [&'static str] {

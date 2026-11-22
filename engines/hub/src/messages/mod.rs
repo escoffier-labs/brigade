@@ -534,18 +534,13 @@ pub fn authenticate<T: ReadTx + ?Sized>(
         Ok(caller) => Ok(Ok(caller)),
         Err((401, body)) if body == object(&[("error", quote("unauthorized"))]) => {
             let rows = tx.query(
-                "SELECT principal_id,token_hash FROM fleet_message_principals WHERE revoked_at IS NULL",
-                &[],
+                "SELECT principal_id,token_hash FROM fleet_message_principals WHERE token_hash=?1 AND revoked_at IS NULL",
+                &[t(key)],
             )?;
-            // Without a non-secret lookup key, scan every active row even
-            // after finding a match.
-            let mut principal = None;
-            for row in &rows {
-                if matches!(&row[1], Value::Text(s) if bool::from(s.as_bytes().ct_eq(key.as_bytes())))
-                {
-                    principal = text_of(&row[0]);
-                }
-            }
+            let principal = rows
+                .first()
+                .filter(|r| matches!(&r[1], Value::Text(s) if bool::from(s.as_bytes().ct_eq(key.as_bytes()))))
+                .and_then(|r| text_of(&r[0]));
             Ok(match principal {
                 Some(p) => Ok(Some(p.to_string())),
                 None => Err((401, body)),
