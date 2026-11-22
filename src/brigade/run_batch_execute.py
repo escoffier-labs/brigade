@@ -23,6 +23,7 @@ from . import (
     run_batch_artifacts,
     run_batch_capability,
     run_batch_launch,
+    run_batch_synthesis,
     run_batch_workspace,
     run_control,
     run_journal,
@@ -114,6 +115,12 @@ class BatchExecution:
         self.writable_worktree = {
             t["task_id"]: t.get("isolation") == "worktree" and not t.get("read_only", False) for t in plan["tasks"]
         }
+        # Retry-only mode: every task is settled, so only the owed synthesis call
+        # runs. No task is accepted, prepared, or launched.
+        self.synthesis_only = False
+        # The optional synthesis fact, kept apart from every task result.
+        self.synthesis: run_batch_synthesis.Outcome | None = None
+        self.synthesis_text: str | None = None
 
     def read_only_for(self, assignment: Assignment) -> bool:
         return self.read_only[str(assignment.task_id)]
@@ -396,9 +403,36 @@ class BatchExecution:
     def refuse_unbudgeted(self, assignment: Assignment | None) -> Any:
         return run_batch_launch.refuse_unbudgeted(assignment, self.refused.add)
 
+    def _require_synthesis_seat(self, roster: Roster) -> None:
+        """The requested synthesis seat gets the same admission a task seat gets."""
+        synthesis = self.plan.get("synthesis")
+        if synthesis is None:
+            return
+        from .aboyeur import artifacts, planning
+
+        seat = str(synthesis["seat"])
+        error = artifacts._direct_worker_error(seat, roster, read_only=True)
+        agent = roster.agents.get(seat)
+        if error is None and agent is not None:
+            error = read_only_cloud_mutation_error(agent)
+        if error is None and agent is not None:
+            error = read_only_enforcement_error("synthesis", agent, roster, read_only=True)
+        if error is None and agent is not None:
+            # Exactly the admission the runtime orchestrator call applies, so a
+            # seat that would be rejected there refuses before any task launches.
+            error = planning.orchestrator_seat_error(agent, roster) or planning.orchestrator_provider_error(agent)
+        if error is not None:
+            self.refusal = ("invalid-seat", f"synthesis seat {seat!r}: {error}")
+            raise BatchError(*self.refusal)
+
     def assignments(self, roster: Roster) -> list[Assignment]:
         from .aboyeur import artifacts
 
+        self._require_synthesis_seat(roster)
+        if self.synthesis_only:
+            # The batch already accepted every task; this retry owes only the
+            # synthesis call, so no assignment is accepted or launched.
+            return []
         for task in self.plan["tasks"]:
             read_only = self.read_only[task["task_id"]]
             error = artifacts._direct_worker_error(task["seat"], roster, read_only=read_only)
@@ -534,6 +568,10 @@ class BatchExecution:
     def dispatch(self, assignments: list[Assignment], roster: Roster, **kwargs: Any) -> list[WorkerResult]:
         from .aboyeur import planning
 
+        if self.synthesis_only:
+            # Every task is settled. This retry owes only the synthesis call,
+            # so it returns the recorded results and prepares no task.
+            return self.stored_worker_results()
         _refuse_externally_controlled(self.run_dir)
         # A remote route hands the task text to another machine, which has no
         # access to a checkout reserved on this one. Refuse before any launch.
@@ -660,7 +698,12 @@ class BatchExecution:
         # Resolve each required seat against the same snapshot and source roster.
         # Accumulate Hub-derived seats before the final pass, which receipts all
         # admissions together for the runtime admission coordinator.
-        for seat in sorted({t["seat"] for t in self.plan["tasks"]}):
+        seats = {t["seat"] for t in self.plan["tasks"]}
+        synthesis = self.plan.get("synthesis")
+        if synthesis is not None:
+            # The synthesis seat is resolved and admitted like a task seat.
+            seats.add(str(synthesis["seat"]))
+        for seat in sorted(seats):
             resolution = orchestrator.resolve_fleet_model_policy(roster, worker=seat, snapshot=snapshot)
             if resolution.error is not None:
                 return resolution
@@ -668,7 +711,6 @@ class BatchExecution:
         resolution = orchestrator.resolve_fleet_model_policy(roster, worker=kwargs["worker"], snapshot=snapshot)
         # Explicit seats have no health or invalid-final fallback. Failure must
         # remain attributed to the seat the caller selected.
-        seats = {t["seat"] for t in self.plan["tasks"]}
         return replace(
             resolution,
             roster=replace(
@@ -683,7 +725,13 @@ class BatchExecution:
     def resolve_health_routing(self, roster: Roster, results: Any, **kwargs: Any) -> Any:
         from .aboyeur import orchestrator
 
-        for seat in sorted({t["seat"] for t in self.plan["tasks"]}):
+        # The synthesis seat is gated like a task seat: an unhealthy seat refuses
+        # the batch before a wave launches tasks that could never be summarized.
+        seats = {t["seat"] for t in self.plan["tasks"]}
+        synthesis = self.plan.get("synthesis")
+        if synthesis is not None:
+            seats.add(str(synthesis["seat"]))
+        for seat in sorted(seats):
             routing = orchestrator.resolve_orchestrator_health_routing(
                 roster, results, pinned_seats=frozenset({seat}), worker_seat=seat
             )
@@ -699,18 +747,50 @@ class BatchExecution:
             return False
         return state.status == "cancelled" and state.cancel_requested
 
-    def finish(self, results: list[WorkerResult]) -> agents.AgentResult:
+    def synthesis_context(
+        self,
+        *,
+        roster: Roster,
+        budget: Any,
+        record_dispatch: Any,
+        ground_truth: Any,
+        cwd: Path | None,
+        codex_transport: str | None,
+        process_registry: Any,
+        model_lease: Any,
+    ) -> run_batch_synthesis.Context:
+        """The enclosing run's handles one optional synthesis call may use."""
+        return run_batch_synthesis.Context(
+            roster=roster,
+            budget=budget,
+            record_dispatch=record_dispatch,
+            ground_truth=ground_truth,
+            cwd=cwd,
+            codex_transport=codex_transport,
+            process_registry=process_registry,
+            model_lease=model_lease,
+        )
+
+    def finish(
+        self,
+        results: list[WorkerResult],
+        *,
+        synthesis: run_batch_synthesis.Context | None = None,
+    ) -> agents.AgentResult:
         failures: list[str] = []
         lines = []
         for result in results:
-            try:
-                self.observe(result)
-            except Exception as exc:
-                # Dispatch guards on_result failures, so finish is the last
-                # chance to record that a result file or journal observation
-                # could not be written. Keep it inside the batch summary path
-                # instead of escaping as an unexpected run failure.
-                failures.append(f"task {result.task_id} observation failed: {exc}")
+            if not self.synthesis_only:
+                # A synthesis-only retry reads already-recorded results; it must
+                # not observe a terminal task again.
+                try:
+                    self.observe(result)
+                except Exception as exc:
+                    # Dispatch guards on_result failures, so finish is the last
+                    # chance to record that a result file or journal observation
+                    # could not be written. Keep it inside the batch summary path
+                    # instead of escaping as an unexpected run failure.
+                    failures.append(f"task {result.task_id} observation failed: {exc}")
             if self._cancelled(str(result.task_id)):
                 # A recorded cancellation is a decided outcome, not a failure;
                 # the sibling results keep their own status.
@@ -733,6 +813,10 @@ class BatchExecution:
         detail = "; ".join(failures)
         if detail:
             lines.append(detail)
+        if self.plan.get("synthesis") is not None and synthesis is not None:
+            # A separate fact: the synthesis outcome never changes a task line
+            # or the task-derived ok/detail above.
+            self._run_synthesis(results, synthesis)
         return agents.AgentResult(
             text="\n".join(lines),
             ok=ok,
@@ -740,6 +824,76 @@ class BatchExecution:
             failure_phase="result-processing" if failures else None,
             failure_kind="observation-write-failed" if failures else None,
         )
+
+    def _run_synthesis(self, results: list[WorkerResult], context: run_batch_synthesis.Context) -> None:
+        try:
+            self.synthesis = run_batch_synthesis.perform(
+                run_dir=self.run_dir,
+                plan=self.plan,
+                results=results,
+                context=context,
+            )
+        except (KeyboardInterrupt, SystemExit):
+            raise
+        except Exception as exc:
+            # A retained run lock is the real diagnosis and must keep propagating.
+            runguard.raise_if_retained_run_lock(exc)
+            # The reservation may already be durable, so the honest fact is
+            # indeterminate. Every task result still stands.
+            try:
+                self.synthesis = run_batch_synthesis.write_error_indeterminate(self.plan, self.run_dir, exc)
+            except OSError:
+                self.synthesis = None
+        if self.synthesis is not None and self.synthesis.status == run_batch_synthesis.COMPLETED:
+            self.synthesis_text = self.synthesis.text
+
+    def stored_worker_results(self) -> list[WorkerResult]:
+        """Rebuild the settled per-task results from their durable receipts.
+
+        A synthesis-only retry never relaunches a task, so its prompt input is
+        the recorded projection rather than a fresh worker result.
+        """
+        states = {r.handle.spec.task_id: r for r in run_tasks.read_tasks(self.run_dir)}
+        results: list[WorkerResult] = []
+        for task in self.plan["tasks"]:
+            task_id = task["task_id"]
+            state = states.get(task_id)
+            if state is None or state.result_id is None:
+                if state is not None and state.status in {"cancelled", "unknown", "failed"}:
+                    # A terminal task with no result receipt still contributes
+                    # its settled status to the synthesis input.
+                    results.append(
+                        WorkerResult(
+                            worker=task["seat"],
+                            task=f"{_BATCH_TASK_PREFIX}{task_id}\n\n{task['text']}",
+                            text="",
+                            ok=False,
+                            detail=state.status,
+                            status=state.status,
+                            task_id=task_id,
+                        )
+                    )
+                continue
+            path = self.run_dir / f"batch-result-{hashlib.sha256(task_id.encode()).hexdigest()}.json"
+            payload = localio.read_json_dict(path)
+            if payload is None:
+                continue
+            results.append(
+                WorkerResult(
+                    worker=str(payload.get("worker") or task["seat"]),
+                    task=str(payload.get("task") or f"{_BATCH_TASK_PREFIX}{task_id}\n\n{task['text']}"),
+                    text=str(payload.get("text") or ""),
+                    ok=bool(payload.get("ok")),
+                    detail=str(payload.get("detail") or ""),
+                    failure_phase=payload.get("failure_phase")
+                    if isinstance(payload.get("failure_phase"), str)
+                    else None,
+                    failure_kind=payload.get("failure_kind") if isinstance(payload.get("failure_kind"), str) else None,
+                    provenance=payload.get("provenance") if isinstance(payload.get("provenance"), dict) else None,
+                    task_id=task_id,
+                )
+            )
+        return results
 
 
 def stored_result(
@@ -782,6 +936,13 @@ def stored_result(
         "request_id": plan["request_id"],
         "run_status": (localio.read_json_dict(run_dir / "run.json") or {}).get("status", "unknown"),
         "tasks": tasks,
+        # Additive: null when synthesis was not requested, otherwise the
+        # sidecar projection. A task's status and result are unaffected.
+        "synthesis": (
+            run_batch_synthesis.summary(run_dir, seat=str(plan["synthesis"]["seat"]))
+            if plan.get("synthesis") is not None
+            else None
+        ),
     }
 
 
@@ -890,8 +1051,6 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
     from . import cli
     from .cli.run import dispatch
 
-    if plan["synthesis"] is not None:
-        raise BatchError("synthesis-not-implemented", "batch synthesis execution is not implemented")
     workspace = (args.cwd or Path.cwd()).expanduser().resolve()
     run_dir = (
         runguard.lock_path(workspace).parent
@@ -906,6 +1065,36 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
         pass
     dispatch_rc = None
     execution: BatchExecution | None = None
+
+    def launch(target: BatchExecution) -> int:
+        argv = [
+            "run",
+            f"Explicit batch {plan['request_id']}",
+            "--worker",
+            plan["tasks"][0]["seat"],
+            "--cwd",
+            str(workspace),
+            "--output-dir",
+            str(run_dir),
+            "--no-route",
+        ]
+        # The run-level flag stays the single truth for an all-read-only
+        # batch. A mixed batch relies on the per-task read-only resolver.
+        if all(task.get("read_only", False) for task in plan["tasks"]):
+            argv.append("--read-only")
+        if args.roster is not None:
+            argv.extend(["--roster", str(args.roster)])
+        run_budget_path = getattr(args, "run_budget", None)
+        if run_budget_path is not None:
+            argv.extend(["--run-budget", str(run_budget_path)])
+        normal = cli._build_parser_for(argv).parse_args(argv)
+        normal.batch_execution = target
+        try:
+            with contextlib.redirect_stdout(sys.stderr):
+                return dispatch(normal)
+        except (KeyboardInterrupt, TimeoutError):
+            return 1
+
     # Serialize retry eligibility with dispatch, including preflight. The
     # workspace run lock remains the authority for executing worker processes.
     with request_lock(run_dir):
@@ -932,6 +1121,25 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
                     "request-unknown",
                     "journal shows a possible launch but the request marker is missing; refusing launch",
                 )
+            # Tasks are settled, so a retry can owe at most the synthesis call.
+            state = run_batch_synthesis.pending(plan, run_dir)
+            if state == run_batch_synthesis.PENDING_INDETERMINATE:
+                # A reserved call without a sidecar may already have run. Record
+                # that fact and never call again. If the fact cannot be recorded,
+                # the run still refuses to call: the diagnosis stays closed.
+                try:
+                    run_batch_synthesis.write_indeterminate(plan, run_dir)
+                except OSError as exc:
+                    raise BatchError(
+                        "synthesis-unrecorded",
+                        "synthesis dispatch reservation cannot be recorded; refusing to call again",
+                    ) from exc
+            elif state == run_batch_synthesis.PENDING_RUN:
+                execution = BatchExecution(plan, run_dir, workspace)
+                execution.synthesis_only = True
+                dispatch_rc = launch(execution)
+                if execution.refusal is not None:
+                    raise BatchError(*execution.refusal)
         else:
             # A valid marker is never rewritten: the accepted request, including
             # its capability resolutions and digest, stays exactly as accepted.
@@ -946,30 +1154,7 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
             # moved HEAD is refused with its own code and no run artifacts.
             if plan.get("base_sha") is not None:
                 execution.check_pinned_base()
-            argv = [
-                "run",
-                f"Explicit batch {plan['request_id']}",
-                "--worker",
-                plan["tasks"][0]["seat"],
-                "--cwd",
-                str(workspace),
-                "--output-dir",
-                str(run_dir),
-                "--no-route",
-            ]
-            # The run-level flag stays the single truth for an all-read-only
-            # batch. A mixed batch relies on the per-task read-only resolver.
-            if all(task.get("read_only", False) for task in plan["tasks"]):
-                argv.append("--read-only")
-            if args.roster is not None:
-                argv.extend(["--roster", str(args.roster)])
-            normal = cli._build_parser_for(argv).parse_args(argv)
-            normal.batch_execution = execution
-            try:
-                with contextlib.redirect_stdout(sys.stderr):
-                    dispatch_rc = dispatch(normal)
-            except (KeyboardInterrupt, TimeoutError):
-                dispatch_rc = 1
+            dispatch_rc = launch(execution)
             # A refusal raised inside dispatch still belongs to the request, so
             # report its closed code instead of a generic run failure.
             if execution.refusal is not None:
@@ -983,10 +1168,32 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
             print(f"{task_id}: {task['status']} {task['result_ref'] or ''}".rstrip())
             if task["refusal"] is not None:
                 print(f"task {task_id}: {task['refusal']['code']} ({task['refusal']['reason']})", file=sys.stderr)
+    # Synthesis is a separate fact: it never decides a task's outcome, and a
+    # task's outcome never hides a failed or refused synthesis.
+    synthesis = result["synthesis"]
+    synthesis_requested = plan.get("synthesis") is not None
+    synthesis_ok = not synthesis_requested or (
+        synthesis is not None and synthesis.get("status") == run_batch_synthesis.COMPLETED
+    )
+    if synthesis_requested and not synthesis_ok:
+        state = synthesis.get("status") if synthesis is not None else "not-run"
+        print(f"synthesis: {state}", file=sys.stderr)
     if dispatch_rc:
-        if any(t["status"] == "failed" for t in result["tasks"].values()):
+        # A task that settled unknown is as terminal as a failure: when a
+        # synthesis-only retry reads it back from the journal, the batch exits 1
+        # like a failed task, never the pre-launch code 2.
+        settled_unknown = (
+            execution is not None
+            and execution.synthesis_only
+            and any(t["status"] == "unknown" for t in result["tasks"].values())
+        )
+        if any(t["status"] == "failed" for t in result["tasks"].values()) or settled_unknown:
             return 1
         return 1 if dispatch_rc in {3, 130} else dispatch_rc
     return (
-        0 if result["run_status"] == "ok" and all(t["status"] == "completed" for t in result["tasks"].values()) else 1
+        0
+        if result["run_status"] == "ok"
+        and all(t["status"] == "completed" for t in result["tasks"].values())
+        and synthesis_ok
+        else 1
     )

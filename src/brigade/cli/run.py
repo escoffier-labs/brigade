@@ -367,6 +367,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_batch.add_argument("--json", action="store_true", help="Print JSON plan or error.")
     p_batch.add_argument("--cwd", type=Path, default=None, help="Workspace to execute in.")
     p_batch.add_argument("--roster", type=Path, help="Roster TOML path.")
+    p_batch.add_argument(
+        "--run-budget",
+        type=Path,
+        default=None,
+        help="Path to a brigade.run_budget.v1 JSON declaration bounding task and synthesis dispatch.",
+    )
     p_batch.set_defaults(func=dry_run_cli)
 
     p_approve = run_sub.add_parser("approve", help="Record a signed human approval for a run.")

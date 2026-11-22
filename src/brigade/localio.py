@@ -206,11 +206,23 @@ def write_json(path: Path, payload: dict[str, Any]) -> None:
 
 def write_text_exclusive(path: Path, data: str) -> None:
     """Publish complete data atomically without replacing an existing file."""
+    write_bytes_exclusive(path, data.encode("utf-8"))
+
+
+def write_bytes_exclusive(path: Path, data: bytes) -> None:
+    """Publish complete bytes atomically without replacing an existing entry.
+
+    ``os.link`` publishes the finished temporary file under ``path`` and fails
+    with ``FileExistsError`` when the name is already taken, so an existing
+    file, directory, or symlink is never followed or overwritten. Bytes are
+    written through a binary handle, so no newline translation can change the
+    stored length or digest on any platform.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
     tmp_path = Path(tmp_name)
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+        with os.fdopen(fd, "wb") as handle:
             handle.write(data)
             handle.flush()
             os.fsync(handle.fileno())

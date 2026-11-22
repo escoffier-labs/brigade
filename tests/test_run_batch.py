@@ -116,11 +116,20 @@ def test_dry_run_cli(tmp_path, capsys, no_models, as_json):
     assert not (tmp_path / ".brigade").exists()
 
 
-def test_synthesis_execution_refused(tmp_path, capsys, no_models):
+def test_synthesis_seat_refused_before_launch(tmp_path, capsys, monkeypatch):
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "roster.toml").write_text(
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.coder]\ncli = "codex"\nrole = "implement"\n'
+    )
+    model = Mock(side_effect=AssertionError("model called"))
+    monkeypatch.setattr(agents, "run_agent", model)
     path = tmp_path / "batch.json"
-    path.write_text(json.dumps(batch(synthesis={"seat": "coder", "text": "Summarize"})))
-    assert cli.main(["run", "batch", str(path)]) == 2
-    assert "synthesis-not-implemented" in capsys.readouterr().err
+    path.write_text(json.dumps(batch(synthesis={"seat": "ghost", "text": "Summarize"})))
+    assert cli.main(["run", "batch", str(path), "--cwd", str(tmp_path)]) == 2
+    assert "invalid-seat" in capsys.readouterr().err
+    model.assert_not_called()
 
 
 @pytest.mark.parametrize(
@@ -351,8 +360,6 @@ def test_validation_cli_and_synthesis(tmp_path, capsys, no_models):
     path.write_text(json.dumps(batch(synthesis={"text": "Summarize findings", "seat": "writer"})))
     assert cli.main(["run", "batch", str(path), "--dry-run", "--json"]) == 0
     assert json.loads(capsys.readouterr().out)["synthesis"] == {"seat": "writer"}
-    assert cli.main(["run", "batch", str(path), "--json"]) == 2
-    assert json.loads(capsys.readouterr().out)["error"]["code"] == "synthesis-not-implemented"
 
 
 def test_fingerprint_golden_vector():

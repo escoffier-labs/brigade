@@ -33,7 +33,7 @@ from .. import message_envelope
 from .. import proc, receipt_schema, runguard
 from .. import run_control
 from .. import run_checkpoint
-from .. import run_batch_launch, run_budget
+from .. import run_batch_launch, run_batch_synthesis, run_budget
 from .. import run_events
 from .. import run_journal
 from .. import run_lifecycle
@@ -486,6 +486,7 @@ def run(
     output_dir = output_dir.expanduser() if output_dir is not None else None
     handoff_inbox = handoff_inbox.expanduser() if handoff_inbox is not None else None
     direct_worker = worker is not None
+    synthesis_only = run_batch_synthesis.synthesis_retry(batch_execution)
     admission_coordinator = model_admission.RuntimeAdmissionCoordinator.for_run(output_dir)
     # Judge the command-line sandbox override rather than the static declaration.
     effective_sandbox = sandbox if sandbox is not None else ("read-only" if read_only else None)
@@ -1068,7 +1069,7 @@ def run(
     if drift_rc is not None:
         return drift_rc
 
-    if output_dir is not None:
+    if output_dir is not None and not synthesis_only:
         attempts_payload: dict[str, object] = {"attempts": plan_attempts or []}
         if direct_worker:
             attempts_payload["mode"] = "direct-worker"
@@ -1101,7 +1102,7 @@ def run(
             plan_doc["run_budget"] = dict(budget_for_plan)
         run_io._write_json(output_dir / "plan.json", plan_doc)
 
-    if cwd is not None and output_dir is not None:
+    if cwd is not None and output_dir is not None and not synthesis_only:
         from .. import candidate_set as candidate_set_mod
 
         assignments, _candidate_decision, candidate_failure = planning._apply_candidate_set_gate(
@@ -1701,8 +1702,10 @@ def run(
         sandbox=sandbox,
     )
     ground_truth["suspected_noop"] = suspected_noop
-    worker_results = prompts._mark_noop_worker_results(worker_results, suspected_noop)
-    if output_dir is not None:
+    if not synthesis_only:
+        # A synthesis-only retry reuses the recorded results it read.
+        worker_results = prompts._mark_noop_worker_results(worker_results, suspected_noop)
+    if output_dir is not None and not synthesis_only:
         worker_results = _write_worker_logs(output_dir, worker_results)
         run_io.write_sidecar_revision(
             output_dir,
@@ -1736,7 +1739,19 @@ def run(
 
     synth_captured = None
     if batch_execution is not None:
-        final = batch_execution.finish(worker_results)
+        final = run_batch_synthesis.finish_batch(
+            batch_execution,
+            worker_results,
+            output_dir=output_dir,
+            roster=roster,
+            budget=budget_coordinator,
+            record_dispatch=dispatch_fact,
+            ground_truth=ground_truth,
+            cwd=cwd,
+            codex_transport=transport_for_payload,
+            process_registry=process_registry,
+            model_lease=lease_model_agent,
+        )
         direct_worker = False
     elif direct_worker:
         direct_result = (
@@ -1918,6 +1933,8 @@ def run(
             transport_warning=direct_result.transport_warning if direct_worker else None,
             base=finish_base,
             extra=finish_extra,
+            # The batch synthesis published final.txt itself; never rewrite it here.
+            final_txt_published=run_batch_synthesis.published_final(batch_execution),
         )
     if handoff_inbox is not None and workers_ok:
         try:

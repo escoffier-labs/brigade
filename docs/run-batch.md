@@ -8,8 +8,9 @@ when it is planned.
 
 Without `--dry-run`, the command executes through the existing run orchestrator.
 Use `--cwd WORKSPACE` and optionally `--roster ROSTER.toml`. Execution makes no
-planner or synthesis call. Remove `synthesis` from this example to execute it.
-Validation errors exit 2, with a stable code in text or `error.code` in JSON.
+planner call. Optional synthesis runs after the tasks settle, as described in
+[Synthesis](#synthesis). Validation errors exit 2, with a stable code in text or
+`error.code` in JSON.
 Tasks that `brigade t3 open` refuses as `t3-unsupported` belong here, submitted
 as a separate request with its own admission, budget and receipts. See
 [work T3 cannot run](t3-governed-delegation.md#work-t3-cannot-run).
@@ -29,8 +30,12 @@ See [governed Orca delegation](orca-governed-delegation.md).
 ```
 
 Synthesis defaults to off (omit it or use `null`). When present, it must specify
-non-empty `text` and a `seat`. It is fingerprinted and displayed as requested,
-but never executed. No synthesis budget, receipt, or launch is created yet.
+non-empty `text` and a `seat`, and the seat must pass the same admission a task
+seat passes: a declared roster seat that is not the orchestrator seat, with an
+allowed CLI and hard read-only enforcement. It must also be a seat the runtime
+orchestrator call accepts, so a `codex-cloud:` seat or an unusable provider
+configuration refuses the batch. An inadmissible seat refuses the whole batch
+with `invalid-seat` before any task launches.
 Only the documented fields are accepted. Each task requires `task_id`, `text`,
 and exactly one selector: `seat` or `capability`. `depends_on` defaults to an
 empty list of unique task IDs. `depends_on` must be a list when present. `null`
@@ -401,9 +406,9 @@ and digests.
 | `input-limit` | File exceeds the input byte bound |
 | `invalid-json` | Malformed UTF-8/JSON, excessive nesting, or duplicate object keys |
 | `invalid-fingerprint` | Stored fingerprint passed to `compare_request` is malformed |
-| `synthesis-not-implemented` | Execution requested with synthesis |
 | `request-conflict` | Request ID already reserved with a different fingerprint |
 | `request-unknown` | Request reservation has no readable fingerprint, the marker is missing while the journal shows a possible launch, or an accepted request has lost or cannot read its journal |
+| `synthesis-unrecorded` | An owed synthesis reservation could not be recorded on a retry; the run refuses to call again |
 | `request-busy` | Another caller holds this request’s dispatch lock |
 
 
@@ -822,9 +827,87 @@ Exit 0 requires every task to be completed successfully and the run to pass
 finalization. Worker failures, cancellation, and timeout exit 1. Preflight and
 run-guard refusals retain their nonzero dispatch exit code and stderr reason.
 Batch runs retain normal drift checkpoints, worker-result artifacts, final
-receipts, artifact collection, and lineage metadata without calling synthesis.
-Synthesis execution exits 2 with `synthesis-not-implemented`. Dry run still shows
-its requested seat. No synthesis model call or budget is created.
+receipts, artifact collection, and lineage metadata.
+
+## Synthesis
+
+Synthesis is optional, separate, and never decides a task outcome. With no
+`synthesis` object, a batch makes zero synthesis calls and every task result and
+status is exactly what the run recorded.
+
+When `synthesis` is present, exactly one synthesis call runs on its `seat` after
+the tasks settle. The call reuses the planned-run prompt builder over the
+per-task results, the same model lease, and the same `synthesis-request` and
+`synthesis-result` message envelopes; the envelopes name the requested synthesis
+seat, never the orchestrator. A batch never calls the planner.
+
+The synthesis seat passes the same admission before any task launches. Beyond
+the task-seat rules above, it must be a seat the runtime orchestrator call
+accepts: an allowed CLI, not a `codex-cloud:` seat (those are workers only), and
+no provider-config refusal such as a Cloudflare AI Gateway route with missing
+environment variables. A seat that fails any of these refuses the whole batch
+with `invalid-seat` before a task wave starts, so a task is never spent on a
+synthesis that cannot run. An unhealthy synthesis seat aborts through the same
+seat-health routing a task seat uses, also before any launch.
+
+Synthesis takes one dispatch unit from the same run budget, reserved through the
+dispatch coordinator before the call and recorded as its own
+`run.dispatch.requested` fact. The reservation is recorded before the provider
+call, so a crash cannot spend it twice. When the declared ceiling is already
+spent, the task results stand and synthesis is `refused-budget`; no call is
+made. A task and the synthesis may share one seat: each reservation mints its own
+dispatch attempt, so the second identity never reuses the first.
+
+Synthesis runs only after every accepted task is terminal. Fail-fast stops later
+waves, so a wave failure leaves those tasks `queued` and never launched. Such a
+run reserves no dispatch unit, writes no dispatch marker, and makes no model
+call: it records `not-run` with the closed reason `tasks-unfinished` instead.
+That fact is non-final, because it reserved nothing. A later retry whose journal
+shows every accepted task terminal clears it and runs the owed call exactly once.
+Until then, every retry reports the same `not-run` fact.
+
+The call is recorded in `batch-synthesis.json` (schema
+`brigade.batch_synthesis.v1`) beside the batch result receipts. It holds the
+request ID, seat, `status` (`completed`, `failed`, `refused-budget`, `not-run`,
+or `indeterminate`), a closed `reason`, a closed `error_class` instead of any
+exception text, the input task IDs with their result IDs, and the completed
+output's digest and byte count. A completed call also publishes its text to
+`final.txt`. That write is exclusive, atomic, and byte-exact: the trailing
+newline is one `0x0A` byte, so `output_bytes` and `output_sha256` describe the
+file on every platform. The planned-run terminal receipts do not rewrite
+`final.txt` after synthesis published it, on the success or the failure path.
+The per-task `synthesis.json` summary keeps its existing shape and task lines.
+The batch result JSON gains an additive `synthesis` member, or `null` when
+synthesis was not requested.
+
+Both receipt files are untrusted input on a retry. `batch-synthesis.json` and
+`batch-synthesis-dispatch.json` are read without following a symlinked final
+component, bounded in size, and validated against the exact key set, the closed
+`status` and `reason` enums, and their field types. A path that exists but is not
+such a regular file fails closed: the retry does not reserve budget, does not
+call the model, and reports synthesis `indeterminate` with the closed reason
+`sidecar-invalid` or `marker-invalid`. An exclusive reservation that finds the
+dispatch marker already present is never called over; it reports
+`indeterminate` with reason `reservation-held`.
+
+A retry never relaunches a task because of synthesis. If every task is already
+terminal and no synthesis sidecar and no reserved synthesis dispatch exist, the
+retry runs only the owed synthesis call. That retry reuses the accepted plan, so
+it writes no `plan.json`, `plan-attempts.json`, or `candidate-set.json`: every
+artifact derived from the accepted assignments stays byte-identical. If a
+synthesis dispatch was reserved but no sidecar exists, the call may already have
+run: the retry never calls again and records `indeterminate`.
+`batch-synthesis-dispatch.json` is the durable marker for that reservation. If
+recording that fact fails, the retry refuses with `synthesis-unrecorded` rather
+than calling without a receipt.
+
+A failed, refused, or indeterminate synthesis leaves every task result and
+status untouched and exits 1 when the tasks themselves completed, reporting the
+synthesis status on stderr. A task failure, cancellation, or settled `unknown`
+still exits 1 on its own; a synthesis-only retry that re-reads a settled
+`unknown` task therefore exits 1, not the pre-launch refusal code 2.
+`--run-budget PATH` supplies the `brigade.run_budget.v1` declaration that bounds
+both task and synthesis dispatch.
 
 ## Cancellation
 

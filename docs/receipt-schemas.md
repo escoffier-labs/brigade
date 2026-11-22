@@ -197,6 +197,66 @@ merged, pushed or published. Integration is described in
 
 ---
 
+## `brigade.batch_synthesis.v1`
+
+**Path:** `.brigade/runs/batch-<sha256 of request id>/batch-synthesis.json`
+
+The record of the one optional synthesis call an explicit batch requested
+(#2047). It is written exclusively and is a separate fact from every task
+result. `batch-synthesis-dispatch.json` in the same directory records the
+reserved dispatch before the call, so a sidecar-less retry reports
+`indeterminate` instead of calling again.
+
+Both files are read on a retry as untrusted local state: no-follow, bounded (64
+KiB for the sidecar, 4 KiB for the marker), and validated against the exact key
+set below. A path that exists but is not that regular file is never trusted and
+never overwritten; synthesis reports `indeterminate` with `sidecar-invalid` or
+`marker-invalid` and makes no call.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `schema` | string | Always `brigade.batch_synthesis.v1` |
+| `request_id` | string | The batch request identity |
+| `seat` | string | The requested synthesis seat, never the orchestrator when they differ |
+| `status` | string | `completed`, `failed`, `refused-budget`, `not-run`, or `indeterminate` |
+| `inputs` | array of object | `{task_id, result_id}` rows in task-ID order; `result_id` is null for a task with no result |
+| `output_ref` | string \| null | `final.txt` when the completed text was written, else null |
+| `output_sha256` | string \| null | SHA-256 of the written `final.txt` bytes |
+| `output_bytes` | integer \| null | Byte count of the written `final.txt` |
+| `reason` | string \| null | Closed reason; null only when `status` is `completed` |
+| `error_class` | string \| null | Closed exception class for an unexpected failure; null otherwise |
+
+`reason` is one of `sidecar-invalid`, `marker-invalid`, `reservation-held`,
+`budget-unavailable`, `seat-unavailable`, `call-failed`, `output-conflict`,
+`output-write-failed`, `synthesis-error`, or `tasks-unfinished`. It never
+carries free text.
+`error_class` is one of `os-error`, `budget-error`, `journal-error`,
+`value-error`, or `unexpected-error`, and is present only with
+`synthesis-error`, so a failed run is diagnosable without storing a message.
+
+`final.txt` is published once, exclusively and atomically, as exact bytes: the
+recorded digest and byte count describe that file on every platform, and the
+planned-run terminal receipts do not rewrite it afterwards. A `completed`
+record always names `final.txt` with both values; every other status leaves all
+three output fields null.
+
+`not-run` with `tasks-unfinished` is the one non-final record: it is written when
+the run stops with an accepted task still `queued`, so synthesis reserved no
+dispatch unit and made no call. A retry whose journal shows every accepted task
+terminal replaces it with the outcome of the owed call, so it never blocks that
+call. Every other status is final, and a `completed` record is never replaced.
+
+`batch-synthesis-dispatch.json` is exactly `{seat, attempt}` with a non-empty
+seat and a positive integer attempt. An exclusive reservation that finds the
+marker present reports `indeterminate` (`reservation-held`) and never calls.
+
+The batch result JSON carries the same status as an additive `synthesis`
+member (`{status, seat, ref, digest, reason}` or null). The per-task
+`synthesis.json` summary retains its existing `brigade.synthesis.v1` shape.
+Synthesis is described in [explicit task batches](run-batch.md#synthesis).
+
+---
+
 ## `brigade.work_verify_receipt`: `schema_version: 2`
 
 **Path:** `.brigade/work/verify-runs/<run-id>/receipt.json`
