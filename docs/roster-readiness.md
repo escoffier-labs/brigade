@@ -303,14 +303,16 @@ It runs these checks in order:
    On Linux, the command `orca` belongs to the GNOME screen reader.
 2. Run `--version` and compare its output with the Orca adapter's supported
    versions.
-3. Run `orchestration worker-start --help` and check that its Options section
-   lists `--retry-request`.
+3. Run `orchestration worker-start --help`, recognize Orca's worker-start
+   usage line, and look for `--retry-request` before the next heading after
+   `Options:`.
 4. Validate each selected seat's `[orca_targets.<seat>]` declaration using
    the Orca adapter's dispatch rules for the agent, version, worktree, model,
    and effort. Invalid declarations report `orca-target-invalid`. A valid
    declaration with an unsupported setting reports `orca-target-<gap>`.
 
-Each CLI probe has a 12-second timeout. A timed-out, failed, or unrecognized
+Each CLI probe has a 12-second timeout and receives a copy of the environment
+with credential-like variable names removed. A timed-out, failed, or unrecognized
 probe produces `unknown` evidence and exit 3 (`unverified`). A missing
 executable, unsupported version, absent retry flag, or incompatible target
 produces exit 2 (`blocked`). Subsequent checks appear as `skipped` in both

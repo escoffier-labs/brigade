@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import time
 from dataclasses import asdict
@@ -15,9 +16,20 @@ from .roster_readiness import SOURCE_ORCA_LOCAL_PROBE, Observation, ReadinessReq
 
 PROBE_TIMEOUT_SECONDS = 12.0
 _VERSION = re.compile(r"v?(\d+\.\d+\.\d+(?:-[\w.-]+)?(?:\+[\w.-]+)?)", re.ASCII)
-_WORKER_START_USAGE = re.compile(r"^Usage:[^\r\n]+\bworker-start\b", re.MULTILINE)
-_OPTIONS = re.compile(r"^Options:[ \t]*\r?\n(.*?)(?=^Notes:[ \t]*\r?$|\Z)", re.MULTILINE | re.DOTALL)
+# Orca 1.4.269 usage with both required selector groups and optional flags.
+_WORKER_START_USAGE = re.compile(
+    r"^Usage: orca-ide orchestration worker-start "
+    r"\(--task <task_id> \| --spec <text> \| --spec-file <path\|->\)"
+    r"(?: \[--[^\]\r\n]+\])* \(--agent <agent> \| --terminal <handle>\)"
+    r"(?: \[--[^\]\r\n]+\])*[ \t]*\r?$",
+    re.MULTILINE,
+)
+_OPTIONS = re.compile(r"^Options:[ \t]*\r?\n(.*?)(?=^\S[^\r\n]*:[^\S\r\n]*\r?$|\Z)", re.MULTILINE | re.DOTALL)
 _RETRY_REQUEST_OPTION = re.compile(r"^[ \t]+--retry-request(?=[ \t=\r\n]|$)", re.MULTILINE)
+_CREDENTIAL_ENV_NAME = re.compile(
+    r"TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_KEY|APIKEY|PRIVATE_KEY|AUTH"
+    r"|^(?:OP_|AWS_|GH_|GITHUB_|ANTHROPIC_|OPENAI_|GOOGLE_APPLICATION)"
+)
 
 
 def _declared_target(roster: Roster, seat: str) -> native_orca_host.NativeTarget | None:
@@ -36,8 +48,9 @@ def target_scope(roster: Roster, request: ReadinessRequest) -> dict[str, dict[st
 
 
 def _probe(argv: list[str]) -> tuple[str, str | None]:
+    env = {name: value for name, value in os.environ.items() if not _CREDENTIAL_ENV_NAME.search(name.upper())}
     try:
-        result = proc.run(argv, timeout=PROBE_TIMEOUT_SECONDS, stdin=b"", supervise_group=True)
+        result = proc.run(argv, timeout=PROBE_TIMEOUT_SECONDS, env=env, stdin=b"", supervise_group=True)
     except OSError:
         return "", "failed"
     if result.code == 124:
@@ -92,8 +105,9 @@ def orca_route_observations(
     if error is not None:
         checks["orca-retry-request"] = observed("unknown", f"orca-help-probe-{error}")
         return checks
-    options = _OPTIONS.search(stdout)
-    if not _WORKER_START_USAGE.search(stdout) or options is None:
+    usage = _WORKER_START_USAGE.search(stdout)
+    options = _OPTIONS.search(stdout, usage.end()) if usage is not None else None
+    if options is None:
         checks["orca-retry-request"] = observed("unknown", "orca-worker-start-help-unrecognized")
         return checks
     if not _RETRY_REQUEST_OPTION.search(options[1]):

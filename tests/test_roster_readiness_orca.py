@@ -1,6 +1,7 @@
 """Local route support against the Orca 1.4.269 CLI contract."""
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -30,6 +31,7 @@ def orca_cli(tmp_path, monkeypatch, capsys):
         declared_version=ORCA_VERSION,
         worktree="new-child",
         target_fields="",
+        check_env=None,
         extra_args=(),
     ):
         roster.write_bytes(
@@ -62,9 +64,11 @@ orca_version = "{declared_version}"
             assert name == "orca-ide"
             return proc.ExecutableIdentity(name, executable if installed else None, "native", installed, "")
 
-        def run(argv, *, timeout, **kwargs):
+        def run(argv, *, timeout, env=None, **kwargs):
             assert argv[0] == executable
             assert timeout == 12
+            if check_env is not None:
+                check_env(env)
             args = argv[1:]
             calls.append(args)
             if args == VERSION_ARGS:
@@ -223,7 +227,8 @@ def test_orca_1_4_269_refuses_invalid_target(orca_cli, target, reason):
     assert calls == [VERSION_ARGS, HELP_ARGS]
 
 
-def test_orca_1_4_269_retry_request_in_notes_does_not_count(orca_cli):
+@pytest.mark.parametrize("section", ["Notes", "Examples", "Additional information"])
+def test_orca_1_4_269_retry_request_in_a_later_section_does_not_count(orca_cli, section):
     invoke, fixture = orca_cli
     before_notes, heading, notes = fixture["worker_start_help"]["stdout"].partition("\nNotes:\n")
     assert heading and notes
@@ -232,8 +237,65 @@ def test_orca_1_4_269_retry_request_in_notes_does_not_count(orca_cli):
         line for line in before_notes.split("\n") if not line.lstrip().startswith("--retry-request ")
     )
     assert "--retry-request" not in before_notes
-    help_text = before_notes + heading + notes + "\n  --retry-request <id>  Mentioned in notes only\n"
+    help_text = before_notes + f"\n{section}:\n  --retry-request <id>  Mentioned here only\n"
+    help_text += notes if section == "Notes" else heading + notes
     code, out, calls = invoke(help_text=help_text, extra_args=("--json",))
     assert code == 2
     assert json.loads(out)["limiting_reason"] == "orca-retry-request-unsupported"
     assert calls == [VERSION_ARGS, HELP_ARGS]
+
+
+def test_orca_1_4_269_foreign_worker_start_usage_is_unverified(orca_cli):
+    invoke, fixture = orca_cli
+    help_text = "\n".join(
+        "Usage: unrelated worker-start" if line.startswith("Usage:") else line
+        for line in fixture["worker_start_help"]["stdout"].split("\n")
+    )
+    code, out, calls = invoke(help_text=help_text, extra_args=("--json",))
+    assert code == 3
+    assert json.loads(out)["limiting_reason"] == "orca-worker-start-help-unrecognized"
+    assert calls == [VERSION_ARGS, HELP_ARGS]
+
+
+def test_orca_1_4_269_probes_filter_credentials_and_keep_startup_env(orca_cli, monkeypatch, tmp_path):
+    invoke, _ = orca_cli
+    credentials = (
+        "GH_TOKEN",
+        "OP_SERVICE_ACCOUNT_TOKEN",
+        "Aws_Profile",
+        "GITHUB_ACTOR",
+        "ANTHROPIC_BASE_URL",
+        "OPENAI_ORG_ID",
+        "GOOGLE_APPLICATION_PROJECT",
+        "example_token",
+        "example_secret",
+        "example_password",
+        "example_passwd",
+        "example_credential",
+        "example_api_key",
+        "example_apikey",
+        "example_private_key",
+        "example_auth",
+    )
+    startup = {
+        "PATH": os.environ.get("PATH", str(tmp_path)),
+        "HOME": str(tmp_path),
+        "XDG_RUNTIME_DIR": str(tmp_path / "runtime"),
+        "APPDATA": str(tmp_path / "appdata"),
+        "APPIMAGE_EXTRACT_AND_RUN": "1",
+    }
+    for name in credentials:
+        monkeypatch.setenv(name, "example")
+    for name, value in startup.items():
+        monkeypatch.setenv(name, value)
+
+    def check_env(env):
+        assert env is not None
+        assert not {name.upper() for name in credentials} & {name.upper() for name in env}
+        for name, value in startup.items():
+            assert env[name] == value
+
+    code, _, calls = invoke(check_env=check_env)
+    assert code == 0
+    assert calls == [VERSION_ARGS, HELP_ARGS]
+    assert all(os.environ[name] == "example" for name in credentials)
