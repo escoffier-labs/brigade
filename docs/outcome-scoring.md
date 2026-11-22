@@ -127,7 +127,7 @@ The two-hour grace window (`ATTEST_GRACE`) starts separately for each in-scope c
 
 The merge queue can batch up to five entries into one push. The workflow runs on the push tip. An in-scope commit inside the batch without a run of its own counts as unverified and receives a `missing` hurt verdict after its grace window.
 
-The ledger reads the manifest from each commit's tree. At a pin change, the previous pinned manifest supplies the scope for that commit. The new pin starts a cohort. In-scope commits from the old cohort that still lack a verdict are recorded as `hurt` with the reason `missing`, and missing evidence is kept across later pin changes. An unavailable manifest leaves the previous scope in force.
+The ledger reads the manifest from each commit's tree. At a pin change, the previous pinned manifest supplies the scope for that commit. The new pin starts a cohort. Every hurt verdict from the old cohort is kept, whatever its reason. That includes a failure that finished after the pin changed. In-scope commits from the old cohort that still lack a verdict are recorded as `hurt` with the reason `missing`. Helped verdicts from the old cohort do not carry into the new one. An unavailable manifest leaves the previous scope in force.
 
 A malformed or truncated Actions response stops the build and the check. This includes a page that ends before `total_count`, a completed job without a readable verdict, and a run with more than 50 attempts. When the cohort continues under the same pin, recorded trials carry forward unchanged. The ledger reads Actions evidence only for newer commits, so retention expiry cannot alter carried trials.
 

@@ -18,7 +18,7 @@ A commit that needs an attest verdict and has none counts against the text, so d
 cancelling a run never helps. See ``outcome_ledger_trials``.
 
 A ledger carries forward trials under the same manifest pin and reads the Actions API only
-for newer commits. A pin change restarts the cohort, with missing evidence kept as hurt.
+for newer commits. A pin change restarts the cohort, and every hurt verdict before it is kept.
 
 Trials come only from ``outcome_ledger_actions`` (Actions API jobs, never check runs).
 Git reads come only from ``outcome_ledger_git`` (commit ids, never a working tree).
@@ -37,7 +37,7 @@ from typing import Any
 from . import outcome as outcome_core, scorecard, shipped_history, verify_manifest
 from .outcome_ledger_actions import GhApi, owner_review_ok, parse_time
 from .outcome_ledger_git import Repo, bundle_fingerprint, is_sha
-from .outcome_ledger_trials import MANIFESTS_DIR, TrialPlan, is_missing_trial, plan_trials, scope_history
+from .outcome_ledger_trials import MANIFESTS_DIR, TrialPlan, is_hurt_trial, plan_trials, scope_history
 
 SCHEMA = "brigade.outcome_ledger.v1"
 LEDGER_PATH = "outcome-ledger/skills.json"
@@ -375,7 +375,7 @@ def build_ledger(
         plan = _plan(ev, definition, manifest, covers_sha, cutoff, seed_tip)
         before = prev_subjects.get(key) or {}
         if plan.restarted or before.get("manifest_sha256") != pin:
-            seed = [row for row in seed if is_missing_trial(row)]
+            seed = [row for row in seed if is_hurt_trial(row)]
         trials = seed + list(plan.trials)
         demoted: list[str] = list(before.get("demoted", []))
         same_cohort = (before.get("current") or {}).get("fingerprint") == fingerprint
