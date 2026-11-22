@@ -12,7 +12,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote, urlencode
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
@@ -227,10 +227,35 @@ class Publisher:
             raise RetryPublication("the pull request changed before publication")
         return queued
 
-    def _decision(self, branch: str) -> tuple[planner.BranchAction, dict[str, Any] | None]:
+    def _disable_approval_auto_merge(self, number: int) -> bool:
+        args = (str(number), "--repo", self.ev.slug)
+        result = json.loads(self._gh("pr", "view", *args, "--json", "autoMergeRequest"))
+        if not isinstance(result, dict) or "autoMergeRequest" not in result:
+            raise PublicationError(f"auto-merge state for approval #{number} is unreadable")
+        request = result["autoMergeRequest"]
+        if request is None:
+            return False
+        if not isinstance(request, dict):
+            raise PublicationError(f"auto-merge state for approval #{number} is unreadable")
+        try:
+            self._gh("pr", "merge", *args, "--disable-auto")
+        except (PublicationError, OSError, subprocess.SubprocessError) as exc:
+            raise PublicationError(f"cannot disable auto-merge for approval #{number}: {exc}") from exc
+        say(f"disabled auto-merge for approval #{number}. Skipping publication for this run.")
+        return True
+
+    def _decision(self, branch: str) -> tuple[planner.BranchAction | Literal["auto-disabled"], dict[str, Any] | None]:
         # Publication reads live PR state. Evidence reads used during recompute are memoized.
-        rows = planner.branch_prs(ci_attestation.default_gh_api, self.ev.slug, branch)
+        gh = ci_attestation.default_gh_api
+        rows = planner.branch_prs(gh, self.ev.slug, branch)
         pull = next((row for row in rows if row["state"] == "open"), None)
+        if branch != planner.AUTO_BRANCH and pull is not None:
+            number = pull["number"]
+            if self._disable_approval_auto_merge(number):
+                return "auto-disabled", pull
+            if planner.approval_was_closed(gh, self.ev.slug, number):
+                say(f"approval #{number} was previously closed. The fingerprint for {branch} is permanently rejected.")
+                return "closed", pull
         queued = pull is not None and self._queued(pull)
         return planner.branch_action(branch, [row["state"].upper() for row in rows], queued=queued), pull
 
@@ -240,8 +265,13 @@ class Publisher:
         if pull is not None:
             if old != pull["head"]["sha"]:
                 raise RetryPublication("the branch head changed before publication")
-            if self._queued(pull):
-                raise RetryPublication(f"{branch} is in the merge queue")
+            if branch == planner.AUTO_BRANCH:
+                if self._queued(pull):
+                    raise RetryPublication(f"{branch} is in the merge queue")
+            else:
+                action, live = self._decision(branch)
+                if action != "update" or live is None or live["number"] != pull["number"] or live["head"]["sha"] != old:
+                    raise RetryPublication(f"{branch} is no longer eligible for publication")
         else:
             action, _ = self._decision(branch)
             if action != "create":
@@ -363,6 +393,8 @@ class Publisher:
             return False
         title = f"chore(outcome): approve {approval.key.removeprefix('skill:')} {approval.fingerprint[:12]}"
         action, pull = self._decision(branch)
+        if action == "auto-disabled":
+            return False
         if action in {"closed", "queued"}:
             say(f"{branch} is {action}. Leaving its branch alone.")
             return False

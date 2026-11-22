@@ -255,6 +255,87 @@ def test_rejected_approval_stays_closed(seeded, writer_script, monkeypatch, caps
     assert "is closed" in capsys.readouterr().out
 
 
+@pytest.fixture
+def open_approval(seeded, writer_script, monkeypatch):
+    main, raw, proposed = qualifying(seeded)
+    [approval] = writer.approvals(proposed)
+    publisher = writer_script.Publisher(seeded.ev, main)
+    row = {
+        "number": 13,
+        "state": "open",
+        "head": {"sha": main, "ref": approval.branch, "label": f"{seeded.ev.slug.split('/')[0]}:{approval.branch}"},
+    }
+    monkeypatch.setattr(publisher, "_queued", lambda _: False)
+    monkeypatch.setattr(publisher, "_refresh_approval", lambda *_: pytest.fail("approval was refreshed"))
+    monkeypatch.setattr(publisher, "_push", lambda *_: pytest.fail("approval was pushed"))
+    monkeypatch.setattr(publisher, "_dispatch", lambda *_: pytest.fail("CI was dispatched"))
+    return publisher, row, raw, proposed, approval
+
+
+def test_reopened_approval_is_permanently_rejected(open_approval, writer_script, monkeypatch, capsys):
+    publisher, row, raw, proposed, approval = open_approval
+    base = f"repos/{publisher.ev.slug}/issues/13/events"
+
+    def gh(endpoint):
+        if endpoint.startswith(f"repos/{publisher.ev.slug}/pulls?"):
+            return [row]
+        if endpoint == f"{base}?per_page=100&page=1":
+            return [{"event": "labeled"}] * 100
+        assert endpoint == f"{base}?per_page=100&page=2"
+        return [{"event": "closed"}, {"event": "reopened"}]
+
+    monkeypatch.setattr(writer_script.ci_attestation, "default_gh_api", gh)
+    monkeypatch.setattr(publisher, "_gh", lambda *_: b'{"autoMergeRequest":null}')
+    assert not publisher.approval(raw, proposed, approval, WRITER_NOW)
+    assert "permanently rejected" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("disable_fails", [False, True])
+def test_approval_disables_auto_merge_and_skips_rebuild(
+    open_approval, writer_script, monkeypatch, capsys, disable_fails
+):
+    publisher, row, raw, proposed, approval = open_approval
+    monkeypatch.setattr(
+        writer_script.ci_attestation, "default_gh_api", lambda endpoint: [row] if "/pulls?" in endpoint else []
+    )
+    disabled = []
+
+    def gh(*args):
+        if args == ("pr", "view", "13", "--repo", publisher.ev.slug, "--json", "autoMergeRequest"):
+            return b'{"autoMergeRequest":{"enabledAt":"2026-11-21T06:00:00Z"}}'
+        assert args == ("pr", "merge", "13", "--repo", publisher.ev.slug, "--disable-auto")
+        if disable_fails:
+            raise writer_script.PublicationError("denied")
+        disabled.append(13)
+        return b""
+
+    monkeypatch.setattr(publisher, "_gh", gh)
+    if disable_fails:
+        with pytest.raises(writer_script.PublicationError, match="cannot disable auto-merge"):
+            publisher.approval(raw, proposed, approval, WRITER_NOW)
+        return
+    assert not publisher.approval(raw, proposed, approval, WRITER_NOW)
+    assert disabled == [13]
+    assert "disabled auto-merge" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("events", [{}, [{"event": []}], None], ids=["not-a-list", "bad-event", "unreadable"])
+def test_approval_fails_closed_on_unreadable_events(open_approval, writer_script, monkeypatch, events):
+    publisher, row, raw, proposed, approval = open_approval
+
+    def gh(endpoint):
+        if "/pulls?" in endpoint:
+            return [row]
+        if events is None:
+            raise writer_script.ci_attestation.GhUnavailable("denied")
+        return events
+
+    monkeypatch.setattr(writer_script.ci_attestation, "default_gh_api", gh)
+    monkeypatch.setattr(publisher, "_gh", lambda *_: b'{"autoMergeRequest":null}')
+    with pytest.raises(writer_script.EvidenceError, match="close history"):
+        publisher.approval(raw, proposed, approval, WRITER_NOW)
+
+
 def test_rollback_artifact_restores_the_bundle_and_rejects_changed_bytes(seeded, writer_script, tmp_path):
     main = seeded.commit({SUBJECT: WORSE, f"{SKILL_DIR}/new.txt": "new file\n"}, T % (21, "04:00:00Z"))
     seeded.gh.failed(main, done=T % (21, "04:10:00Z"))

@@ -9,8 +9,8 @@ from dataclasses import dataclass, replace
 from typing import Any, Literal
 from urllib.parse import urlencode
 
-from . import outcome_ledger as ledger, shipped_history
-from .outcome_ledger_actions import EvidenceError, GhApi
+from . import ci_attestation, outcome_ledger as ledger, shipped_history
+from .outcome_ledger_actions import MAX_PAGES, PER_PAGE, EvidenceError, GhApi
 from .outcome_ledger_git import Repo, bundle_fingerprint, is_sha
 
 AUTO_BRANCH = "ledger/auto"
@@ -90,6 +90,29 @@ def branch_prs(gh: GhApi, slug: str, branch: str) -> list[dict[str, Any]]:
     if sum(row["state"] == "open" for row in found) > 1:
         raise EvidenceError("multiple open pull requests for one ledger branch")
     return found
+
+
+def approval_was_closed(gh: GhApi, slug: str, number: int) -> bool:
+    """Read close history even when GitHub currently reports the approval as open."""
+    endpoint = f"repos/{slug}/issues/{number}/events"
+    for page in range(1, MAX_PAGES + 1):
+        try:
+            rows = gh(f"{endpoint}?per_page={PER_PAGE}&page={page}")
+        except (ci_attestation.GhUnavailable, ci_attestation.GhNotFound) as exc:
+            raise EvidenceError(f"cannot read close history for approval #{number}: {exc}") from exc
+        if (
+            not isinstance(rows, list)
+            or len(rows) > PER_PAGE
+            or any(
+                not isinstance(row, dict) or not isinstance(row.get("event"), str) or not row["event"] for row in rows
+            )
+        ):
+            raise EvidenceError(f"close history for approval #{number} has an unreadable page")
+        if any(row["event"] == "closed" for row in rows):
+            return True
+        if len(rows) < PER_PAGE:
+            return False
+    raise EvidenceError(f"close history for approval #{number} exceeds {MAX_PAGES} pages")
 
 
 def evidence(repo: Repo, gh: GhApi, slug: str) -> ledger.Evidence:
