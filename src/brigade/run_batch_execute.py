@@ -40,6 +40,8 @@ from .roster import Roster, read_only_cloud_mutation_error
 # Written once the batch is accepted into the lifecycle journal, so a deleted journal is detectable.
 JOURNAL_SENTINEL = "batch-journal-enrolled.json"
 _CANCEL_POLL_SECONDS = 0.5
+# Cancel outcomes that do not prove the worker stopped writing its checkout.
+_UNCONTAINED = frozenset({"still_active", "error"})
 
 
 @dataclass
@@ -282,39 +284,53 @@ class BatchExecution:
             return False
 
     def _watch_cancels(self, stopped: threading.Event, *, terminate: bool = True) -> None:
+        try:
+            self._watch_cancels_loop(stopped, terminate=terminate)
+        finally:
+            # A watcher that stops for any reason must stop advertising live
+            # termination, or `runs tasks cancel` would promise a stop nobody makes.
+            run_task_inbox.retire_live_watcher(self.run_dir, self.workspace)
+
+    def _watch_cancels_loop(self, stopped: threading.Event, *, terminate: bool) -> None:
         while not stopped.wait(_CANCEL_POLL_SECONDS):
-            self._drain_inbox()
-            if not terminate:
-                # A remote route has no exact per-task cancel, so a running
-                # task keeps its real result and the intent shows as too late.
-                continue
             try:
-                states = run_tasks.read_tasks(self.run_dir)
-            except run_tasks.TaskJournalError as exc:
-                print(f"warning: task cancel journal refused: {exc}", file=sys.stderr)
+                self._watch_once(stopped, terminate=terminate)
+            except Exception as exc:  # noqa: BLE001 - one bad poll must not end live cancellation
+                print(f"warning: task cancel watcher poll failed: {type(exc).__name__}", file=sys.stderr)
+
+    def _watch_once(self, stopped: threading.Event, *, terminate: bool) -> None:
+        self._drain_inbox()
+        if not terminate:
+            # A remote route has no exact per-task cancel, so a running
+            # task keeps its real result and the intent shows as too late.
+            return
+        try:
+            states = run_tasks.read_tasks(self.run_dir)
+        except run_tasks.TaskJournalError as exc:
+            print(f"warning: task cancel journal refused: {exc}", file=sys.stderr)
+            return
+        # Both transactions have exited before we acquire runtime locks
+        # or make any potentially blocking transport call.
+        for state in states:
+            if stopped.is_set():
+                return
+            if not state.cancel_requested or state.launch_claim is None or state.result_id is not None:
                 continue
-            # Both transactions have exited before we acquire runtime locks
-            # or make any potentially blocking transport call.
-            for state in states:
-                if stopped.is_set():
-                    return
-                if not state.cancel_requested or state.launch_claim is None or state.result_id is not None:
+            task_id, attempt_id = state.handle.spec.task_id, state.handle.attempt_id
+            runtime = self.runtime.get(task_id)
+            if runtime is None or attempt_id is None:
+                continue
+            with runtime.lock:
+                if runtime.handed_off or runtime.cancel_done is not None:
                     continue
-                task_id, attempt_id = state.handle.spec.task_id, state.handle.attempt_id
-                runtime = self.runtime.get(task_id)
-                if runtime is None or attempt_id is None:
-                    continue
-                with runtime.lock:
-                    if runtime.handed_off or runtime.cancel_done is not None:
-                        continue
-                    done = runtime.cancel_done = threading.Event()
-                    runtime.attempt_id = attempt_id
-                try:
-                    self.processes.cancel_task(task_id, attempt_id)
-                    if self.turns is not None:
-                        self.turns.interrupt(task_id=task_id, attempt_id=attempt_id, latch_task=True)
-                finally:
-                    done.set()
+                done = runtime.cancel_done = threading.Event()
+                runtime.attempt_id = attempt_id
+            try:
+                self.processes.cancel_task(task_id, attempt_id)
+                if self.turns is not None:
+                    self.turns.interrupt(task_id=task_id, attempt_id=attempt_id, latch_task=True)
+            finally:
+                done.set()
 
     def _cancel_containment(self, task_id: str, attempt_id: str, result: WorkerResult) -> str:
         outcomes = {outcome.result for outcome in self.processes.task_cancellation_outcomes(task_id, attempt_id)}
@@ -451,6 +467,11 @@ class BatchExecution:
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         artifact_kind, artifact_digest = "receipt", digest
         binding = self.workspaces.get(task_id)
+        if cancel_containment in _UNCONTAINED:
+            # The stop was not confirmed, so the worker may still be writing
+            # the checkout. Commit nothing: the observation rests on the
+            # receipt, and the worktree stays exactly as the worker leaves it.
+            binding = None
         if binding is not None:
             # Collection runs inside the per-task run lock the batch holds from
             # creation through worker exit, so nothing else can be writing the

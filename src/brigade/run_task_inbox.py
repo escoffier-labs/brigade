@@ -479,6 +479,18 @@ def live_watcher(run_dir: Path, workspace: Path) -> Iterator[None]:
         marker.unlink(missing_ok=True)
 
 
+def retire_live_watcher(run_dir: Path, workspace: Path) -> None:
+    """Stop advertising live cancellation once this process's watcher has ended."""
+    lock = runguard.lock_path(workspace)
+    owner = runguard.read_lock_owner(lock)
+    if owner is None or owner.get("pid") != os.getpid() or not runguard._owner_matches_run(owner, run_dir):
+        return
+    try:
+        (lock / _WATCHER_MARKER).unlink(missing_ok=True)
+    except OSError:
+        pass
+
+
 def _has_live_watcher(run_dir: Path, workspace: Path) -> bool:
     lock = runguard.lock_path(workspace)
     owner = runguard.read_lock_owner(lock)
@@ -571,6 +583,15 @@ def cancel(
         if held is not None:
             with held:
                 drained = drain(run_dir, workspace)
+                # A batch may have claimed a task and exited between the read
+                # above and this lock, so judge live termination on the state
+                # the drain saw, never the stale pre-lock read.
+                try:
+                    states = {result.handle.spec.task_id: result for result in run_tasks.read_tasks(run_dir)}
+                except (run_tasks.TaskJournalError, run_journal.RunJournalError) as exc:
+                    raise TaskInboxError(
+                        "journal-unreadable", f"task journal in run {run_dir.name} is not readable"
+                    ) from exc
 
     if drained is None and submitted and not live:
         live = _has_live_watcher(run_dir, workspace)
@@ -586,7 +607,8 @@ def cancel(
         outcome = drained.get(state.handle.spec.task_id)
         if outcome in {"recorded", "already-requested"}:
             row["outcome"] = OUTCOME_RECORDED
-            if state.launch_claim is not None:
+            current = states.get(state.handle.spec.task_id, state)
+            if current.launch_claim is not None:
                 row["live_termination"] = LIVE_TERMINATION_UNAVAILABLE
         else:
             row["outcome"] = OUTCOME_UNKNOWN_TASK

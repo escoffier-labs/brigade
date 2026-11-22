@@ -768,10 +768,16 @@ watcher wins is also cancelled.
 
 Once the worker returns, Brigade collects partial worktree changes through
 the usual artifact collection path and records one `cancelled` observation.
+When the stop was not confirmed (`still_active` or `error`), the worker may
+still be writing its checkout, so Brigade commits nothing from it: the
+observation rests on the receipt and the worktree is left as it is.
 Containment reports `interrupted`, `still_active`, or `error` based on the
 observed stop outcome, or `unknown` when no stop outcome was available. An
 app-server interrupt acknowledgement alone does not prove that the turn
-stopped. The batch joins the watcher when dispatch ends.
+stopped. The batch joins the watcher when dispatch ends. A failed watcher poll
+is reported and the next poll continues. A watcher that ends for any reason
+stops advertising live termination, so `runs tasks cancel` never reports
+`requested` without a watcher to act on it.
 
 A batch routed through Fleet remote dispatch cannot cancel one exact remote
 request. Its watcher still journals intent, so a task that has not launched

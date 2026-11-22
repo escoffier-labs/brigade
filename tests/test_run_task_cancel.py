@@ -21,6 +21,7 @@ from brigade import aboyeur, agents, cli, proc, run_batch_artifacts, run_events,
 from brigade import run_task_inbox as inbox
 from brigade import run_tasks
 from brigade.run_batch_execute import BatchExecution
+from brigade.run_transport import WorkerResult
 
 posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX no-follow inbox checks")
 
@@ -730,5 +731,65 @@ def test_remote_routed_watcher_only_journals_intent_and_never_terminates():
         runtime={},
         run_dir=None,
     )
-    BatchExecution._watch_cancels(fake, stopped, terminate=False)
+    BatchExecution._watch_once(fake, stopped, terminate=False)
     assert drains == [1]
+
+
+def test_a_watcher_poll_error_is_survived_and_a_dead_watcher_stops_advertising(held_run, monkeypatch):
+    from types import SimpleNamespace
+
+    run_dir, workspace = held_run
+    stopped = threading.Event()
+    polls: list[int] = []
+
+    def poll(self, stopped_event, *, terminate):
+        polls.append(1)
+        if len(polls) == 1:
+            raise RuntimeError("transport control failed")
+        stopped_event.set()
+
+    monkeypatch.setattr(BatchExecution, "_watch_once", poll)
+    monkeypatch.setattr("brigade.run_batch_execute._CANCEL_POLL_SECONDS", 0.01)
+    fake = SimpleNamespace(run_dir=run_dir, workspace=workspace)
+    fake._watch_cancels_loop = lambda stopped_event, terminate: BatchExecution._watch_cancels_loop(
+        fake, stopped_event, terminate=terminate
+    )
+    fake._watch_once = lambda stopped_event, terminate: poll(fake, stopped_event, terminate=terminate)
+    with inbox.live_watcher(run_dir, workspace):
+        assert inbox._has_live_watcher(run_dir, workspace)
+        BatchExecution._watch_cancels(fake, stopped, terminate=True)
+        # The first poll failed and the watcher kept going; once it ended it
+        # retired the marker, so cancel no longer promises a live stop.
+        assert polls == [1, 1]
+        assert not inbox._has_live_watcher(run_dir, workspace)
+
+
+@pytest.mark.parametrize("containment", ["still_active", "error"])
+def test_unconfirmed_stop_commits_nothing_from_the_worktree(tmp_path, monkeypatch, containment):
+    # The worker may still be writing its checkout, so collection never runs:
+    # the observation rests on the receipt and the worktree is left alone.
+    from types import SimpleNamespace
+
+    from brigade import run_batch_execute
+
+    collected: list[str] = []
+    observed: list[object] = []
+    monkeypatch.setattr(run_batch_execute.run_batch_artifacts, "collect", lambda *a, **k: collected.append("x"))
+    monkeypatch.setattr(run_batch_execute.run_tasks, "observe_task", lambda *a, **k: observed.append(k["observation"]))
+    monkeypatch.setattr(run_batch_execute.run_tasks, "prepare_attempt", lambda *a, **k: SimpleNamespace(attempt_id="t"))
+    monkeypatch.setattr(run_batch_execute.run_receipts, "worker_payload_one", lambda result: {})
+    fake = SimpleNamespace(
+        prerequisite_cancelled=set(),
+        refused=set(),
+        current=lambda task_id: SimpleNamespace(result_id=None),
+        run_dir=tmp_path,
+        workspace=tmp_path,
+        workspaces={"a": object()},
+        _drain_inbox=lambda: True,
+    )
+    result = WorkerResult(worker="coder", task="t", text="", ok=False, task_id="a")
+
+    BatchExecution._publish_result(fake, result, "a", containment)
+
+    assert collected == []
+    assert [(o.status, o.containment, o.artifact_kind) for o in observed] == [("cancelled", containment, "receipt")]
