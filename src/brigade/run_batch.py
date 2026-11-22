@@ -1,14 +1,21 @@
-"""Versioned explicit batch contract and offline planning. No execution or storage."""
+"""Versioned explicit batch contract, offline planning, and the bounded request marker.
+
+The marker reader never follows a symlink and never reads an unbounded file.
+Nothing here executes a batch.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 import sys
 from pathlib import Path
 from typing import Any, Literal
 
+from . import run_journal
 from . import run_task_journal as journal
 
 SCHEMA = "brigade.run_batch.v1"
@@ -16,6 +23,9 @@ MAX_TASKS = journal.MAX_BATCH_MEMBERS
 MAX_TEXT_BYTES = 16 * 1024
 MAX_INPUT_BYTES = 256 * 1024
 ISOLATIONS = ("shared", "worktree")
+# The request reservation holds the accepted plan; never read an unbounded one.
+MARKER_NAME = "batch-request.json"
+MAX_MARKER_BYTES = 512 * 1024
 _FINGERPRINT = re.compile(r"[0-9a-f]{64}")
 _BASE_SHA = re.compile(r"[0-9a-f]{40}")
 
@@ -114,7 +124,8 @@ def validate_batch(payload: object) -> dict[str, Any]:
     syntactically checked, not admitted against a live roster, and a capability
     is resolved to a seat once, at acceptance. Isolation and read-only defaults
     are filled into the canonical row, but the fingerprint omits those defaults
-    and any capability field so existing request fingerprints are unchanged.
+    and hashes ``capability`` when a task uses one, so only seat-only tasks are
+    unchanged and existing seat-only fingerprints stay byte for byte.
     """
     obj = _fields(payload, {"schema", "request_id", "tasks", "synthesis"}, "batch")
     if obj.get("schema") != SCHEMA:
@@ -291,6 +302,53 @@ def load_batch(path: Path) -> object:
         if isinstance(exc, BatchError):
             raise
         raise BatchError("invalid-json", "batch input must be valid UTF-8 JSON") from exc
+
+
+def read_request_marker(run_dir: Path) -> dict[str, Any] | None:
+    """Read the request reservation no-follow and within bounds.
+
+    Returns ``None`` only when there is no marker. A marker that exists but
+    cannot be read as a bounded regular JSON object is refused with
+    ``request-unknown``: the reservation is the only record of an accepted
+    assignment, so treating it as absent could authorize a relaunch.
+    """
+    path = run_dir / MARKER_NAME
+    raw = b""
+    try:
+        # Never follow a symlink out of the run directory, even one swapped in
+        # after the reservation was written.
+        fd = run_journal._open_nofollow(path, os.O_RDONLY)
+    except FileNotFoundError:
+        return None
+    except (OSError, run_journal.RunJournalError) as exc:
+        raise BatchError(
+            "request-unknown", "request reservation is not a readable regular file; refusing launch"
+        ) from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise BatchError("request-unknown", "request reservation is not a regular file; refusing launch")
+        if info.st_size > MAX_MARKER_BYTES:
+            raise BatchError(
+                "request-unknown", f"request reservation exceeds {MAX_MARKER_BYTES} bytes; refusing launch"
+            )
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            raw = handle.read(MAX_MARKER_BYTES + 1)
+    except OSError as exc:
+        raise BatchError("request-unknown", "cannot read request reservation; refusing launch") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if len(raw) > MAX_MARKER_BYTES:
+        raise BatchError("request-unknown", f"request reservation exceeds {MAX_MARKER_BYTES} bytes; refusing launch")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise BatchError("request-unknown", "request reservation is not readable JSON; refusing launch") from exc
+    if not isinstance(payload, dict):
+        raise BatchError("request-unknown", "request reservation is not a JSON object; refusing launch")
+    return payload
 
 
 def dry_run_cli(args) -> int:

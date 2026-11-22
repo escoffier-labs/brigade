@@ -110,14 +110,59 @@ def _marker(site: Site, request: str = "req") -> dict:
     return json.loads((site.run_dir(request) / "batch-request.json").read_text())
 
 
-def _stages(site: Site, request: str = "req") -> list[int]:
-    return [row["stage"] for row in json.loads((site.run_dir(request) / "plan.json").read_text())["assignments"]]
-
-
 def _workers(site: Site, request: str = "req") -> list[str]:
     """The seats that actually dispatched, from the retained worker results."""
     payload = json.loads((site.run_dir(request) / "worker-results.json").read_text())
     return [row["worker"] for row in payload["results"]]
+
+
+def _rewrite_marker(site: Site, *, seat: str, reseal: bool, request: str = "req") -> None:
+    """Point a capability task at another seat, optionally recomputing the digest."""
+    path = site.run_dir(request) / "batch-request.json"
+    marker = json.loads(path.read_text())
+    for row in marker["tasks"]:
+        row["seat"] = seat
+    for row in marker["capability_resolutions"]:
+        row["seat"] = seat
+    if reseal:
+        marker["resolution_digest"] = run_batch_capability.resolution_digest(
+            marker["capability_resolutions"], marker["fingerprint"]
+        )
+    path.write_text(json.dumps(marker))
+
+
+def _fail_first_dispatch(site, capsys, monkeypatch) -> None:
+    """Leave the reservation written and nothing launched, like a preflight exit."""
+    from brigade.cli import run
+
+    original = run.dispatch
+    monkeypatch.setattr(run, "dispatch", Mock(return_value=2))
+    rc, _, err = invoke(site, capsys, [task("a")])
+    assert rc == 2, err
+    assert site.calls == []
+    monkeypatch.setattr(run, "dispatch", original)
+
+
+def _accept_then_interrupt(site, capsys, monkeypatch) -> dict:
+    """Accept the batch, then stop before the first attempt like an interrupted run."""
+    from brigade import run_tasks
+
+    real = run_tasks.prepare_attempt
+    seen: dict = {}
+
+    def interrupted(run_dir, **kwargs):
+        seen["marker"] = json.loads((site.run_dir() / "batch-request.json").read_text())
+        raise run_tasks.TaskJournalError("simulated interruption before the first attempt")
+
+    monkeypatch.setattr(run_tasks, "prepare_attempt", interrupted)
+    rc, _, err = invoke(site, capsys, [task("a")])
+    assert rc != 0, err
+    assert site.calls == []
+    monkeypatch.setattr(run_tasks, "prepare_attempt", real)
+    # Acceptance is durable even though the attempt never was.
+    assert (site.run_dir() / "batch-journal-enrolled.json").exists()
+    assert seen["marker"]["capability_resolutions"][0]["seat"] == "coder"
+    return seen["marker"]
 
 
 def test_capability_resolves_to_the_first_eligible_seat_in_roster_order(site, capsys):
@@ -301,31 +346,30 @@ def test_a_missing_roster_refuses_rather_than_crashing(site, capsys):
     assert SENTINEL not in err
 
 
-def test_two_capability_tasks_on_one_seat_split_waves_by_remaining_capacity(site, capsys, monkeypatch):
-    active = 0
-    peak = 0
-    lock = threading.Lock()
+def test_two_capability_tasks_on_one_seat_never_overlap_at_capacity_one(site, capsys, monkeypatch):
+    # The barrier only lets a worker through when both are in flight at once.
+    # With one remaining slot the second task waits for the first wave, so its
+    # peer never arrives and the wait times out instead of overlapping.
+    barrier = threading.Barrier(2, timeout=1.0)
+    overlapped: list[str] = []
 
     def model(cli_ref, prompt, **kwargs):
-        nonlocal active, peak
-        with lock:
-            active += 1
-            peak = max(peak, active)
         site.calls.append(prompt)
-        with lock:
-            active -= 1
+        try:
+            barrier.wait()
+        except threading.BrokenBarrierError:
+            return agents.AgentResult(text="done", ok=True)
+        overlapped.append(prompt)
         return agents.AgentResult(text="done", ok=True)
 
     monkeypatch.setattr(agents, "run_agent", model)
     monkeypatch.setattr(run_batch_capability, "remaining_capacity", lambda roster: {"coder": 1})
     rc, result, err = invoke(site, capsys, [task("a"), task("b")])
     assert rc == 0, err
-    # Both resolved to the one capable seat and share a dependency layer, yet
-    # only one ran at a time.
+    assert overlapped == []
     assert {row["seat"] for row in _marker(site)["capability_resolutions"]} == {"coder"}
-    assert _stages(site) == [0, 0]
-    assert peak == 1
-    assert len(_workers(site)) == 2
+    assert _workers(site) == ["coder", "coder"]
+    assert {result["tasks"]["a"]["status"], result["tasks"]["b"]["status"]} == {"completed"}
 
 
 def test_wave_building_caps_one_seat_by_its_known_capacity():
@@ -364,6 +408,138 @@ def test_remaining_capacity_needs_an_enrolled_fleet_that_answers(monkeypatch):
     monkeypatch.setattr(fleet_client_policy, "read_seat_usage", lambda: {"seats": {"coder": {"occupied": 1}}})
     # A full seat adds no scheduling cap; the launch-time lease is the refusal.
     assert run_batch_capability.remaining_capacity(roster) == {}
+
+
+def test_a_retry_after_acceptance_reuses_the_seat_and_never_rewrites_the_marker(site, capsys, monkeypatch):
+    accepted = _accept_then_interrupt(site, capsys, monkeypatch)
+
+    # The reordered roster would now resolve the other seat; the accepted
+    # journal binds coder, so the retry must reuse it.
+    site.roster(ROSTER_REORDERED)
+    rc, result, err = invoke(site, capsys, [task("a")])
+    assert rc == 0, err
+    assert _workers(site) == ["coder"]
+    assert result["tasks"]["a"]["status"] == "completed"
+    # The accepted request, including its resolutions and digest, is untouched.
+    assert _marker(site) == accepted
+
+
+def test_a_tampered_resolution_is_refused_by_its_digest(site, capsys, monkeypatch):
+    _fail_first_dispatch(site, capsys, monkeypatch)
+    _rewrite_marker(site, seat="chef", reseal=False)
+    rc, result, err = invoke(site, capsys, [task("a")])
+    assert rc == 2
+    assert result["error"]["code"] == "capability-marker-mismatch"
+    assert site.calls == []
+    assert not (site.run_dir() / "batch-journal-enrolled.json").exists()
+
+
+def test_a_resealed_resolution_still_refuses_a_non_capable_seat(site, capsys, monkeypatch):
+    _fail_first_dispatch(site, capsys, monkeypatch)
+    _rewrite_marker(site, seat="chef", reseal=True)
+    rc, result, err = invoke(site, capsys, [task("a")])
+    assert rc == 2
+    assert result["error"]["code"] == "capability-seat-invalid"
+    assert "chef" in result["error"]["message"]
+    assert SENTINEL not in json.dumps(result) and SENTINEL not in err
+    assert site.calls == []
+
+
+def test_a_resolution_that_disagrees_with_its_task_row_is_refused(site, capsys, monkeypatch):
+    _fail_first_dispatch(site, capsys, monkeypatch)
+    path = site.run_dir() / "batch-request.json"
+    marker = json.loads(path.read_text())
+    marker["tasks"][0]["seat"] = "reviewer"
+    path.write_text(json.dumps(marker))
+    rc, result, err = invoke(site, capsys, [task("a")])
+    assert rc == 2
+    assert result["error"]["code"] == "capability-marker-mismatch"
+    assert site.calls == []
+
+
+@pytest.mark.parametrize("damage", ["symlink", "oversized"])
+def test_an_unreadable_request_marker_is_refused(site, capsys, damage):
+    run_dir = site.run_dir()
+    run_dir.mkdir(parents=True)
+    marker = run_dir / run_batch.MARKER_NAME
+    if damage == "symlink":
+        decoy = site.home / "decoy.json"
+        decoy.write_text(json.dumps({"schema": SCHEMA, "request_id": "req", "tasks": []}))
+        marker.symlink_to(decoy)
+    else:
+        padding = " " * (run_batch.MAX_MARKER_BYTES + 1)
+        marker.write_text(json.dumps({"schema": SCHEMA, "request_id": "req", "tasks": []}) + padding)
+    rc, result, err = invoke(site, capsys, [task("a")])
+    assert rc == 2
+    assert result["error"]["code"] == "request-unknown"
+    assert site.calls == []
+
+
+def test_a_journal_seat_that_disagrees_with_the_resolution_is_refused(site, capsys, monkeypatch):
+    _accept_then_interrupt(site, capsys, monkeypatch)
+    # A valid marker that now binds the other capable seat: the journal already
+    # accepted coder, so the batch refuses closed instead of a journal error.
+    _rewrite_marker(site, seat="reviewer", reseal=True)
+    rc, result, err = invoke(site, capsys, [task("a")])
+    assert rc == 2
+    assert result["error"]["code"] == "capability-seat-conflict"
+    assert site.calls == []
+
+
+def test_a_failing_seat_usage_read_leaves_the_batch_uncapped(site, capsys, monkeypatch):
+    from brigade import fleet_client_policy, fleet_session_bootstrap, run_batch_execute
+    from tests.test_roster_readiness import _enrolled_policy_document
+
+    document = _enrolled_policy_document(concurrency=1)
+    document["seats"]["coder"] = document["seats"].pop("worker")
+    # Only the advisory capacity probe asks for the enrollment lock; the run
+    # admission path must still see the real (unenrolled) answer.
+    real = fleet_session_bootstrap.classify_enrollment
+
+    def classify(snapshot, **kwargs):
+        return "enrolled" if "lock_timeout" in kwargs else real(snapshot, **kwargs)
+
+    monkeypatch.setattr(fleet_session_bootstrap, "classify_enrollment", classify)
+    monkeypatch.setattr(fleet_client_policy, "show_policy", lambda **kwargs: {"document": document})
+
+    def unavailable():
+        raise RuntimeError("seat usage is unavailable")
+
+    monkeypatch.setattr(fleet_client_policy, "read_seat_usage", unavailable)
+    # The advisory read is gone, so wave construction receives no seat cap.
+    seen: dict[str, object] = {}
+    build = run_batch_capability.build_waves
+
+    def capture(assignments, max_workers, capacity=None):
+        seen["capacity"] = capacity
+        return build(assignments, max_workers, capacity)
+
+    monkeypatch.setattr(run_batch_execute.run_batch_capability, "build_waves", capture)
+    rc, result, err = invoke(site, capsys, [task("a"), task("b")])
+    assert rc == 0, err
+    assert seen["capacity"] == {}
+    assert {result["tasks"]["a"]["status"], result["tasks"]["b"]["status"]} == {"completed"}
+    assert _workers(site) == ["coder", "coder"]
+
+
+def test_a_non_authoritative_snapshot_leaves_admission_to_launch(site, capsys, monkeypatch):
+    from brigade import fleet_client
+    from tests.test_fleet_model_admission import _versioned_seat, _versioned_snapshot
+
+    # A stale hub snapshot marks coder inadmissible, but it is not authoritative,
+    # so capability selection must not drop the seat.
+    snapshot = _versioned_snapshot(
+        _versioned_seat("coder", "openai", "gpt-6.1-sol", instance_id="codex", enabled=False),
+        state="stale",
+    )
+    monkeypatch.setattr(fleet_client, "load_model_policy_snapshot", lambda: snapshot)
+    rc, result, err = invoke(site, capsys, [task("a")])
+    assert _marker(site)["capability_resolutions"][0]["seat"] == "coder"
+    # It ends at the existing launch-time admission refusal, not a capability one.
+    assert rc == 2
+    assert "capability-unavailable" not in err
+    assert "fleet model policy hub is unavailable" in err
+    assert site.calls == []
 
 
 def test_output_reports_the_selection_of_every_task(site, capsys):

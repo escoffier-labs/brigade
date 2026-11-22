@@ -4,19 +4,30 @@ Capability selection names a kind of work, not a seat. The resolution reads the
 roster in roster order, drops every seat the batch's existing per-task checks
 would refuse, and keeps the first survivor. The result is persisted with the
 request so a retry or resume reuses it instead of resolving again.
+
+The persisted block sits outside the request fingerprint, so it is read closed:
+every row must name a capability task of this request, carry that task's
+capability, and agree with the request's recorded seat, and the whole block must
+match its digest. A retry then re-checks the recorded seat against the live
+roster and refuses rather than resolving again.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from typing import Any
 
 from . import agents, roster as roster_mod
 from .run_batch import BatchError
+from .run_task_journal import token as _token
 
 # A task row's resolved selector, reported without any roster or task text.
 Selection = dict[str, Any]
+# The closed field set of one persisted resolution.
+_RESOLUTION_FIELDS = ("task_id", "capability", "seat", "candidates")
 
 
 def read_only_enforcement_error(task_id: str, agent: Any, roster: roster_mod.Roster, *, read_only: bool) -> str | None:
@@ -72,6 +83,88 @@ def has_capability(plan: Mapping[str, Any]) -> bool:
     return any(isinstance(task.get("capability"), str) for task in plan.get("tasks") or ())
 
 
+def _admission(snapshot: Mapping[str, Any] | None) -> Mapping[str, Any] | None:
+    """The Fleet Hub snapshot that participates in admission, if any.
+
+    Fleet model-policy admission applies only to an authoritative snapshot; an
+    unconfigured or unavailable hub is the existing run admission's refusal to
+    report, not a reason to call the capability itself unavailable.
+    """
+    return snapshot if isinstance(snapshot, Mapping) and snapshot.get("state") == "authoritative" else None
+
+
+def _request_capabilities(plan: Mapping[str, Any]) -> dict[str, str]:
+    """The capability task IDs of this request and the tag each one names."""
+    capabilities: dict[str, str] = {}
+    for task in plan.get("tasks") or ():
+        if isinstance(task, Mapping) and isinstance(task.get("capability"), str):
+            capabilities[str(task["task_id"])] = task["capability"]
+    return capabilities
+
+
+def _mismatch(detail: str) -> BatchError:
+    return BatchError("capability-marker-mismatch", detail)
+
+
+def recorded_resolutions(plan: Mapping[str, Any], marker: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """Validate the persisted capability resolutions closed, in task order.
+
+    The block is outside the request fingerprint, so an edited or pre-created
+    marker could otherwise bind a capability task to any roster seat. Every row
+    must be exactly the documented fields, name a capability task of this
+    request, carry that task's capability, count its candidates, and agree with
+    the seat the request row records. Anything else refuses closed.
+    """
+    capabilities = _request_capabilities(plan)
+    rows = marker.get("capability_resolutions")
+    if not isinstance(rows, list):
+        raise _mismatch("request reservation has no readable capability resolutions; refusing launch")
+    marker_tasks = marker.get("tasks")
+    seats = (
+        {
+            str(row["task_id"]): row.get("seat")
+            for row in marker_tasks
+            if isinstance(row, Mapping) and isinstance(row.get("task_id"), str)
+        }
+        if isinstance(marker_tasks, list)
+        else {}
+    )
+    recorded: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if not isinstance(row, Mapping) or set(row) != set(_RESOLUTION_FIELDS):
+            raise _mismatch("a capability resolution is not a closed row; refusing launch")
+        task_id = row["task_id"]
+        if not isinstance(task_id, str) or task_id not in capabilities:
+            raise _mismatch("a capability resolution names no capability task of this request; refusing launch")
+        if task_id in recorded:
+            raise _mismatch(f"task {task_id} has more than one recorded capability resolution; refusing launch")
+        capability = row["capability"]
+        seat = row["seat"]
+        candidates = row["candidates"]
+        if capability != capabilities[task_id]:
+            raise _mismatch(f"task {task_id} records a different capability than the request; refusing launch")
+        if not isinstance(seat, str) or not _token(seat):
+            raise _mismatch(f"task {task_id} records no valid capability seat; refusing launch")
+        if type(candidates) is not int or candidates < 0:
+            raise _mismatch(f"task {task_id} capability resolution has no candidate count; refusing launch")
+        if seats.get(task_id) != seat:
+            raise _mismatch(f"task {task_id} records a different seat than its resolution; refusing launch")
+        recorded[task_id] = {field: row[field] for field in _RESOLUTION_FIELDS}
+    return [recorded[task_id] for task_id in sorted(recorded)]
+
+
+def resolution_digest(resolutions: Iterable[Mapping[str, Any]], fingerprint: object) -> str:
+    """Hash the canonical resolutions together with the request fingerprint."""
+    canonical = [{field: row[field] for field in _RESOLUTION_FIELDS} for row in resolutions]
+    canonical.sort(key=lambda row: row["task_id"])
+    material = {
+        "fingerprint": fingerprint if isinstance(fingerprint, str) else "",
+        "resolutions": canonical,
+    }
+    encoded = json.dumps(material, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("ascii")
+    return hashlib.sha256(encoded).hexdigest()
+
+
 def resolve(
     plan: dict[str, Any],
     roster: roster_mod.Roster,
@@ -88,10 +181,7 @@ def resolve(
     """
     if not has_capability(plan):
         return plan
-    # Fleet model-policy admission applies only to an authoritative snapshot;
-    # an unconfigured or unavailable hub is the existing run admission's refusal
-    # to report, not a reason to call the capability itself unavailable.
-    admission = snapshot if isinstance(snapshot, Mapping) and snapshot.get("state") == "authoritative" else None
+    admission = _admission(snapshot)
     tasks = []
     resolutions = []
     for task in plan.get("tasks") or ():
@@ -123,27 +213,39 @@ def resolve(
                 "candidates": len(candidates),
             }
         )
-    return {**plan, "tasks": tasks, "capability_resolutions": resolutions}
+    return {
+        **plan,
+        "tasks": tasks,
+        "capability_resolutions": resolutions,
+        "resolution_digest": resolution_digest(resolutions, plan.get("fingerprint")),
+    }
 
 
 def reuse(
     plan: dict[str, Any],
-    marker: Mapping[str, Any] | None,
+    marker: Mapping[str, Any],
     roster: roster_mod.Roster,
+    *,
+    snapshot: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Bind a retried capability task to the seat its accepted request recorded.
 
     The journal binds the resolved seat, so a resolution is never recomputed and
     a recorded seat the roster no longer declares refuses the batch. Choosing a
-    different seat here would silently change the accepted assignment.
+    different seat here would silently change the accepted assignment. The
+    recorded seat is re-checked as if it had just been chosen: a seat that
+    stopped declaring the capability, or that the batch's per-task checks would
+    now refuse, refuses closed instead of resolving again.
     """
     if not has_capability(plan):
         return plan
-    recorded = {
-        row.get("task_id"): row
-        for row in (marker or {}).get("capability_resolutions") or ()
-        if isinstance(row, Mapping) and isinstance(row.get("seat"), str)
-    }
+    resolutions = recorded_resolutions(plan, marker)
+    fingerprint = marker.get("fingerprint")
+    digest = resolution_digest(resolutions, fingerprint)
+    if marker.get("resolution_digest") != digest:
+        raise _mismatch("request reservation capability resolutions do not match its digest; refusing launch")
+    admission = _admission(snapshot)
+    recorded = {row["task_id"]: row for row in resolutions}
     tasks = []
     for task in plan.get("tasks") or ():
         capability = task.get("capability")
@@ -163,8 +265,21 @@ def reuse(
                 f"task {task['task_id']} capability {capability!r} resolved to seat {seat!r}, "
                 "which the roster no longer declares",
             )
+        agent = roster.agents[seat]
+        if not agent.supports(capability):
+            raise BatchError(
+                "capability-seat-invalid",
+                f"task {task['task_id']} capability {capability!r} is recorded on seat {seat!r}, "
+                "which no longer declares it; refusing to resolve another seat",
+            )
+        error = _seat_error(task, agent, roster, read_only=bool(task.get("read_only", False)), snapshot=admission)
+        if error is not None:
+            raise BatchError(
+                "capability-seat-invalid",
+                f"task {task['task_id']} recorded seat {seat!r} is no longer eligible: {error}",
+            )
         tasks.append({**task, "seat": seat})
-    return {**plan, "tasks": tasks, "capability_resolutions": list(recorded.values())}
+    return {**plan, "tasks": tasks, "capability_resolutions": resolutions, "resolution_digest": digest}
 
 
 def remaining_capacity(roster: roster_mod.Roster) -> dict[str, int]:

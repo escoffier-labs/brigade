@@ -33,7 +33,7 @@ from . import (
     run_tasks,
     runguard,
 )
-from .run_batch import BatchError
+from .run_batch import MARKER_NAME, BatchError, read_request_marker
 from .run_batch_capability import read_only_enforcement_error
 from .run_transport import TASK_CANCELLED_STATUS, Assignment, WorkerResult
 from .roster import Roster, read_only_cloud_mutation_error
@@ -847,15 +847,43 @@ def accepted_plan(plan: dict[str, Any], marker: dict[str, Any] | None, workspace
     """Bind capability tasks to seats once, or replay the seats already recorded.
 
     The first acceptance resolves against the live roster and persists the
-    result with the request. A retry or resume never recomputes: it reuses the
-    recorded seat, and refuses when the roster no longer declares that seat.
+    result with the request. A retry or resume never recomputes: it validates
+    the recorded block, re-checks the recorded seat, and refuses when the roster
+    no longer declares or no longer admits that seat.
     """
     if not run_batch_capability.has_capability(plan):
         return plan
     roster = _batch_roster(workspace, getattr(args, "roster", None))
+    snapshot = fleet_client.load_model_policy_snapshot()
     if marker is None:
-        return run_batch_capability.resolve(plan, roster, snapshot=fleet_client.load_model_policy_snapshot())
-    return run_batch_capability.reuse(plan, marker, roster)
+        return run_batch_capability.resolve(plan, roster, snapshot=snapshot)
+    return run_batch_capability.reuse(plan, marker, roster, snapshot=snapshot)
+
+
+def _refuse_recorded_seat_conflict(run_dir: Path, plan: dict[str, Any]) -> None:
+    """Refuse a capability task the journal already accepted on another seat.
+
+    Acceptance refuses a changed descriptor as a journal identity conflict; a
+    closed code keeps a retry that bound a different seat from surfacing as an
+    unhandled journal error. A task with no accepted spec is not checked here.
+    """
+    if not run_lifecycle._journal_path(run_dir).exists():
+        return
+    try:
+        accepted = run_tasks.read_tasks(run_dir)
+    except run_tasks.TaskJournalError:
+        return
+    seats = {row.handle.spec.task_id: row.handle.spec.seat for row in accepted}
+    for task in plan["tasks"]:
+        if not isinstance(task.get("capability"), str):
+            continue
+        seat = seats.get(task["task_id"])
+        if seat is not None and seat != task["seat"]:
+            raise BatchError(
+                "capability-seat-conflict",
+                f"task {task['task_id']} is already accepted on seat {seat!r}, "
+                f"not the recorded seat {task['seat']!r}; refusing launch. Use a new request_id",
+            )
 
 
 def execute_cli(args: Any, plan: dict[str, Any]) -> int:
@@ -881,11 +909,11 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
     # Serialize retry eligibility with dispatch, including preflight. The
     # workspace run lock remains the authority for executing worker processes.
     with request_lock(run_dir):
-        marker_path = run_dir / "batch-request.json"
-        marker = localio.read_json_dict(marker_path)
-        if marker_path.exists() and (
-            marker is None or re.fullmatch(r"[0-9a-f]{64}", str(marker.get("fingerprint"))) is None
-        ):
+        marker_path = run_dir / MARKER_NAME
+        # The reservation is read no-follow and bounded: a symlinked or oversized
+        # marker is refused rather than silently treated as absent.
+        marker = read_request_marker(run_dir)
+        if marker is not None and re.fullmatch(r"[0-9a-f]{64}", str(marker.get("fingerprint"))) is None:
             raise BatchError("request-unknown", "request reservation has no readable fingerprint; refusing launch")
         if marker is not None and marker.get("fingerprint") != plan["fingerprint"]:
             raise BatchError("request-conflict", "request_id already belongs to a different batch")
@@ -905,9 +933,14 @@ def execute_cli(args: Any, plan: dict[str, Any]) -> int:
                     "journal shows a possible launch but the request marker is missing; refusing launch",
                 )
         else:
+            # A valid marker is never rewritten: the accepted request, including
+            # its capability resolutions and digest, stays exactly as accepted.
+            fresh = marker is None
             plan = accepted_plan(plan, marker, workspace, args)
-            localio.write_json(marker_path, plan)
-            run_journal._fsync_directory(run_dir)
+            _refuse_recorded_seat_conflict(run_dir, plan)
+            if fresh:
+                localio.write_json(marker_path, plan)
+                run_journal._fsync_directory(run_dir)
             execution = BatchExecution(plan, run_dir, workspace)
             # The base is checked once before the run starts, so a caller that
             # moved HEAD is refused with its own code and no run artifacts.

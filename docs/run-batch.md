@@ -123,6 +123,32 @@ recorded resolution for a capability task is refused with `request-unknown`.
 An unresolvable roster refuses a capability batch with `roster-unavailable` or
 `roster-invalid` rather than an unhandled error.
 
+The recorded block sits outside the request fingerprint, so it is read closed.
+Every row must be exactly those four fields, name a capability task of this
+request, carry that task's capability, count its candidates, and agree with the
+seat the request row records. The marker also carries a `resolution_digest`, a
+sha256 over the canonical rows and the request fingerprint, and a retry verifies
+it. Any other shape, a mismatch with the request row, or a digest that does not
+match refuses the batch with `capability-marker-mismatch` before anything is
+launched:
+
+- `capability-marker-mismatch`: the persisted capability resolutions are not a
+  closed list of this request's capability tasks, disagree with the request's
+  recorded seats, or do not match `resolution_digest`.
+- `capability-seat-invalid`: the recorded seat no longer declares the
+  capability, or the batch's per-task checks would now refuse it. The retry
+  refuses rather than resolving another seat.
+- `capability-seat-missing`: the roster no longer declares the recorded seat.
+- `capability-seat-conflict`: the lifecycle journal already accepted the task
+  on a different seat, so the retry refuses instead of failing as a journal
+  identity error. Use a new `request_id`.
+
+`batch-request.json` is read no-follow and bounded (512 KiB). A marker that is a
+symlink, not a regular file, oversized, or unreadable is refused with
+`request-unknown`, as is a missing journal that acceptance had already bound. A
+retry with a valid marker never rewrites it, so the accepted request and its
+resolutions stay exactly as accepted.
+
 Resolution never puts the tag on the assignment's `capabilities`, so it selects
 a seat and does not gate the worker's tools.
 

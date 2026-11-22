@@ -206,25 +206,22 @@ def _artifact_sidecar(run_dir: Path, task_id: str) -> tuple[str | None, str | No
     return _sidecar(run_dir, f"batch-artifact-{hashlib.sha256(task_id.encode()).hexdigest()}.json")
 
 
-# A batch request marker is a bounded plan; never read an unbounded one back.
-_MARKER_MAX_BYTES = 512 * 1024
-
-
+# A batch request marker is read through run_batch.read_request_marker, which
+# owns the no-follow, bounded read.
 def _selection(run_dir: Path, task_id: str) -> dict[str, Any] | None:
     """The batch task's selector, read only from a bounded request marker.
 
-    Seat-only batches show ``{"kind": "seat", "capability": null}``. A run
-    without a readable batch marker has no selection to report.
+    Seat-only batches show ``{"kind": "seat", "capability": null}``. The marker
+    is read no-follow and bounded, so a symlinked or oversized one reports no
+    selection instead of being followed. A run without a readable batch marker
+    has no selection to report.
     """
-    from . import localio
+    from .run_batch import BatchError, read_request_marker
 
-    marker = run_dir / "batch-request.json"
     try:
-        if marker.stat().st_size > _MARKER_MAX_BYTES:
-            return None
-    except OSError:
+        payload = read_request_marker(run_dir) or {}
+    except BatchError:
         return None
-    payload = localio.read_json_dict(marker) or {}
     for row in payload.get("tasks") or ():
         if isinstance(row, dict) and row.get("task_id") == task_id:
             capability = row.get("capability")
