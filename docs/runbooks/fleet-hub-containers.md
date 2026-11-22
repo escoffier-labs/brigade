@@ -286,7 +286,13 @@ An admin-only client config sends the admin token for events and claims,
 which this Hub rejects with HTTP 403 because admin writes are disabled by
 default. Enroll the local client after the Hub starts, as described below.
 
-Build the pinned image locally and record its digest. Keep an operator copy of
+From the repository root, build the pinned image and record its image digest.
+Set `BRIGADE_SHA256` to the source tree digest at `BRIGADE_REF`. For a new pin,
+run `ops/fleet-hub/bin/source-tree-digest.py --ref <sha>` from the checkout.
+For an existing environment file with a custom archive checksum, recompute
+`BRIGADE_SHA256` for its pinned commit before rebuilding.
+
+Keep an operator copy of
 the admin token in a private file, import that file as a Podman secret, render
 the Quadlet with the digest, and copy the volume unit to
 `~/.config/containers/systemd/`:
@@ -295,7 +301,7 @@ the Quadlet with the digest, and copy the volume unit to
 set -euo pipefail
 podman build -f ops/fleet-hub/Containerfile \
   --build-arg BRIGADE_REF=e6009f6969dc6e45db2ab93790aa3e407c791409 \
-  --build-arg BRIGADE_SHA256=68014a8e99c61f5e547d8bf223a5f3ad7ea31f60355a4c30356bffd78e15c168 \
+  --build-arg BRIGADE_SHA256=fd56274a692492174c2b9378404825889d874d025bf4f71ca937e403603fb2b5 \
   --build-arg BRIGADE_VERSION=0.28.0 \
   -t localhost/brigade-fleet-hub:0.28.0-e6009f6 .
 image_digest="$(podman image inspect --format '{{.Digest}}' localhost/brigade-fleet-hub:0.28.0-e6009f6)"

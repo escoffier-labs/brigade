@@ -1,0 +1,1 @@
+- Fleet Hub image builds verify the pinned source tree, so GitHub archive renames and recompression no longer break rebuilds. Compute custom `BRIGADE_SHA256` pins with `ops/fleet-hub/bin/source-tree-digest.py`.

@@ -152,14 +152,13 @@ The Brigade image must install a reviewed commit that includes
 native memory route (#2283). The image builds both the Python package and
 `brigade-hub` from that one commit. The default `BRIGADE_REF` in
 `compose.yaml` has all of them. To build a newer reviewed commit, pass it,
-its source archive digest and the version in its `pyproject.toml` (the image's
+its source tree digest and the version in its `pyproject.toml` (the image's
 version label) to setup:
 
 ```bash
 ref=<MERGED_COMMIT_SHA>
-curl -fsSL "https://github.com/escoffier-labs/brigade/archive/${ref}.tar.gz" | sha256sum
-curl -fsSL "https://github.com/escoffier-labs/brigade/archive/${ref}.tar.gz" \
-  | tar -xzO "brigade-${ref}/pyproject.toml" | grep -m1 '^version'
+ops/fleet-hub/bin/source-tree-digest.py --ref "$ref"
+git show "${ref}:pyproject.toml" | grep -m1 '^version'
 ```
 
 ## Set up
@@ -169,7 +168,7 @@ Run setup as the compose account, from the repository checkout:
 ```bash
 cd ops/fleet-hub
 bin/hub-setup.py init \
-  --brigade-ref <MERGED_COMMIT_SHA> --brigade-sha256 <ARCHIVE_SHA256> \
+  --brigade-ref <MERGED_COMMIT_SHA> --brigade-sha256 <SOURCE_TREE_SHA256> \
   --brigade-version <VERSION_IN_ITS_PYPROJECT> \
   --front-hostname <FRONT_NODE_NAME> \
   --backup-dir "$HOME/brigade-hub-backups"

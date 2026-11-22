@@ -1,4 +1,3 @@
 **
-!ops/
-!ops/fleet-hub/
 !ops/fleet-hub/Containerfile
+!ops/fleet-hub/bin/source-tree-digest.py
