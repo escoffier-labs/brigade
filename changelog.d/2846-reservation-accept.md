@@ -1,0 +1,1 @@
+- Add `brigade fleet policy reservation accept` so the selected target can accept its routing reservation before renewing or releasing it.
