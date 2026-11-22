@@ -5,7 +5,7 @@ keeps a second process from rewriting another run's history. A cancel request
 can still arrive from anywhere: an operator in another terminal, a parent run,
 or a budget decision. So a request is first written as a bounded file under
 ``<run_dir>/task-inbox/``, and only the owner journals it, either from the live
-batch before its next launch or from ``brigade runs tasks cancel`` when it can
+batch during dispatch or from ``brigade runs tasks cancel`` when it can
 take the run lock itself.
 
 The inbox holds no paths and no free text. One request is a closed
@@ -32,7 +32,7 @@ import stat
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Iterator, Mapping, Sequence
 from uuid import uuid4
 
 from . import dirfd, localio, run_events, run_journal, runguard
@@ -64,6 +64,7 @@ OUTCOME_UNKNOWN_TASK = "unknown-task"
 OUTCOME_NOT_RECORDED = "not-recorded"
 REFUSAL_OUTCOMES = frozenset({OUTCOME_ALREADY_TERMINAL, OUTCOME_UNKNOWN_TASK, OUTCOME_NOT_RECORDED})
 LIVE_TERMINATION_UNAVAILABLE = "live-termination-unavailable"
+_WATCHER_MARKER = "batch-cancel-watcher.json"
 
 ERROR_CODES = frozenset(
     {
@@ -416,9 +417,6 @@ def drain(run_dir: Path, workspace: Path) -> dict[str, str]:
                 if current is None:
                     outcomes.setdefault(request.task_id, "unknown")
                     continue
-                if current.status in journal.TERMINAL:
-                    outcomes.setdefault(request.task_id, "terminal")
-                    continue
                 if current.cancel_requested:
                     outcomes.setdefault(request.task_id, "already-requested")
                     continue
@@ -463,6 +461,42 @@ def _ordered(task_ids: Sequence[str]) -> tuple[str, ...]:
     return tuple(task_ids)
 
 
+@contextlib.contextmanager
+def live_watcher(run_dir: Path, workspace: Path) -> Iterator[None]:
+    """Advertise live cancellation only for this workspace lock's owner."""
+    # A batch also holds nested worktree locks. Name the caller's lock
+    # directly, since the context's innermost lock may belong to a worktree.
+    lock = runguard.lock_path(workspace)
+    owner = runguard.read_lock_owner(lock)
+    if owner is None or owner.get("pid") != os.getpid() or not runguard._owner_matches_run(owner, run_dir):
+        yield
+        return
+    marker = lock / _WATCHER_MARKER
+    localio.write_json(marker, {"owner_token": owner["owner_token"]})
+    try:
+        yield
+    finally:
+        marker.unlink(missing_ok=True)
+
+
+def _has_live_watcher(run_dir: Path, workspace: Path) -> bool:
+    lock = runguard.lock_path(workspace)
+    owner = runguard.read_lock_owner(lock)
+    if not runguard._owner_matches_run(owner, run_dir) or owner is None:
+        return False
+    pid, token = owner.get("pid"), owner.get("owner_token")
+    if type(pid) is not int or pid <= 0 or not isinstance(token, str) or not runguard._pid_is_active(pid):
+        return False
+    try:
+        descriptor = dirfd.open_directory_nofollow(lock, writable=False)
+        try:
+            return _read(descriptor, _WATCHER_MARKER, lock) == {"owner_token": token}
+        finally:
+            os.close(descriptor)
+    except (OSError, TaskInboxError):
+        return False
+
+
 def cancel(
     run_dir: Path,
     task_ids: Sequence[str],
@@ -503,13 +537,14 @@ def cancel(
         rows[task_id] = row
 
     # The request is durable before any attempt to take the run lock, so a
-    # live batch can read it between its launches even when this process never
+    # live batch can read it during dispatch even when this process never
     # becomes the owner.
     # A failure part way through still reports the requests already written:
     # they are durable and will be honored, so they must not vanish from the
     # answer behind a bare refusal.
     failure: TaskInboxError | None = None
     committed: list[run_tasks.TaskResult] = []
+    live = bool(submitted) and _has_live_watcher(run_dir, workspace)
     for state in submitted:
         if failure is None:
             try:
@@ -537,6 +572,8 @@ def cancel(
             with held:
                 drained = drain(run_dir, workspace)
 
+    if drained is None and submitted and not live:
+        live = _has_live_watcher(run_dir, workspace)
     for state in submitted:
         row = rows[state.handle.spec.task_id]
         if drained is None:
@@ -544,13 +581,13 @@ def cancel(
             # so a request this process could not journal is reported as
             # possibly running, never as safely stopped before launch.
             row["outcome"] = OUTCOME_QUEUED
-            row["live_termination"] = LIVE_TERMINATION_UNAVAILABLE
+            row["live_termination"] = "requested" if live else LIVE_TERMINATION_UNAVAILABLE
             continue
         outcome = drained.get(state.handle.spec.task_id)
         if outcome in {"recorded", "already-requested"}:
             row["outcome"] = OUTCOME_RECORDED
-        elif outcome == "terminal":
-            row["outcome"] = OUTCOME_ALREADY_TERMINAL
+            if state.launch_claim is not None:
+                row["live_termination"] = LIVE_TERMINATION_UNAVAILABLE
         else:
             row["outcome"] = OUTCOME_UNKNOWN_TASK
     return {
@@ -588,15 +625,11 @@ def render(payload: dict[str, Any]) -> str:
         detail = f"task {row['task_id']}: {row['outcome']}"
         if row["outcome"] in {OUTCOME_RECORDED, OUTCOME_QUEUED}:
             detail += f" ({row['reason']})"
+        if row.get("live_termination") == "requested":
+            detail += " (live cancellation requested)"
         lines.append(detail)
         if row.get("live_termination") == LIVE_TERMINATION_UNAVAILABLE:
             live.append(row["task_id"])
     for task_id in live:
-        lines.append(
-            f"task {task_id} may already be running: {LIVE_TERMINATION_UNAVAILABLE} in this release, "
-            "so the worker was not stopped. The request is recorded for its next launch attempt."
-        )
-    if any(row["outcome"] == OUTCOME_QUEUED for row in payload["tasks"]):
-        lines.append("A live batch journals queued requests before its next launch.")
-    lines.append("Brigade did not launch, stop, merge, push or publish anything.")
+        lines.append(f"task {task_id}: {LIVE_TERMINATION_UNAVAILABLE} (no live batch watcher)")
     return "\n".join(lines)

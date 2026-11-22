@@ -3,22 +3,27 @@
 from __future__ import annotations
 
 import contextlib
+import contextvars
 import hashlib
 import json
 import re
 import sys
-from dataclasses import replace
+import threading
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
 from . import (
     agents,
+    codex_appserver,
     fleet_client,
     inbox_lock,
     localio,
+    proc,
     run_batch_artifacts,
     run_batch_launch,
     run_batch_workspace,
+    run_control,
     run_journal,
     run_lifecycle,
     run_receipts,
@@ -34,6 +39,16 @@ from .roster import Roster, read_only_cloud_mutation_error
 
 # Written once the batch is accepted into the lifecycle journal, so a deleted journal is detectable.
 JOURNAL_SENTINEL = "batch-journal-enrolled.json"
+_CANCEL_POLL_SECONDS = 0.5
+
+
+@dataclass
+class _TaskRuntime:
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    handed_off: bool = False
+    cancel_done: threading.Event | None = None
+    attempt_id: str | None = None
+    containment: str | None = None
 
 
 def _reference(value: str | None) -> str | None:
@@ -74,6 +89,9 @@ class BatchExecution:
         self.plan = plan
         self.run_dir = run_dir
         self.workspace = workspace
+        self.runtime = {task["task_id"]: _TaskRuntime() for task in plan["tasks"]}
+        self.processes = proc.ProcessRegistry()
+        self.turns: run_control.LiveTurnRegistry | None = None
         # The prepared handle and its journal version, captured at the launch point.
         self.prepared: dict[str, tuple[run_tasks.TaskHandle, str]] = {}
         # Per-task read-only is enforced by the existing worker read-only path,
@@ -251,16 +269,56 @@ class BatchExecution:
             raise BatchError("launch-refused", f"task {task_id} is missing from the lifecycle journal")
         return found
 
-    def _drain_inbox(self) -> None:
+    def _drain_inbox(self) -> bool:
         """Journal pending cancel intent; the batch owns the run lock here.
 
         A refused inbox is reported and skipped: a malformed request must never
         turn into a failed dispatch, and it names no task the batch may launch.
         """
         try:
-            run_task_inbox.drain(self.run_dir, self.workspace)
+            return bool(run_task_inbox.drain(self.run_dir, self.workspace))
         except run_task_inbox.TaskInboxError as exc:
             print(f"warning: task cancel inbox refused: {exc.code}: {exc.detail}", file=sys.stderr)
+            return False
+
+    def _watch_cancels(self, stopped: threading.Event) -> None:
+        while not stopped.wait(_CANCEL_POLL_SECONDS):
+            self._drain_inbox()
+            try:
+                states = run_tasks.read_tasks(self.run_dir)
+            except run_tasks.TaskJournalError as exc:
+                print(f"warning: task cancel journal refused: {exc}", file=sys.stderr)
+                continue
+            # Both transactions have exited before we acquire runtime locks
+            # or make any potentially blocking transport call.
+            for state in states:
+                if stopped.is_set():
+                    return
+                if not state.cancel_requested or state.launch_claim is None or state.result_id is not None:
+                    continue
+                task_id, attempt_id = state.handle.spec.task_id, state.handle.attempt_id
+                runtime = self.runtime.get(task_id)
+                if runtime is None or attempt_id is None:
+                    continue
+                with runtime.lock:
+                    if runtime.handed_off or runtime.cancel_done is not None:
+                        continue
+                    done = runtime.cancel_done = threading.Event()
+                    runtime.attempt_id = attempt_id
+                try:
+                    self.processes.cancel_task(task_id, attempt_id)
+                    if self.turns is not None:
+                        self.turns.interrupt(task_id=task_id, attempt_id=attempt_id, latch_task=True)
+                finally:
+                    done.set()
+
+    def _cancel_containment(self, task_id: str, attempt_id: str, result: WorkerResult) -> str:
+        outcomes = {outcome.result for outcome in self.processes.task_cancellation_outcomes(task_id, attempt_id)}
+        if self.turns is not None:
+            turn = self.turns.task_interrupt_outcome(task_id, attempt_id)
+            if turn is not None:
+                outcomes.add("interrupted" if turn == "still_active" and result.status == "interrupted" else turn)
+        return next((s for s in ("error", "still_active", "interrupted") if s in outcomes), "unknown")
 
     def _record_cancelled(self, task_id: str) -> None:
         """Record the one terminal cancellation observation for a gated task.
@@ -337,10 +395,37 @@ class BatchExecution:
             for t in self.plan["tasks"]
         ]
 
-    def observe(self, result: WorkerResult) -> None:
+    def observe(self, result: WorkerResult) -> WorkerResult | None:
         if result.task_id is None:
-            return
+            return None
         task_id = str(result.task_id)
+        runtime = self.runtime[task_id]
+        with runtime.lock:
+            runtime.handed_off = True
+            done, attempt_id = runtime.cancel_done, runtime.attempt_id
+        containment = None
+        if done is not None and attempt_id is not None:
+            done.wait()
+            if runtime.containment is None:
+                runtime.containment = self._cancel_containment(task_id, attempt_id, result)
+            containment = runtime.containment
+            result = replace(result, ok=False, status="cancelled")
+        self._publish_result(result, task_id, containment)
+        return result
+
+    def _observe_for_dispatch(self, result: WorkerResult) -> WorkerResult | None:
+        try:
+            return self.observe(result)
+        except Exception:
+            task_id = result.task_id
+            if task_id is None or self.runtime[task_id].containment is None:
+                raise
+            # Keep the scheduling decision on a write failure. Finish retries
+            # observation and reports any error that persists.
+            print(f"warning: task {task_id} cancellation observation failed", file=sys.stderr)
+            return replace(result, ok=False, status="cancelled")
+
+    def _publish_result(self, result: WorkerResult, task_id: str, cancel_containment: str | None) -> None:
         if task_id in self.prerequisite_cancelled:
             # Never launched and never journaled: the task stays queued.
             return
@@ -384,15 +469,18 @@ class BatchExecution:
                     # A candidate exists: the artifact is the commit, and only
                     # then does the observation name the artifact sidecar.
                     artifact_kind, artifact_digest = "commit", sidecar_digest
+        # An intent arriving after handoff can still be journaled before
+        # publication, including while worktree artifact collection is running.
+        self._drain_inbox()
         run_tasks.observe_task(
             self.run_dir,
             workspace=self.workspace,
             handle=handle,
             observation=run_tasks.TaskObservation(
-                status="completed" if result.ok else "failed",
+                status="cancelled" if cancel_containment is not None else ("completed" if result.ok else "failed"),
                 artifact_kind=artifact_kind,
                 artifact_digest=artifact_digest,
-                containment="quiescent",
+                containment=cancel_containment or "quiescent",
                 provider_task_id=_reference(result.provider_task_id),
                 original_run_id=_reference(result.original_run_id),
                 provider_result_id=_reference(result.provider_result_id),
@@ -469,19 +557,39 @@ class BatchExecution:
             return original_prompt(agent, assignment, **prompt_kwargs)
 
         kwargs["build_prompt"] = build_prompt
-        kwargs["on_result"] = self.observe
+        kwargs["on_result"] = self._observe_for_dispatch
         kwargs["allow_reinvocation"] = False
         # Layers are ordered by stage. The DAG scheduler ignores stage, so it is never used here.
         kwargs["scheduler"] = "waves"
         kwargs["read_only_for"] = self.read_only_for
         kwargs["cwd_for"] = self.cwd_for
         kwargs["writable_worktree_for"] = self.writable_worktree_for
+        self.processes = kwargs.get("process_registry") or self.processes
+        self.turns = kwargs.get("control_registry")
+        if self.turns is None and kwargs.get("appserver") is not None:
+            self.turns = run_control.LiveTurnRegistry()
+        kwargs["process_registry"] = self.processes
+        kwargs["control_registry"] = self.turns
         with contextlib.ExitStack() as stack:
             # Resume/replay: an intent that survived a crash is journaled, and
             # the task is recorded as cancelled before any checkout or launch.
             self._drain_inbox()
             self.prepare_workspaces(stack)
-            return planning.dispatch(waves, roster, **kwargs)
+            stopped = threading.Event()
+            ctx = contextvars.copy_context()
+            watcher = threading.Thread(
+                target=ctx.run, args=(self._watch_cancels, stopped), name="batch-task-cancel", daemon=True
+            )
+            with run_task_inbox.live_watcher(self.run_dir, self.workspace):
+                watcher.start()
+                try:
+                    return planning.dispatch(waves, roster, **kwargs)
+                finally:
+                    stopped.set()
+                    watcher.join(timeout=self.processes.cancellation_timeout + codex_appserver._INTERRUPT_GRACE)
+                    if watcher.is_alive():
+                        raise runguard.RetainRunLockError("batch cancellation watcher did not stop")
+                    self._drain_inbox()
 
     def resolve_model_policy(self, roster: Roster, **kwargs: Any) -> Any:
         from .aboyeur import orchestrator

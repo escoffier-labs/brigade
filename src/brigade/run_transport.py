@@ -61,10 +61,8 @@ class Assignment:
     attempt_id: str | None = None
 
 
-# Decided launch-point outcomes that are not failures: a batch task cancelled
-# before launch, and a dependent never launched because its prerequisite was
-# cancelled. Neither aborts later waves under fail-fast, so siblings still run.
-NON_ABORTING_STATUSES = frozenset({"cancelled-before-launch", "prerequisite-cancelled"})
+# Decided cancellations and the launch refusals they cause do not abort later waves.
+NON_ABORTING_STATUSES = frozenset({"cancelled", "cancelled-before-launch", "prerequisite-cancelled"})
 
 
 class LaunchRefused(Exception):
@@ -624,7 +622,7 @@ def dispatch(
     remote_transport: RemoteTransport | None = None,
     coordinator_prompt_sha256: str | None = None,
     codex_transport: str | None = None,
-    on_result: Callable[[WorkerResult], None] | None = None,
+    on_result: Callable[[WorkerResult], WorkerResult | None] | None = None,
     allow_reinvocation: bool = True,
     policy_workspace: Path | None = None,
     recording_policy_workspace: Path | None = None,
@@ -851,7 +849,13 @@ def dispatch(
         ) -> agents.AgentResult:
             assert selected_agent.cli is not None
             cli_ref = selected_agent.cli
-            seat_process_registry = process_registry.for_seat(selected_agent.name)
+            if assignment.task_id is not None and assignment.attempt_id is not None:
+                seat_process_registry = process_registry.for_task(
+                    assignment.task_id, assignment.attempt_id, selected_agent.name
+                )
+                seat_process_registry.check_cancellation()
+            else:
+                seat_process_registry = process_registry.for_seat(selected_agent.name)
             cloud_dispatch_kwargs = {"cloud_safe_mode": selected_agent.cloud_safe_mode}
             session_binding_id = (
                 resume_session_id or str(uuid.uuid4())
@@ -1413,16 +1417,19 @@ def dispatch(
 
     recorded_run_one = run_one
 
+    def observe_result(result: WorkerResult) -> WorkerResult:
+        if on_result is not None:
+            try:
+                return on_result(result) or result
+            except Exception as exc:
+                print(f"warning: worker result observation failed: {exc}", file=sys.stderr)
+        return result
+
     def observed_run_one(assignment: Assignment, prior_results: list[WorkerResult]) -> WorkerResult:
         result = recorded_run_one(assignment, prior_results)
         if assignment.task_id is not None:
             result = replace(result, task_id=assignment.task_id)
-        if on_result is not None:
-            try:
-                on_result(result)
-            except Exception as exc:
-                print(f"warning: worker result observation failed: {exc}", file=sys.stderr)
-        return result
+        return observe_result(result)
 
     run_one = observed_run_one
 
@@ -1496,7 +1503,7 @@ def dispatch(
                     # A launch-point refusal with a closed decided code keeps
                     # that code as its status, so fail-fast can tell it apart.
                     code = getattr(exc, "code", None)
-                    stage_results_by_index[index] = WorkerResult(
+                    result = WorkerResult(
                         worker=assignment.worker,
                         task=assignment.task,
                         text="",
@@ -1505,6 +1512,7 @@ def dispatch(
                         status=code if code in NON_ABORTING_STATUSES else "",
                         task_id=assignment.task_id,
                     )
+                    stage_results_by_index[index] = observe_result(result) if assignment.task_id is not None else result
         except KeyboardInterrupt as exc:
             try:
                 if on_interrupt is not None:

@@ -215,6 +215,10 @@ class TaskResult:
     cancel_reason: str | None = None
 
     @property
+    def cancel_too_late(self) -> bool:
+        return self.cancel_requested and self.status in journal.TERMINAL and self.status != "cancelled"
+
+    @property
     def native_enrolled(self) -> bool:
         """True when the fold saw a ``task.native-enrolled`` fact for this task."""
         return self.enrollment is not None
@@ -483,11 +487,8 @@ def _fold_history(run_id: str, events: list[run_journal.RunEvent]) -> _TaskHisto
                 raise TaskJournalError("task disposal conflicts with recorded disposal")
             results[task_id] = replace(current, disposal=disposed)
         elif event.event_type == "task.cancel-requested":
-            # Cancellation intent is its own fact: it blocks a launch that has
-            # not happened, and never changes status. An identical replay is a
-            # no-op; a conflicting reason refuses rather than rewriting intent.
-            if current.status in journal.TERMINAL:
-                raise TaskJournalError("task cancel intent requires a non-terminal task")
+            # A queued request can be drained after the terminal observation.
+            # Intent never changes the worker's status or result identity.
             if current.cancel_requested and current.cancel_reason != p["reason"]:
                 raise TaskJournalError("task cancel intent conflicts with recorded intent")
             results[task_id] = replace(current, cancel_requested=True, cancel_reason=p["reason"])

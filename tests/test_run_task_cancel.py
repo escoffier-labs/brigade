@@ -6,6 +6,10 @@ import errno
 import hashlib
 import json
 import os
+import subprocess
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
@@ -13,9 +17,10 @@ from tests._home import set_home
 from tests.test_run_batch_worktrees import Site, invoke
 from tests.test_run_batch_worktrees import site as worktree_site  # noqa: F401  (fixture for getfixturevalue)
 
-from brigade import aboyeur, agents, cli, run_events, runguard, run_journal, run_lifecycle
+from brigade import aboyeur, agents, cli, proc, run_batch_artifacts, run_events, runguard, run_journal, run_lifecycle
 from brigade import run_task_inbox as inbox
 from brigade import run_tasks
+from brigade.run_batch_execute import BatchExecution
 
 posix_only = pytest.mark.skipif(os.name == "nt", reason="POSIX no-follow inbox checks")
 
@@ -338,11 +343,11 @@ def test_runs_tasks_show_and_list_report_cancel_state(run_site, capsys):
 
     assert cli.main(["runs", "tasks", "show", str(run_dir), "a", "--json"]) == 0
     shown = json.loads(capsys.readouterr().out)["task"]
-    assert shown["cancel"] == {"requested": True, "queued": False, "reason": "operator"}
+    assert shown["cancel"] == {"requested": True, "queued": False, "reason": "operator", "too_late": False}
 
     assert cli.main(["runs", "tasks", "list", str(run_dir), "--json"]) == 0
     listed = {item["task_id"]: item for item in json.loads(capsys.readouterr().out)["tasks"]}
-    assert listed["a"]["cancel"] == {"requested": True, "queued": False, "reason": "operator"}
+    assert listed["a"]["cancel"] == {"requested": True, "queued": False, "reason": "operator", "too_late": False}
     assert listed["b"]["cancel"] == {"requested": False, "queued": True, "reason": "operator"}
 
 
@@ -521,3 +526,164 @@ def test_publish_without_hard_links_renames_a_complete_file_and_a_crash_leaves_n
     assert inbox.submit(run_dir, "cancel", "a", reason="operator") == "created"
     assert renamed == [False]
     assert [request.task_id for request in inbox.pending(run_dir).requests] == ["a"]
+
+
+@posix_only
+def test_live_cancel_retains_partial_work_and_same_seat_siblings(site, capsys, monkeypatch):
+    tasks = accept_batch(
+        site,
+        [site.task("a", isolation="worktree"), site.task("b", read_only=True), site.task("c", read_only=True)],
+    )
+    ready = {name: threading.Event() for name in ("a", "b")}
+    target_exited = threading.Event()
+    watchers = []
+    watch = BatchExecution._watch_cancels
+
+    def watch_and_record(self, stopped):
+        watchers.append(threading.current_thread())
+        watch(self, stopped)
+
+    monkeypatch.setattr(BatchExecution, "_watch_cancels", watch_and_record)
+
+    def model(agent, prompt, *, process_registry, cwd, **kwargs):
+        name = prompt.split("Batch task_id: ", 1)[1].splitlines()[0]
+        if name == "c":
+            return agents.AgentResult(text="later wave", ok=True)
+        if name == "a":
+            (cwd / "partial.txt").write_text("retained partial work\n")
+        child = subprocess.Popen(
+            [sys.executable, "-c", "import sys; sys.stdin.read(); print('sibling result')"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            **proc.process_group_kwargs(),
+        )
+        try:
+            process_registry.register(child)
+            ready[name].set()
+            if name == "a":
+                code = child.wait(timeout=10)
+                target_exited.set()
+                assert code < 0
+                return agents.AgentResult(text="", ok=False)
+            assert target_exited.wait(10)
+            assert child.poll() is None
+            output, _ = child.communicate(timeout=10)
+            return agents.AgentResult(text=output.decode().strip(), ok=child.returncode == 0)
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.communicate(timeout=10)
+            process_registry.unregister(child)
+
+    monkeypatch.setattr(agents, "run_agent", model)
+
+    def request_cancel():
+        assert ready["a"].wait(10) and ready["b"].wait(10)
+        assert inbox._has_live_watcher(site.run_dir(), site.repo)
+        return inbox.cancel(site.run_dir(), ["a"], workspace=site.repo)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        submitted = pool.submit(request_cancel)
+        rc, result, err = invoke(site, capsys, tasks["tasks"])
+        answer = submitted.result(timeout=10)
+
+    assert row(answer, "a")["outcome"] == "queued"
+    assert row(answer, "a")["live_termination"] == "requested"
+    assert rc == 1, err
+    assert {name: task["status"] for name, task in result["tasks"].items()} == {
+        "a": "cancelled",
+        "b": "completed",
+        "c": "completed",
+    }
+    assert (launched(site, "a"), launched(site, "b"), launched(site, "c")) == (1, 1, 1)
+    run_dir = site.run_dir()
+    terminal = [event.payload for event in facts(run_dir, "task.observed") if event.payload["task_id"] == "a"]
+    assert [(event["status"], event["containment"]) for event in terminal] == [("cancelled", "interrupted")]
+    assert len(facts(run_dir, "task.cancel-requested")) == 1
+    assert state_of(run_dir, "a").artifact_kind == "commit"
+    assert "retained partial work" in (run_dir / run_batch_artifacts.patch_name("a")).read_text()
+    assert "sibling result" in (run_dir / result["tasks"]["b"]["result_ref"]).read_text()
+    assert len(watchers) == 1 and not watchers[0].is_alive()
+
+
+def test_cancel_after_worker_result_handoff_is_too_late(site, capsys, monkeypatch):
+    tasks, _ = prepare_batch_run(site, ["a"])
+    record_launches(monkeypatch, [])
+    handed_off, journaled, submitted = threading.Event(), threading.Event(), threading.Event()
+    publish = BatchExecution._publish_result
+    drain = BatchExecution._drain_inbox
+
+    def pause_publication(self, result, task_id, containment):
+        handed_off.set()
+        assert journaled.wait(10) and submitted.wait(10)
+        publish(self, result, task_id, containment)
+
+    def signal_drain(self):
+        drained = drain(self)
+        if drained:
+            journaled.set()
+        return drained
+
+    monkeypatch.setattr(BatchExecution, "_publish_result", pause_publication)
+    monkeypatch.setattr(BatchExecution, "_drain_inbox", signal_drain)
+
+    def request_cancel():
+        assert handed_off.wait(10)
+        try:
+            return inbox.cancel(site.run_dir(), ["a"], workspace=site.repo)
+        finally:
+            submitted.set()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        request = pool.submit(request_cancel)
+        rc, result, err = invoke(site, capsys, tasks["tasks"])
+        assert row(request.result(timeout=10), "a")["live_termination"] == "requested"
+
+    assert rc == 0, err
+    assert result["tasks"]["a"]["status"] == "completed"
+    assert len(facts(site.run_dir(), "task.observed")) == 1
+    for mode in (["show", str(site.run_dir()), "a"], ["list", str(site.run_dir())]):
+        assert cli.main(["runs", "tasks", *mode, "--json"]) == 0
+        payload = json.loads(capsys.readouterr().out)
+        task = payload["task"] if "task" in payload else payload["tasks"][0]
+        assert task["status"] == "completed"
+        assert task["cancel"]["too_late"] is True
+
+
+def test_cancel_claimed_task_without_live_batch_reports_unavailable(run_site, capsys):
+    run_dir, workspace = run_site
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        handle = run_tasks.prepare_attempt(run_dir, workspace=workspace, task_id="a")
+        decision = run_tasks.claim_task_launch(
+            run_dir,
+            workspace=workspace,
+            handle=handle,
+            expected_version=state_of(run_dir, "a").version,
+            seat="worker",
+            dispatch_attempt=1,
+        )
+        assert decision.outcome == "granted"
+
+    rc, payload = cancel(run_dir, capsys, "a")
+
+    assert rc == 0
+    assert row(payload, "a")["outcome"] == "recorded"
+    assert row(payload, "a")["live_termination"] == "live-termination-unavailable"
+
+
+def test_pending_intent_drained_after_terminal_observation_keeps_result(held_run):
+    run_dir, workspace = held_run
+    assert inbox.submit(run_dir, "cancel", "a") == "created"
+    handle = run_tasks.prepare_attempt(run_dir, workspace=workspace, task_id="a")
+    observed = run_tasks.observe_task(
+        run_dir,
+        workspace=workspace,
+        handle=handle,
+        observation=run_tasks.TaskObservation(status="completed", containment="quiescent"),
+    )
+
+    assert inbox.drain(run_dir, workspace) == {"a": "recorded"}
+    result = state_of(run_dir, "a")
+    assert result.status == "completed"
+    assert result.result_id == observed.result_id
+    assert result.cancel_too_late
