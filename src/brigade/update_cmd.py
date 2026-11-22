@@ -35,9 +35,9 @@ _RELEASE_REPOSITORIES = (REPOSITORY, RENAMED_REPOSITORY)
 STATE_SCHEMA_VERSION = 1
 MANIFEST_ASSET = "component-manifest-v1.json"
 PYPI_PROJECT = "brigadestack"
-# The pre-0.32 package name. It stays published as a compatibility package that depends
-# on PYPI_PROJECT at the same version, so a pipx app installed under this name keeps
-# upgrading under it instead of gaining a second app that shadows `brigade`.
+# The pre-0.32 package name. Through 0.33 it stays published as a full build of the same
+# source at the same version, so a pipx app installed under this name keeps upgrading
+# under it instead of gaining a second app that shadows `brigade`.
 LEGACY_PYPI_PROJECT = "brigade-cli"
 PYPI_PROJECT_JSON_URL = f"https://pypi.org/pypi/{PYPI_PROJECT}/json"
 BETA_PREVIEW_BASE = "0.32.0"
@@ -89,6 +89,9 @@ class UpdatePaths:
     cache_root: Path
     brigade_executable: Path
     pipx_executable: str = "pipx"
+    # pipx's local venvs directory. Only the brigade-cli migration uses it, to run setup from and
+    # relink to the new brigadestack environment. None asks the configured pipx executable.
+    pipx_venvs: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -220,6 +223,86 @@ def default_paths() -> UpdatePaths:
     bin_dir = Path(os.environ.get("PIPX_BIN_DIR", str(Path.home() / ".local" / "bin")))
     executable = bin_dir / ("brigade.exe" if os.name == "nt" else "brigade")
     return UpdatePaths(data_root=Path(roots), cache_root=Path(cache), brigade_executable=executable)
+
+
+def _default_capture(argv: list[str]) -> str | None:
+    """Run a read-only query (argument list, no shell) and return its stdout, or None when it fails."""
+    try:
+        result = subprocess.run(argv, check=False, capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout if result.returncode == 0 else None
+
+
+def _fallback_pipx_venvs() -> Path:
+    # PIPX_LOCAL_VENVS is deliberately not read: pipx derives its venvs directory from PIPX_HOME only
+    # and ignores that variable as an input, so a stale or attacker-set value would name an unrelated tree.
+    home = os.environ.get("PIPX_HOME")
+    if home:
+        return Path(home) / "venvs"
+    legacy = Path.home() / ".local" / "pipx" / "venvs"
+    return legacy if legacy.is_dir() else Path.home() / ".local" / "share" / "pipx" / "venvs"
+
+
+def _resolve_pipx_venvs(paths: UpdatePaths, capture: Callable[[list[str]], str | None]) -> Path:
+    """Where pipx keeps its environments: the configured value, else what pipx itself reports.
+
+    Falls back to PIPX_HOME/venvs and then the default locations when pipx cannot be asked or reports
+    something that is not an absolute path.
+    """
+    if paths.pipx_venvs is not None:
+        return paths.pipx_venvs
+    reported = capture([paths.pipx_executable, "environment", "--value", "PIPX_LOCAL_VENVS"])
+    lines = reported.strip().splitlines() if reported else []
+    if len(lines) == 1 and Path(lines[0].strip()).is_absolute():
+        return Path(lines[0].strip())
+    return _fallback_pipx_venvs()
+
+
+def _venv_bin_dir(venvs: Path) -> Path:
+    """The ``bin`` (``Scripts`` on Windows) directory of the brigadestack pipx environment."""
+    return venvs / PYPI_PROJECT / ("Scripts" if os.name == "nt" else "bin")
+
+
+def _brigadestack_env_problem(venvs: Path) -> str | None:
+    """Why the brigadestack environment under ``venvs`` must not be executed or linked to, or None.
+
+    The directory only counts when pipx made it for the brigadestack package: a real directory whose
+    pipx_metadata.json names brigadestack as its main package.
+    """
+    env_dir = venvs / PYPI_PROJECT
+    if env_dir.is_symlink():
+        return f"{env_dir} is a symbolic link"
+    metadata = env_dir / "pipx_metadata.json"
+    try:
+        package = json.loads(metadata.read_text(encoding="utf-8"))["main_package"]["package"]
+    except (OSError, ValueError, KeyError, TypeError):
+        return f"{metadata} is missing or unreadable"
+    if package != PYPI_PROJECT:
+        return f"{metadata} names {package!r} as its main package, not {PYPI_PROJECT!r}"
+    return None
+
+
+def _restore_launchers(paths: UpdatePaths, venvs: Path) -> bool:
+    """Relink brigade, brigadestack and brigade-hook to the brigadestack environment without the network.
+
+    These are the links pipx makes. They are all that is left to restore when the install that follows
+    removing the old brigade-cli app fails, so the user keeps a working `brigade`. Returns False, linking
+    nothing, when the environment is not a verified brigadestack environment or has no `brigade` entry.
+    """
+    venv_bin = _venv_bin_dir(venvs)
+    bin_dir = paths.brigade_executable.parent
+    if _pipx_copies_apps() or _brigadestack_env_problem(venvs) or not (venv_bin / "brigade").is_file():
+        return False
+    for name in ("brigade", "brigadestack", "brigade-hook"):
+        source = venv_bin / name
+        if not source.is_file():
+            continue
+        staging = bin_dir / f".{name}.update-link"
+        staging.unlink(missing_ok=True)
+        staging.symlink_to(source)
+        os.replace(staging, bin_dir / name)
+    return True
 
 
 def load_update_state(path: Path) -> UpdateState | None:
@@ -717,8 +800,10 @@ def installed_pypi_project() -> str:
     """Name of the PyPI distribution this installation was made from.
 
     pipx records the requested package in ``pipx_metadata.json``, which is exact even
-    when the compatibility package pulled in its real dependency. Other layouts fall
-    back to the installed distribution metadata. Anything unknown is the real package.
+    when the install is a brigade-cli app. Other layouts fall back to the installed
+    distribution metadata, where the real package wins: a venv upgraded from the 0.31.0
+    brigadestack bridge keeps an orphaned brigade-cli dist-info. Anything unknown is the
+    real package.
     """
     try:
         recorded = json.loads((Path(sys.prefix) / "pipx_metadata.json").read_text(encoding="utf-8"))
@@ -727,11 +812,13 @@ def installed_pypi_project() -> str:
         package = None
     if package in (PYPI_PROJECT, LEGACY_PYPI_PROJECT):
         return package
-    try:
-        importlib.metadata.distribution(LEGACY_PYPI_PROJECT)
-    except importlib.metadata.PackageNotFoundError:
-        return PYPI_PROJECT
-    return LEGACY_PYPI_PROJECT
+    for name in (PYPI_PROJECT, LEGACY_PYPI_PROJECT):
+        try:
+            importlib.metadata.distribution(name)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+        return name
+    return PYPI_PROJECT
 
 
 def _pipx_copies_apps() -> bool:
@@ -761,6 +848,7 @@ def run_update(
     runner: Callable[[list[str]], Any] | None = None,
     now: Callable[[], str] = localio.utc_now_iso,
     pid_alive: Callable[[int], bool] | None = None,
+    capture: Callable[[list[str]], str | None] | None = None,
 ) -> int:
     """Update CLI, then publish state after native component setup succeeds."""
     if distribution.is_npm():
@@ -775,6 +863,7 @@ def run_update(
     selected_paths = paths or default_paths()
     selected_http = http or _DefaultHttp()
     selected_runner = runner or _default_runner
+    selected_capture = capture or _default_capture
     state_path = Path(component_paths.update_state_path(str(selected_paths.data_root)))
     lock_path = Path(component_paths.update_lock_path(str(selected_paths.data_root)))
     try:
@@ -810,24 +899,33 @@ def run_update(
                 return 0
             # Stable and beta both force-reinstall the one user-global pipx app
             # with an exact package pin. Beta never uses a mutable Git main SHA.
-            # Stable keeps the installed package name. Beta resolves daily wheels of the real
-            # package only: the compatibility package has no development builds.
+            # Both channels install the real package: brigade-cli is the same code under the old
+            # name, its last release becomes a stub, and it has no development builds, so an
+            # update must move a brigade-cli app to brigadestack.
             installed_project = installed_pypi_project()
-            install_project = installed_project if channel == "stable" else PYPI_PROJECT
+            install_project = PYPI_PROJECT
             pipx_spec = f"{install_project}=={coordinate}"
-            # A beta update of a brigade-cli app installs brigadestack as a new pipx app whose
+            # An update of a brigade-cli app installs brigadestack as a new pipx app whose
             # `brigade` and `brigade-hook` replace the old links (--force), removes the old app so
             # it cannot relink them on a later `pipx upgrade-all`, then installs brigadestack once
             # more, because older pipx (1.4.x) uninstalls launchers by name even when another app
             # owns them. Setup and the state write come after, so a lost launcher never records a
             # finished update. Where pipx copies apps (Windows), uninstall also fails on the
             # running interpreter, so there the user removes the old app after exit.
-            retire_legacy = installed_project == LEGACY_PYPI_PROJECT and install_project != LEGACY_PYPI_PROJECT
+            retire_legacy = installed_project == LEGACY_PYPI_PROJECT
             retire_after_exit = retire_legacy and _pipx_copies_apps()
             cached_manifest_path = Path(
                 component_paths.verified_manifest_path(str(selected_paths.cache_root), release.manifest_sha256)
             )
-            setup_command = [str(selected_paths.brigade_executable), "setup", "--manifest", str(cached_manifest_path)]
+            # A migration runs setup from the brigadestack environment itself, not from whichever
+            # `brigade` link the pipx bin directory holds after the old app's removal.
+            venvs = _resolve_pipx_venvs(selected_paths, selected_capture) if retire_legacy else None
+            setup_executable = (
+                _venv_bin_dir(venvs) / ("brigade.exe" if os.name == "nt" else "brigade")
+                if venvs is not None
+                else selected_paths.brigade_executable
+            )
+            setup_command = [str(setup_executable), "setup", "--manifest", str(cached_manifest_path)]
             if compatible_manifest_version is not None:
                 setup_command.extend(["--allow-compatible-stable-manifest", compatible_manifest_version])
             install_command = [selected_paths.pipx_executable, "install", "--force", pipx_spec]
@@ -844,21 +942,56 @@ def run_update(
             manifest_path = _cache_manifest(selected_paths, release)
             if manifest_path != cached_manifest_path:
                 raise UpdateError("verified manifest cache path changed unexpectedly")
+            retired = False
+            retire_failed = False
             for command in commands:
+                if retire_failed and command is setup_command:
+                    break  # only the restoring install ran; the migration is not finished
+                if command is setup_command and venvs is not None:
+                    problem = _brigadestack_env_problem(venvs)
+                    if problem:
+                        raise UpdateError(
+                            f"not running setup from {setup_executable}: {problem}. Setup was not run and no "
+                            "update was recorded; check where pipx keeps its environments and run brigade update again"
+                        )
                 if _returncode(selected_runner(command)) == 0:
+                    if command is retire_command:
+                        retired = True
                     continue
                 if command is retire_command:
-                    # The reinstall that follows restores any launcher a partial removal took;
-                    # a leftover old app is untidy, not broken.
-                    print(
-                        f"brigade update: could not remove the old app; remove it with: {' '.join(retire_command)}",
-                        file=sys.stderr,
-                    )
+                    # The reinstall that follows restores any launcher a partial removal took.
+                    retire_failed = True
                     continue
+                if retired and command is install_command:
+                    restored = _restore_launchers(selected_paths, venvs) if venvs is not None else False
+                    raise UpdateError(
+                        f"update command failed: {' '.join(command)}. The old {LEGACY_PYPI_PROJECT} app is already "
+                        + (
+                            f"removed and the brigade launchers were relinked to the existing {PYPI_PROJECT} "
+                            "environment, so `brigade` still runs the new version. "
+                            if restored
+                            else f"removed and no {PYPI_PROJECT} environment could be relinked. "
+                        )
+                        + f"No update was recorded. Restore with: {' '.join(install_command)}"
+                    )
                 raise UpdateError(f"update command failed: {' '.join(command)}")
-            write_update_state(state_path, next_state)
+            if retire_failed:
+                raise UpdateError(
+                    f"could not remove the old {LEGACY_PYPI_PROJECT} app, so the update is not recorded. "
+                    f"Finish with: {' '.join(retire_command)} ; {' '.join(install_command)} "
+                    "(older pipx removes launchers by name), then run brigade update again"
+                )
             if retire_after_exit:
-                print(_retire_after_exit_hint(retire_command, install_command), file=sys.stderr)
+                # pipx copies launchers here and cannot delete the interpreter it runs from, so the
+                # migration is unfinished until the user removes the old app. Recording the update now
+                # would make the next `brigade update` stop at "already owns" and never retire it.
+                raise UpdateError(
+                    f"{PYPI_PROJECT} is installed but retiring the old {LEGACY_PYPI_PROJECT} app is pending, "
+                    f"so the update is not recorded. After this command exits, run: {' '.join(retire_command)} ; "
+                    f"{' '.join(install_command)} (removing the old app deletes the brigade launcher), "
+                    "then run brigade update again"
+                )
+            write_update_state(state_path, next_state)
     except (UpdateError, OSError, UnicodeDecodeError, ValueError) as exc:
         print(f"brigade update: {exc}", file=sys.stderr)
         return 1

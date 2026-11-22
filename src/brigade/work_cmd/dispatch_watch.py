@@ -16,8 +16,8 @@ from .ledger import locking
 
 def installed_version() -> str:
     """Read distribution metadata afresh, rather than the imported module cache."""
-    # brigadestack is the real distribution; brigade-cli is the compatibility package
-    # and tracks the same version, so either name reports a reinstall.
+    # brigadestack is the real distribution; brigade-cli is the same code under the old
+    # name and tracks the same version, so either name reports a reinstall.
     for name in ("brigadestack", "brigade-cli"):
         try:
             return metadata.version(name)
