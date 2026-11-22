@@ -12,7 +12,7 @@ import sys
 
 import pytest
 
-from brigade import cli
+from brigade import cli, work_cmd
 from brigade.work_cmd import verify_ranking
 
 _SRC = Path(__file__).resolve().parents[1] / "src"
@@ -90,20 +90,33 @@ def _run_hint(hint: str, caller: Path) -> tuple[subprocess.CompletedProcess[str]
     return result, json.loads(result.stdout)
 
 
-def test_default_plan_hint_runs_selected_default_in_the_target(tmp_path):
+def test_plan_without_command_suggests_a_focused_example(tmp_path):
     target, caller = _project(tmp_path)
 
     result, plan = _plan(target, caller)
 
-    assert result.returncode == 0, result.stdout + result.stderr
-    assert plan["commands"] == ["python3 -m pytest -q"]
+    assert result.returncode == 1, result.stdout + result.stderr
+    assert plan["commands"] == []
+    assert "focused test selector" in plan["blockers"][0]
+    assert shlex.split(plan["suggested_command"]) == [
+        "brigade",
+        "work",
+        "verify",
+        "run",
+        f"--target={target}",
+        "--command=<focused test command>",
+    ]
     assert not (target / "default-executed").exists()
-    run, receipt = _run_hint(plan["suggested_command"], caller)
-    assert run.returncode == 0, run.stdout + run.stderr
-    assert receipt["target"] == str(target)
-    assert receipt["planned_commands"] == plan["commands"]
-    assert (target / "default-executed").read_text() == "ran"
     assert not (caller / "default-executed").exists()
+
+
+def test_library_run_without_command_requires_a_command_or_manifest(tmp_path, capsys):
+    target, _ = _project(tmp_path)
+
+    assert work_cmd.verify_run(target=target) == 2
+    assert "pass --command or --manifest" in capsys.readouterr().err
+    assert not (target / "default-executed").exists()
+    assert not (target / ".brigade" / "work" / "verify-runs").exists()
 
 
 def test_explicit_repeated_commands_are_preserved_in_order(tmp_path):
@@ -225,7 +238,7 @@ def test_graph_hint_priority_preserves_explicit_choice(tmp_path, monkeypatch, ca
     assert run.returncode == 0, run.stdout + run.stderr
     assert receipt["planned_commands"] == [command if explicit else ranked]
     assert bool(plan.get("suggested_from_graph_impact")) is not explicit
-    assert plan["commands"] == ([command] if explicit else ["python3 -m pytest -q"])
+    assert plan["commands"] == [command if explicit else ranked]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="executes the explicitly labelled POSIX shell hint")
@@ -262,7 +275,7 @@ def test_empty_plan_and_missing_manifest_keep_actionable_selector(tmp_path):
     caller = tmp_path
     result, plan = _plan(target, caller)
     assert result.returncode == 1
-    assert "--command=..." in shlex.split(plan["suggested_command"])
+    assert "--command=<focused test command>" in shlex.split(plan["suggested_command"])
     assert f"--target={target}" in shlex.split(plan["suggested_command"])
 
     result, plan = _plan(target, caller, ["--manifest=-missing ' manifest"])
