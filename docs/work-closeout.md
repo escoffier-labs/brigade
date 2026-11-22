@@ -88,6 +88,7 @@ A closeout is ready when:
 - the work session is ended
 - the newest applicable verification for the work session and current tree
   completed without a recorded change outside `.brigade/` during the run
+- that receipt meets the [current verification policy](verify-gate.md)
 - the consumed task has acceptance criteria when task evidence is present
 - the latest scanner sweep has not failed and has no unresolved review issue
 - code review has no unclosed review run and no unresolved imported finding
@@ -104,6 +105,13 @@ session. Receipts without either binding are unattributed.
 Closeout skips busy and canceled runs and looks for the newest remaining
 receipt for the current tree. A failed, rejected, or timed-out run for that
 tree blocks closeout and names the run.
+
+When the trusted Git base declares a required check, the newest applicable
+receipt must carry an eligible verdict for the current policy. A newer
+ineligible receipt blocks closeout even when an older receipt passed. Closeout
+reports the reason and shows the command to rerun when the policy can be read.
+If the repository has no declaration, a completed receipt without a verdict
+can still count.
 
 When tree fingerprints differ, verification and closeout compare the paths
 in the Git trees. Changes confined to `.brigade/` count as the same tree,

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 import stat
 import subprocess
 import unicodedata
@@ -272,7 +273,58 @@ _INELIGIBLE_NOTICE = {
     "not_the_required_check": "The last run did not run the required check.",
     "no_selector": "The last run had no test selector.",
     "no_tests_passed": "The last run passed no tests or reported test failures or errors.",
+    "missing_gating": "The last run has no required-check verdict.",
+    "invalid_gating": "The last run has an invalid required-check verdict.",
+    "policy_changed": "The required check rule changed since the run.",
 }
+
+
+def _receipt_policy_verdict(receipt: Mapping[str, Any], policy: _GatePolicy) -> tuple[bool, str]:
+    if policy.mode == "unresolved":
+        return False, policy.reason
+    eligible, reason = receipt_is_gating(receipt)
+    if reason == "missing_gating" and "gating" not in receipt and policy.mode == "audit_only":
+        return True, "audit_only"
+    stamp = receipt.get("gating")
+    if isinstance(stamp, dict) and reason != "invalid_gating" and not _blocked_reason(receipt):
+        if not policy.matches(stamp):
+            return False, "policy_changed"
+    return eligible, reason
+
+
+def _suggested_argv(policy: _GatePolicy) -> list[str]:
+    if policy.mode != "required_check":
+        return ["pytest", "tests/test_example.py"]
+    return [*policy.argv_prefix, *(["tests/test_example.py"] if policy.needs_arguments else [])]
+
+
+def _policy_error(policy: _GatePolicy) -> str:
+    detail = policy.error or "Git timed out reading the required check"
+    return f"could not load {_DECLARATION_PATH}: {detail}."
+
+
+def receipt_counts_for_policy(target: Path, receipt: Mapping[str, Any]) -> tuple[bool, str | None]:
+    """Check a receipt against the current policy and explain a rejection with rerun guidance."""
+    policy = _load_policy(target)
+    eligible, reason = _receipt_policy_verdict(receipt, policy)
+    if eligible:
+        return True, None
+    if policy.mode == "unresolved":
+        return False, _policy_error(policy)
+    explanation = _INELIGIBLE_NOTICE.get(reason, "The last run has an ineligible required-check verdict.")
+    command = shlex.join(
+        [
+            "brigade",
+            "work",
+            "verify",
+            "run",
+            "--target",
+            str(target),
+            "--argv-json",
+            json.dumps(_suggested_argv(policy)),
+        ]
+    )
+    return False, f"{explanation} Run `{command}` in a POSIX shell."
 
 
 class StopGate:
@@ -306,25 +358,17 @@ class StopGate:
         completed = localio.parse_iso_datetime(receipt.get("completed_at"))
         if receipt_started is None or completed is None or receipt_started < started or completed < receipt_started:
             return None
-        eligible, recorded_reason = receipt_is_gating(receipt)
-        reason = recorded_reason
-        stamp = receipt.get("gating")
-        if isinstance(stamp, dict) and not self._policy.matches(stamp) and not _blocked_reason(receipt):
-            eligible, reason = False, "missing_gating"
-        if self._policy.mode != "unresolved" and (
-            eligible or (reason == "missing_gating" and self._policy.mode == "audit_only")
-        ):
+        eligible, reason = _receipt_policy_verdict(receipt, self._policy)
+        if eligible:
             return completed
+        stamp = receipt.get("gating")
         if isinstance(stamp, dict) and stamp.get("eligible") is False:
             if self._last_ineligible is None or completed > self._last_ineligible[0]:
-                self._last_ineligible = completed, receipt_started, recorded_reason
+                self._last_ineligible = completed, receipt_started, reason
         return None
 
     def command(self) -> list[str]:
-        policy = self._policy
-        if policy.mode != "required_check":
-            return ["pytest", "tests/test_example.py"]
-        return [*policy.argv_prefix, *(["tests/test_example.py"] if policy.needs_arguments else [])]
+        return _suggested_argv(self._policy)
 
     def notice(self) -> str | None:
         policy = self._policy
@@ -345,7 +389,7 @@ class StopGate:
     def block_guidance(self, replacement: str, since: object) -> str:
         policy = self._policy
         if policy.mode == "unresolved":
-            message = f"{self.target}: could not load {_DECLARATION_PATH}: {policy.error}."
+            message = f"{self.target}: {_policy_error(policy)}"
         else:
             message = f"{self.target}: run `{replacement}` in a POSIX shell."
             if policy.mode == "audit_only":

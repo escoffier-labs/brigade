@@ -42,10 +42,15 @@ ineligible, Stop can explain why that run did not count. Receipts record
 Without a declaration, any completed receipt can satisfy the gate if it meets
 the session and tree checks. Legacy receipts without a verdict count only in
 audit-only mode. The policy identity consists of the mode, the declaration
-digest when present, and the fallback source when used. Stop treats a receipt
-with a different identity as a legacy receipt. Verify runs the commands again
-when a candidate for reuse has a different identity. A legacy receipt can be
+digest when present, and the fallback source when used. A stamped receipt
+counts only when its identity matches the current policy. Verify runs the commands
+again when a candidate for reuse has a different identity. A legacy receipt can be
 reused in audit-only mode if it otherwise meets the reuse checks.
+
+Work closeout applies the same policy to the newest applicable receipt for
+the session and current tree. If that receipt fails the policy, closeout
+reports why and shows the `--argv-json` command when the policy can be read.
+Closeout uses the default Git timeouts.
 
 ## Limits
 
@@ -57,4 +62,3 @@ reused in audit-only mode if it otherwise meets the reuse checks.
 - Brigade runs the declared command from the working tree. The gate does not
   compare the script with the copy on the base.
 - With no remote, the base is local `HEAD`.
-- Closeout does not read the verdict yet.
