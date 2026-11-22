@@ -27,7 +27,7 @@
 
 BrigadeStack gives the agent tools you already use one shared memory and one set of MCP servers and skills. It keeps a record of the work they check.
 
-Install with pipx (Python 3.11 or newer) or npm (Node.js 22 or newer). The command is `brigadestack`. `brigadestack` on PyPI is the Python package. The `brigade-cli` compatibility package and the `@escoffier-labs/brigade` npm package install the same CLI as `brigade`, so existing users keep their command and `pipx upgrade brigade-cli` keeps working.
+Install with pipx (Python 3.11 or newer) or npm (Node.js 22 or newer). The command is `brigadestack`. `brigadestack` on PyPI is the Python package. The `brigade-cli` PyPI package (the same code under the old name) and the `@escoffier-labs/brigade` npm compatibility package install the same CLI as `brigade`, so existing users keep their command and `pipx upgrade brigade-cli` keeps working.
 
 ```bash
 pipx install brigadestack

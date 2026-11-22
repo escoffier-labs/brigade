@@ -31,6 +31,7 @@ from .. import (
 from .. import verification_contract, verify_manifest, verify_trial
 from ..agent_identity import stamp_verify_identity as _stamp_harness_session
 from ..claude_hooks import producer_session as hook_producer
+from ..verify_command import split_verify_command
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
@@ -61,18 +62,9 @@ def _verification_shell_meta_re() -> re.Pattern[str]:
     return constants.SCANNER_SHELL_META_RE
 
 
-def _verification_strip_outer_quotes(token: str) -> str:
-    if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}:
-        return token[1:-1]
-    return token
-
-
 def _verification_split_command(command: str) -> list[str]:
     """Split a raw ``--command`` string with platform-aware shlex rules."""
-    parts = shlex.split(command, posix=not _verification_is_windows())
-    if _verification_is_windows():
-        parts = [_verification_strip_outer_quotes(token) for token in parts]
-    return parts
+    return split_verify_command(command, windows=_verification_is_windows())
 
 
 def _receipt_git_snapshot(target: Path) -> dict[str, Any] | None:

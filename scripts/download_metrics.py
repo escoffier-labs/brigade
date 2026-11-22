@@ -12,8 +12,8 @@ from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-# brigadestack is the real package. brigade-cli is the compatibility package that
-# existing installs, pipx apps and scripts still pull, so both count as PyPI downloads.
+# brigadestack is the real package. brigade-cli is the same code under the old name,
+# which existing installs, pipx apps and scripts still use, so both count as PyPI downloads.
 PYPI_PACKAGES = ("brigadestack", "brigade-cli")
 PYPI_URLS = {name: f"https://pypistats.org/api/packages/{name}/overall?mirrors=false" for name in PYPI_PACKAGES}
 # The same split on npm: brigadestack is the real package and @escoffier-labs/brigade is
