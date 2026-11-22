@@ -4,9 +4,10 @@ from datetime import datetime, timedelta, timezone
 import json
 import os
 from pathlib import Path
-import shlex
 import subprocess
 import sys
+
+import pytest
 
 from scripts import workflow_approval_digest, workflow_guard
 
@@ -192,6 +193,10 @@ def test_script_path_help_works_from_another_directory(tmp_path):
     assert "--since" in result.stdout
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="Without a shell, Windows resolves gh to an executable only, so a script shim on PATH cannot stand in for it.",
+)
 def test_script_path_runs_with_fake_gh_from_another_directory(tmp_path):
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -208,15 +213,11 @@ def test_script_path_runs_with_fake_gh_from_another_directory(tmp_path):
         "    raise SystemExit(1)\n",
         encoding="utf-8",
     )
-    if os.name == "nt":
-        fake_gh = fake_bin / "gh.cmd"
-        fake_gh.write_text(f'@echo off\n"{sys.executable}" "{fake_gh_script}" %*\n', encoding="utf-8")
-    else:
-        fake_gh = fake_bin / "gh"
-        fake_gh.write_text(
-            f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(fake_gh_script))} "$@"\n',
-            encoding="utf-8",
-        )
+    fake_gh = fake_bin / "gh"
+    fake_gh.write_text(
+        f'#!/bin/sh\nexec "{sys.executable}" "{fake_gh_script}" "$@"\n',
+        encoding="utf-8",
+    )
     fake_gh.chmod(0o755)
     env = os.environ.copy()
     env.pop("PYTHONPATH", None)
