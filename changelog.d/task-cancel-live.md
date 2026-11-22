@@ -1,0 +1,2 @@
+- Stop a running batch task by task and attempt, preserve its partial worktree artifact, and keep unrelated workers running.
+- Report live cancellation requests and show when recorded intent arrived too late to change a task's result.

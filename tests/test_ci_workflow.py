@@ -40,7 +40,7 @@ def test_ci_gate_accepts_confirmed_docs_skips_but_keeps_lightweight_checks_requi
     script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
     for event in ("pull_request", "merge_group", "push"):
         needs = {name: {"result": "skipped"} for name in names}
-        for name in ("changes", "content-guard", "repo-metadata", "changelog-fragments"):
+        for name in ("changes", "content-guard", "repo-metadata", "changelog-fragments", "ledger-recompute"):
             needs[name] = {"result": "success"}
         needs["changes"]["outputs"] = {"docs_only": "true"}
         if mutation in {"full", "unknown", "missing-classification"}:
@@ -117,7 +117,14 @@ def test_docs_classification_gates_every_runtime_job_without_implicit_success():
                     assert not _job_admitted(
                         text, name, docs=docs, cancelled=True, dependency=dependency, event=event
                     ), (name, event, docs, dependency)
-            if name in {"changes", "content-guard", "repo-metadata", "changelog-fragments", "ci-gate"}:
+            if name in {
+                "changes",
+                "content-guard",
+                "repo-metadata",
+                "changelog-fragments",
+                "ledger-recompute",
+                "ci-gate",
+            }:
                 assert _job_admitted(text, name, docs="true", event=event)
                 continue
             assert not _job_admitted(text, name, docs="true", event=event), name
@@ -788,6 +795,7 @@ def test_ci_workflow_shadow_gate_covers_required_jobs_and_their_dependencies():
         "cosign-integration",
         "fleet-hub-container",
         "hub-rust",
+        "ledger-recompute",
     }
     for name in needs:
         _workflow_job_section(text, name)
@@ -1841,6 +1849,7 @@ def test_ci_migration_preserves_existing_job_names_and_hosted_routing():
     assert set(re.findall(r"^  ([a-z0-9-]+):$", jobs, re.MULTILINE)) == set(EXISTING_CI_JOBS) | {
         "trusted-runner-canary",
         "engine-rename-installer",
+        "ledger-recompute",
         "ci-gate",
         "windows-affected-plan",
         "windows-affected-shard",
@@ -1915,7 +1924,11 @@ def test_ci_merge_groups_force_non_hub_component_checks_and_select_hub_from_trus
     filters = [step for step in steps if step.startswith(f"uses: {PATHS_FILTER_ACTION}")]
     assert len(filters) == 2
     for step in filters:
-        assert "        if: ${{ github.event_name != 'merge_group' }}\n" in step
+        # A dispatched run has no base to diff, so it skips the filters too and runs full CI.
+        assert (
+            "        if: ${{ github.event_name != 'merge_group' && github.event_name != 'workflow_dispatch' }}\n"
+            in step
+        )
         assert "base:" not in step
         assert "ref:" not in step
     assert "        id: filter\n" in filters[0]

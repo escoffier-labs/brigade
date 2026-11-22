@@ -1,0 +1,24 @@
+{
+  "schema": "brigade.verify_manifest.v1",
+  "schema_version": 1,
+  "manifest_id": "skill-note",
+  "binding_mode": "patch_backed",
+  "verifier_id": "brigade.verify.skill-contract",
+  "patch_source": "worktree",
+  "subject": {
+    "artifact_kind": "skill",
+    "artifact_id": "note",
+    "subject_path": "src/brigade/templates/skills/note/SKILL.md"
+  },
+  "scope_globs": [
+    "src/brigade/templates/skills/note/**",
+    "scripts/skill_contract_check.py"
+  ],
+  "checks": [
+    {
+      "check_id": "contract.skill-note",
+      "check_role": "effectiveness",
+      "command": "python3 scripts/skill_contract_check.py src/brigade/templates/skills/note"
+    }
+  ]
+}

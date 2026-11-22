@@ -4,6 +4,7 @@ const fs=require('node:fs');
 const path=require('node:path');
 const assert=require('node:assert/strict');
 const {createRequire}=require('node:module');
+const {execFileSync}=require('node:child_process');
 const SLSA='https://slsa.dev/provenance/v1';
 const SOURCE_DIGEST='1.3.6.1.4.1.57264.1.13';
 const SOURCE_REPOSITORY_ID='1.3.6.1.4.1.57264.1.15';
@@ -16,17 +17,42 @@ const ACCEPTED_REPOSITORIES=['escoffier-labs/brigade','escoffier-labs/brigadesta
 // Registry provenance policy for a package published by .github/workflows/npm-publish.yml on main in
 // the repository the workflow runs in: the name follows GITHUB_REPOSITORY, but only for an accepted
 // name running with the Brigade repository ID, and the signed certificate must carry that ID too.
-function publishingIdentity(env,name,version,verifier) {
+function publishingRepository(env) {
   assert.ok(ACCEPTED_REPOSITORIES.includes(env.GITHUB_REPOSITORY),'GITHUB_REPOSITORY must be an accepted Brigade repository name');
   assert.equal(env.GITHUB_REPOSITORY_ID,REPOSITORY_ID,'GITHUB_REPOSITORY_ID must be the Brigade repository ID');
-  assert.match(env.GITHUB_SHA || '',/^[a-f0-9]{40}$/,'GITHUB_SHA must identify the publishing commit');
-  const repository='https://github.com/'+env.GITHUB_REPOSITORY;
+  return githubRepository(env.GITHUB_REPOSITORY);
+}
+const githubRepository=slug=>`https://github.com/${slug}`;
+const packageRepositoryUrl=repository=>`git+${repository}.git`;
+const publishingPackageRepositoryUrl=env=>packageRepositoryUrl(publishingRepository(env));
+function assertPublishingArchiveRepository(file,expectedUrl) {
+  const manifest=JSON.parse(execFileSync('tar',['-xOzf',file,'--','package/package.json'],{
+    encoding:'utf8',timeout:30000,maxBuffer:1024*1024,
+  }));
+  assert.equal(manifest?.repository?.url,expectedUrl,
+    `${path.basename(file)}: repository.url must match the publishing repository`);
+}
+function archiveRepository(url) {
+  const repository=ACCEPTED_REPOSITORIES.map(githubRepository).find(repo=>packageRepositoryUrl(repo)===url);
+  assert.ok(repository,'archive must name an accepted Brigade repository');
+  return repository;
+}
+function expectedIdentity(repository,sourceCommit,name,version,verifier) {
+  assert.match(sourceCommit || '',/^[a-f0-9]{40}$/,'GITHUB_SHA must identify the publishing commit');
   return {
-    purl:verifier.purl(name,version),sourceCommit:env.GITHUB_SHA,repository,repositoryId:REPOSITORY_ID,
+    purl:verifier.purl(name,version),sourceCommit,repository,repositoryId:REPOSITORY_ID,
     workflow:'.github/workflows/npm-publish.yml',ref:'refs/heads/main',
     san:`${repository}/.github/workflows/npm-publish.yml@refs/heads/main`,
     issuer:'https://token.actions.githubusercontent.com',builder:'https://github.com/actions/runner/github-hosted',
   };
+}
+function publishingIdentity(env,name,version,verifier) {
+  return expectedIdentity(publishingRepository(env),env.GITHUB_SHA,name,version,verifier);
+}
+// The packed URL selects the historical name. Verification still requires the signed repository ID,
+// SAN, and workflow predicate to match this policy and the signed subject to bind the archive bytes.
+function archiveIdentity(url,sourceCommit,name,version,verifier) {
+  return expectedIdentity(archiveRepository(url),sourceCommit,name,version,verifier);
 }
 function resolveNpmCli() {
   if(process.env.npm_execpath) return fs.realpathSync(process.env.npm_execpath);
@@ -93,4 +119,4 @@ function createVerifier(npmCli,cachePath) {
   }
   return {purl:(name,version)=>npa.toPurl(`${name}@${version}`),verifyRegistry};
 }
-module.exports={createVerifier,resolveNpmCli,publishingIdentity,REPOSITORY_ID,ACCEPTED_REPOSITORIES};
+module.exports={createVerifier,resolveNpmCli,publishingIdentity,publishingPackageRepositoryUrl,assertPublishingArchiveRepository,archiveRepository,archiveIdentity,REPOSITORY_ID,ACCEPTED_REPOSITORIES};

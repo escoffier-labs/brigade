@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
 from .. import localio
@@ -129,7 +131,43 @@ def stamp_reused_tree(receipt: dict[str, Any], identity: Mapping[str, Any]) -> N
         receipt.pop("inherited_test_env", None)
 
 
-def stamp_tree_after(target: Any, receipt: dict[str, Any]) -> None:
+def same_verification_tree(target: Path, before: str, after: str) -> bool | None:
+    """Compare Git trees ignoring changes under .brigade/. None means comparison failed."""
+    if before == after:
+        return True
+    # Receipts store full object IDs. Keep arbitrary revisions and options out of Git.
+    if not all(re.fullmatch(r"[0-9a-f]{40}|[0-9a-f]{64}", tree) for tree in (before, after)):
+        return None
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(target),
+                "diff-tree",
+                "-r",
+                "--name-only",
+                "-z",
+                "--no-relative",
+                "--no-renames",
+                "--ignore-submodules=none",
+                f"{before}^{{tree}}",
+                f"{after}^{{tree}}",
+                "--",
+            ],
+            check=False,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0:
+        return None
+    return all(path.startswith(b".brigade/") for path in result.stdout.split(b"\0")[:-1])
+
+
+def stamp_tree_after(target: Path, receipt: dict[str, Any]) -> None:
     """Capture post-run tree identity without making stability a gate."""
     try:
         after = localio.tree_fingerprint(target)
@@ -137,4 +175,8 @@ def stamp_tree_after(target: Any, receipt: dict[str, Any]) -> None:
         after = None
     receipt["tree_fingerprint_after"] = after
     before = receipt.get("tree_fingerprint")
-    receipt["tree_stable"] = before == after if isinstance(before, str) and isinstance(after, str) else None
+    receipt["tree_stable"] = (
+        same_verification_tree(target, before, after) is True
+        if isinstance(before, str) and isinstance(after, str)
+        else None
+    )

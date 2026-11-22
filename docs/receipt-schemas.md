@@ -219,7 +219,7 @@ merged, pushed or published. Integration is described in
 | `baseline_commit` | string \| null | yes | Verified Git baseline, or `null` when identity capture is unavailable |
 | `tree_fingerprint` | string \| null | yes | Verified Git tree hash, or `null` with the unavailable identity tuple |
 | `tree_fingerprint_after` | string \| null | no (additive) | Git tree fingerprint captured after a non-canceled run |
-| `tree_stable` | boolean \| null | no (additive) | Whether the before and after fingerprints match. `null` when either is unavailable, and on a reused receipt, where no command ran |
+| `tree_stable` | boolean \| null | no (additive) | Whether the fingerprints match or the Git trees differ only under `.brigade/`. `false` if different fingerprints cannot be compared. `null` when either fingerprint is unavailable or the receipt was reused |
 | `gating` | object | no (additive) | Eligibility to satisfy the local Stop gate. Included in the receipt digest |
 | `tree_fingerprint_head` | string \| null | yes | Fingerprint-time HEAD commit used to reset excluded evidence paths, or `null` with the unavailable identity tuple |
 | `changes_patch_sha256` | string \| null | yes | SHA-256 of `changes.patch`, or `null` with the unavailable identity tuple |
@@ -443,12 +443,22 @@ directory with the same files and file hashes as the source.
 
 **Verification summary** (`verification` object, when present)
 
+The summary references the newest completed receipt that belongs to the work
+session and covers the current tree. If none qualifies, it can reference the
+newest receipt for that session with a reason in `blockers`. The work session
+record can carry an optional `harness_session` object with `harness` and
+`fingerprint` fields for receipt matching.
+
 | Field | Type | Notes |
 | --- | --- | --- |
-| `run_id` | string | Latest verify run id |
+| `run_id` | string | Selected verify run id |
 | `status` | string | Verify receipt status |
 | `path` | string | Verify run directory |
 | `command_count` | integer | Number of command records |
+
+Verify plans and receipts can also include an `evidence.latest_verify` compact
+reference to the previous workspace receipt. Its additive `command_count`
+integer is the number of command records in that previous receipt.
 
 ---
 

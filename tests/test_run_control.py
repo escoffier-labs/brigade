@@ -746,3 +746,21 @@ def test_transport_refuses_success_without_selected_identity(tmp_path, monkeypat
         )
         assert response.get("ok") is not True
         assert response["error"] == "control response selector mismatch"
+
+
+@pytest.mark.parametrize("register_before_cancel", [True, False])
+def test_latched_turn_interrupt_targets_an_exact_attempt(register_before_cancel):
+    registry = run_control.LiveTurnRegistry()
+    target, sibling = _FakeTurn(), _FakeTurn()
+    registry.register("coder", sibling, "sibling-turn", task_id="task", attempt_id="sibling")
+    if register_before_cancel:
+        registry.register("coder", target, "target-turn", task_id="task", attempt_id="target")
+
+    registry.interrupt(task_id="task", attempt_id="target", latch_task=True)
+
+    if not register_before_cancel:
+        registry.register("coder", target, "target-turn", task_id="task", attempt_id="target")
+    assert target.calls == [("interrupt", "target-turn", "")]
+    assert sibling.calls == []
+    assert registry.task_interrupt_outcome("task", "target") == "still_active"
+    assert registry.task_interrupt_outcome("task", "sibling") is None

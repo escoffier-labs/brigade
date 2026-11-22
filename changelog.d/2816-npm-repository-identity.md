@@ -1,0 +1,1 @@
+- Stamp npm launcher, platform companion, and compatibility archives with the publishing repository and issue tracker URLs. Require the archived repository URL to match the workflow before publishing, and verify registry provenance under the repository recorded in the original archive.

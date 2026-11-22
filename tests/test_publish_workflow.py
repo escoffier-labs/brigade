@@ -648,6 +648,12 @@ def test_npm_release_workflow_has_dispatch_source_oidc_and_native_gates():
     build = "\n".join(s.get("run", "") for s in jobs["build"]["steps"])
     assert "refs/heads/main" in build and "EXPECTED_SHA" in build and "RELEASE_TAG" in build
     assert "gh attestation verify" in build
+    prepare = next(line for line in build.splitlines() if '"npm/feasibility/prepare.py"' in line and '"--out"' in line)
+    assert '"--stamp-publishing-repository"' in prepare
+    compat_pack = next(s["run"] for s in jobs["publish-compat"]["steps"] if "npm pack " in s.get("run", ""))
+    stamp, pack = compat_pack.split(" && npm pack ", 1)
+    assert 'npm pkg set "repository.url=$repository_url" "bugs.url=$issues_url"' in stamp
+    assert pack.startswith("--ignore-scripts ")
     publish = "\n".join(s.get("run", "") for s in jobs["publish"]["steps"])
     assert "publish.cjs" in publish
     assert 'test "$GITHUB_REF" = refs/heads/main' in publish

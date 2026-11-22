@@ -3,6 +3,7 @@
 from __future__ import annotations
 import hashlib
 import json
+import os
 import subprocess
 from dataclasses import dataclass
 from functools import partial
@@ -41,13 +42,25 @@ class ManifestGitError(ValueError):
         self.reason = reason
 
 
+def trusted_git_env() -> dict[str, str]:
+    """Drop inherited Git overrides for local repository inspection."""
+    return {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
+
+
 def _git(target: Path, *args: str, deadline: float | None = None) -> subprocess.CompletedProcess[bytes]:
     command = ["git", *args]
     timeout = 30.0 if deadline is None else min(30.0, deadline - monotonic())
     if timeout <= 0:
         raise subprocess.TimeoutExpired(command, timeout)
     try:
-        return subprocess.run(command, cwd=target, stdin=subprocess.DEVNULL, capture_output=True, timeout=timeout)
+        return subprocess.run(
+            command,
+            cwd=target,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            timeout=timeout,
+            env=trusted_git_env(),
+        )
     except subprocess.TimeoutExpired:
         if deadline is not None:
             raise

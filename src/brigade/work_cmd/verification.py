@@ -12,7 +12,7 @@ import shutil
 import stat
 import subprocess
 import sys
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout, suppress
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -32,10 +32,12 @@ from .. import verification_contract, verify_manifest, verify_trial
 from ..agent_identity import stamp_verify_identity as _stamp_harness_session
 from ..claude_hooks import producer_session as hook_producer
 from ..verify_command import split_verify_command
+from . import closeout_receipt
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
 from . import verify_argv_files, verify_ci, verify_gate, verify_ranking, verify_receipt_details, verify_runtime
+from .closeout_receipt import write_markdown as _write_work_closeout_markdown
 from .verify_scoreability import _print_graph_impact, _print_scoreability_notice, _scoreability_notice
 
 
@@ -1208,11 +1210,13 @@ def _verify_receipt_reference(receipt: dict[str, Any] | None) -> dict[str, Any] 
     if receipt is None:
         return None
     digests = receipt.get("digests") if isinstance(receipt.get("digests"), dict) else {}
+    commands = receipt.get("commands")
     return {
         "run_id": receipt.get("run_id"),
         "status": receipt.get("status"),
         "path": receipt.get("path"),
         "digest": digests.get("receipt_sha256"),
+        "command_count": len(commands) if isinstance(commands, list) else 0,
     }
 
 
@@ -1265,7 +1269,10 @@ def _verification_evidence_payload(target: Path, session: tuple[Path, dict[str, 
     latest_session = session or (sessions[0] if sessions else None)
     session_info = helpers._session_info(latest_session[0], latest_session[1]) if latest_session else None
     task = _verification_task_from_session(latest_session[1]) if latest_session else None
-    latest_verify = _verify_receipt_reference(_latest_verify_receipt(target))
+    if session is None:
+        receipt, verification_blocker = _latest_verify_receipt(target), None
+    else:
+        receipt, verification_blocker = closeout_receipt.select(target, *session, _verify_receipts(target))
     sweep_health = scanners_mod._scanner_sweep_health(target)
     review_health = reviews_mod._review_health(target)
     handoff_drafts = handoff_cmd.draft_queue_payload(target)
@@ -1276,7 +1283,8 @@ def _verification_evidence_payload(target: Path, session: tuple[Path, dict[str, 
         "task_acceptance": task.get("acceptance")
         if isinstance(task, dict) and isinstance(task.get("acceptance"), list)
         else [],
-        "latest_verify": latest_verify,
+        "latest_verify": _verify_receipt_reference(receipt),
+        **({"verification_blocker": verification_blocker} if verification_blocker else {}),
         "scanner_sweep": {
             "latest": sweep_health.get("latest"),
             "issue_count": sweep_health.get("review", {}).get("issue_count")
@@ -1689,16 +1697,22 @@ def _write_reused_receipt(
     timeout: int,
     *,
     gating: dict[str, Any],
+    admitted_fingerprint: str | None,
     capture: str | None = None,
     capture_kind: str = "skill",
     capture_meta: dict[str, Any] | None = None,
-) -> tuple[dict[str, Any], int]:
+) -> tuple[dict[str, Any] | None, int]:
     """Write a fresh receipt dir that records a reused passing run (no commands executed)."""
     started = helpers._now()
     run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-work-verify-{uuid4().hex[:6]}"
     run_dir = helpers._verify_runs_root(target) / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
     identity = _capture_verify_identity(target, run_dir)
+    if admitted_fingerprint is None or identity.get("tree_fingerprint") != admitted_fingerprint:
+        with suppress(OSError):
+            (run_dir / "changes.patch").unlink(missing_ok=True)
+            run_dir.rmdir()
+        return None, 0
     completed_at = helpers._now()
     receipt: dict[str, Any] = {
         "run_id": run_id,
@@ -1794,29 +1808,6 @@ def _latest_work_closeout_payload(target: Path) -> dict[str, Any] | None:
     return closeouts[0] if closeouts else None
 
 
-def _write_work_closeout_markdown(path: Path, closeout: dict[str, Any]) -> None:
-    lines = [
-        "# Brigade Work Closeout",
-        "",
-        f"- Closeout: `{closeout.get('closeout_id')}`",
-        f"- Status: {closeout.get('status')}",
-        f"- Ready: {closeout.get('ready')}",
-        f"- Session: `{closeout.get('session', {}).get('id') if isinstance(closeout.get('session'), dict) else ''}`",
-        f"- Local checks: `{closeout.get('verification', {}).get('run_id') if isinstance(closeout.get('verification'), dict) else ''}`",
-        f"- {verify_ci.closeout_summary(closeout['ci_verification'])}",
-        "",
-        "## Blockers",
-        "",
-    ]
-    blockers = closeout.get("blockers") if isinstance(closeout.get("blockers"), list) else []
-    lines.extend(f"- {item}" for item in blockers) if blockers else lines.append("- none")
-    lines.extend(["", "## Evidence", ""])
-    for key in ("task", "scanner_sweep", "code_review", "handoff_drafts"):
-        value = closeout.get(key)
-        lines.append(f"- {key}: `{json.dumps(value, sort_keys=True, default=str)[:500]}`")
-    path.with_name("closeout.md").write_text("\n".join(lines) + "\n")
-
-
 def _work_closeout_payload(target: Path, session_id: str, *, write: bool = False) -> tuple[dict[str, Any] | None, int]:
     target = target.expanduser().resolve()
     session_path, session_payload, error = _resolve_closeout_session(target, session_id)
@@ -1833,12 +1824,8 @@ def _work_closeout_payload(target: Path, session_id: str, *, write: bool = False
     blockers: list[str] = []
     if session_payload.get("status") != "ended":
         blockers.append(f"work session is not ended: {session_payload.get('status')}")
-    if latest_verify is None:
-        blockers.append("no verification receipt found")
-    elif latest_verify.get("status") != "completed":
-        blockers.append(
-            f"latest verification did not complete: {latest_verify.get('run_id')} [{latest_verify.get('status')}]"
-        )
+    if verification_blocker := evidence.get("verification_blocker"):
+        blockers.append(verification_blocker)
     if task is not None and not task_acceptance:
         blockers.append(f"task has no acceptance criteria: {task.get('id')}")
     latest_sweep = scanner_sweep.get("latest") if isinstance(scanner_sweep.get("latest"), dict) else None
@@ -1871,7 +1858,7 @@ def _work_closeout_payload(target: Path, session_id: str, *, write: bool = False
             "run_id": latest_verify.get("run_id"),
             "status": latest_verify.get("status"),
             "path": latest_verify.get("path"),
-            "command_count": len(latest_verify.get("commands") or []),
+            "command_count": latest_verify.get("command_count", 0),
         }
         if latest_verify
         else None,
@@ -2036,6 +2023,7 @@ def verify_run(
                         planned_display,
                         timeout,
                         gating=gating,
+                        admitted_fingerprint=fingerprint,
                         capture=capture,
                         capture_kind=capture_kind,
                         capture_meta=capture_meta,
@@ -2220,11 +2208,7 @@ def closeout(*, target: Path, session_id: str, json_output: bool = False) -> int
     print(f"ready: {payload['ready']}")
     session = payload.get("session") if isinstance(payload.get("session"), dict) else {}
     print(f"session: {session.get('id')}")
-    verification = payload.get("verification") if isinstance(payload.get("verification"), dict) else None
-    if verification:
-        print(f"Local checks: {verification.get('run_id')} [{verification.get('status')}]")
-    else:
-        print("Local checks: no receipt")
+    print(closeout_receipt.local_checks_summary(payload.get("verification")))
     print(verify_ci.closeout_summary(payload["ci_verification"]))
     blockers = payload.get("blockers") if isinstance(payload.get("blockers"), list) else []
     if blockers:
