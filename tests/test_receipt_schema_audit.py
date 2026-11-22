@@ -142,6 +142,7 @@ def test_finalize_verify_receipt_writes_once_when_summary_fails(tmp_path, monkey
         "status": "running",
         "started_at": started.isoformat(),
         "path": str(run_dir),
+        "planned_commands": ["true"],
         "commands": [
             {
                 "command": "true",
