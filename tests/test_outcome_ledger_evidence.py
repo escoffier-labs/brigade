@@ -291,11 +291,13 @@ def test_runs_and_jobs_are_read_across_pages(monkeypatch):
 
 def test_a_failed_read_stops_the_ledger_build_and_the_check(world, promoted):
     tip = world.touch_skill_json(3, T % (23, "12:00:00Z"))
+    world.gh.passed(tip, done=T % (23, "12:10:00Z"))
+    raw = world.build(prev_raw=promoted["genesis"], covers=tip, approved=promoted["approved"])
+    world.propose(raw, tip, name="bad-api")
     world.gh.overrides["/runs?"] = {"workflow_runs": None}
     with pytest.raises(A.EvidenceError):
         world.build(prev_raw=promoted["raw"], covers=tip, approved=promoted["approved"])
-    # The stale scan reads the newer commit, and its unreadable answer fails the check.
-    errors = world.verify(promoted["raw"], promoted["genesis"])
+    errors = world.verify(raw, promoted["genesis"], head="bad-api")
     assert any("could not finish" in error and "EvidenceError" in error for error in errors), errors
 
 
@@ -324,42 +326,42 @@ def test_a_worse_revision_that_times_out_is_rolled_back(world, promoted):
 
 
 # ---------------------------------------------------------------------------
-# 8. A push range is attested at its tip
+# 8. Each commit needs its own evidence
 # ---------------------------------------------------------------------------
 
 
-def test_a_two_commit_push_where_only_the_first_commit_touches_scope_keeps_its_hurt_verdict(world, promoted):
+def test_an_out_of_scope_failed_tip_does_not_supply_the_scoped_commits_verdict(world, promoted):
     first = world.touch_skill_json(3, T % (23, "06:00:00Z"))
     tip = world.commit({"README.md": "tip\n"}, T % (23, "06:05:00Z"), branch="main")
-    # One push, one run: its job carries the head of the push range, which is the second commit.
     world.gh.failed(tip, done=T % (23, "06:20:00Z"))
     raw = world.build(prev_raw=promoted["raw"], covers=tip, approved=promoted["approved"])
     trials = json.loads(raw)["subjects"]["skill:note"]["trials"]
-    assert [(row["sha"], row["outcome"]) for row in trials][-1] == (tip, "hurt")
-    assert first not in [row["sha"] for row in trials]
-    assert trials[-1]["fingerprint"] == bundle_fingerprint(world.repo.snapshot(tip, SKILL_DIR))
+    assert [row["sha"] for row in trials] == [promoted["c1"], promoted["c2"], first]
+    assert (trials[-1]["outcome"], trials[-1]["reason"]) == ("hurt", "missing")
+    assert trials[-1]["fingerprint"] == bundle_fingerprint(world.repo.snapshot(first, SKILL_DIR))
     decision = json.loads(raw)["subjects"]["skill:note"]["decision"]
     assert decision["code"] == "no_approved_target", "a hurt verdict reaches the decision, so the text cannot promote"
     world.propose(raw, tip, name="range")
     assert world.verify(raw, promoted["raw"], head="range") == []
 
 
-def test_a_two_commit_push_that_passed_is_one_helped_trial_for_its_tip(world, promoted):
-    world.touch_skill_json(3, T % (23, "06:00:00Z"))
+def test_an_out_of_scope_successful_tip_records_no_row(world, promoted):
+    first = world.touch_skill_json(3, T % (23, "06:00:00Z"))
     tip = world.commit({"README.md": "tip\n"}, T % (23, "06:05:00Z"), branch="main")
     world.gh.passed(tip, done=T % (23, "06:20:00Z"))
     trials = json.loads(world.build(prev_raw=promoted["raw"], covers=tip, approved=promoted["approved"]))["subjects"][
         "skill:note"
     ]["trials"]
-    assert [row["sha"] for row in trials][-1] == tip and trials[-1]["outcome"] == "helped"
+    assert [row["sha"] for row in trials] == [promoted["c1"], promoted["c2"], first]
+    assert (trials[-1]["outcome"], trials[-1]["reason"]) == ("hurt", "missing")
 
 
-def test_the_stale_check_sees_a_verdict_on_a_push_tip_that_did_not_touch_scope(world, promoted):
-    world.touch_skill_json(3, T % (23, "06:00:00Z"))
+def test_the_stale_check_names_the_scoped_commit_before_an_out_of_scope_tip(world, promoted):
+    first = world.touch_skill_json(3, T % (23, "06:00:00Z"))
     tip = world.commit({"README.md": "tip\n"}, T % (23, "06:05:00Z"), branch="main")
     world.gh.failed(tip, done=T % (23, "06:20:00Z"))
     errors = world.verify(promoted["raw"], promoted["genesis"])
-    assert any("stale" in error for error in errors), errors
+    assert any("stale" in error and first[:12] in error for error in errors), errors
 
 
 # ---------------------------------------------------------------------------

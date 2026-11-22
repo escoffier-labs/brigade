@@ -17,10 +17,8 @@ functions read, and adds the two ledger rules they do not know about:
 A commit that needs an attest verdict and has none counts against the text, so deleting or
 cancelling a run never helps. See ``outcome_ledger_trials``.
 
-Trial evidence is append only. A ledger keeps the trials of the previous ledger for every
-commit it already covered, and reads the Actions API only for newer commits. Runs and jobs
-expire with Actions retention, so rebuilding old trials from the API would let a failure
-vanish and a regressed text promote.
+A ledger carries forward trials under the same manifest pin and reads the Actions API only
+for newer commits. A pin change restarts the cohort, with missing evidence kept as hurt.
 
 Trials come only from ``outcome_ledger_actions`` (Actions API jobs, never check runs).
 Git reads come only from ``outcome_ledger_git`` (commit ids, never a working tree).
@@ -37,9 +35,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from . import outcome as outcome_core, scorecard, shipped_history, verify_manifest
-from .outcome_ledger_actions import GhApi, has_completed_verdict, owner_review_ok, parse_time
+from .outcome_ledger_actions import GhApi, owner_review_ok, parse_time
 from .outcome_ledger_git import Repo, bundle_fingerprint, is_sha
-from .outcome_ledger_trials import MANIFESTS_DIR, TrialPlan, plan_trials
+from .outcome_ledger_trials import MANIFESTS_DIR, TrialPlan, is_missing_trial, plan_trials, scope_history
 
 SCHEMA = "brigade.outcome_ledger.v1"
 LEDGER_PATH = "outcome-ledger/skills.json"
@@ -313,24 +311,19 @@ def _snapshot_fingerprint(repo: Repo, commit: str, directory: str) -> str | None
     return bundle_fingerprint(repo.snapshot(commit, directory))
 
 
-def _seed_for(prev: Mapping[str, Any] | None, key: str, pin: str) -> tuple[list[dict[str, Any]], str | None]:
-    """The trials carried forward from the previous ledger, and the commit they are complete up to.
-
-    Carried trials count only while the manifest is unchanged, the same rule that restarts
-    the count when a manifest is edited. The boundary is kept either way, so evidence for
-    commits the previous ledger covered is never read again.
-    """
+def _seed_for(prev: Mapping[str, Any] | None, key: str) -> tuple[list[dict[str, Any]], str | None]:
+    """The recorded trials and the commit through which they are complete."""
     if prev is None:
         return [], None
     before = prev["subjects"].get(key) or {}
-    rows = before.get("trials") if before.get("manifest_sha256") == pin else []
-    return [dict(row) for row in rows or [] if isinstance(row, dict)], prev["covers"]["main_sha"]
+    rows = before.get("trials") or []
+    return [dict(row) for row in rows if isinstance(row, dict)], prev["covers"]["main_sha"]
 
 
 def _plan(
     ev: Evidence,
     definition: SubjectDef,
-    pin: str,
+    manifest: verify_manifest.VerifyManifest,
     covers: str,
     ref: dt.datetime,
     seed_tip: str | None,
@@ -347,34 +340,11 @@ def _plan(
         ev.slug,
         ev.repo_id,
         ev.repo,
-        manifest_id=definition.manifest_id,
-        pin=pin,
+        manifest=manifest,
         chain=chain,
         ref=ref,
         fingerprint_at=lambda sha: _snapshot_fingerprint(ev.repo, sha, directory),
     )
-
-
-def collect_trials(
-    ev: Evidence,
-    definition: SubjectDef,
-    pin: str,
-    covers: str,
-    cutoff: dt.datetime,
-    *,
-    seed: Sequence[Mapping[str, Any]] = (),
-    seed_tip: str | None = None,
-) -> list[dict[str, Any]]:
-    """Trials for main commits after ``since_commit`` under the pinned manifest.
-
-    ``seed`` holds the trials already recorded for commits up to ``seed_tip``. Only newer
-    commits are asked about. A trial belongs to the tip of a push, because ``outcome-attest``
-    runs once per push and its job carries the head of the whole push range. A verdict that is
-    still pending at ``cutoff`` records nothing here, and the completeness check rejects a
-    ledger that skipped it.
-    """
-    plan = _plan(ev, definition, pin, covers, cutoff, seed_tip)
-    return [dict(row) for row in seed] + [dict(row) for row in plan.trials]
 
 
 def build_ledger(
@@ -397,13 +367,16 @@ def build_ledger(
     for key in sorted(definitions):
         definition = definitions[key]
         directory = skill_dir(definition.subject_path)
-        _manifest, pin = _load_manifest(ev.repo, covers_sha, definition)
+        manifest, pin = _load_manifest(ev.repo, covers_sha, definition)
         fingerprint = _snapshot_fingerprint(ev.repo, covers_sha, directory)
         if fingerprint is None:
             raise LedgerError(f"{key}: skill bundle is missing at {covers_sha[:12]}")
-        seed, seed_tip = _seed_for(prev, key, pin)
-        trials = collect_trials(ev, definition, pin, covers_sha, cutoff, seed=seed, seed_tip=seed_tip)
+        seed, seed_tip = _seed_for(prev, key)
+        plan = _plan(ev, definition, manifest, covers_sha, cutoff, seed_tip)
         before = prev_subjects.get(key) or {}
+        if plan.restarted or before.get("manifest_sha256") != pin:
+            seed = [row for row in seed if is_missing_trial(row)]
+        trials = seed + list(plan.trials)
         demoted: list[str] = list(before.get("demoted", []))
         same_cohort = (before.get("current") or {}).get("fingerprint") == fingerprint
         last_action_text = before.get("last_action_at") if same_cohort else None
@@ -597,17 +570,24 @@ def verify_ledger(
             if not repo.is_ancestor(definition.since_commit, covers):
                 errors.append(f"{key}: since_commit is not in main history")
             errors += _approved_errors(ev, key, definition, previous, covers, context, owners)
-            if before and prev is not None:
-                errors += _trial_history_errors(
-                    repo, key, before, proposed["subjects"][key], prev["covers"]["main_sha"]
-                )
         if errors:
             return errors
         stage("stale")
+        uncovered = repo.first_parent(covers, main_sha)
         for key, definition in definitions.items():
-            for sha in repo.first_parent(covers, main_sha):
-                if has_completed_verdict(ev.gh, ev.slug, ev.repo_id, definition.manifest_id, sha, now):
-                    return [f"{key}: ledger is stale, main commit {sha[:12]} already has a completed attest verdict"]
+            manifest, _pin = _load_manifest(repo, covers, definition)
+            scope = scope_history(repo, uncovered, manifest)
+            if scope.commits:
+                sha = scope.commits[0].sha
+                errors.append(f"{key}: ledger is stale, main commit {sha[:12]} is in scope after covers.main_sha")
+            current = proposed["subjects"][key].get("current")
+            fingerprint = current.get("fingerprint") if isinstance(current, dict) else None
+            if fingerprint is None or fingerprint != _snapshot_fingerprint(
+                repo, main_sha, skill_dir(definition.subject_path)
+            ):
+                errors.append(f"{key}: current.fingerprint does not match the bundle on trusted main")
+        if errors:
+            return errors
         stage("rebuild")
         expected = build_ledger(
             ev,
@@ -620,6 +600,11 @@ def verify_ledger(
         )
         if canonical_bytes(expected) != raw:
             errors.append("ledger differs from the recomputed ledger")
+            if prev is not None:
+                for key in prev["subjects"]:
+                    errors += _trial_history_errors(
+                        repo, key, expected["subjects"][key], proposed["subjects"][key], prev["covers"]["main_sha"]
+                    )
         stage("complete")
         errors += _completeness_errors(ev, definitions, expected, prev, covers, now)
         stage("paths")
@@ -643,14 +628,11 @@ def _memoized(gh: GhApi) -> GhApi:
 
 
 def _trial_history_errors(
-    repo: Repo, key: str, before: Mapping[str, Any], after: Mapping[str, Any], prev_tip: str
+    repo: Repo, key: str, expected: Mapping[str, Any], proposed: Mapping[str, Any], prev_tip: str
 ) -> list[str]:
-    """Trials for commits the previous ledger covered are evidence now. They may not change."""
-    if after.get("manifest_sha256") != before.get("manifest_sha256"):
-        return []
-    old = before.get("trials")
-    new = after.get("trials")
-    if not (isinstance(old, list) and isinstance(new, list)):
+    """Carried trials must match the recomputed history, including across a cohort restart."""
+    new = proposed.get("trials")
+    if not isinstance(new, list):
         return [f"{key}: trials must be a list"]
     kept = []
     for row in new:
@@ -658,7 +640,8 @@ def _trial_history_errors(
             return [f"{key}: a trial row is malformed"]
         if repo.is_ancestor(row["sha"], prev_tip):
             kept.append(row)
-    if kept != old:
+    carried = [row for row in expected["trials"] if repo.is_ancestor(row["sha"], prev_tip)]
+    if kept != carried:
         return [f"{key}: trials for commits the previous ledger covered may not change"]
     return []
 
@@ -674,15 +657,15 @@ def _completeness_errors(
     """Fail when the evidence as of ``now`` holds a verdict the ledger lacks or reads differently.
 
     The ledger's own ``cutoff_at`` cannot decide what counts, or a cutoff set before a failed
-    verdict would hide it. One direction only: a verdict the ledger has and the API no longer
-    returns (expired Actions evidence) is fine, so old evidence cannot deadlock the check.
+    verdict would hide it. Trials carried from previous ledgers are outside this check.
     """
     errors: list[str] = []
+    seed_tip = prev["covers"]["main_sha"] if prev is not None else None
     for key, definition in definitions.items():
         body = expected["subjects"][key]
         recorded = {row["sha"]: (row["outcome"], row.get("reason")) for row in body["trials"]}
-        _seed, seed_tip = _seed_for(prev, key, body["manifest_sha256"])
-        plan = _plan(ev, definition, body["manifest_sha256"], covers, now, seed_tip)
+        manifest, _pin = _load_manifest(ev.repo, covers, definition)
+        plan = _plan(ev, definition, manifest, covers, now, seed_tip)
         for row in plan.trials:
             if recorded.get(row["sha"]) != (row["outcome"], row["reason"]):
                 reason = f" ({row['reason']})" if row["reason"] else ""

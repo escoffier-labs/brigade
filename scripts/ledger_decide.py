@@ -178,9 +178,14 @@ def verify_artifact(
         context=ledger.EventContext("workflow_dispatch", None),
         now=now,
     )
-    if planner.retryable_errors(errors):
-        raise RetryPublication(" | ".join(errors))
     if errors:
+        if planner.retryable_errors(errors):
+            raise RetryPublication(" | ".join(errors))
+        # A rerun can make a recorded verdict pending and change the rebuild at the original cutoff.
+        if "ledger differs from the recomputed ledger" in errors:
+            current = planner.main_plan(ev, main, now)
+            if current.state == "pending":
+                raise RetryPublication(current.reason)
         raise PublicationError(" | ".join(errors))
     return planner.Plan(main, state, f"the verified plan is {state}", proposed), previous_raw, commit
 

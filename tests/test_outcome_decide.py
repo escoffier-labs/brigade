@@ -134,6 +134,38 @@ def test_pending_evidence_leaves_no_ledger_payload(seeded, writer_script, tmp_pa
     assert "inside the grace window" in capsys.readouterr().out
 
 
+def test_mid_batch_commit_waits_for_grace_then_counts_as_missing(seeded, writer_script, tmp_path):
+    middle = seeded.touch_skill_json(1, T % (21, "05:00:00Z"))
+    tip = seeded.touch_skill_json(2, T % (21, "06:00:00Z"))
+    seeded.gh.passed(tip, done=T % (21, "06:10:00Z"))
+    pending = writer.main_plan(seeded.ev, tip, WRITER_NOW)
+    assert pending.state == "pending"
+    assert pending.proposed is None
+    assert middle[:12] in pending.reason
+
+    later = WRITER_NOW + dt.timedelta(hours=2)
+    artifact = tmp_path / "artifact"
+    writer_script.compute(seeded.ev, tip, artifact, later)
+    plan, _, _ = writer_script.verify_artifact(seeded.ev, tip, artifact, later)
+    assert plan.proposed["covers"]["main_sha"] == tip
+    rows = plan.proposed["subjects"]["skill:note"]["trials"]
+    assert [(row["sha"], row["outcome"], row["reason"]) for row in rows] == [
+        (middle, "hurt", "missing"),
+        (tip, "helped", None),
+    ]
+
+
+def test_publish_defers_when_an_attest_rerun_starts_after_compute(seeded, writer_script, tmp_path, monkeypatch):
+    main = seeded.touch_skill_json(1, T % (21, "06:00:00Z"))
+    run = seeded.gh.passed(main, done=T % (21, "06:10:00Z"))
+    artifact = tmp_path / "artifact"
+    writer_script.compute(seeded.ev, main, artifact, WRITER_NOW)
+    run.update(status="in_progress", run_attempt=2)
+    monkeypatch.setattr(writer_script, "Publisher", lambda *_: pytest.fail("pending plan tried to publish"))
+    with pytest.raises(writer_script.RetryPublication, match="still running"):
+        writer_script.publish(seeded.ev, main, artifact, WRITER_NOW + dt.timedelta(minutes=1))
+
+
 def test_artifact_from_older_main_is_stale(seeded, writer_script, tmp_path):
     main = seeded.repo.resolve("main")
     artifact = tmp_path / "artifact"

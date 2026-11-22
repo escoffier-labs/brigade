@@ -82,12 +82,12 @@ def test_a_single_commit_with_a_passing_job_is_still_one_helped_trial(world, bas
 # ---------------------------------------------------------------------------
 
 
-def test_a_deleted_run_folds_its_commits_into_the_next_tip_whose_run_lacks_the_job(world, base):
+def test_a_deleted_run_hurts_its_own_commit_when_the_later_tip_has_no_job(world, base):
     c1 = world.touch_skill_json(1, T % (22, "00:00:00Z"))  # in scope, its run was deleted
     c2 = world.commit({"README.md": "later\n"}, T % (23, "00:00:00Z"), branch="main")
     run_without_job(world.gh, c2, T % (23, "00:10:00Z"))
     raw = world.build(prev_raw=base["genesis"], covers=c2, approved=base["approved"])
-    assert summary(raw) == [(c2, "hurt", "missing")]
+    assert summary(raw) == [(c1, "hurt", "missing")]
     assert rows(raw)[0]["jobs"] == []
     assert json.loads(raw)["subjects"]["skill:note"]["decision"]["code"] == "regression_hold"
     assert accepted(world, base, raw, c2, name="deleted-middle") == []
@@ -99,6 +99,87 @@ def test_a_deleted_run_folds_its_commits_into_the_next_tip_whose_run_lacks_the_j
         errors = world.verify(forged, base["genesis"], head=f"forged-{name}")
         assert any("differs from the recomputed ledger" in error for error in errors), (name, errors)
     assert c1 != c2
+
+
+def test_deleted_failed_run_keeps_its_own_hurt_row_before_a_later_scoped_success(world, base):
+    c1 = world.touch_skill_json(1, T % (22, "00:00:00Z"))
+    c2 = world.touch_skill_json(2, T % (23, "00:00:00Z"))
+    world.gh.failed(c1, done=T % (22, "00:10:00Z"))
+    world.gh.passed(c2, done=T % (23, "00:10:00Z"))
+    with_failure = world.build(prev_raw=base["genesis"], covers=c2, approved=base["approved"])
+    assert summary(with_failure) == [(c1, "hurt", "failure"), (c2, "helped", None)]
+
+    del world.gh.runs[c1]
+    raw = world.build(prev_raw=base["genesis"], covers=c2, approved=base["approved"])
+    assert summary(raw) == [(c1, "hurt", "missing"), (c2, "helped", None)]
+    assert rows(raw)[0]["fingerprint"] == world.approved_row(c1)["fingerprint"]
+    assert accepted(world, base, raw, c2, name="deleted-before-success") == []
+
+
+@pytest.mark.parametrize("missing_state", ["no-run", "running", "past-grace"])
+def test_manifest_round_trip_preserves_missing_verdict_from_old_pin(world, base, missing_state):
+    path = "verify/manifests/skill-note.json"
+    manifest_a = (world.root / path).read_text()
+    manifest_b = json.loads(manifest_a)
+    manifest_b["checks"][0]["command"] = "true"
+    day = 22 if missing_state == "past-grace" else 23
+    c1 = world.touch_skill_json(1, T % (day, "23:10:00Z"))
+    if missing_state == "running":
+        world.gh.failed(c1, done=T % (day, "23:15:00Z"), status="in_progress")
+    world.commit({path: json.dumps(manifest_b)}, T % (23, "23:20:00Z"), branch="main")
+    covers = world.commit({path: manifest_a}, T % (23, "23:30:00Z"), branch="main")
+
+    raw = world.build(prev_raw=base["genesis"], covers=covers, approved=base["approved"])
+    assert summary(raw) == [(c1, "hurt", "missing")]
+    assert accepted(world, base, raw, covers, name="restored-pin") == []
+
+
+def test_a_manifest_restart_carries_forward_recorded_missing_evidence(world, base):
+    c1 = world.touch_skill_json(1, T % (22, "00:00:00Z"))
+    first = world.build(prev_raw=base["genesis"], covers=c1, approved=base["approved"], cutoff=T % (22, "03:00:00Z"))
+    world.commit({L.LEDGER_PATH: first.decode()}, T % (22, "04:00:00Z"), branch="main")
+    path = "verify/manifests/skill-note.json"
+    manifest = json.loads((world.root / path).read_text())
+    manifest["checks"][0]["command"] = "true"
+    covers = world.commit({path: json.dumps(manifest)}, T % (23, "06:00:00Z"), branch="main")
+
+    raw = world.build(prev_raw=first, covers=covers, approved=base["approved"])
+    assert summary(raw) == [(c1, "hurt", "missing")]
+    world.propose(raw, covers, name="carry-missing")
+    assert world.verify(raw, first, head="carry-missing") == []
+
+
+def test_the_commit_changing_the_pin_is_scoped_by_the_previous_manifest(world, base):
+    path = "verify/manifests/skill-note.json"
+    manifest = json.loads((world.root / path).read_text())
+    manifest["scope_globs"].remove("scripts/skill_contract_check.py")
+    covers = world.commit(
+        {path: json.dumps(manifest), "scripts/skill_contract_check.py": "# changed\n"},
+        T % (23, "21:00:00Z"),
+        branch="main",
+    )
+    raw = world.build(prev_raw=base["genesis"], covers=covers, approved=base["approved"])
+    assert summary(raw) == [(covers, "hurt", "missing")]
+    assert accepted(world, base, raw, covers, name="old-scope") == []
+
+
+@pytest.mark.parametrize("unavailable", [None, "[]"], ids=["missing", "malformed"])
+def test_an_unavailable_manifest_keeps_the_previous_scope_and_grace_window(world, base, unavailable):
+    path = "verify/manifests/skill-note.json"
+    manifest = (world.root / path).read_text()
+    world.commit({path: unavailable}, T % (23, "12:00:00Z"), branch="main")
+    c1 = world.touch_skill_json(1, T % (23, "12:15:00Z"))
+    covers = world.commit({path: manifest}, T % (23, "12:30:00Z"), branch="main")
+    early = world.build(
+        prev_raw=base["genesis"], covers=covers, approved=base["approved"], cutoff=T % (23, "13:00:00Z")
+    )
+    assert summary(early) == []
+    now = dt.datetime(2026, 11, 23, 13, 30, tzinfo=dt.timezone.utc)
+    errors = accepted(world, base, early, covers, name="unavailable", now=now)
+    assert any("grace" in error and c1[:12] in error for error in errors), errors
+    raw = world.build(prev_raw=base["genesis"], covers=covers, approved=base["approved"])
+    assert summary(raw) == [(c1, "hurt", "missing")]
+    assert accepted(world, base, raw, covers, name="unavailable-after-grace") == []
 
 
 def test_the_same_history_with_the_run_kept_is_helped_for_the_first_commit_only(world, base):
@@ -193,18 +274,18 @@ def batch(world: World) -> tuple[str, str, str]:
     return first, middle, tip
 
 
-def test_a_batched_push_where_only_the_middle_commit_touches_scope_is_helped_by_the_tip_job(world, base):
-    _first, _middle, tip = batch(world)
+def test_an_in_scope_mid_batch_commit_has_a_missing_verdict_even_when_the_tip_job_succeeds(world, base):
+    _first, middle, tip = batch(world)
     world.gh.passed(tip, done=T % (23, "00:20:00Z"))
     raw = world.build(prev_raw=base["genesis"], covers=tip, approved=base["approved"])
-    assert summary(raw) == [(tip, "helped", None)]
+    assert summary(raw) == [(middle, "hurt", "missing")]
 
 
 def test_a_batched_push_where_only_the_middle_commit_touches_scope_is_hurt_when_the_tip_run_has_no_job(world, base):
-    _first, _middle, tip = batch(world)
+    _first, middle, tip = batch(world)
     run_without_job(world.gh, tip, T % (23, "00:20:00Z"))
     raw = world.build(prev_raw=base["genesis"], covers=tip, approved=base["approved"])
-    assert summary(raw) == [(tip, "hurt", "missing")]
+    assert summary(raw) == [(middle, "hurt", "missing")]
     assert accepted(world, base, raw, tip, name="batch") == []
 
 
@@ -245,13 +326,22 @@ def test_after_the_grace_window_the_missing_run_counts_as_hurt(world, base):
     assert accepted(world, base, raw, c1, name="after-grace", now=now) == []
 
 
-def test_the_grace_window_runs_from_the_newest_in_scope_commit_not_from_a_later_commit(world, base):
+def test_an_out_of_scope_commit_does_not_extend_the_grace_window(world, base):
     c1 = world.touch_skill_json(1, T % (23, "10:00:00Z"))
     world.commit({"README.md": "later\n"}, T % (23, "13:59:00Z"), branch="main")
     tip = world.git("rev-parse", "HEAD")
     raw = world.build(prev_raw=base["genesis"], covers=tip, approved=base["approved"], cutoff=T % (23, "14:00:00Z"))
-    assert summary(raw) == [(tip, "hurt", "missing")]
-    assert c1
+    assert summary(raw) == [(c1, "hurt", "missing")]
+
+
+def test_each_commit_without_a_run_has_its_own_grace_window(world, base):
+    c1 = world.touch_skill_json(1, T % (23, "10:00:00Z"))
+    c2 = world.touch_skill_json(2, T % (23, "13:00:00Z"))
+    raw = world.build(prev_raw=base["genesis"], covers=c2, approved=base["approved"], cutoff=T % (23, "14:00:00Z"))
+    assert summary(raw) == [(c1, "hurt", "missing")]
+    now = dt.datetime(2026, 11, 23, 14, 30, tzinfo=dt.timezone.utc)
+    errors = accepted(world, base, raw, c2, name="independent-grace", now=now)
+    assert any("stale" in error and "grace" in error and c2[:12] in error for error in errors), errors
 
 
 # ---------------------------------------------------------------------------
