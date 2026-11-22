@@ -1,0 +1,1 @@
+- The Rust hub confirms the message-principal digest from its indexed lookup with a constant-time comparison.
