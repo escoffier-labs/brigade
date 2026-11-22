@@ -1593,7 +1593,7 @@ jobs:
       - name: Run Windows native acceptance (source install)
         shell: powershell
         run: |
-          & "${{ github.workspace }}\scripts\windows-native-acceptance.ps1" -InstallMode source -RepoRoot "${{ github.workspace }}" -EngineBinDir "${{ github.workspace }}\engine-bin"
+          & "${{ github.workspace }}\scripts\windows-native-acceptance.ps1" -InstallMode source -RepoRoot "${{ github.workspace }}" -EngineBinDir "${{ github.workspace }}\engine-bin" -ProveCanonicalMcpEncoding
       - name: Native two-process journal lock regressions
         shell: pwsh
         run: |

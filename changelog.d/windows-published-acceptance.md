@@ -1,0 +1,1 @@
+- Windows published acceptance now sends the graph MCP initialize request as BOM-free UTF-8. Maintainers can recheck a published stable version from main without republishing it.

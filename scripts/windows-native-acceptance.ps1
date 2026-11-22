@@ -15,7 +15,9 @@ param(
     [string]$RepoRoot = "",
 
     [Parameter(Mandatory = $false)]
-    [string]$EngineBinDir = ""
+    [string]$EngineBinDir = "",
+
+    [switch]$ProveCanonicalMcpEncoding
 )
 
 $ErrorActionPreference = "Stop"
@@ -1050,13 +1052,47 @@ function Assert-ReleaseManifestAndAssets {
 }
 
 function Invoke-CanonicalComponentSmoke {
-    param($Paths)
+    param($Paths, [string]$ScratchDirectory, [switch]$ProveMcpEncoding)
     & ($Paths[0]) --version | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "canonical graph version smoke failed" }
-    $canonicalResponse = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' | & ($Paths[1])
-    if ($LASTEXITCODE -ne 0) { throw "canonical graph MCP smoke failed" }
-    $response = $canonicalResponse | ConvertFrom-Json
-    if ($response.jsonrpc -ne "2.0" -or $response.id -ne 1 -or -not $response.PSObject.Properties["result"]) { throw "canonical graph MCP returned invalid initialize response" }
+    $request = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+    if ($ProveMcpEncoding) {
+        # Keep this encoding in scope for both invocations. The legacy pipeline
+        # prepends its preamble to the request in Windows PowerShell 5.1.
+        $OutputEncoding = [Text.UTF8Encoding]::new($true)
+        $legacyReply = $request | & ($Paths[1]) 2>$null
+        $legacyExit = $LASTEXITCODE
+        $legacyResponse = $null
+        try { $legacyResponse = $legacyReply | ConvertFrom-Json } catch { }
+        if ($legacyExit -ne 0 -or $legacyResponse.jsonrpc -cne "2.0" -or
+            -not $legacyResponse.PSObject.Properties["id"] -or $null -ne $legacyResponse.id -or
+            $legacyResponse.PSObject.Properties["result"] -or $legacyResponse.error.code -ne -32700) {
+            throw "legacy canonical graph MCP pipeline did not reproduce JSON-RPC parse error -32700 (exit $legacyExit)"
+        }
+        Write-Step "legacy canonical graph MCP pipeline reproduced JSON-RPC parse error -32700 with BOM-emitting OutputEncoding"
+    }
+
+    $mcpIn = Join-Path $ScratchDirectory "canonical-mcp-initialize.json"
+    $mcpOut = Join-Path $ScratchDirectory "canonical-mcp-initialize.out"
+    $mcpErr = Join-Path $ScratchDirectory "canonical-mcp-initialize.err"
+    [IO.File]::WriteAllText($mcpIn, $request + "`n", [Text.UTF8Encoding]::new($false))
+    $process = Start-Process -FilePath ($Paths[1]) -RedirectStandardInput $mcpIn -RedirectStandardOutput $mcpOut `
+        -RedirectStandardError $mcpErr -NoNewWindow -Wait -PassThru
+    if ($null -eq $process.ExitCode -or $process.ExitCode -ne 0) {
+        throw "canonical graph MCP smoke failed (exit $($process.ExitCode)): $(Get-BoundedStderr -Path $mcpErr)"
+    }
+    $reply = [IO.File]::ReadAllText($mcpOut).Trim()
+    $response = $null
+    if ($reply.StartsWith('{') -and $reply.EndsWith('}')) {
+        try { $response = ConvertFrom-Json -InputObject $reply } catch { }
+    }
+    if ($response.jsonrpc -isnot [string] -or $response.jsonrpc -cne "2.0" -or
+        ($response.id -isnot [int] -and $response.id -isnot [long]) -or $response.id -ne 1 -or
+        $response.PSObject.Properties["error"] -or $response.result -isnot [pscustomobject] -or
+        $response.result.serverInfo.name -isnot [string] -or $response.result.serverInfo.name -cne "brigade-code-graph") {
+        throw "canonical graph MCP returned invalid initialize response (expected JSON-RPC 2.0, id 1, and brigade-code-graph serverInfo): $(Get-BoundedStderr -Path $mcpErr)"
+    }
+    Write-Step "canonical graph MCP initialized brigade-code-graph (JSON-RPC id 1) through BOM-free file redirection"
     & ($Paths[2]) version | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "canonical evidence version smoke failed" }
 }
@@ -1117,9 +1153,13 @@ function Invoke-CanonicalAttestationVerifier {
 }
 
 function Invoke-VerifiedCanonicalSmoke {
-    param([string]$Version, [string]$ReleaseDirectory, [string]$GhExe, [string]$PythonExe = "python")
+    param([string]$Version, [string]$ReleaseDirectory, [string]$GhExe, [string]$PythonExe = "python",
+        [switch]$ProveMcpEncoding)
     $checksums = @(Get-Content -LiteralPath (Join-Path $ReleaseDirectory "checksums.txt"))
-    if ($checksums.Count -eq 26) { return }
+    if ($checksums.Count -eq 26) {
+        if ($ProveMcpEncoding) { throw "published release has no separate canonical graph MCP asset for the encoding proof" }
+        return
+    }
     # 40 native assets and the manifest, plus brigade-hub's two Linux assets
     # from the release that first ships it. Keep in step with
     # scripts/published-artifact-acceptance.py.
@@ -1155,7 +1195,8 @@ function Invoke-VerifiedCanonicalSmoke {
             $saved[$key] = [Environment]::GetEnvironmentVariable($key, 'Process')
             [Environment]::SetEnvironmentVariable($key, $null, 'Process')
         }
-        Invoke-CanonicalComponentSmoke -Paths $paths
+        Invoke-CanonicalComponentSmoke -Paths $paths -ScratchDirectory (Split-Path -Parent $ReleaseDirectory) `
+            -ProveMcpEncoding:$ProveMcpEncoding
     } finally {
         foreach ($key in $saved.Keys) {
             [Environment]::SetEnvironmentVariable($key, $saved[$key], 'Process')
@@ -1480,7 +1521,8 @@ try {
     $sessionfindExe = Get-ManagedExecutablePath -Report $report -ComponentId "sessionfind" -ManagedBin $managedBin
 
     if ($InstallMode -eq "pypi") {
-        Invoke-VerifiedCanonicalSmoke -Version $BrigadeVersion -ReleaseDirectory (Join-Path $acceptRoot "release-assets") -GhExe $ghExe -PythonExe $bootstrapPython
+        Invoke-VerifiedCanonicalSmoke -Version $BrigadeVersion -ReleaseDirectory (Join-Path $acceptRoot "release-assets") `
+            -GhExe $ghExe -PythonExe $bootstrapPython -ProveMcpEncoding:$ProveCanonicalMcpEncoding
     }
 
     # The managed bin holds only the legacy code graph names until setup
@@ -1496,6 +1538,10 @@ try {
             if (-not (Test-Path -LiteralPath $exe -PathType Leaf)) {
                 throw "same-commit engine missing: $exe"
             }
+        }
+        if ($ProveCanonicalMcpEncoding) {
+            Invoke-CanonicalComponentSmoke -Paths @($codeGraphExe, $codeGraphMcpExe, $evidenceExe) `
+                -ScratchDirectory $acceptRoot -ProveMcpEncoding
         }
     }
 

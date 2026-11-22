@@ -1,6 +1,7 @@
 from datetime import datetime, timezone
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 
@@ -1132,6 +1133,96 @@ def test_published_acceptance_has_read_only_attestation_access():
     for name in ("Run published artifact acceptance (Unix)", "Run Windows native acceptance (published CLI)"):
         env = steps[name]["env"]
         assert any(env.get(key) == "${{ github.token }}" for key in ("GITHUB_TOKEN", "GH_TOKEN")), name
+
+
+def test_windows_published_recheck_is_read_only_and_runs_the_encoding_proof():
+    workflow = _load_workflow_yaml(ROOT / ".github/workflows/windows-published-acceptance.yml")
+    trigger = workflow[True]["workflow_dispatch"]  # PyYAML treats `on` as a YAML 1.1 boolean.
+    assert set(workflow[True]) == {"workflow_dispatch"}
+    assert trigger["inputs"]["version"] == {
+        "description": "Published stable version without the v prefix (for example, 0.32.0)",
+        "required": True,
+        "type": "string",
+    }
+    assert workflow["permissions"] == {"contents": "read", "attestations": "read"}
+    (job,) = workflow["jobs"].values()
+    assert job["if"] == "github.repository_id == '1238165856' && github.ref == 'refs/heads/main'"
+    assert job["runs-on"] == "windows-latest"
+    assert "permissions" not in job
+    checkout, setup, run = job["steps"]
+    assert re.fullmatch(r"actions/checkout@[a-f0-9]{40}", checkout["uses"])
+    assert checkout["with"] == {"persist-credentials": False}
+    assert re.fullmatch(r"actions/setup-python@[a-f0-9]{40}", setup["uses"])
+    assert run["shell"] == "powershell"
+    assert run["env"] == {"BRIGADE_VERSION": "${{ inputs.version }}", "GH_TOKEN": "${{ github.token }}"}
+    assert r"\A(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}\z" in run["run"]
+    assert "-InstallMode pypi -BrigadeVersion $version -ProveCanonicalMcpEncoding" in run["run"]
+
+    ci = _load_workflow_yaml(ROOT / ".github/workflows/ci.yml")
+    steps = ci["jobs"]["windows-native-acceptance"]["steps"]
+    source = next(step for step in steps if step.get("name") == "Run Windows native acceptance (source install)")
+    assert source["shell"] == "powershell"
+    assert "-ProveCanonicalMcpEncoding" in source["run"]
+
+
+@pytest.mark.parametrize(
+    ("reply", "exit_code", "expected_error"),
+    [
+        ('{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"brigade-code-graph"}}}', 0, None),
+        ('{"jsonrpc":"2.0","id":null,"error":{"code":-32700,"message":"parse error"}}', 0, "invalid initialize"),
+        ('{"jsonrpc":"2.0","id":"1","result":{"serverInfo":{"name":"brigade-code-graph"}}}', 0, "invalid initialize"),
+        ('{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"unexpected-server"}}}', 0, "invalid initialize"),
+        (
+            '{"jsonrpc":"2.0","id":1,"result":{"serverInfo":{"name":"brigade-code-graph"}},"error":null}',
+            0,
+            "invalid initialize",
+        ),
+        ("{bad json}", 0, "invalid initialize"),
+        ("", 4, "smoke failed (exit 4)"),
+    ],
+)
+def test_canonical_windows_mcp_smoke_checks_request_and_reply(tmp_path, monkeypatch, reply, exit_code, expected_error):
+    from tests.test_ci_workflow import _extract_powershell_function
+
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    if shell is None:
+        pytest.skip("PowerShell unavailable")
+    script = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
+    harness = tmp_path / "mcp.ps1"
+    harness.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        + "\n".join(
+            _extract_powershell_function(script, name)
+            for name in ("Write-Step", "Get-BoundedStderr", "Invoke-CanonicalComponentSmoke")
+        )
+        + r"""
+function Start-Process {
+    param($FilePath, $RedirectStandardInput, $RedirectStandardOutput, $RedirectStandardError,
+        [switch]$NoNewWindow, [switch]$Wait, [switch]$PassThru)
+    if ($FilePath -cne 'fixture-mcp.exe' -or -not ($Wait -and $PassThru)) { throw 'wrong launch' }
+    $request = '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' + "`n"
+    $expected = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($request))
+    $actual = [Convert]::ToBase64String([IO.File]::ReadAllBytes($RedirectStandardInput))
+    if ($actual -cne $expected) { throw 'wrong request bytes' }
+    [IO.File]::WriteAllText($RedirectStandardOutput, $env:FIXTURE_REPLY)
+    [IO.File]::WriteAllText($RedirectStandardError, ('x' * 3000) + 'stderr-tail')
+    [pscustomobject]@{ExitCode = [int]$env:FIXTURE_EXIT}
+}
+$OutputEncoding = [Text.UTF8Encoding]::new($true)
+$version = { $global:LASTEXITCODE = 0 }
+Invoke-CanonicalComponentSmoke -Paths @($version, 'fixture-mcp.exe', $version) -ScratchDirectory $PSScriptRoot
+"""
+    )
+    monkeypatch.setenv("FIXTURE_REPLY", reply)
+    monkeypatch.setenv("FIXTURE_EXIT", str(exit_code))
+    result = subprocess.run([shell, "-NoProfile", "-File", str(harness)], capture_output=True, text=True, timeout=20)
+    if expected_error is None:
+        assert result.returncode == 0, result.stderr
+        assert "initialized brigade-code-graph" in result.stdout
+    else:
+        assert result.returncode != 0
+        assert expected_error in result.stderr
+        assert "stderr-tail" not in result.stderr
 
 
 def test_acceptance_scripts_accept_the_same_checksum_inventories() -> None:
