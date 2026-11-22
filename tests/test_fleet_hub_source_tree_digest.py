@@ -3,6 +3,7 @@
 import hashlib
 import importlib.util
 import io
+import subprocess
 import tarfile
 from pathlib import Path
 
@@ -65,11 +66,37 @@ def test_source_tree_digest_tracks_executable_bit_and_symlink_target():
         ("root//absolute", tarfile.REGTYPE, "Unsafe archive path"),
         ("/absolute", tarfile.REGTYPE, "Unsafe archive path"),
         ("root/file", tarfile.REGTYPE, "Duplicate archive path"),
+        ("root/./b", tarfile.REGTYPE, "Unsafe archive path"),
+        ("root/a\\b", tarfile.REGTYPE, "Unsafe archive path"),
+        ("../evil", tarfile.REGTYPE, "Unsafe archive path"),
         ("root/hardlink", tarfile.LNKTYPE, "Unsupported archive member"),
         ("root/device", tarfile.CHRTYPE, "Unsupported archive member"),
+        # pip builds from a top-level pyproject.toml once top folders differ, so a member
+        # outside the single top folder must fail rather than be skipped.
+        ("pyproject.toml", tarfile.REGTYPE, "outside the top folder"),
+        ("other/setup.py", tarfile.REGTYPE, "outside the top folder"),
+        ("other", tarfile.DIRTYPE, "outside the top folder"),
     ],
 )
 def test_source_tree_digest_rejects_invalid_entries(name, kind, message):
     data = archive([("root/file", tarfile.REGTYPE, 0o644, b"one"), (name, kind, 0o644, b"two")])
     with pytest.raises(ValueError, match=message):
         MODULE.source_tree_digest(data)
+
+
+def test_source_tree_digest_rejects_a_top_level_file():
+    with pytest.raises(ValueError, match="top level must be one folder"):
+        MODULE.source_tree_digest(archive([("pyproject.toml", tarfile.REGTYPE, 0o644, b"x")]))
+
+
+def test_digest_ref_matches_the_archive_of_the_same_commit(tmp_path):
+    def git(*args):
+        return subprocess.run(["git", *args], cwd=tmp_path, check=True, capture_output=True, text=True).stdout
+
+    git("init", "-q")
+    (tmp_path / "file").write_bytes(b"hello\n")
+    (tmp_path / "link").symlink_to("file")
+    git("add", "file", "link")
+    git("-c", "user.name=t", "-c", "user.email=t@example.invalid", "commit", "-q", "-m", "t")
+    expected = MODULE.source_tree_digest(tree("other"))
+    assert MODULE.digest_ref("HEAD", str(tmp_path)) == expected

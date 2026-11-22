@@ -12,14 +12,28 @@ from typing import BinaryIO
 def source_tree_digest(archive: BinaryIO) -> str:
     """Hash the files and symlinks in a tar stream after stripping its top folder."""
     rows: dict[str, bytes] = {}
+    top: str | None = None
     with tarfile.open(fileobj=archive, mode="r|*") as tar:
         for member in tar:
-            _, _, rel = member.name.partition("/")
-            if member.name.startswith("/") or rel.startswith("/") or ".." in rel.split("/"):
-                raise ValueError(f"Unsafe archive path: {member.name!r}")
             if not (member.isdir() or member.isfile() or member.issym()):
                 raise ValueError(f"Unsupported archive member: {member.name!r}")
-            if member.isdir() or not rel:
+            # Every member sits under one top folder, which tar --strip-components=1 and pip
+            # both strip. A member outside it would be skipped here but still extracted or
+            # built (pip stops stripping when top folders differ), so it fails the digest.
+            name = member.name[:-1] if member.isdir() and member.name.endswith("/") else member.name
+            parts = name.split("/")
+            if "\\" in name or "\0" in name or any(part in ("", ".", "..") for part in parts):
+                raise ValueError(f"Unsafe archive path: {member.name!r}")
+            if top is None:
+                top = parts[0]
+            if parts[0] != top:
+                raise ValueError(f"Archive member outside the top folder {top!r}: {member.name!r}")
+            if len(parts) == 1:
+                if not member.isdir():
+                    raise ValueError(f"Archive top level must be one folder: {member.name!r}")
+                continue
+            rel = "/".join(parts[1:])
+            if member.isdir():
                 continue
             if rel in rows:
                 raise ValueError(f"Duplicate archive path: {rel!r}")
