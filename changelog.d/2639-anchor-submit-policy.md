@@ -1,0 +1,1 @@
+- Preview fresh anchoring proposals without applying, skip proposals disallowed by policy, and retry inconclusive automatic results. Read anchoring quota once per run and stop when the submit outcome is uncertain.

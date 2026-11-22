@@ -596,6 +596,35 @@ class _Reserved(NamedTuple):
         )
 
 
+def _status_admission(client: hubc.MemoryHubClient) -> tuple[_Reserved, tuple[int, int] | None]:
+    """Read reserved classes and proposal quota in one status request."""
+    try:
+        body = client.call("status")
+    except (hubc.HubUnavailable, hubc.HubRefusal):
+        return _Reserved(), None
+    quota = body.get("proposal_quota")
+    pending = quota.get("pending") if isinstance(quota, dict) else None
+    cap = quota.get("pending_per_principal") if isinstance(quota, dict) else None
+    proposal_quota = (pending, cap) if type(pending) is int and type(cap) is int else None
+    policy = body.get("memory_policy")
+    if (
+        not isinstance(policy, dict)
+        or policy.get("auto_apply") is not True
+        or body.get("reflect_principal") is not False
+    ):
+        return _Reserved(), proposal_quota
+    classes, scopes = policy.get("tier0_op_classes"), policy.get("reserved_scopes")
+    if not isinstance(classes, list) or not isinstance(scopes, list):
+        return _Reserved(), proposal_quota
+    return (
+        _Reserved(
+            frozenset(c for c in classes if isinstance(c, str)),
+            frozenset(x for x in scopes if isinstance(x, str)),
+        ),
+        proposal_quota,
+    )
+
+
 def _reserved_classes(client: hubc.MemoryHubClient) -> _Reserved:
     """Op classes and scopes the hub reserves for automatic apply by a principal this run is not.
 
@@ -604,23 +633,7 @@ def _reserved_classes(client: hubc.MemoryHubClient) -> _Reserved:
     clear signal returns nothing, so an older hub, a policy with automatic apply off, a scope no listed
     principal reflects on or a listed caller all keep today's behaviour.
     """
-    try:
-        body = client.call("status")
-    except (hubc.HubUnavailable, hubc.HubRefusal):
-        return _Reserved()
-    policy = body.get("memory_policy")
-    if (
-        not isinstance(policy, dict)
-        or policy.get("auto_apply") is not True
-        or body.get("reflect_principal") is not False
-    ):
-        return _Reserved()
-    classes, scopes = policy.get("tier0_op_classes"), policy.get("reserved_scopes")
-    if not isinstance(classes, list) or not isinstance(scopes, list):
-        return _Reserved()
-    return _Reserved(
-        frozenset(c for c in classes if isinstance(c, str)), frozenset(x for x in scopes if isinstance(x, str))
-    )
+    return _status_admission(client)[0]
 
 
 def _reflect(
@@ -730,7 +743,7 @@ def _reflect(
     budget = near.Budget()
     link_stats = {"links": 0, "broken": 0, "repairs": 0}
     link_index = links.Index(heads)
-    reserved = _reserved_classes(client)
+    reserved, proposal_quota = _status_admission(client)
 
     for name in reflected:
         scoped = [head for head in heads if head["scope"] == name]
@@ -879,6 +892,7 @@ def _reflect(
         from .memory_reflect_policy import AutoApplyPacer
 
         pacer = AutoApplyPacer()
+        preview_heads = {(head["scope"], head["card_id"]): head for head in heads} if not apply else {}
         served_any = False
 
         def served(digest: str) -> None:
@@ -892,9 +906,33 @@ def _reflect(
             anchoring = all(op["type"] == "anchor_blocks" for op in ops)
             remembered_id = previous.get(digest, {}).get("proposal_id")
             if anchoring and not remembered_id:
-                quota = client.call("status").get("proposal_quota", {})
-                pending, cap = quota.get("pending"), quota.get("pending_per_principal")
-                if type(pending) is not int or type(cap) is not int or pending >= max(0, cap - ANCHOR_RESERVE_SLOTS):
+                if not apply:
+                    reason = "anchor_apply_required"
+                    skipped[reason] = skipped.get(reason, 0) + 1
+                    op = ops[0]
+                    head = preview_heads[op["scope"], op["card_id"]]
+                    proposals.append(
+                        {
+                            "proposal_id": None,
+                            "state": "dry_run",
+                            "reason": reason,
+                            "ops": [_redacted(op)],
+                            # Unanchored blocks have no IDs. Use positions in the pinned revision.
+                            "block_indices": [
+                                index
+                                for index, block in enumerate(anchors.blocks(head["text"]))
+                                if block.block_id is None
+                            ],
+                        }
+                    )
+                    continue
+                from .memory_reflect_policy import allowed
+
+                policy_reason = allowed(target, ops)
+                if policy_reason is not None:
+                    skipped[policy_reason] = skipped.get(policy_reason, 0) + 1
+                    continue
+                if proposal_quota is None or proposal_quota[0] >= max(0, proposal_quota[1] - ANCHOR_RESERVE_SLOTS):
                     skipped["anchor_quota_reserve"] = skipped.get("anchor_quota_reserve", 0) + 1
                     continue
             sent = (
@@ -920,9 +958,6 @@ def _reflect(
                 skipped["proposal_quota"] = skipped.get("proposal_quota", 0) + len(selected) - position
                 attempted = position
                 break
-            if sent.outcome in (DENIED, UNAVAILABLE):
-                error = sent.code
-                break
             if sent.outcome == FAILED:
                 if sent.anchor_no_delta:
                     no_delta_ops += 1
@@ -930,6 +965,12 @@ def _reflect(
                 else:
                     failed_ops += 1
                 continue
+            if sent.outcome not in (OPENED, DUPLICATE):
+                # The hub may have accepted the proposal even if we could not confirm it.
+                error = sent.code or "hub_reflect_submit_unknown"
+                break
+            if anchoring and not remembered_id and sent.outcome == OPENED and proposal_quota is not None:
+                proposal_quota = (proposal_quota[0] + 1, proposal_quota[1])
             if sent.proposal_id is not None:
                 served(digest)
                 _save(target, state)
@@ -972,6 +1013,19 @@ def _reflect(
                         target, state, client, previous, digest, sent.proposal_id, report["log_epoch"]
                     )
                     proposal["withdrawal"] = withdrawal
+                    automatic = proposal.get("automatic")
+                    checks = automatic.get("checks") if isinstance(automatic, dict) else None
+                    decisive_hold = (
+                        isinstance(automatic, dict) and automatic.get("reason") == "tier_requires_review"
+                    ) or (
+                        isinstance(checks, list)
+                        and any(isinstance(check, dict) and check.get("state") == "held" for check in checks)
+                    )
+                    if not decisive_hold and withdrawal.get("state") in ("rejected", "applied"):
+                        # A closed proposal holds nothing back, so a later run proposes the
+                        # anchor again. A failed withdrawal keeps its proposal id and failure
+                        # count, so the bounded retry still gives up after three attempts.
+                        previous.pop(digest, None)
                     _save(target, state)
                 proposals.append(proposal)
         if served_any:

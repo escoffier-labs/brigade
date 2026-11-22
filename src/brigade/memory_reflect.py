@@ -399,6 +399,16 @@ def dispatch(args: argparse.Namespace) -> int:
             for reason, count in sorted(payload.get("skipped_reasons", {}).items()):
                 print(_terminal_text(f"skipped: {reason}={count}"))
             for proposal in payload["proposals"]:
+                if proposal.get("state") == "dry_run":
+                    op = proposal["ops"][0]
+                    print(
+                        _terminal_text(
+                            f"would propose: {op['type']} {op['scope']}/{op['card_id']} "
+                            f"revision {op['base_revision']}, block indices {proposal['block_indices']} "
+                            f"({proposal['reason']})"
+                        )
+                    )
+                    continue
                 print(
                     _terminal_text(
                         f"proposal: {proposal['proposal_id']} {proposal.get('automatic', {'state': 'pending'})}"

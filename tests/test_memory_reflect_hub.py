@@ -778,6 +778,7 @@ def test_missing_metadata_after_refresh_stays_skipped(setup, capsys, monkeypatch
 def test_replica_missing_auto_authored_refreshes_its_metadata(setup, capsys, monkeypatch):
     from brigade import memory_hub_client as hubc
     from brigade import memory_hub_sync as sync
+    from brigade import memory_reflect_policy as policy
 
     target, hub, _ = setup
     hub.cards.clear()
@@ -804,9 +805,10 @@ def test_replica_missing_auto_authored_refreshes_its_metadata(setup, capsys, mon
         return code, payload
 
     monkeypatch.setattr(hub, "do_status", quota)
-    monkeypatch.setattr(hub, "do_decide", lambda body: (200, {"state": "rejected"}), raising=False)
+    monkeypatch.setattr(hub, "do_auto_apply", lambda body: (200, {"state": "applied"}), raising=False)
+    policy.ensure(target)
     before = len(hub.calls)
-    code, report = run(target, capsys, "run")
+    code, report = run(target, capsys, "run", "--apply")
     assert code == 0
     assert [call for call in hub.calls[before:] if call["action"] == "card"]
     assert "anchor_quota_reserve" not in report["skipped_reasons"]
@@ -814,6 +816,160 @@ def test_replica_missing_auto_authored_refreshes_its_metadata(setup, capsys, mon
         call for call in writes(hub) if call["action"] == "propose" and call["ops"][0]["type"] == "anchor_blocks"
     ]
     assert len(anchored) == 1
+
+
+def _auto_authored_cards(hub, count=1):
+    hub.cards.clear()
+    hub.events.clear()
+    for index in range(count):
+        hub._commit("card.put", "fleet", f"auto-{index}", f"Unique claim {index}.\n", "live", hubc.event_id())
+    original = hub.do_card
+
+    def card(body):
+        code, payload = original(body)
+        if code == 200:
+            payload["card"]["auto_authored"] = True
+        return code, payload
+
+    hub.do_card = card
+    original_status = hub.do_status
+
+    def status(body):
+        code, payload = original_status(body)
+        payload["proposal_quota"] = {"pending": 0, "pending_per_principal": 32}
+        return code, payload
+
+    hub.do_status = status
+
+
+def test_fresh_anchors_wait_for_apply_without_being_submitted(setup, capsys):
+    target, hub, _ = setup
+    _auto_authored_cards(hub, count=2)
+
+    for _ in range(2):
+        code, report = run(target, capsys, "run")
+        assert code == 0
+        assert report["skipped_reasons"]["anchor_apply_required"] == 2
+        assert [op["card_id"] for op in report["ops"]] == ["auto-0", "auto-1"]
+        assert report["proposals"] == [
+            {
+                "proposal_id": None,
+                "state": "dry_run",
+                "reason": "anchor_apply_required",
+                "ops": [op],
+                "block_indices": [0],
+            }
+            for op in report["ops"]
+        ]
+
+    assert cli.main(["memory", "reflect", "run", "--target", str(target)]) == 0
+    output = capsys.readouterr().out
+    for op in report["ops"]:
+        assert (
+            f"would propose: anchor_blocks fleet/{op['card_id']} "
+            f"revision {op['base_revision']}, block indices [0] (anchor_apply_required)"
+        ) in output
+    assert writes(hub) == []
+
+
+def test_fresh_anchor_disabled_class_is_reproposed_after_enable(setup, capsys):
+    from brigade import memory_reflect_policy as policy
+
+    target, hub, _ = setup
+    _auto_authored_cards(hub)
+    policy.ensure(target)
+    value = policy.load(target)
+    value["tier0_op_classes"].remove("anchor_blocks")
+    (target / policy.PATH).write_text(json.dumps(value))
+
+    code, report = run(target, capsys, "run", "--apply")
+    assert code == 0
+    assert report["skipped_reasons"]["class_disabled"] == 1
+    assert not [call for call in writes(hub) if call["action"] == "propose"]
+
+    (target / policy.PATH).write_text(json.dumps(policy.DEFAULT))
+    hub.do_auto_apply = lambda body: (200, {"state": "applied"})
+    assert run(target, capsys, "run", "--apply")[0] == 0
+    assert len([call for call in writes(hub) if call["action"] == "propose"]) == 1
+
+
+@pytest.mark.parametrize("result", ["rate_limited", "unknown"])
+def test_nondecisive_anchor_result_is_reproposed_next_run(setup, capsys, result):
+    from brigade import memory_reflect_policy as policy
+
+    target, hub, _ = setup
+    _auto_authored_cards(hub)
+    policy.ensure(target)
+    hub.do_decide = lambda body: (200, {"state": "rejected"})
+    if result == "rate_limited":
+        hub.do_auto_apply = lambda body: (429, {"code": "memory_auto_apply_rate_limited"})
+    else:
+        hub.do_auto_apply = lambda body: (_ for _ in ()).throw(ConnectionRefusedError("down"))
+
+    for count in (1, 2):
+        assert run(target, capsys, "run", "--apply")[0] == 0
+        assert len([call for call in writes(hub) if call["action"] == "propose"]) == count
+
+
+def test_anchor_quota_status_is_read_once_for_several_candidates(setup, capsys, monkeypatch):
+    from brigade import memory_hub_sync as sync
+    from brigade import memory_reflect_hub as reflect
+    from brigade import memory_reflect_policy as policy
+
+    target, hub, _ = setup
+    _auto_authored_cards(hub, count=3)
+    policy.ensure(target)
+    hub.do_auto_apply = lambda body: (200, {"state": "applied"})
+    settings = hubc.load_settings(target)
+    client = hubc.client_for(settings)
+    sync.pull(target, client, settings)
+    sync.refresh_scan_metadata(target, client, settings)
+    pull_report = sync.pull(target, client, settings)
+    monkeypatch.setattr(reflect.sync, "pull", lambda *args: pull_report)
+    hub.calls.clear()
+
+    code, report = run(target, capsys, "run", "--apply")
+
+    assert code == 0 and report["candidate_count"] == 3
+    assert len([call for call in hub.calls if call["action"] == "status"]) == 1
+
+
+@pytest.mark.parametrize("outcome", ["unavailable", "unknown"])
+def test_ambiguous_anchor_submit_stops_with_one_quota_slot_left(setup, capsys, monkeypatch, outcome):
+    from brigade import memory_reflect_hub as reflect
+    from brigade import memory_reflect_policy as policy
+
+    target, hub, _ = setup
+    _auto_authored_cards(hub, count=3)
+    policy.ensure(target)
+    status = hub.do_status
+
+    def one_slot(body):
+        code, payload = status(body)
+        quota = payload["proposal_quota"]
+        quota["pending"] = quota["pending_per_principal"] - reflect.ANCHOR_RESERVE_SLOTS - 1
+        return code, payload
+
+    hub.do_status = one_slot
+
+    def lose_response(body):
+        raise TimeoutError
+
+    hub.do_propose = lose_response
+    if outcome == "unknown":
+        submit = reflect.submit
+
+        def unknown(*args, **kwargs):
+            submit(*args, **kwargs)
+            return reflect.Submitted("unknown")
+
+        monkeypatch.setattr(reflect, "submit", unknown)
+
+    code, report = run(target, capsys, "run", "--apply")
+
+    assert report["candidate_count"] == 3
+    assert len([call for call in writes(hub) if call["action"] == "propose"]) == 1
+    assert code != 0 and report["status"] == "failed"
 
 
 def test_replica_explicit_auto_authored_false_is_not_refreshed(setup, capsys, monkeypatch):
