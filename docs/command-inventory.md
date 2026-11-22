@@ -48,7 +48,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade notifications` (extras): 4 command path(s)
 - `brigade operator`: 21 command path(s)
 - `brigade orca`: 9 command path(s)
-- `brigade outcome`: 13 command path(s)
+- `brigade outcome`: 14 command path(s)
 - `brigade pantry` (extras): 5 command path(s)
 - `brigade profiles`: 2 command path(s)
 - `brigade projection`: 1 command path(s)
@@ -493,6 +493,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade outcome doctor`
 - `brigade outcome explain`
 - `brigade outcome fork`
+- `brigade outcome ledger`
 - `brigade outcome rank`
 - `brigade outcome ratchet`
 - `brigade outcome rebuild-status`
