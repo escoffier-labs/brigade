@@ -1,0 +1,5 @@
+- `brigade run batch` executes an optional `synthesis` request after every task settles. It runs on the requested roster seat, never the orchestrator, and refuses the whole batch with `invalid-seat` when that seat fails the same admission a task seat gets (#2047).
+- Synthesis reserves exactly one dispatch unit from the run budget before the call and records it as its own dispatch fact. A spent ceiling leaves every task result intact and reports `refused-budget` without a call.
+- The call writes `batch-synthesis.json` (schema `brigade.batch_synthesis.v1`) with the seat, status, input task and result IDs, and output digest and byte count, plus the completed text in `final.txt`. The batch result JSON gains an additive `synthesis` member; the existing per-task `synthesis.json` summary is unchanged.
+- A retry never relaunches a task for synthesis. A settled batch with an owed call runs only that call; a reserved call without a sidecar is reported `indeterminate` and never called twice.
+- `brigade run batch` accepts `--run-budget` so a batch declaration bounds both task and synthesis dispatch.

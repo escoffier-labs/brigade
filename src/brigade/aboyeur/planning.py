@@ -337,8 +337,10 @@ def _run_orchestrator(
     codex_transport: str | None = None,
     process_registry: proc.ProcessRegistry | None = None,
     model_lease: Callable[[Agent], ContextManager[str | None]] | None = None,
+    seat: str | None = None,
 ) -> agents.AgentResult:
-    orchestrator = roster.agents[roster.orchestrator]
+    seat_name = seat or roster.orchestrator
+    orchestrator = roster.agents[seat_name]
     transport = codex_transport or roster.codex_transport
     if orchestrator.cli is None or not is_cli_allowed(orchestrator.cli, roster):
         return agents.AgentResult(
@@ -407,7 +409,7 @@ def _run_orchestrator(
     if not result.ok and orchestrator.cli == "codex":
         detail = _orchestrator_failure_detail(
             result,
-            seat=roster.orchestrator,
+            seat=seat_name,
             cli=orchestrator.cli,
             transport=transport,
         )

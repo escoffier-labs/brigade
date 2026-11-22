@@ -197,6 +197,34 @@ merged, pushed or published. Integration is described in
 
 ---
 
+## `brigade.batch_synthesis.v1`
+
+**Path:** `.brigade/runs/batch-<sha256 of request id>/batch-synthesis.json`
+
+The record of the one optional synthesis call an explicit batch requested
+(#2047). It is written exclusively and is a separate fact from every task
+result. `batch-synthesis-dispatch.json` in the same directory records the
+reserved dispatch before the call, so a sidecar-less retry reports
+`indeterminate` instead of calling again.
+
+| Field | Type | Notes |
+| --- | --- | --- |
+| `schema` | string | Always `brigade.batch_synthesis.v1` |
+| `request_id` | string | The batch request identity |
+| `seat` | string | The requested synthesis seat, never the orchestrator when they differ |
+| `status` | string | `completed`, `failed`, `refused-budget`, or `indeterminate` |
+| `inputs` | array of object | `{task_id, result_id}` rows in task-ID order; `result_id` is null for a task with no result |
+| `output_ref` | string \| null | `final.txt` when the completed text was written, else null |
+| `output_sha256` | string \| null | SHA-256 of the written `final.txt` bytes |
+| `output_bytes` | integer \| null | Byte count of the written `final.txt` |
+
+The batch result JSON carries the same status as an additive `synthesis`
+member (`{status, seat, ref, digest}` or null). The per-task `synthesis.json`
+summary retains its existing `brigade.synthesis.v1` shape. Synthesis is
+described in [explicit task batches](run-batch.md#synthesis).
+
+---
+
 ## `brigade.work_verify_receipt`: `schema_version: 2`
 
 **Path:** `.brigade/work/verify-runs/<run-id>/receipt.json`

@@ -1701,8 +1701,12 @@ def run(
         sandbox=sandbox,
     )
     ground_truth["suspected_noop"] = suspected_noop
-    worker_results = prompts._mark_noop_worker_results(worker_results, suspected_noop)
-    if output_dir is not None:
+    synthesis_only = batch_execution is not None and batch_execution.synthesis_only
+    if not synthesis_only:
+        # A synthesis-only retry reuses the recorded results; it must not
+        # re-mark them or rewrite the worker-result receipts it read.
+        worker_results = prompts._mark_noop_worker_results(worker_results, suspected_noop)
+    if output_dir is not None and not synthesis_only:
         worker_results = _write_worker_logs(output_dir, worker_results)
         run_io.write_sidecar_revision(
             output_dir,
@@ -1736,7 +1740,21 @@ def run(
 
     synth_captured = None
     if batch_execution is not None:
-        final = batch_execution.finish(worker_results)
+        synthesis_context = (
+            batch_execution.synthesis_context(
+                roster=roster,
+                budget=budget_coordinator,
+                record_dispatch=dispatch_fact,
+                ground_truth=ground_truth,
+                cwd=cwd,
+                codex_transport=transport_for_payload,
+                process_registry=process_registry,
+                model_lease=lease_model_agent,
+            )
+            if output_dir is not None
+            else None
+        )
+        final = batch_execution.finish(worker_results, synthesis=synthesis_context)
         direct_worker = False
     elif direct_worker:
         direct_result = (
@@ -1859,6 +1877,10 @@ def run(
         "suspected_noop": suspected_noop,
         "worker": worker,
     }
+    if batch_execution is not None and batch_execution.synthesis_text is not None:
+        # The completed synthesis text is the batch's final answer; the task
+        # summary stays in the batch result and synthesis.json.
+        finish_base["final_output_text"] = batch_execution.synthesis_text
     finish_extra: dict[str, Any] = {
         "control_socket": control_socket,
         "control_transport": control_transport,
