@@ -27,14 +27,15 @@ def orca_cli(tmp_path, monkeypatch, capsys):
         help_text=None,
         agent="codex",
         help_code=0,
-        command="orca-test",
+        declared_version=ORCA_VERSION,
+        worktree="new-child",
+        target_fields="",
         extra_args=(),
     ):
-        command_setting = f'orca_command = "{command}"\n' if command else ""
         roster.write_bytes(
             f"""\
 orchestrator = "lead"
-{command_setting}
+
 [agents.lead]
 cli = "codex"
 role = "lead"
@@ -45,11 +46,11 @@ role = "coder"
 
 [orca_targets.coder]
 agent = "{agent}"
-worktree = "new-child"
-orca_version = "{ORCA_VERSION}"
+worktree = "{worktree}"
+orca_version = "{declared_version}"
+{target_fields}
 """.encode()
         )
-        selected_command = command or "orca-ide"
         calls = []
         resolutions = []
 
@@ -58,12 +59,12 @@ orca_version = "{ORCA_VERSION}"
                 # The shared operation scope fingerprints the selected seat.
                 return proc.ExecutableIdentity(name, None, "missing", False, "")
             resolutions.append(name)
-            assert name == selected_command
+            assert name == "orca-ide"
             return proc.ExecutableIdentity(name, executable if installed else None, "native", installed, "")
 
         def run(argv, *, timeout, **kwargs):
             assert argv[0] == executable
-            assert 0 < timeout <= 10
+            assert timeout == 12
             args = argv[1:]
             calls.append(args)
             if args == VERSION_ARGS:
@@ -92,7 +93,7 @@ orca_version = "{ORCA_VERSION}"
         )
         out, err = capsys.readouterr()
         assert not err
-        assert resolutions == [selected_command]
+        assert resolutions == ["orca-ide"]
         return code, out, calls
 
     return invoke, fixture
@@ -123,7 +124,7 @@ orca_version = "{ORCA_VERSION}"
             2,
             "blocked",
             ("passed", "passed", "passed", "unsupported"),
-            "orca-agent-disabled",
+            "orca-target-driver-unsupported",
             [VERSION_ARGS, HELP_ARGS],
         ),
         (
@@ -165,7 +166,7 @@ def test_orca_1_4_269_readiness(orca_cli, scenario, exit_code, status, states, r
         "probe-timeout": {"help_code": 124},
         "probe-failure": {"help_code": 1},
         "unrecognized-version-output": {"version": "unrecognized"},
-        "ready": {"command": None},
+        "ready": {},
     }
     code, out, calls = invoke(**options[scenario], extra_args=("--json",))
     report = json.loads(out)
@@ -199,3 +200,40 @@ def test_orca_1_4_269_text_reports_skipped_checks(orca_cli):
     assert "orca-retry-request: skipped" in out
     assert "orca-agent seat=coder: skipped" in out
     assert not calls
+
+
+@pytest.mark.parametrize(
+    ("target", "reason"),
+    [
+        ({"declared_version": "1.0.0"}, "orca-target-version-unsupported"),
+        ({"worktree": "current"}, "orca-target-worktree-unsupported"),
+        ({"target_fields": 'effort = "high"'}, "orca-target-model-required"),
+        ({"target_fields": 'unknown_field = "example"'}, "orca-target-invalid"),
+    ],
+)
+def test_orca_1_4_269_refuses_invalid_target(orca_cli, target, reason):
+    invoke, _ = orca_cli
+    code, out, calls = invoke(**target, extra_args=("--json",))
+    report = json.loads(out)
+    evidence = {item["category"]: item for item in report["evidence"]}
+    assert code == report["exit_code"] == 2
+    assert report["limiting_reason"] == evidence["orca-agent"]["reason"] == reason
+    assert evidence["orca-version"]["status"] == "passed"
+    assert evidence["orca-agent"]["status"] == "unsupported"
+    assert calls == [VERSION_ARGS, HELP_ARGS]
+
+
+def test_orca_1_4_269_retry_request_in_notes_does_not_count(orca_cli):
+    invoke, fixture = orca_cli
+    before_notes, heading, notes = fixture["worker_start_help"]["stdout"].partition("\nNotes:\n")
+    assert heading and notes
+    before_notes = before_notes.replace(" [--retry-request <id>]", "")
+    before_notes = "\n".join(
+        line for line in before_notes.split("\n") if not line.lstrip().startswith("--retry-request ")
+    )
+    assert "--retry-request" not in before_notes
+    help_text = before_notes + heading + notes + "\n  --retry-request <id>  Mentioned in notes only\n"
+    code, out, calls = invoke(help_text=help_text, extra_args=("--json",))
+    assert code == 2
+    assert json.loads(out)["limiting_reason"] == "orca-retry-request-unsupported"
+    assert calls == [VERSION_ARGS, HELP_ARGS]

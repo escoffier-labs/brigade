@@ -156,14 +156,9 @@ def operation_scope(
         material.pop("received_at", None)
         inputs["t3"] = material
     elif request.route == "orca":
-        inputs["orca"] = {
-            "command": roster.orca_command,
-            "agents": {
-                name: agent if isinstance(agent, str) else None
-                for name in request.workers
-                if (agent := roster.orca_targets.get(name, {}).get("agent")) is not None
-            },
-        }
+        from .roster_readiness_orca import target_scope
+
+        inputs["orca"] = target_scope(roster, request)
     return "sha256:" + hashlib.sha256(json.dumps(inputs, sort_keys=True).encode()).hexdigest()
 
 

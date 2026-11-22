@@ -299,20 +299,20 @@ brigade roster ready --route orca --worker builder --json
 The Orca route checks local CLI support and the selected seats' Orca declarations.
 It runs these checks in order:
 
-1. Resolve the roster's top-level `orca_command` executable (default `orca-ide`).
-   Set this field to a command name or executable path if the install uses a
-   different name or location. On Linux, the GNOME `orca` screen reader can be on
-   the same PATH. Readiness only resolves the configured command.
+1. Resolve `orca-ide` from PATH, the same command dispatch uses.
+   On Linux, the command `orca` belongs to the GNOME screen reader.
 2. Run `--version` and compare its output with the Orca adapter's supported
    versions.
-3. Run `orchestration worker-start --help` and check that the help lists
-   `--retry-request`.
-4. Check that each selected seat declares an `agent` in
-   `[orca_targets.<seat>]` and that the Brigade Orca adapter supports it.
+3. Run `orchestration worker-start --help` and check that its Options section
+   lists `--retry-request`.
+4. Validate each selected seat's `[orca_targets.<seat>]` declaration using
+   the Orca adapter's dispatch rules for the agent, version, worktree, model,
+   and effort. Invalid declarations report `orca-target-invalid`. A valid
+   declaration with an unsupported setting reports `orca-target-<gap>`.
 
-Each CLI probe has a five-second timeout. A timed-out, failed, or unrecognized
+Each CLI probe has a 12-second timeout. A timed-out, failed, or unrecognized
 probe produces `unknown` evidence and exit 3 (`unverified`). A missing
-executable, unsupported version, absent retry flag, or disabled target agent
+executable, unsupported version, absent retry flag, or incompatible target
 produces exit 2 (`blocked`). Subsequent checks appear as `skipped` in both
 output formats when a prerequisite prevents them from running. The JSON schema
 is `brigade.roster_readiness.v1`. Orca evidence is tagged `orca-local-probe`.
@@ -320,8 +320,8 @@ is `brigade.roster_readiness.v1`. Orca evidence is tagged `orca-local-probe`.
 `ready` describes the local probe and roster snapshot. The route leaves admitted
 capacity unset and reports `launch_guaranteed: false` and
 `capacity_reserved: false`. Orca still decides live agent enablement. Brigade
-checks the target's isolation declaration, admission, capacity, and budget
-at claim time. The probe reserves nothing and starts no worker.
+checks admission, capacity, and budget at claim time. The probe reserves
+nothing and starts no worker.
 
 ## Integration interface
 
@@ -350,7 +350,7 @@ isolation, admission and capacity.
 
 For `route == "orca"`, the inspector observes `orca-binary`, `orca-version`,
 `orca-retry-request`, and `orca-agent` with source `orca-local-probe`. Scope
-also binds the configured Orca command and selected target agents. The pure
+also binds the selected Orca target declarations. The pure
 evaluator consumes the resulting observations without running CLI probes.
 
 `health` maps selected seat names to existing `SeatHealthResult` instances.

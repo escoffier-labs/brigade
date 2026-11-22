@@ -16,7 +16,6 @@ from . import agents as agent_adapters
 
 
 SANDBOX_CHOICES = ("read-only", "workspace-write", "danger-full-access")
-DEFAULT_ORCA_COMMAND = "orca-ide"
 CODEX_TRANSPORT_CHOICES = ("exec", "app-server")
 AGENT_TRANSPORT_CHOICES = ("direct", "acpx")
 ACPX_TRANSPORT_VERSION = "0.12.0"
@@ -92,7 +91,6 @@ class Roster:
     task_role_instructions: dict[str, str] = field(default_factory=dict)
     worker_instructions: str = field(default="", repr=False)
     orca_targets: dict[str, dict[str, object]] = field(default_factory=dict)
-    orca_command: str = DEFAULT_ORCA_COMMAND
 
     def find_role(self, role: str) -> Agent | None:
         return next((a for a in self.agents.values() if a.role == role), None)
@@ -685,7 +683,6 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None, text:
         resolution=resolution,
         t3_targets=t3_targets,
         orca_targets=orca_targets,
-        orca_command=_as_str(data.get("orca_command", DEFAULT_ORCA_COMMAND), "orca_command"),
     )
 
 
