@@ -1,3 +1,0 @@
-- Work closeout uses the newest local verification for the session and current tree after skipping busy and canceled runs. It reports incomplete runs and unattributed receipts and includes the command count when a receipt is selected.
-- Work closeout accepts a matching work session ID across harness sessions. Verification and closeout treat changes confined to `.brigade/` as the same tree.
-- Verification runs the commands again if the tree changes between accepting a reusable pass and capturing the new receipt, even if cleanup of the unused receipt directory fails.

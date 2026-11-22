@@ -1,2 +1,0 @@
-- Refuse rate-limited automatic apply requests and conflicting event replays before writer locks, including verifier automatic apply.
-- Rate-check requests for terminal proposals and preserve exact committed replay behavior.

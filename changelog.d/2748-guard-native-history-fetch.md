@@ -1,1 +1,0 @@
-- Fetch the release tags and the base branch in the Native guard workflow, so its shipped-file history check can run instead of failing every guard pull request since #2716 (#2748).

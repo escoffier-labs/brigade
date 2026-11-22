@@ -1,2 +1,0 @@
-- Rotate cached automatic reflection retries by last attempt so held proposals cannot starve later retries under `--limit`.
-- Pace automatic hub application requests by one second and retry rate-limited refusals once, with at most `4 * limit - 1` seconds of added sleep per run.

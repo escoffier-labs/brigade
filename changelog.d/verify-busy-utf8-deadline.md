@@ -1,2 +1,0 @@
-- Signed-attestation claims classify canceled and busy verify receipts as incomplete, and EC-01 busy fixtures include a valid receipt digest.
-- JSON and JSONL reads use UTF-8 consistently, and undecodable JSONL files return no records.

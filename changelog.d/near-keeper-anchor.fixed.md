@@ -1,1 +1,0 @@
-- Near-duplicate reflection no longer skips a cluster because the keeper's only anchored paragraph has inline code. The supersede op pins only the newer card, so the keeper needs a claim anchor, not a block the hub can pin.
