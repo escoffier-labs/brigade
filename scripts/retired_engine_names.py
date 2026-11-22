@@ -37,10 +37,9 @@ def matches(root: Path) -> dict[str, Counter[str]]:
     return result
 
 
-def violations(root: Path, entries: list[dict], version: str) -> list[str]:
+def violations(root: Path, entries: list[dict], *, release_version: tuple[int, int, int] | None = None) -> list[str]:
     failures = []
     allowed = {}
-    current_version = tuple(int(part) for part in version.split(".")[:3])
     for entry in entries:
         name = entry["path"]
         kind = entry["kind"]
@@ -50,7 +49,7 @@ def violations(root: Path, entries: list[dict], version: str) -> list[str]:
         if kind in REMOVABLE_KINDS:
             if entry.get("remove_in") != "0.33.0":
                 failures.append(f"{name}: removable entry requires remove_in 0.33.0")
-            if current_version >= (0, 33, 0):
+            if release_version is not None and release_version >= (0, 33, 0):
                 failures.append(f"{name}: {kind} allowance expired in 0.33.0")
     for name, found in sorted(matches(root).items()):
         limits = allowed.get(name, {})
@@ -63,14 +62,23 @@ def violations(root: Path, entries: list[dict], version: str) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    parser.add_argument("--release-version", metavar="X.Y.Z", help="enforce shim expiry for this stable release")
     args = parser.parse_args()
+    release_version = None
+    if args.release_version is not None:
+        stable = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)", args.release_version)
+        if stable is None:
+            parser.error("--release-version: expected a stable version in X.Y.Z form")
+        # Read the package version without importing the installed checkout.
+        source = (args.root / "src/brigade/__init__.py").read_text(encoding="utf-8")
+        version = re.search(r'__version__ = "([^"]+)"', source)
+        if version is None:
+            parser.error("package version not found")
+        if args.release_version != version.group(1):
+            parser.error(f"--release-version {args.release_version} does not match package version {version.group(1)}")
+        release_version = (int(stable[1]), int(stable[2]), int(stable[3]))
     entries = json.loads((args.root / ALLOWLIST).read_text(encoding="utf-8"))
-    # Read the package version without importing the installed checkout.
-    source = (args.root / "src/brigade/__init__.py").read_text(encoding="utf-8")
-    version = re.search(r'__version__ = "([^"]+)"', source)
-    if version is None:
-        parser.error("package version not found")
-    failures = violations(args.root, entries, version.group(1))
+    failures = violations(args.root, entries, release_version=release_version)
     for failure in failures:
         print(failure)
     return int(bool(failures))
