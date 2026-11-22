@@ -1,27 +1,52 @@
-# Run the pull request check from the base branch so a PR cannot change its own guard.
+# Run the pull request check from the default branch so a PR cannot change its own guard.
 # Never check out, import, or execute anything from the pull request.
 name: Workflow guard
 
 on:
   pull_request_target:
-    types: [opened, synchronize, reopened, labeled, unlabeled, ready_for_review]
+    types: [opened, synchronize, reopened, edited, labeled, unlabeled, ready_for_review]
   merge_group:
 
 permissions:
   contents: read
   pull-requests: read
 
-concurrency:
-  group: workflow-guard-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
-
 jobs:
+  clear-approval:
+    if: github.event.action == 'synchronize'
+    permissions:
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Clear the approval label on push
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.number }}
+        run: |
+          if response=$(gh api --include --silent -X DELETE "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/workflow-change-approved" 2>/dev/null); then
+            exit 0
+          fi
+          if [[ $response =~ ^HTTP/[^[:space:]]+[[:space:]]404([[:space:]]|$) ]]; then
+            exit 0
+          fi
+          echo "Could not clear the workflow approval label." >&2
+          exit 1
+
   workflow-guard:
     # This name is the required status check contract.
     name: workflow-guard
+    needs: clear-approval
+    if: ${{ !cancelled() }}
+    permissions:
+      contents: read
+      pull-requests: read
+    # A label or edit event must never cancel a push's label-removal job.
+    concurrency:
+      group: workflow-guard-${{ github.event.pull_request.number || github.ref }}
+      cancel-in-progress: true
     runs-on: ubuntu-latest
     steps:
-      - name: Check out the base branch
+      - name: Check out the default branch
         if: github.event_name == 'pull_request_target'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -31,7 +56,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.number }}
+          PR_BASE_REF: ${{ github.event.pull_request.base.ref }}
+          REPO_DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PR_ACTION: ${{ github.event.action }}
+          APPROVAL_CLEAR_RESULT: ${{ needs.clear-approval.result }}
         run: python3 scripts/workflow_guard.py --repo "$GITHUB_REPOSITORY" --pr "$PR_NUMBER"
       - name: Report merge queue result
         if: github.event_name == 'merge_group'
-        run: echo "Pull requests passed the workflow guard before entering the merge queue."
+        run: echo "Reporting workflow-guard for the merge group. Changed paths are checked on pull request events."
