@@ -206,6 +206,37 @@ def _artifact_sidecar(run_dir: Path, task_id: str) -> tuple[str | None, str | No
     return _sidecar(run_dir, f"batch-artifact-{hashlib.sha256(task_id.encode()).hexdigest()}.json")
 
 
+# A batch request marker is read through run_batch.read_request_marker, which
+# owns the no-follow, bounded read.
+def _selection(run_dir: Path, task_id: str) -> dict[str, Any] | None:
+    """The batch task's selector, read only from a bounded request marker.
+
+    Seat-only batches show ``{"kind": "seat", "capability": null}``. The marker
+    is read no-follow and bounded, so a symlinked or oversized one reports no
+    selection instead of being followed. A run without a readable batch marker
+    has no selection to report.
+    """
+    from .run_batch import BatchError, read_request_marker
+
+    try:
+        payload = read_request_marker(run_dir) or {}
+    except BatchError:
+        return None
+    for row in payload.get("tasks") or ():
+        if isinstance(row, dict) and row.get("task_id") == task_id:
+            capability = row.get("capability")
+            kind = "capability" if isinstance(capability, str) else "seat"
+            return {"kind": kind, "capability": capability if isinstance(capability, str) else None}
+    return None
+
+
+def _selection_text(selection: dict[str, Any] | None) -> str:
+    if selection is None:
+        return "-"
+    capability = selection.get("capability")
+    return f"capability {capability}" if selection.get("kind") == "capability" else "seat"
+
+
 def _cancel_text(cancel: dict[str, Any]) -> str:
     if cancel.get("requested"):
         return f"requested ({cancel['reason']})"
@@ -240,6 +271,7 @@ def _print_detail(
     result_sha256: str | None,
     artifact_ref: str | None,
     artifact_sha256: str | None,
+    selection: dict[str, Any] | None = None,
 ) -> None:
     for field in (
         "task_id",
@@ -255,6 +287,7 @@ def _print_detail(
     ):
         cell = _cell(row, field, 1024)
         print(f"{field}: {cell}")
+    print(f"selection: {_selection_text(selection)}")
     print(f"result_ref: {result_ref if result_ref is not None else '-'}")
     print(f"result_sha256: {result_sha256 if result_sha256 is not None else '-'}")
     print(f"artifact_ref: {artifact_ref if artifact_ref is not None else '-'}")
@@ -327,6 +360,7 @@ def show_task(
     row = _row(by_id[task_id], _pending_cancel_reasons(run_dir))
     result_ref, result_sha256 = _result_sidecar(run_dir, task_id)
     artifact_ref, artifact_sha256 = _artifact_sidecar(run_dir, task_id)
+    selection = _selection(run_dir, task_id)
     if json_output:
         _emit(
             {
@@ -334,6 +368,7 @@ def show_task(
                 "run_id": run_dir.name,
                 "task": {
                     **row.to_dict(),
+                    "selection": selection,
                     "result_ref": result_ref,
                     "result_sha256": result_sha256,
                     "artifact_ref": artifact_ref,
@@ -342,7 +377,7 @@ def show_task(
             }
         )
     else:
-        _print_detail(row, result_ref, result_sha256, artifact_ref, artifact_sha256)
+        _print_detail(row, result_ref, result_sha256, artifact_ref, artifact_sha256, selection)
     return 0
 
 

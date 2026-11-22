@@ -7,13 +7,15 @@ never filesystem access. The CLI replay is apparatus validation, not a live tria
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import locale
 import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
-from typing import Any, Callable
+from typing import IO, Any, Callable
 
 from .paired_output import safe_output, inspect_tree, write as safe_write
 from .skills_cmd.registry import SkillsStatePathError, TreeBudget, _collect_source_tree, _package_identity
@@ -145,6 +147,14 @@ def _rpc_response(message: dict[str, Any], response: dict[str, Any]) -> dict[str
     }
 
 
+def _cli_output_tail(stream: IO[bytes], limit: int) -> str:
+    end = stream.seek(0, io.SEEK_END)
+    start = max(0, end - limit * 4)  # Keep enough bytes for multibyte text.
+    stream.seek(start)
+    text = stream.read(end - start).decode(locale.getpreferredencoding(False), errors="replace")
+    return text.replace("\r\n", "\n").replace("\r", "\n")[-limit:]
+
+
 class Boundary:
     """Only evaluator-selected commands can execute, all in a fresh temp target."""
 
@@ -164,8 +174,19 @@ class Boundary:
     def _cli(self, args: list[str]) -> dict[str, Any]:
         env = dict(os.environ)
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+        command = [sys.executable, "-m", "brigade", *args, "--target", str(self.target)]
+        if os.name == "nt":
+            # A descendant can retain an inherited output handle after the tool exits.
+            # Files let us collect the output without waiting for a pipe to reach EOF.
+            with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+                completed = subprocess.run(command, cwd=self.target, env=env, stdout=stdout, stderr=stderr, timeout=45)
+                return {
+                    "exit_code": completed.returncode,
+                    "stdout": _cli_output_tail(stdout, 24000),
+                    "stderr": _cli_output_tail(stderr, 4000),
+                }
         result = subprocess.run(
-            [sys.executable, "-m", "brigade", *args, "--target", str(self.target)],
+            command,
             cwd=self.target,
             env=env,
             capture_output=True,

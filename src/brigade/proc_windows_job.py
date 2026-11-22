@@ -33,6 +33,7 @@ _LOG = logging.getLogger(__name__)
 # must never stand once its output pipes were cut off mid-stream.
 INCOMPLETE_GROUP_EXIT_CODE = 125
 _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
+_JOB_OBJECT_BASIC_ACCOUNTING_CLASS = 1
 _JOB_OBJECT_EXTENDED_LIMIT_CLASS = 9
 _TH32CS_SNAPTHREAD = 0x00000004
 _THREAD_SUSPEND_RESUME = 0x0002
@@ -82,6 +83,33 @@ class OwnedWindowsJob:
                 return False
             return _resume_windows_main_thread(self._kernel32, pid)
 
+    def active_processes(self) -> int | None:
+        """Read the active process count, or None if the job cannot be queried."""
+        import ctypes
+
+        class BasicAccountingInformation(ctypes.Structure):
+            _fields_ = [
+                ("TotalUserTime", ctypes.c_int64),
+                ("TotalKernelTime", ctypes.c_int64),
+                ("ThisPeriodTotalUserTime", ctypes.c_int64),
+                ("ThisPeriodTotalKernelTime", ctypes.c_int64),
+                ("TotalPageFaultCount", ctypes.c_uint32),
+                ("TotalProcesses", ctypes.c_uint32),
+                ("ActiveProcesses", ctypes.c_uint32),
+                ("TotalTerminatedProcesses", ctypes.c_uint32),
+            ]
+
+        with self._lock:
+            query = getattr(self._kernel32, "QueryInformationJobObject", None)
+            if self._closed or query is None:
+                return None
+            info = BasicAccountingInformation()
+            if not query(
+                self._handle, _JOB_OBJECT_BASIC_ACCOUNTING_CLASS, ctypes.byref(info), ctypes.sizeof(info), None
+            ):
+                return None
+            return int(info.ActiveProcesses)
+
     def terminate(self) -> bool:
         """Terminate every process in the owned tree, including escaped descendants."""
         with self._lock:
@@ -117,6 +145,10 @@ def _declare_job_prototypes(kernel32: Any) -> bool:
     kernel32.CreateJobObjectW.restype = wintypes.HANDLE
     kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD]
     kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    query = getattr(kernel32, "QueryInformationJobObject", None)
+    if query is not None:
+        query.argtypes = [wintypes.HANDLE, ctypes.c_int, wintypes.LPVOID, wintypes.DWORD, wintypes.LPDWORD]
+        query.restype = wintypes.BOOL
     kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
     kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
     kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]

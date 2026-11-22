@@ -25,6 +25,11 @@ RESEARCH_GENERAL_CAPABILITIES = frozenset({"research.plan", "research.extract", 
 _CAPABILITY_RE = re.compile(r"^[a-z][a-z0-9]*(\.[a-z][a-z0-9-]*)+$")
 
 
+def is_capability_tag(value: object) -> bool:
+    """True for a string the roster accepts as a capability tag."""
+    return isinstance(value, str) and _CAPABILITY_RE.fullmatch(value) is not None
+
+
 @dataclass(frozen=True)
 class RosterResolution:
     path: Path
@@ -241,7 +246,7 @@ def _as_capabilities(value: object, field: str) -> tuple[str, ...]:
         return ()
     seen: set[str] = set()
     for item in capabilities:
-        if not _CAPABILITY_RE.fullmatch(item):
+        if not is_capability_tag(item):
             raise ValueError(f"{field} values must match [a-z][a-z0-9]*(\\.[a-z][a-z0-9-]*)+; got {item!r}")
         if item in seen:
             raise ValueError(f"{field} must not contain duplicates; got {item!r}")

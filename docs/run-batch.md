@@ -1,8 +1,10 @@
 # Explicit task batches
 
 `brigade run batch batch.json --dry-run [--json]` validates a caller-supplied
-batch and prints deterministic topological layers, task seats, and a SHA-256
-request fingerprint. Dry runs make zero model calls and require no roster.
+batch and prints deterministic topological layers, task seats or capability
+selectors, and a SHA-256 request fingerprint. Dry runs make zero model calls and
+require no roster; a capability is resolved when the request is accepted, not
+when it is planned.
 
 Without `--dry-run`, the command executes through the existing run orchestrator.
 Use `--cwd WORKSPACE` and optionally `--roster ROSTER.toml`. Execution makes no
@@ -20,7 +22,7 @@ See [governed Orca delegation](orca-governed-delegation.md).
   "request_id": "example-request-1",
   "tasks": [
     {"task_id": "inspect", "text": "Inspect the example", "seat": "coder"},
-    {"task_id": "review", "text": "Review the findings", "seat": "coder", "depends_on": ["inspect"]}
+    {"task_id": "review", "text": "Review the findings", "capability": "review.code", "depends_on": ["inspect"]}
   ],
   "synthesis": {"text": "Summarize the results", "seat": "writer"}
 }
@@ -30,15 +32,16 @@ Synthesis defaults to off (omit it or use `null`). When present, it must specify
 non-empty `text` and a `seat`. It is fingerprinted and displayed as requested,
 but never executed. No synthesis budget, receipt, or launch is created yet.
 Only the documented fields are accepted. Each task requires `task_id`, `text`,
-and `seat`. `depends_on` defaults to an empty list of unique task IDs.
-`depends_on` must be a list when present. `null` is refused, unlike
-`synthesis`. Each task may also declare `isolation`, either `shared` (the
-default) or `worktree`, and `read_only`, a boolean that defaults to false.
-Rows are checked in input order, so when several rows are
-invalid, the reported code belongs to the first invalid row. A row error names
-the row as `tasks[N]` until its `task_id` is valid, and by `task_id` after that.
-Selecting a task by admitted capability instead of a named seat, which #2047
-also allows, is not part of v1. It remains a later capability-selection slice.
+and exactly one selector: `seat` or `capability`. `depends_on` defaults to an
+empty list of unique task IDs. `depends_on` must be a list when present. `null`
+is refused, unlike `synthesis`. Each task may also declare `isolation`, either
+`shared` (the default) or `worktree`, and `read_only`, a boolean that defaults to
+false. Rows are checked in input order, so when several rows are invalid, the
+reported code belongs to the first invalid row. A row error names the row as
+`tasks[N]` until its `task_id` is valid, and by `task_id` after that. A task that
+names both selectors, or neither, is refused with `invalid-selection`. A
+`capability` that is not a roster capability tag is refused with
+`invalid-capability`. See [Capability selection](#capability-selection).
 
 The batch admits 1 through 8 tasks, matching the existing durable assignment
 batch bound. Each task or synthesis text is limited to 16,384 UTF-8 bytes.
@@ -56,14 +59,16 @@ tasks, create task storage, or use the T3 route.
 
 Canonicalization sorts tasks by ID, dependency lists, and object keys, fills
 optional dependencies, synthesis, isolation, and read-only defaults, and
-preserves exact text.
-Layers sort ready task IDs lexicographically. The fingerprint hashes compact
-ASCII-escaped canonical JSON, including schema, request ID, texts, seats,
-dependencies, non-default isolation and read-only values, synthesis, and any
-pinned `base_sha`. Object key, task, and dependency ordering do not
-change the fingerprint. Text changes do. Isolation and read-only at their
-defaults are omitted from the hashed bytes, so a batch written before these
-fields existed keeps its fingerprint. `compare_request(stored_fingerprint,
+preserves exact text. Layers sort ready task IDs lexicographically. The
+fingerprint hashes compact ASCII-escaped canonical JSON, including schema,
+request ID, texts, seats or capabilities, dependencies, non-default isolation
+and read-only values, synthesis, and any pinned `base_sha`. Object key, task,
+and dependency ordering do not change the fingerprint. Text changes do.
+Isolation and read-only at their defaults are omitted from the hashed bytes, so
+a batch written before these fields existed keeps its fingerprint. A
+`capability` field is added to the hashed row only when that task uses one, so a
+batch whose tasks all name a seat keeps its existing fingerprint byte for byte.
+`compare_request(stored_fingerprint,
 payload, base_sha=...)` returns `new` for no stored fingerprint, `same` for a
 match, and `conflict` otherwise. The caller must look up the stored fingerprint
 under the same request ID. A stored value that is not 64 lowercase hex
@@ -73,6 +78,79 @@ those exact bytes: Python `json.dumps` with `ensure_ascii=True`, so non-ASCII
 text is written as lowercase `\uXXXX` escapes and characters outside the Basic
 Multilingual Plane as surrogate pairs. A golden vector in
 `tests/test_run_batch.py` pins the bytes and digest for other implementations.
+
+## Capability selection
+
+A task may name an admitted capability instead of a seat:
+
+```json
+{"task_id": "review", "text": "Review the findings", "capability": "review.code"}
+```
+
+The tag uses the roster capability grammar:
+`[a-z][a-z0-9]*(\.[a-z][a-z0-9-]*)+`, the same rule `agents.<name>.capabilities`
+uses. A task names exactly one of `seat` or `capability`; both, or neither, is
+`invalid-selection`.
+
+Resolution runs once, at acceptance, before any worker is launched. Candidates
+are the roster seats that declare the capability, in roster order, including a
+researcher's implicit `research.general` expansion. A candidate the batch would
+refuse for that task is dropped:
+
+1. the direct-worker rule (unknown seat, orchestrator seat, no CLI adapter, a
+   CLI outside `limits.allow_models`, or a read-only-incapable seat for a
+   `read_only` task);
+2. read-only enforcement, and the mutating `codex-cloud` refusal for a read-only
+   task;
+3. the same Fleet Hub model-policy admission the batch applies to a named seat,
+   when a policy snapshot applies.
+
+The first surviving candidate is the task's seat. The same roster and request
+always pick the same seat. When no candidate survives, the whole batch is
+refused before launch with `capability-unavailable`, naming the task and the
+tag and never the task text.
+
+Each resolution is recorded in `batch-request.json` as
+`{"task_id", "capability", "seat", "candidates"}` under
+`capability_resolutions`, where `candidates` is the number of roster seats that
+declared the tag. The task row also records the resolved `seat`, and the
+lifecycle journal accepts that seat. A retry or resume reuses the recorded seat
+and never resolves again: removing or reordering seats in the roster does not
+move an accepted task. A recorded seat the roster no longer declares refuses the
+batch with `capability-seat-missing` instead of silently picking another seat,
+because the journal binds the resolved seat. A retry whose marker has no
+recorded resolution for a capability task is refused with `request-unknown`.
+An unresolvable roster refuses a capability batch with `roster-unavailable` or
+`roster-invalid` rather than an unhandled error.
+
+The recorded block sits outside the request fingerprint, so it is read closed.
+Every row must be exactly those four fields, name a capability task of this
+request, carry that task's capability, count its candidates, and agree with the
+seat the request row records. The marker also carries a `resolution_digest`, a
+sha256 over the canonical rows and the request fingerprint, and a retry verifies
+it. Any other shape, a mismatch with the request row, or a digest that does not
+match refuses the batch with `capability-marker-mismatch` before anything is
+launched:
+
+- `capability-marker-mismatch`: the persisted capability resolutions are not a
+  closed list of this request's capability tasks, disagree with the request's
+  recorded seats, or do not match `resolution_digest`.
+- `capability-seat-invalid`: the recorded seat no longer declares the
+  capability, or the batch's per-task checks would now refuse it. The retry
+  refuses rather than resolving another seat.
+- `capability-seat-missing`: the roster no longer declares the recorded seat.
+- `capability-seat-conflict`: the lifecycle journal already accepted the task
+  on a different seat, so the retry refuses instead of failing as a journal
+  identity error. Use a new `request_id`.
+
+`batch-request.json` is read no-follow and bounded (512 KiB). A marker that is a
+symlink, not a regular file, oversized, or unreadable is refused with
+`request-unknown`, as is a missing journal that acceptance had already bound. A
+retry with a valid marker never rewrites it, so the accepted request and its
+resolutions stay exactly as accepted.
+
+Resolution never puts the tag on the assignment's `capabilities`, so it selects
+a seat and does not gate the worker's tools.
 
 ## Isolation and concurrency
 
@@ -635,6 +713,16 @@ same-seat retries, continuations, and fallback dispatch after the first result.
 The first failure is retained as the task result. Planned and `--worker` runs
 retain their existing retry policy.
 
+Besides `max_workers`, wave construction caps how many tasks in one wave use the
+same seat by that seat's known capacity. When the run's fleet is enrolled and
+the Hub answers `read_seat_usage`, the cap is the seat's remaining capacity from
+the enrolled policy's `concurrency` for that seat; otherwise no extra cap
+applies. A task over the cap moves to the next wave in the same dependency
+layer, and order inside the layer is preserved. A seat whose remaining capacity
+is zero adds no scheduling cap, because the launch-time lease is the final
+admission check and is what refuses it. The cap is a scheduling hint only: it
+never grants a lease and never replaces provider or Hub admission.
+
 A request reserves `.brigade/runs/batch-<SHA-256 of request ID>/` by atomic
 directory creation before dispatch. `batch-request.json` retains its fingerprint
 and canonical plan. The directory is rooted at the git worktree root, or the
@@ -715,11 +803,16 @@ JSON output uses `brigade.run_batch_result.v1`, with `run_id`, `request_id`, `ru
 `tasks` object keyed by task ID. Each member has `status`, `not_run`, `result_id`,
 `result_ref` (relative to the run directory, or null), `workspace`
 (`worktree` for a task that ran in its own reserved checkout, `shared` for one
-that ran in the caller workspace), `artifact` (`{delivery, candidate_commit,
+that ran in the caller workspace), `selection`
+(`{"kind": "seat", "capability": null}` or
+`{"kind": "capability", "capability": "<tag>"}`, with no roster or task text),
+`artifact` (`{delivery, candidate_commit,
 patch_ref, patch_sha256}` for a worktree task, null for a shared one), and
 `refusal` (`{code, reason}` for a task
 refused at its launch point, otherwise null). Human mode also prints each
-refusal to stderr as `task <id>: <code> (<reason>)`. Completed results persist
+refusal to stderr as `task <id>: <code> (<reason>)`. `brigade runs tasks show`
+reports the same `selection` for a batch task, read from its request marker.
+Completed results persist
 as each worker finishes, as the same sanitized projection the run receipt uses
 (no raw stdout or stderr captures). Failed workers retain their result receipt too. Skipped
 tasks remain queued in the journal, have `not_run: true`, and have no result reference. Cancellation

@@ -1,14 +1,21 @@
-"""Versioned explicit batch contract and offline planning. No execution or storage."""
+"""Versioned explicit batch contract, offline planning, and the bounded request marker.
+
+The marker reader never follows a symlink and never reads an unbounded file.
+Nothing here executes a batch.
+"""
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import stat
 import sys
 from pathlib import Path
 from typing import Any, Literal
 
+from . import run_journal
 from . import run_task_journal as journal
 
 SCHEMA = "brigade.run_batch.v1"
@@ -16,6 +23,9 @@ MAX_TASKS = journal.MAX_BATCH_MEMBERS
 MAX_TEXT_BYTES = 16 * 1024
 MAX_INPUT_BYTES = 256 * 1024
 ISOLATIONS = ("shared", "worktree")
+# The request reservation holds the accepted plan; never read an unbounded one.
+MARKER_NAME = "batch-request.json"
+MAX_MARKER_BYTES = 512 * 1024
 _FINGERPRINT = re.compile(r"[0-9a-f]{64}")
 _BASE_SHA = re.compile(r"[0-9a-f]{40}")
 
@@ -34,7 +44,7 @@ def _fields(value: object, allowed: set[str], label: str) -> dict[str, Any]:
     return value
 
 
-def _selection(value: dict[str, Any], label: str) -> dict[str, str]:
+def _selection(value: dict[str, Any], label: str, *, capability: bool = True) -> dict[str, str]:
     text = value.get("text")
     if not isinstance(text, str) or not text.strip():
         raise BatchError("empty-text", f"{label}.text must be non-empty text")
@@ -44,7 +54,20 @@ def _selection(value: dict[str, Any], label: str) -> dict[str, str]:
         raise BatchError("invalid-payload", f"{label}.text must be valid Unicode") from exc
     if size > MAX_TEXT_BYTES:
         raise BatchError("text-limit", f"{label}.text exceeds {MAX_TEXT_BYTES} UTF-8 bytes")
+    tag = value.get("capability")
     seat = value.get("seat")
+    if tag is not None:
+        if not capability or seat is not None:
+            raise BatchError("invalid-selection", f"{label} must name exactly one of seat or capability")
+        from .roster import is_capability_tag
+
+        if not is_capability_tag(tag):
+            raise BatchError(
+                "invalid-capability", f"{label}.capability must be a roster capability tag such as research.plan"
+            )
+        return {"text": text, "capability": tag}
+    if capability and seat is None:
+        raise BatchError("invalid-selection", f"{label} must name exactly one of seat or capability")
     if not isinstance(seat, str) or not journal.token(seat):
         raise BatchError("invalid-seat", f"{label}.seat must be a 1-512 character ASCII token")
     return {"text": text, "seat": seat}
@@ -97,10 +120,12 @@ def validate_batch(payload: object) -> dict[str, Any]:
     """Validate and return canonical data. IDs map directly to TaskSpec.task_id.
 
     Task/dependency order is not semantic. Text bytes are preserved exactly.
-    Seat names are syntactically checked, not admitted against a live roster.
-    Isolation and read-only defaults are filled into the canonical row, but the
-    fingerprint omits those defaults so existing request fingerprints are
-    unchanged.
+    A task names exactly one of ``seat`` or ``capability``. Seat names are
+    syntactically checked, not admitted against a live roster, and a capability
+    is resolved to a seat once, at acceptance. Isolation and read-only defaults
+    are filled into the canonical row, but the fingerprint omits those defaults
+    and hashes ``capability`` when a task uses one, so only seat-only tasks are
+    unchanged and existing seat-only fingerprints stay byte for byte.
     """
     obj = _fields(payload, {"schema", "request_id", "tasks", "synthesis"}, "batch")
     if obj.get("schema") != SCHEMA:
@@ -113,7 +138,9 @@ def validate_batch(payload: object) -> dict[str, Any]:
     tasks: list[dict[str, Any]] = []
     ids: set[str] = set()
     for index, row in enumerate(rows):
-        row = _fields(row, {"task_id", "text", "seat", "depends_on", "isolation", "read_only"}, f"tasks[{index}]")
+        row = _fields(
+            row, {"task_id", "text", "seat", "capability", "depends_on", "isolation", "read_only"}, f"tasks[{index}]"
+        )
         task_id = row.get("task_id")
         if not isinstance(task_id, str) or not journal.task_id(task_id):
             raise BatchError("invalid-task-id", f"tasks[{index}].task_id must be a 1-128 character ASCII identifier")
@@ -158,7 +185,7 @@ def validate_batch(payload: object) -> dict[str, Any]:
     if synthesis is not None:
         if not isinstance(synthesis, dict):
             raise BatchError("invalid-synthesis", "synthesis must be null or an explicit text/seat object")
-        synthesis = _selection(_fields(synthesis, {"text", "seat"}, "synthesis"), "synthesis")
+        synthesis = _selection(_fields(synthesis, {"text", "seat"}, "synthesis"), "synthesis", capability=False)
     return {"schema": SCHEMA, "request_id": obj["request_id"], "tasks": tasks, "synthesis": synthesis}
 
 
@@ -277,6 +304,53 @@ def load_batch(path: Path) -> object:
         raise BatchError("invalid-json", "batch input must be valid UTF-8 JSON") from exc
 
 
+def read_request_marker(run_dir: Path) -> dict[str, Any] | None:
+    """Read the request reservation no-follow and within bounds.
+
+    Returns ``None`` only when there is no marker. A marker that exists but
+    cannot be read as a bounded regular JSON object is refused with
+    ``request-unknown``: the reservation is the only record of an accepted
+    assignment, so treating it as absent could authorize a relaunch.
+    """
+    path = run_dir / MARKER_NAME
+    raw = b""
+    try:
+        # Never follow a symlink out of the run directory, even one swapped in
+        # after the reservation was written.
+        fd = run_journal._open_nofollow(path, os.O_RDONLY)
+    except FileNotFoundError:
+        return None
+    except (OSError, run_journal.RunJournalError) as exc:
+        raise BatchError(
+            "request-unknown", "request reservation is not a readable regular file; refusing launch"
+        ) from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise BatchError("request-unknown", "request reservation is not a regular file; refusing launch")
+        if info.st_size > MAX_MARKER_BYTES:
+            raise BatchError(
+                "request-unknown", f"request reservation exceeds {MAX_MARKER_BYTES} bytes; refusing launch"
+            )
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            raw = handle.read(MAX_MARKER_BYTES + 1)
+    except OSError as exc:
+        raise BatchError("request-unknown", "cannot read request reservation; refusing launch") from exc
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if len(raw) > MAX_MARKER_BYTES:
+        raise BatchError("request-unknown", f"request reservation exceeds {MAX_MARKER_BYTES} bytes; refusing launch")
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
+        raise BatchError("request-unknown", "request reservation is not readable JSON; refusing launch") from exc
+    if not isinstance(payload, dict):
+        raise BatchError("request-unknown", "request reservation is not a JSON object; refusing launch")
+    return payload
+
+
 def dry_run_cli(args) -> int:
     """Validate before dry-run output or explicit-batch execution."""
     try:
@@ -299,7 +373,7 @@ def dry_run_cli(args) -> int:
         print(f"fingerprint: {plan['fingerprint']}")
         if plan["base_sha"] is not None:
             print(f"base: {plan['base_sha']}")
-        seats = {task["task_id"]: task["seat"] for task in plan["tasks"]}
+        seats = {task["task_id"]: task.get("seat") or f"capability:{task['capability']}" for task in plan["tasks"]}
         for index, layer in enumerate(plan["layers"], 1):
             print(f"layer {index}: " + ", ".join(f"{task_id} ({seats[task_id]})" for task_id in layer))
         print("synthesis: " + (plan["synthesis"]["seat"] if plan["synthesis"] else "off"))
