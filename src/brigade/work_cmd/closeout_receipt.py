@@ -71,7 +71,7 @@ def select(
         if receipt.get("tree_stable") is False:
             return receipt, "tree changed during the verification run"
         # An older pass must never hide a newer run that failed or did not count.
-        counts, explanation = verify_gate.receipt_counts_for_policy(target, receipt)
+        counts, explanation = verify_gate.receipt_counts_for_policy(target, receipt, current_tree=tree)
         if not counts:
             return receipt, explanation
         return receipt, None

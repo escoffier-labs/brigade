@@ -45,6 +45,8 @@ def inherited_test_env(environ: Mapping[str, str] | None = None) -> dict[str, An
     """Return the bounded inherited test environment recorded by verify."""
     source = os.environ if environ is None else environ
     result: dict[str, Any] = {"pythonpath_set": "PYTHONPATH" in source}
+    if "PY" in source:
+        result["py_set"] = True
     for name in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
         if name in source:
             # Kept verbatim so a reader can see what changed pytest's behavior, but bounded.

@@ -1735,11 +1735,14 @@ def _qualified_verify_receipts(
         from ..work_cmd.verify_gate import StopGate
 
         gate = StopGate(target)
-    for receipt in _iter_verify_receipts(target):
-        if _receipt_target_matches(receipt, target):
-            completed = gate.completion_in_window(receipt, started, fingerprint)
-            if completed is not None:
-                yield receipt, completed
+    receipts = (receipt for receipt in _iter_verify_receipts(target) if _receipt_target_matches(receipt, target))
+    if gate.requires_plan:
+        yield from gate.latest_completion(receipts, started, fingerprint)
+        return
+    for receipt in receipts:
+        completed = gate.completion_in_window(receipt, started, fingerprint)
+        if completed is not None:
+            yield receipt, completed
 
 
 def _session_has_completed_receipt(
@@ -2022,7 +2025,7 @@ def _receipt_since(
     target = target.expanduser().resolve()
     # Snapshotting is an optional strengthening signal.  ``None`` preserves
     # hook operation in non-Git workspaces and on local Git/tool errors.
-    audited_tree = localio.tree_fingerprint(target)
+    audited_tree = gate.current_tree if gate is not None and gate.requires_plan else localio.tree_fingerprint(target)
     session_id = (
         _session_id_for_fingerprint(target, session_fingerprint) if isinstance(session_fingerprint, str) else None
     )

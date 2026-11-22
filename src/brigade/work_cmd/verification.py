@@ -2015,7 +2015,7 @@ def verify_run(
                 if (
                     latest is not None
                     and verify_argv_files.reusable_receipt(target, planned, planned_display, fingerprint, latest)
-                    and (gating := verify_gate.reuse_gating(target, latest)) is not None
+                    and (gating := verify_gate.reuse_gating(target, latest, current_tree=fingerprint)) is not None
                 ):
                     receipt, rc = _write_reused_receipt(
                         target,

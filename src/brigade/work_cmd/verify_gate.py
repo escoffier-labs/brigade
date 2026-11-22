@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shlex
 import stat
 import subprocess
 import unicodedata
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
 from functools import cached_property
@@ -17,12 +18,20 @@ from time import monotonic
 from typing import Any, Literal
 
 from .. import localio, verify_manifest_git
+from . import verify_required
 
 _DECLARATION_PATH = "verify/required-check.json"
 _DECLARATION_SCHEMA = "brigade.verify_required_check.v1"
 STOP_POLICY_BUDGET_SECONDS = 2.0
 _CLOSEOUT_POLICY_BUDGET_SECONDS = 60.0
 _HEAD_FALLBACK_BUDGET_SECONDS = 1.0
+# The operator chose this limit on 2026-11-22 to avoid long local runs.
+_MAX_LOCAL_TEST_FILES = 20
+_PLAN_SCHEMA_VERSION = 1
+_TEST_ENV_OVERRIDES = {"PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTHONPATH", "PY"}
+_SINGLE_OPTIONS = {"-q", "-v", "-vv"}
+_NUMBER_OPTIONS = {"-n", "--timeout", "--durations"}
+_TRACEBACK_STYLES = {"auto", "long", "short", "line", "native", "no"}
 
 
 @dataclass(frozen=True)
@@ -32,17 +41,31 @@ class _GatePolicy:
     argv_prefix: tuple[str, ...] = ()
     needs_arguments: bool = False
     needs_passed_tests: bool = False
+    needs_plan_coverage: bool = False
     base_commit: str | None = None
     declaration_sha256: str | None = None
     fallback_source: Literal["default_branch_tip", "head", "worktree", "none"] | None = None
     base_message: str | None = None
     error: str | None = None
 
-    def matches(self, stamp: Mapping[str, Any]) -> bool:
+    def matches(self, stamp: Mapping[str, Any], current_tree: str | None) -> bool:
+        plan = stamp.get("plan")
         return (
             stamp.get("mode") == self.mode
             and stamp.get("declaration_sha256") == self.declaration_sha256
             and stamp.get("fallback_source") == self.fallback_source
+            and (
+                not self.needs_plan_coverage
+                or (
+                    isinstance(plan, dict)
+                    and plan.get("schema_version") == _PLAN_SCHEMA_VERSION
+                    and self.base_commit is not None
+                    and self.fallback_source is None
+                    and plan.get("base_commit") == self.base_commit
+                    and current_tree is not None
+                    and plan.get("snapshot_tree") == current_tree
+                )
+            )
         )
 
     def stamp(self, eligible: bool, reason: str) -> dict[str, Any]:
@@ -66,6 +89,7 @@ def _parse_declaration(raw: bytes, commit: str | None = None) -> _GatePolicy:
     prefix = payload.get("argv_prefix")
     needs_arguments = payload.get("needs_arguments")
     needs_passed_tests = payload.get("needs_passed_tests")
+    needs_plan_coverage = payload.get("needs_plan_coverage", False)
     if (
         not isinstance(prefix, list)
         or not prefix
@@ -83,12 +107,21 @@ def _parse_declaration(raw: bytes, commit: str | None = None) -> _GatePolicy:
         return _GatePolicy(
             "unresolved", "declaration_invalid", error="needs_arguments and needs_passed_tests must be booleans"
         )
+    if not isinstance(needs_plan_coverage, bool):
+        return _GatePolicy("unresolved", "declaration_invalid", error="needs_plan_coverage must be a boolean")
+    if needs_plan_coverage and not (needs_arguments and needs_passed_tests):
+        return _GatePolicy(
+            "unresolved",
+            "declaration_invalid",
+            error="needs_plan_coverage requires needs_arguments and needs_passed_tests",
+        )
     return _GatePolicy(
         "required_check",
         "passed_required_check",
         tuple(prefix),
         needs_arguments,
         needs_passed_tests,
+        needs_plan_coverage,
         base_commit=commit,
         declaration_sha256=hashlib.sha256(raw).hexdigest(),
     )
@@ -205,6 +238,122 @@ def _required_check_verdict(receipt: Mapping[str, Any], policy: _GatePolicy) -> 
     return True, "passed_required_check"
 
 
+def _coverage_path(arg: str) -> str | None:
+    path = arg.removeprefix("./")
+    if verify_required._repo_path(path) and not path.startswith("@") and not any(c in path for c in "*?[]"):
+        return path
+    return None
+
+
+def _command_files(args: list[str], entries: Mapping[str, tuple[bytes, bytes]]) -> set[str]:
+    files: set[str] = set()
+    values = iter(args[1:] if args[:1] == ["--"] else args)
+    for arg in values:
+        if arg in _SINGLE_OPTIONS:
+            continue
+        if arg == "-p" and next(values, None) == "xdist":
+            continue
+        if arg.startswith("-"):
+            option, separator, value = arg.partition("=")
+            if option not in _NUMBER_OPTIONS and option != "--tb":
+                return set()
+            value = value if separator else next(values, "")
+            if option == "--tb":
+                if value not in _TRACEBACK_STYLES:
+                    return set()
+            elif not re.fullmatch(r"[0-9]+(?:\.[0-9]+)?" if option == "--timeout" else r"[0-9]+", value):
+                return set()
+            continue
+        path = _coverage_path(arg)
+        if path is None or path not in entries or not verify_required._regular(entries[path][0]):
+            return set()
+        files.add(path)
+    return files
+
+
+def _covered_files(
+    receipt: Mapping[str, Any], policy: _GatePolicy, entries: Mapping[str, tuple[bytes, bytes]]
+) -> set[str]:
+    inherited = receipt.get("inherited_test_env") or {}
+    if inherited.get("pythonpath_set") or inherited.get("py_set") or _TEST_ENV_OVERRIDES.intersection(inherited):
+        return set()
+    covered: set[str] = set()
+    prefix = list(policy.argv_prefix)
+    for record in receipt.get("commands", []):
+        argv = record.get("argv")
+        if (
+            isinstance(argv, list)
+            and argv[: len(prefix)] == prefix
+            and all(isinstance(arg, str) for arg in argv)
+            and not _TEST_ENV_OVERRIDES.intersection(name.upper() for name in record.get("env", []))
+            and _tests_passed(record)
+            and record["test_outcomes"].get("deselected") == 0
+        ):
+            covered.update(_command_files(argv[len(prefix) :], entries))
+    return covered
+
+
+def _stamp_plan(target: Path, receipt: Mapping[str, Any], policy: _GatePolicy, stamp: dict[str, Any]) -> None:
+    base = policy.base_commit if policy.fallback_source is None else None
+    tree = receipt.get("tree_fingerprint")
+    plan: dict[str, Any] = {
+        "schema_version": _PLAN_SCHEMA_VERSION,
+        "mode": "not_checked",
+        "base_commit": base,
+        "snapshot_tree": tree,
+        "required_files": [],
+        "missing_files": [],
+        "run_argv": [],
+    }
+    stamp["plan"] = plan
+    if _blocked_reason(receipt):
+        return
+    if receipt.get("reused_from"):
+        stamp.update(eligible=False, reason="missing_gating")
+        return
+    if base is None:
+        stamp.update(eligible=False, reason="plan_base_unresolved")
+        return
+    if receipt.get("tree_stable") is not True or not isinstance(tree, str):
+        stamp.update(eligible=False, reason="plan_tree_unavailable")
+        return
+
+    try:
+        fields, _, entries = verify_required.plan_snapshot(
+            target, base, tree, deadline=monotonic() + verify_required.PLANNER_TIMEOUT_SECONDS
+        )
+        mode = fields["mode"]
+        if mode == "unconfigured":
+            plan.update(mode="unconfigured", reason="A required-test planner is not configured at the base.")
+        elif (
+            mode == "full"
+            or len(fields["tests"]) > _MAX_LOCAL_TEST_FILES
+            or (fields.get("test_files_total") == len(fields["tests"]))
+        ):
+            plan.update(
+                mode="ci_required",
+                required_files=fields["tests"],
+                reason="Required CI on the head commit is the check for this change.",
+            )
+        else:
+            required = fields["tests"]
+            if any(_coverage_path(path) != path for path in required):
+                raise ValueError("planner selected paths that cannot be used as whole test files")
+            missing = sorted(set(required) - _covered_files(receipt, policy, entries))
+            plan.update(
+                mode="selective",
+                required_files=required,
+                missing_files=missing,
+                run_argv=[*policy.argv_prefix, *required],
+            )
+            if missing:
+                stamp.update(eligible=False, reason="plan_files_missing")
+    except (OSError, RuntimeError, ValueError) as exc:
+        reason = (exc.strerror if isinstance(exc, OSError) else str(exc)) or type(exc).__name__
+        plan.update(mode="error", reason=" ".join(reason.split())[:200])
+        stamp.update(eligible=False, reason="plan_error")
+
+
 def _blocked_reason(receipt: Mapping[str, Any]) -> str | None:
     if receipt.get("status") != "completed":
         return "not_completed"
@@ -229,7 +378,7 @@ def receipt_is_gating(receipt: Mapping[str, Any]) -> tuple[bool, str]:
     return stamp["eligible"], stamp["reason"]
 
 
-def reuse_gating(target: Path, receipt: Mapping[str, Any]) -> dict[str, Any] | None:
+def reuse_gating(target: Path, receipt: Mapping[str, Any], *, current_tree: str | None = None) -> dict[str, Any] | None:
     """Return the stamp to copy if the source receipt still belongs to the current policy."""
     if _blocked_reason(receipt):
         return None
@@ -240,7 +389,13 @@ def reuse_gating(target: Path, receipt: Mapping[str, Any]) -> dict[str, Any] | N
     if reason == "missing_gating" and policy.mode == "audit_only":
         return policy.stamp(True, "audit_only")
     stamp = receipt.get("gating")
-    if isinstance(stamp, dict) and reason != "invalid_gating" and policy.matches(stamp):
+    if policy.needs_plan_coverage and current_tree is None:
+        current_tree = localio.tree_fingerprint(target)
+    if (
+        isinstance(stamp, dict)
+        and reason not in {"invalid_gating", "plan_error"}
+        and policy.matches(stamp, current_tree)
+    ):
         return dict(stamp)
     return None
 
@@ -256,17 +411,23 @@ def stamp_gating(target: Path, receipt: dict[str, Any]) -> None:
         return
 
     policy = _load_policy(target)
+    inherited = receipt.get("inherited_test_env")
+    if not policy.needs_plan_coverage and isinstance(inherited, dict):
+        # Preserve the legacy receipt shape when plan coverage is disabled.
+        inherited.pop("py_set", None)
     if problem:
         eligible, reason = False, problem
     elif policy.mode == "unresolved":
         eligible, reason = False, policy.reason
-    elif receipt.get("verify_manifest_id"):
+    elif receipt.get("verify_manifest_id") and not policy.needs_plan_coverage:
         eligible, reason = True, "manifest_run"
     elif policy.mode == "audit_only":
         eligible, reason = True, "audit_only"
     else:
         eligible, reason = _required_check_verdict(receipt, policy)
-    receipt["gating"] = policy.stamp(eligible, reason)
+    receipt["gating"] = stamp = policy.stamp(eligible, reason)
+    if policy.needs_plan_coverage:
+        _stamp_plan(target, receipt, policy, stamp)
 
 
 _INELIGIBLE_NOTICE = {
@@ -278,10 +439,14 @@ _INELIGIBLE_NOTICE = {
     "missing_gating": "The last run has no required-check verdict.",
     "invalid_gating": "The last run has an invalid required-check verdict.",
     "policy_changed": "The required check rule changed since the run.",
+    "plan_base_unresolved": "The required-test plan needs a resolved Git base.",
+    "plan_tree_unavailable": "The required-test plan needs a stable verified tree.",
 }
 
 
-def _receipt_policy_verdict(receipt: Mapping[str, Any], policy: _GatePolicy) -> tuple[bool, str]:
+def _receipt_policy_verdict(
+    receipt: Mapping[str, Any], policy: _GatePolicy, current_tree: str | None
+) -> tuple[bool, str]:
     if policy.mode == "unresolved":
         return False, policy.reason
     if policy.mode == "audit_only":
@@ -290,7 +455,7 @@ def _receipt_policy_verdict(receipt: Mapping[str, Any], policy: _GatePolicy) -> 
     eligible, reason = receipt_is_gating(receipt)
     stamp = receipt.get("gating")
     if isinstance(stamp, dict) and reason != "invalid_gating" and not _blocked_reason(receipt):
-        if not policy.matches(stamp):
+        if not policy.matches(stamp, current_tree):
             return False, "policy_changed"
     return eligible, reason
 
@@ -306,22 +471,47 @@ def _policy_error(policy: _GatePolicy) -> str:
     return f"Could not load {_DECLARATION_PATH}: {detail}."
 
 
-def receipt_counts_for_policy(target: Path, receipt: Mapping[str, Any]) -> tuple[bool, str | None]:
+def _plan_guidance(receipt: Mapping[str, Any], reason: str) -> tuple[str | None, list[str] | None]:
+    stamp = receipt.get("gating")
+    plan = stamp.get("plan") if isinstance(stamp, dict) else None
+    if isinstance(plan, dict):
+        if reason == "plan_error":
+            detail = plan.get("reason") or "unknown planner error"
+            return f"Required-test planning failed ({detail}). Running verify again plans again.", None
+        if reason == "plan_files_missing":
+            missing, argv = plan.get("missing_files"), plan.get("run_argv")
+            if (
+                isinstance(missing, list)
+                and isinstance(argv, list)
+                and all(isinstance(item, str) for item in (*missing, *argv))
+            ):
+                shown = ", ".join(missing[:10])
+                rest = f" and {len(missing) - 10} more" if len(missing) > 10 else ""
+                return f"The last run missed required test files {shown}{rest}.", argv
+    return _INELIGIBLE_NOTICE.get(reason), None
+
+
+def receipt_counts_for_policy(
+    target: Path, receipt: Mapping[str, Any], *, current_tree: str | None = None
+) -> tuple[bool, str | None]:
     """Check a receipt against the current policy and explain a rejection with rerun guidance."""
     policy = _load_policy(target, deadline=monotonic() + _CLOSEOUT_POLICY_BUDGET_SECONDS)
-    eligible, reason = _receipt_policy_verdict(receipt, policy)
+    if policy.needs_plan_coverage and current_tree is None:
+        current_tree = localio.tree_fingerprint(target)
+    eligible, reason = _receipt_policy_verdict(receipt, policy, current_tree)
     if eligible:
         return True, None
     if reason == "policy_timeout" and policy.mode == "unresolved":
         return False, "Git timed out while reading the required check, so run closeout again."
     if policy.mode == "unresolved":
         return False, f"The repository's required check could not be read. {_policy_error(policy)}"
-    explanation = _INELIGIBLE_NOTICE.get(reason, "The last run has an ineligible required-check verdict.")
-    if policy.mode == "audit_only":
+    explanation, argv = _plan_guidance(receipt, reason)
+    explanation = explanation or "The last run has an ineligible required-check verdict."
+    if policy.mode == "audit_only" or reason == "plan_error":
         return False, explanation
     command = (
         f"brigade work verify run --target {shlex.quote(str(target))} "
-        f"--argv-json {shlex.quote(json.dumps(_suggested_argv(policy)))}"
+        f"--argv-json {shlex.quote(json.dumps(argv or _suggested_argv(policy)))}"
     )
     return (
         False,
@@ -336,7 +526,7 @@ class StopGate:
     def __init__(self, target: Path, *, deadline: float | None = None) -> None:
         self.target = target
         self.deadline = deadline
-        self._last_ineligible: tuple[datetime, datetime, str] | None = None
+        self._last_ineligible: tuple[datetime, datetime, str, Mapping[str, Any]] | None = None
 
     @cached_property
     def _policy(self) -> _GatePolicy:
@@ -346,9 +536,17 @@ class StopGate:
     def timed_out(self) -> bool:
         return self._policy.reason == "policy_timeout"
 
-    def completion_in_window(
+    @property
+    def requires_plan(self) -> bool:
+        return self._policy.needs_plan_coverage
+
+    @cached_property
+    def current_tree(self) -> str | None:
+        return localio.tree_fingerprint(self.target)
+
+    def _times_in_window(
         self, receipt: Mapping[str, Any], started: datetime, fingerprint: str | None
-    ) -> datetime | None:
+    ) -> tuple[datetime, datetime] | None:
         if fingerprint is not None:
             session = receipt.get("harness_session")
             if (
@@ -361,16 +559,50 @@ class StopGate:
         completed = localio.parse_iso_datetime(receipt.get("completed_at"))
         if receipt_started is None or completed is None or receipt_started < started or completed < receipt_started:
             return None
-        eligible, reason = _receipt_policy_verdict(receipt, self._policy)
+        return receipt_started, completed
+
+    def completion_in_window(
+        self, receipt: Mapping[str, Any], started: datetime, fingerprint: str | None
+    ) -> datetime | None:
+        times = self._times_in_window(receipt, started, fingerprint)
+        if times is None:
+            return None
+        receipt_started, completed = times
+        current_tree = self.current_tree if self.requires_plan else None
+        eligible, reason = _receipt_policy_verdict(receipt, self._policy, current_tree)
         if eligible:
             return completed
         stamp = receipt.get("gating")
-        if isinstance(stamp, dict) and stamp.get("eligible") is False:
+        if self.requires_plan or (isinstance(stamp, dict) and stamp.get("eligible") is False):
             if self._last_ineligible is None or completed > self._last_ineligible[0]:
-                self._last_ineligible = completed, receipt_started, reason
+                self._last_ineligible = completed, receipt_started, reason, receipt
         return None
 
+    def latest_completion(
+        self, receipts: Iterable[dict[str, Any]], started: datetime, fingerprint: str | None
+    ) -> Iterator[tuple[dict[str, Any], datetime]]:
+        """Use the newest applicable receipt for an opted-in policy, as closeout does."""
+        tree = self.current_tree
+        if tree is None:
+            return
+        latest: tuple[datetime, dict[str, Any]] | None = None
+        for receipt in receipts:
+            if receipt.get("status") in {"busy", "canceled"} or receipt.get("tree_fingerprint") != tree:
+                continue
+            times = self._times_in_window(receipt, started, fingerprint)
+            if times is not None and (latest is None or times[0] > latest[0]):
+                latest = times[0], receipt
+        if latest is not None:
+            receipt = latest[1]
+            if (completed := self.completion_in_window(receipt, started, fingerprint)) is not None:
+                yield receipt, completed
+
     def command(self) -> list[str]:
+        if self._last_ineligible:
+            _, _, reason, receipt = self._last_ineligible
+            _, argv = _plan_guidance(receipt, reason)
+            if argv:
+                return argv
         return _suggested_argv(self._policy)
 
     def notice(self) -> str | None:
@@ -399,7 +631,10 @@ class StopGate:
                 message += "\n  This repository declares no required check."
         threshold = localio.parse_iso_datetime(since)
         if self._last_ineligible and threshold is not None and self._last_ineligible[1] >= threshold:
-            explanation = _INELIGIBLE_NOTICE.get(self._last_ineligible[2])
+            _, _, reason, receipt = self._last_ineligible
+            explanation, _ = _plan_guidance(receipt, reason)
+            if reason == "plan_error":
+                return f"{self.target}: {explanation}"
             if explanation:
                 message += f"\n  {explanation}"
         return message

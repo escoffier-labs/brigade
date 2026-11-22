@@ -10,6 +10,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path, PureWindowsPath
+from time import monotonic
 from typing import Any
 
 from .. import localio, shell_quote, verify_manifest_git
@@ -25,15 +26,21 @@ _PLANNER_TOKENS = {"{base}", "{head}", "{output}", "{planner_dir}", "{repo}", "{
 _GIT_OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 
 
-def _git(target: Path, *args: str, input_data: bytes | None = None) -> bytes:
+def _remaining(deadline: float | None, limit: float) -> float:
+    remaining = limit if deadline is None else min(limit, deadline - monotonic())
+    if remaining <= 0:
+        raise ValueError("required-test planning timed out")
+    return remaining
+
+
+def _git(target: Path, *args: str, deadline: float | None = None) -> bytes:
     try:
         proc = subprocess.run(
             ["git", "--no-replace-objects", "--literal-pathspecs", *args],
             cwd=target,
-            input=input_data,
-            stdin=subprocess.DEVNULL if input_data is None else None,
+            stdin=subprocess.DEVNULL,
             capture_output=True,
-            timeout=30,
+            timeout=_remaining(deadline, 30),
             env=verify_manifest_git.trusted_git_env(),
         )
     except subprocess.TimeoutExpired as exc:
@@ -50,9 +57,11 @@ def _commit_id(raw: bytes) -> str:
     return value
 
 
-def _tree_entries(target: Path, commit: str, path: str | None = None) -> dict[str, tuple[bytes, bytes]]:
+def _tree_entries(
+    target: Path, commit: str, path: str | None = None, *, deadline: float | None = None
+) -> dict[str, tuple[bytes, bytes]]:
     args = ("-r",) if path is None else ("--", path)
-    raw = _git(target, "ls-tree", "-z", "--full-tree", commit, *args)
+    raw = _git(target, "ls-tree", "-z", "--full-tree", commit, *args, deadline=deadline)
     entries = {}
     for entry in raw.split(b"\0"):
         if not entry:
@@ -68,11 +77,11 @@ def _regular(mode: bytes) -> bool:
     return mode in {b"100644", b"100755"}
 
 
-def _read_blob(target: Path, entry: tuple[bytes, bytes], path: str) -> bytes:
+def _read_blob(target: Path, entry: tuple[bytes, bytes], path: str, deadline: float | None) -> bytes:
     mode, oid = entry
     if not _regular(mode):
         raise ValueError(f"{path} is not a regular file")
-    return _git(target, "cat-file", "blob", _commit_id(oid))
+    return _git(target, "cat-file", "blob", _commit_id(oid), deadline=deadline)
 
 
 def _repo_path(path: str) -> bool:
@@ -113,11 +122,11 @@ def _json_object(raw: bytes, label: str) -> dict[str, Any]:
     return data
 
 
-def _config_at(target: Path, base: str) -> dict[str, Any] | None:
-    entry = _tree_entries(target, base, CONFIG_PATH).get(CONFIG_PATH)
+def _config_at(target: Path, base: str, deadline: float | None) -> dict[str, Any] | None:
+    entry = _tree_entries(target, base, CONFIG_PATH, deadline=deadline).get(CONFIG_PATH)
     if entry is None:
         return None
-    config = _json_object(_read_blob(target, entry, CONFIG_PATH), "required-tests config")
+    config = _json_object(_read_blob(target, entry, CONFIG_PATH, deadline), "required-tests config")
     if config.get("schema") != CONFIG_SCHEMA:
         raise ValueError("required-tests config has an unsupported schema")
     for key in ("planner_files", "planner_argv", "run_argv"):
@@ -144,13 +153,13 @@ def _config_at(target: Path, base: str) -> dict[str, Any] | None:
     return config
 
 
-def _copy_planner(target: Path, base: str, files: list[str], directory: Path) -> str:
+def _copy_planner(target: Path, base: str, files: list[str], directory: Path, deadline: float | None) -> str:
     digest = hashlib.sha256()
     for name in sorted(files):
-        entry = _tree_entries(target, base, name).get(name)
+        entry = _tree_entries(target, base, name, deadline=deadline).get(name)
         if entry is None:
             raise ValueError(f"planner file is missing at the base: {name}")
-        blob = _read_blob(target, entry, name)
+        blob = _read_blob(target, entry, name, deadline)
         path = _materialize_file(directory, name, blob)
         if entry[0] == b"100755" and os.name != "nt":
             path.chmod(0o700)
@@ -158,11 +167,15 @@ def _copy_planner(target: Path, base: str, files: list[str], directory: Path) ->
     return digest.hexdigest()
 
 
-def _copy_head(target: Path, entries: dict[str, tuple[bytes, bytes]], directory: Path) -> None:
+def _copy_head(
+    target: Path, entries: dict[str, tuple[bytes, bytes]], directory: Path, deadline: float | None, *, snapshot: bool
+) -> None:
     # Read raw blobs so checkout filters or archive attributes cannot alter or hide planner input.
     by_oid: dict[bytes, list[str]] = {}
     for name, (mode, oid) in entries.items():
         if not _regular(mode):
+            if snapshot:
+                continue
             raise ValueError(f"HEAD snapshot entry is not a regular file: {name!r}")
         by_oid.setdefault(_commit_id(oid).encode("ascii"), []).append(name)
     with tempfile.TemporaryFile() as blobs:
@@ -173,7 +186,7 @@ def _copy_head(target: Path, entries: dict[str, tuple[bytes, bytes]], directory:
                 input=b"".join(oid + b"\n" for oid in by_oid),
                 stdout=blobs,
                 stderr=subprocess.DEVNULL,
-                timeout=30,
+                timeout=_remaining(deadline, 30),
                 env=verify_manifest_git.trusted_git_env(),
             )
         except subprocess.TimeoutExpired as exc:
@@ -182,6 +195,7 @@ def _copy_head(target: Path, entries: dict[str, tuple[bytes, bytes]], directory:
             raise ValueError(f"git cat-file failed copying HEAD (exit {proc.returncode})")
         blobs.seek(0)
         for oid, paths in by_oid.items():
+            _remaining(deadline, 30)
             header = blobs.readline().split()
             if len(header) != 3 or header[:2] != [oid, b"blob"]:
                 raise ValueError("HEAD snapshot blob is unreadable")
@@ -190,7 +204,9 @@ def _copy_head(target: Path, entries: dict[str, tuple[bytes, bytes]], directory:
             if len(data) != size or blobs.read(1) != b"\n":
                 raise ValueError("HEAD snapshot blob is incomplete")
             for name in paths:
-                _materialize_file(directory, name, data)
+                path = _materialize_file(directory, name, data)
+                if snapshot and entries[name][0] == b"100755" and os.name != "nt":
+                    path.chmod(0o700)
 
 
 def _run_planner(
@@ -199,12 +215,15 @@ def _run_planner(
     head: str,
     config: dict[str, Any],
     entries: dict[str, tuple[bytes, bytes]],
+    *,
+    snapshot: bool,
+    deadline: float | None,
 ) -> tuple[dict[str, Any], str]:
     with tempfile.TemporaryDirectory(prefix="brigade-required-") as temp_dir:
         scratch = Path(temp_dir).resolve()
         directory = scratch / "planner"
         output = scratch / "plan.json"
-        digest = _copy_planner(target, base, config["planner_files"], directory)
+        digest = _copy_planner(target, base, config["planner_files"], directory, deadline)
         replacements = {
             "{base}": base,
             "{head}": head,
@@ -215,13 +234,15 @@ def _run_planner(
         }
         tokens: list[str] = config["planner_argv"]
         env = verify_manifest_git.trusted_git_env()
-        if "{head_dir}" in tokens:
+        if snapshot or "{head_dir}" in tokens:
             head_dir = scratch / "head"
             head_dir.mkdir()
-            _copy_head(target, entries, head_dir)
-            git_dir = os.fsdecode(_git(target, "rev-parse", "--absolute-git-dir").rstrip(b"\n"))
+            _copy_head(target, entries, head_dir, deadline, snapshot=snapshot)
+            git_dir = os.fsdecode(_git(target, "rev-parse", "--absolute-git-dir", deadline=deadline).rstrip(b"\n"))
             env.update(GIT_DIR=git_dir, GIT_WORK_TREE=str(head_dir), GIT_NO_REPLACE_OBJECTS="1")
             replacements["{head_dir}"] = str(head_dir)
+            if snapshot:
+                replacements["{repo}"] = str(head_dir)
         argv = [
             str(directory / item.removeprefix(_PLANNER_PREFIX))
             if item.startswith(_PLANNER_PREFIX)
@@ -239,7 +260,7 @@ def _run_planner(
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
                 stderr=subprocess.DEVNULL,
-                timeout=PLANNER_TIMEOUT_SECONDS,
+                timeout=_remaining(deadline, PLANNER_TIMEOUT_SECONDS),
             )
         except subprocess.TimeoutExpired as exc:
             raise ValueError("planner timed out") from exc
@@ -294,8 +315,53 @@ def _plan_fields(
     return result
 
 
-def _record_path(target: Path, head: str | None, base: str | None) -> Path:
-    name = f"{head or 'unknown'}.{base[:12] if base else 'unknown'}.json"
+def _plan_at(
+    target: Path,
+    base: str,
+    head: str,
+    *,
+    snapshot: bool,
+    deadline: float | None,
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, tuple[bytes, bytes]]]:
+    config = _config_at(target, base, deadline)
+    if config is None:
+        return (
+            {
+                "mode": "unconfigured",
+                "local_requirement": "unknown",
+                "reason": f"{CONFIG_PATH} does not exist at the base commit",
+            },
+            None,
+            {},
+        )
+    entries = _tree_entries(target, head, deadline=deadline)
+    plan, digest = _run_planner(target, base, head, config, entries, snapshot=snapshot, deadline=deadline)
+    if snapshot and "error" in plan:
+        detail = plan["error"]
+        reason = " ".join(detail.split())[:160] if isinstance(detail, str) else ""
+        raise ValueError(f"planner reported an error ({reason})" if reason else "planner reported an error")
+    fields = _plan_fields(plan, config, entries, digest)
+    if snapshot and "test_files_total" in plan:
+        total = plan["test_files_total"]
+        if type(total) is not int or total < len(fields["tests"]):
+            raise ValueError("planner output has an invalid test_files_total")
+        fields["test_files_total"] = total
+    _remaining(deadline, PLANNER_TIMEOUT_SECONDS)
+    return fields, config, entries
+
+
+def plan_snapshot(
+    target: Path, base: str, tree: str, *, deadline: float
+) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, tuple[bytes, bytes]]]:
+    """Plan from a verified tree object and the base-pinned planner."""
+    base = _commit_id(base.encode("ascii"))
+    tree = _commit_id(tree.encode("ascii"))
+    return _plan_at(target, base, tree, snapshot=True, deadline=deadline)
+
+
+def _record_path(target: Path, head: str | None, base: str | None, *, worktree: bool = False) -> Path:
+    suffix = ".worktree" if worktree else ""
+    name = f"{head or 'unknown'}.{base[:12] if base else 'unknown'}{suffix}.json"
     path = target / ".brigade" / "work" / "verify-required" / name
     if path.parent.resolve() != path.parent:
         raise ValueError("verification record directory resolves through a symbolic link")
@@ -334,15 +400,16 @@ def _print_human(payload: dict[str, Any], config: dict[str, Any] | None) -> None
         )
 
 
-def _resolve_base(target: Path) -> tuple[str, str]:
-    resolved = verify_manifest_git.resolve_base(target)
+def _resolve_base(target: Path, deadline: float | None = None) -> tuple[str, str]:
+    resolved = verify_manifest_git.resolve_base(target, deadline=deadline)
     if resolved.status != "resolved" or resolved.commit is None or resolved.source is None:
         raise ValueError(resolved.message or "default base is unresolved")
     return _commit_id(resolved.commit.encode("ascii")), resolved.source
 
 
-def required(*, target: Path, json_output: bool = False) -> int:
+def required(*, target: Path, json_output: bool = False, worktree: bool = False) -> int:
     """Run the base-pinned repository planner and record its plan."""
+    deadline = monotonic() + PLANNER_TIMEOUT_SECONDS if worktree else None
     config = None
     record_root = None
     failure_fields: dict[str, Any] = {
@@ -371,36 +438,45 @@ def required(*, target: Path, json_output: bool = False) -> int:
             raise ValueError("target must be an existing repository root")
         record_root = target
         try:
-            root = Path(os.fsdecode(_git(target, "rev-parse", "--show-toplevel").rstrip(b"\n"))).resolve()
+            root = Path(
+                os.fsdecode(_git(target, "rev-parse", "--show-toplevel", deadline=deadline).rstrip(b"\n"))
+            ).resolve()
         except ValueError as exc:
             raise ValueError(f"target must be a Git repository root ({exc})") from exc
         record_root = root
-        head = payload["head_sha"] = _commit_id(_git(root, "rev-parse", "--verify", "HEAD^{commit}"))
+        head = payload["head_sha"] = _commit_id(_git(root, "rev-parse", "--verify", "HEAD^{commit}", deadline=deadline))
         if target != root:
             raise ValueError("target must be the repository root, not a subdirectory")
-        tree = payload["tree_id"] = _commit_id(_git(root, "rev-parse", "--verify", f"{head}^{{tree}}"))
-        payload["covers_worktree"] = (
-            localio.tree_fingerprint(root, git_env=verify_manifest_git.trusted_git_env()) == tree
-        )
-        resolved_base, source = _resolve_base(root)
-        payload.update(base=resolved_base, base_source=source, base_trusted=source == "default_branch")
-        config = _config_at(root, resolved_base)
-        if config is None:
-            payload.update(
-                mode="unconfigured",
-                local_requirement="unknown",
-                reason=f"{CONFIG_PATH} does not exist at the base commit",
+        if deadline is not None:
+            tree, snapshot_head = localio.tree_fingerprint_with_head(
+                root, git_env=verify_manifest_git.trusted_git_env(), deadline=deadline
             )
+            if tree is None or snapshot_head != head:
+                _remaining(deadline, PLANNER_TIMEOUT_SECONDS)
+                raise ValueError("could not snapshot the working tree at HEAD")
+            payload.update(tree_id=tree, covers_worktree=True)
         else:
-            entries = _tree_entries(root, head)
-            plan, digest = _run_planner(root, resolved_base, head, config, entries)
-            payload.update(_plan_fields(plan, config, entries, digest))
+            tree = payload["tree_id"] = _commit_id(_git(root, "rev-parse", "--verify", f"{head}^{{tree}}"))
+            payload["covers_worktree"] = (
+                localio.tree_fingerprint(root, git_env=verify_manifest_git.trusted_git_env()) == tree
+            )
+        resolved_base, source = _resolve_base(root, deadline)
+        payload.update(base=resolved_base, base_source=source, base_trusted=source == "default_branch")
+        if deadline is not None:
+            fields, config, _ = plan_snapshot(root, resolved_base, tree, deadline=deadline)
+        else:
+            fields, config, _ = _plan_at(root, resolved_base, head, snapshot=False, deadline=None)
+        payload.update(fields)
+    except subprocess.TimeoutExpired:
+        payload["reason"] = "Git timed out resolving the planning base"
     except (OSError, RuntimeError, ValueError) as exc:
         payload["reason"] = str(exc)
 
     if record_root is not None:
         try:
-            path = _record_path(record_root, payload["head_sha"], payload["base"])
+            path = _record_path(
+                record_root, payload["tree_id"] if worktree else payload["head_sha"], payload["base"], worktree=worktree
+            )
             payload["record_path"] = str(path)
             localio.write_text_atomic(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
         except (OSError, RuntimeError, ValueError) as exc:
