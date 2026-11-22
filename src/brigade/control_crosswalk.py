@@ -442,11 +442,11 @@ def _assess_verify_receipt(
         return invalid_schema()
     commands = receipt.get("commands")
     # Producer receipt statuses: running (nonterminal) and the terminal
-    # completed, failed, rejected (a command was refused) and canceled.
+    # completed, failed, rejected (a command was refused), canceled and busy.
     if status in {"failed", "rejected"}:
         return observed("failed", "passed", ["status_failed" if status == "failed" else "status_rejected"])
-    if status == "canceled":
-        return observed("incomplete", ("unknown", "status_canceled"))
+    if status in {"canceled", "busy"}:
+        return observed("incomplete", ("unknown", f"status_{status}"))
     if status != "completed":
         return observed("incomplete", ("unknown", "status_not_terminal"))
     if not isinstance(commands, list):
@@ -1771,8 +1771,8 @@ _STATE_CONTRACT_DOC: tuple[str, ...] = (
     "`discovery_unreadable`. Refused discovery leaves the population unknown. "
     "`artifacts_reported_truncated` reports when the 20-artifact output cap omits observed artifacts.",
     "",
-    "Verify receipts (EC-01): `running` is nonterminal (`status_not_terminal`). `canceled` is terminal but "
-    "`incomplete` (`status_canceled`). `failed` and `rejected` are terminal `failed` outcomes, and a command with a "
+    "Verify receipts (EC-01): `running` is nonterminal (`status_not_terminal`). `canceled` and `busy` are terminal but "
+    "`incomplete` (`status_canceled` and `status_busy`, respectively). `failed` and `rejected` are terminal `failed` outcomes, and a command with a "
     "nonzero exit code is `failed`, provided no required trust dimension failed. A failed or rejected receipt "
     "whose `run_id` differs from its directory is `rejected` with `run_binding_mismatch`. A `completed` receipt "
     "needs a non-empty `planned_commands` list, a `run_id` "

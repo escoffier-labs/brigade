@@ -46,7 +46,7 @@ def utc_now_iso_z() -> str:
 def read_json_dict(path: Path) -> dict[str, Any] | None:
     """Read a JSON object from path; return None when missing, invalid, or not a dict."""
     try:
-        payload = json.loads(path.read_text())
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return None
     return payload if isinstance(payload, dict) else None

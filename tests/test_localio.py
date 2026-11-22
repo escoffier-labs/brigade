@@ -22,6 +22,13 @@ def test_read_json_dict_invalid_utf8_returns_none(tmp_path: Path):
     assert localio.read_json_dict(path) is None
 
 
+def test_read_json_dict_reads_utf8_non_ascii_value(tmp_path: Path):
+    path = tmp_path / "utf8.json"
+    path.write_bytes('{"value":"café"}'.encode("utf-8"))
+
+    assert localio.read_json_dict(path) == {"value": "café"}
+
+
 def test_write_json_round_trips_and_is_sorted(tmp_path: Path):
     path = tmp_path / "nested" / "receipt.json"
     localio.write_json(path, {"b": 2, "a": 1})

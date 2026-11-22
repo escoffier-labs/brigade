@@ -2137,6 +2137,7 @@ def test_ec12_classifies_a_missing_manifest_listed_entry_as_snapshot_mismatch(tm
         ("canceled", lambda receipt: receipt["commands"][0].update(status="interrupted"), "status_canceled"),
         ("canceled", lambda receipt: receipt.update(commands=[]), "status_canceled"),
         ("canceled", lambda receipt: receipt.update(planned_commands=["first", "second"]), "status_canceled"),
+        ("busy", lambda receipt: None, "status_busy"),
     ],
 )
 def test_ec03_classifies_incomplete_receipts(tmp_path, monkeypatch, receipt_status, mutate, reason):
@@ -2180,6 +2181,7 @@ def test_ec03_classifies_incomplete_receipts(tmp_path, monkeypatch, receipt_stat
         ("failed", "timed_out", 124, "status_failed"),
         ("failed", "timed_out", None, "status_failed"),
         ("rejected", "rejected", 2, "status_rejected"),
+        ("failed", "busy", 75, "status_failed"),
     ],
 )
 def test_ec03_preserves_signed_terminal_command_failures(
@@ -3386,6 +3388,7 @@ def test_ec10_period_uses_real_outcome_record_ts(tmp_path):
         ("failed", "failed", "status_failed", "evidenced_failed"),
         ("rejected", "failed", "status_rejected", "evidenced_failed"),
         ("canceled", "incomplete", "status_canceled", "untested"),
+        ("busy", "incomplete", "status_busy", "untested"),
         ("running", "incomplete", "status_not_terminal", "untested"),
     ],
 )

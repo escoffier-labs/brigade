@@ -1,0 +1,1 @@
+- Verify receipts classify busy slot-lock results as terminal incomplete evidence and read JSON receipts consistently as UTF-8.
