@@ -34,7 +34,7 @@ def __getattr__(name: str):
         from ..prompt import prompt_for_selection as value
     elif name.startswith("_") and name.endswith("_group") and name[1:-6] in _FAMILY_MODULES:
         value = _family_module(name[1:-6])
-    elif name in _FAMILY_MODULES:
+    elif name in _FAMILY_MODULES or name == "run_cloud":
         value = _family_module(name)
     else:
         raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
@@ -161,6 +161,15 @@ def main(argv=None) -> int:
         parser = _build_parser_for(raw_argv)
         parser.parse_args(raw_argv)
         return 0
+    if raw_argv[:3] == ["work", "verify", "required"]:
+        # Let the command record a rejected revision even when it looks like a flag.
+        options = {"--target", "-t", "--json", "--help", "-h", "--", "--base"}
+        for index in range(len(raw_argv) - 2, 2, -1):
+            if raw_argv[index] != "--base":
+                continue
+            value = raw_argv[index + 1]
+            if value.startswith("-") and value.partition("=")[0] not in options:
+                raw_argv[index : index + 2] = [f"--base={value}"]
     parse_argv, engine_args = _peel_passthrough_engine_args(raw_argv)
     parser = _build_parser_for(parse_argv)
     if not parse_argv:

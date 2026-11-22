@@ -45,12 +45,14 @@ def is_safe_argument(value: str) -> bool:
     return not (" " in value and value.endswith("\\"))
 
 
-def quote_argument(value: str) -> str:
-    """`value` quoted for this platform's shell.
+def quote_argument(value: str, *, posix: bool = False) -> str:
+    """`value` quoted for this platform's shell, or for a requested POSIX shell.
 
     Check `is_safe_argument` first: an argument it rejects cannot be quoted safely and
     the caller withholds the command instead of printing a broken one.
     """
+    if posix:
+        return shlex.quote(value)
     if not value:
         return value
     if is_windows():

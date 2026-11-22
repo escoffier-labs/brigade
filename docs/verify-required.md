@@ -1,9 +1,18 @@
 # Required test planning
 
-`brigade work verify required` asks the repository's tracked planner which local tests cover the diff from a base commit to `HEAD`. It is a read-only planning command. It does not run tests or change verification gates.
+Run `brigade work verify required` from the Git repository root, or pass that root with `--target`. The command plans local checks for the committed diff and writes a plan record.
 
-The command loads `verify/required-tests.json` from the base commit, not from the working tree. By default, the base is the merge base of `HEAD` and the default upstream branch. Use `--base REF` to plan another range.
+The default base is the merge base of `HEAD` and the local remote-tracking ref for the default branch. Fetch the default branch if its ref is missing. In a repository without remotes, the base is `HEAD`. Use `--base=REF` for an explicit commit override. The record identifies the base and its source.
 
-A selective plan prints the exact focused command for the selected test files. A full plan means the diff is too broad for safe local selection. In that case, required CI on the exact head commit supplies the evidence, and the full suite must not be run locally. Planner errors require attention and never mean that no checks are required.
+The command reads `verify/required-tests.json` from the base tree. It copies each regular file listed in `planner_files` from that tree into a fresh directory, keeps the relative paths, and runs `planner_argv` there without a shell. Brigade hashes the paths and exact file bytes. Its `planner_digest` is independent of the optional `planner_reported_digest`.
 
-The JSON plan is printed with `--json` and is always written atomically under `.brigade/work/verify-required/`. The `covers_worktree` field is false when uncommitted changes differ from `HEAD`.
+Planner placeholders are whole arguments. Use `{python}` for the running Python interpreter, `{base}` and `{head}` for commit IDs, `{output}` for the plan file, `{planner_dir}` for the planner directory, and `{repo}` for the target root. An argument may start with `{planner_dir}/` followed by a relative path. Planners that inspect source files can use `{head_dir}` for a temporary copy of regular files from the committed head tree, with Git history available for read operations. The bundled planner uses this copy so uncommitted source edits cannot change its selection.
+
+Use `--json` to print one JSON object. The command also writes the object atomically to `.brigade/work/verify-required/<head>.<base-first-12>.json`. Unavailable commit IDs use `unknown` in the filename. The JSON record path is null when the target directory does not exist or the record cannot be written. The `covers_worktree` field is false when the working tree fingerprint differs from the committed tree. A plan describes requirements for the committed diff. Verification evidence comes from running the selected checks or observing required CI.
+
+| Mode | Exit code | Local requirement |
+| --- | --- | --- |
+| `selective` | 0 | `tests`. The plan contains a nonempty list of files from the head tree. Brigade expands the whole `{tests}` element in `run_argv` into separate arguments. The Bash hint shows up to 40 files and 4,000 characters. On Windows, use Git Bash. Set `PY=.venv/Scripts` when the virtual environment uses the Windows layout. The record contains the complete command. |
+| `full` | 0 | `ci`. Use required CI on the recorded head commit. The record carries planner reasons and an empty test list. |
+| `unconfigured` | 3 | `unknown`. The base tree has no `verify/required-tests.json`. |
+| `error` | 1 | `ci`. The base, configuration, planner, selection, or record could not be verified. |

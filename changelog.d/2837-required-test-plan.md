@@ -1,1 +1,1 @@
-- Add `brigade work verify required` to plan focused local tests from a base-pinned repository configuration, while leaving broad changes to required CI.
+- Add `brigade work verify required` to plan focused tests using the configuration and planner files from the trusted Git base. Full plans and planning errors require CI.
