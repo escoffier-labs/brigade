@@ -19,6 +19,9 @@ CONFIG_PATH = "verify/required-tests.json"
 CONFIG_SCHEMA = "brigade.verify_required_config.v1"
 PLAN_SCHEMA = "brigade.verify_required.v1"
 PLANNER_TIMEOUT_SECONDS = 60
+PYTEST_OPTION_GUIDANCE = (
+    "Put extra pytest options such as -p xdist -n 4 after the command prefix and before any separator or test path."
+)
 _MAX_HINT_TESTS = 40
 _MAX_HINT_CHARS = 4000
 _PLANNER_PREFIX = "{planner_dir}/"
@@ -386,6 +389,7 @@ def _print_hint(template: list[str], tests: list[str], record_path: str) -> None
             print(command)
             shell = "Git Bash" if shell_quote.is_windows() else "Bash"
             print(f"Run from the repository root in {shell}.")
+            print(PYTEST_OPTION_GUIDANCE)
             break
         shown -= 1
     if shown < len(tests):

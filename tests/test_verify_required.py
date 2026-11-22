@@ -431,6 +431,7 @@ def test_hint_quotes_arguments_for_bash(repo, capsys):
     output = run(target, capsys, human=True)
     assert "Bash" in output
     assert shlex.split(output.splitlines()[0]) == ["focused", *paths]
+    assert "after the command prefix and before any separator" in output
 
 
 def test_test_filenames_are_not_pytest_argument_files(repo, capsys):
@@ -495,5 +496,6 @@ def test_repository_planner_template_satisfies_declared_coverage():
     prefix = list(policy.argv_prefix)
     assert argv[: len(prefix)] == prefix
     selectors = argv[len(prefix) :]
-    assert selectors == ["--", *files] or selectors == files
+    assert selectors == ["--", *files]
     assert verify_gate._command_files(selectors, entries) == set(files)
+    assert verify_gate._command_files(["-p", "xdist", "-n", "4", *selectors], entries) == set(files)

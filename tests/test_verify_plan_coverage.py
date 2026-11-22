@@ -92,15 +92,15 @@ def test_invalid_declaration(value, arguments, passed):
         ([[B]], [A]),
         ([[OTHER]], [A, B]),
         ([[A], [B]], []),
+        ([[A, "-p", "xdist", "-n", "4", B]], []),
+        ([[A, B, "-p", "xdist", "-n", "4"]], []),
         (
             [
                 [
-                    "--",
                     "-p",
                     "xdist",
                     "-n",
                     "4",
-                    "-q",
                     "-v",
                     "-vv",
                     "--timeout",
@@ -108,6 +108,7 @@ def test_invalid_declaration(value, arguments, passed):
                     "--durations=3",
                     "--tb",
                     "short",
+                    "--",
                     f"./{A}",
                     B,
                 ]
@@ -141,6 +142,7 @@ def test_selective_coverage_and_shared_guidance(repo, monkeypatch, capsys, comma
         assert stop_result["decision"] == "block"
         for message in (stop_result["reason"], explanation):
             assert "missed required test files" in message
+            assert verify_required.PYTEST_OPTION_GUIDANCE in message
             assert all(path in message for path in missing)
             assert message.count("--argv-json") == 1
             words = shlex.split(message.split("`", 2)[1])
@@ -170,6 +172,7 @@ def test_selective_coverage_and_shared_guidance(repo, monkeypatch, capsys, comma
         ["-p", "other_plugin"],
         ["-n", "--lf"],
         ["--tb=other"],
+        ["-q"],
         ["-qq"],
         ["--", "--"],
         [A + "::test_case"],
@@ -199,7 +202,7 @@ def test_nonregular_files_cannot_contribute(mode):
     assert verify_gate._command_files([A, B], entries) == set()
 
 
-@pytest.mark.parametrize("variable", ["PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTHONPATH", "PY"])
+@pytest.mark.parametrize("variable", ["PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTHONPATH"])
 @pytest.mark.parametrize("inline", [True, False])
 def test_test_environment_cannot_contribute(repo, monkeypatch, capsys, variable, inline):
     _setup(repo)
@@ -209,6 +212,33 @@ def test_test_environment_cannot_contribute(repo, monkeypatch, capsys, variable,
         monkeypatch.setenv(variable, "")
         commands = [[A, B]]
     assert not _run(repo, monkeypatch, capsys, commands)["gating"]["eligible"]
+
+
+@pytest.mark.parametrize("inline", [True, False])
+def test_py_override_can_contribute(repo, monkeypatch, capsys, inline):
+    _setup(repo)
+    if inline:
+        commands = [shlex.join(["PY=.venv/Scripts", *PREFIX, A, B])]
+    else:
+        monkeypatch.setenv("PY", ".venv/Scripts")
+        commands = [[A, B]]
+    assert _run(repo, monkeypatch, capsys, commands)["gating"]["eligible"]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--", A, B, "-p", "xdist", "-n", "4"],
+        ["-k", "case", "--", A, B],
+        [A, "-k", "case", B],
+        [A, B, "-k", "case"],
+        ["--", A, "-k", "case", B],
+        ["--", A, "--", B],
+    ],
+)
+def test_invalid_option_positions_contribute_no_files(args):
+    entries = {path: (b"100644", b"") for path in (A, B)}
+    assert verify_gate._command_files(args, entries) == set()
 
 
 @pytest.mark.parametrize(

@@ -29,6 +29,9 @@ Worktree plans are recorded as `<tree>.<base-first-12>.worktree.json` in the
 same directory. A worktree plan identifies the snapshot with `tree_id` and
 records the checkout's commit in `head_sha`.
 
+Put extra pytest options such as `-p xdist -n 4` after the command prefix and
+before any `--` separator in `run_argv`.
+
 A planner can report the number of files it discovered in
 `test_files_total`. The gate treats a selective plan that names that many
 distinct files as a CI check. If the planner reports an `error` in worktree
