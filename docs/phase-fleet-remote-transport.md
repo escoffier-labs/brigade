@@ -73,9 +73,16 @@ The source owns the orchestration receipt and a read-only model plan
 projection. It never leases a model seat, calls a provider, renews a
 reservation, or releases one for a remote branch. Reservation release is
 target-only and the Hub enforces that, so a blocked source route leaves the
-reservation to its own TTL rather than attempting an unauthorized release. The
-target performs prepare -> context application -> ack -> launch proof ->
-provider execution and renews its own reservation as the execution claim.
+reservation to its own TTL rather than attempting an unauthorized release.
+The target first accepts its reservation with `brigade fleet policy reservation accept`
+(Hub action `reservation-accept`), then renews it as needed, and releases it at
+the end. All three commands require the same reservation ID, decision ID, and
+session ID returned by routing. Acceptance commits the slot. An accepted
+reservation occupies node capacity until it is released, even after its lease
+expires, so the target must release it on every exit path. The accept reply has
+`state: "accepted"`. A renew reply has `state: "active"`. After acceptance, the
+target performs prepare -> context application -> ack -> launch proof -> provider
+execution.
 
 ## Result states and handoff
 

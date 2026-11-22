@@ -97,7 +97,9 @@ def register(fleet_sub: argparse._SubParsersAction) -> None:
     p_reservation = policy_sub.add_parser("reservation", help="Accept, renew, or release a routing reservation.")
     reservation_sub = p_reservation.add_subparsers(dest="policy_reservation_command", metavar="<reservation-command>")
     reservation_sub.required = True
-    p_accept = reservation_sub.add_parser("accept", help="Accept a routing reservation.")
+    p_accept = reservation_sub.add_parser(
+        "accept", help="Accept a routing reservation. Its slot stays held until release."
+    )
     p_accept.add_argument("--reservation-id", required=True, dest="reservation_id")
     p_accept.add_argument("--decision-id", required=True, dest="decision_id")
     p_accept.add_argument("--session-id", required=True, dest="session_id")

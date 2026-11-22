@@ -1,1 +1,1 @@
-- Add a fleet policy reservation accept command so target nodes can accept reservations before renewing or releasing them.
+- Add a fleet policy reservation accept command so target nodes can accept before renewing or releasing. Accepted slots remain occupied until the target releases them.
