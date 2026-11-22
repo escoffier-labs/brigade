@@ -1,0 +1,1 @@
+- The Rust hub compares message-principal credential digests in constant time.

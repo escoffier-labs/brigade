@@ -380,6 +380,75 @@ fn write_store() -> Memory {
     tx
 }
 
+#[test]
+fn authenticate_matches_only_the_exact_live_principal_digest() {
+    let tx = Memory(rusqlite::Connection::open_in_memory().unwrap());
+    // Authentication must compare the digest bytes even if SQLite treats
+    // differently cased text values as equal.
+    tx.0.execute_batch(
+        "CREATE TABLE nodes(node_id TEXT PRIMARY KEY, token_sha256 TEXT UNIQUE, revoked_at TEXT);
+         CREATE TABLE fleet_message_principals(principal_id TEXT PRIMARY KEY, token_hash TEXT COLLATE NOCASE UNIQUE, revoked_at TEXT);
+         INSERT INTO fleet_message_principals VALUES
+            ('agent:revoked', 'revoked-digest', '2026-01-01'),
+            ('agent:blob', CAST('blob-digest' AS BLOB), NULL),
+            ('agent:live', 'live-digest', NULL);",
+    )
+    .unwrap();
+
+    assert_eq!(
+        authenticate(&tx, "live-digest", "admin-digest", false).unwrap(),
+        Ok(Some("agent:live".into()))
+    );
+    for key in [
+        "revoked-digest",
+        "unknown",
+        "live-diges",
+        "LIVE-digest",
+        "blob-digest",
+    ] {
+        assert_eq!(
+            authenticate(&tx, key, "admin-digest", false).unwrap(),
+            Err((401, r#"{"error": "unauthorized"}"#.into())),
+            "key {key}"
+        );
+    }
+}
+
+#[test]
+fn authenticate_prefers_admin_then_node_to_a_principal_with_the_same_digest() {
+    let tx = write_store();
+    tx.0.execute_batch(
+        "INSERT INTO fleet_message_principals VALUES
+            ('agent:shared', 'shared', 'Shared', 'digest', '2026-01-01', NULL);",
+    )
+    .unwrap();
+
+    assert_eq!(
+        authenticate(&tx, "digest", "digest", true).unwrap(),
+        Ok(None)
+    );
+    assert_eq!(
+        authenticate(&tx, "digest", "digest", false)
+            .unwrap()
+            .unwrap_err()
+            .0,
+        403
+    );
+    assert_eq!(
+        authenticate(&tx, "digest", "admin-digest", false).unwrap(),
+        Ok(Some("node-a".into()))
+    );
+    tx.0.execute("UPDATE nodes SET revoked_at='2026-01-01'", [])
+        .unwrap();
+    assert_eq!(
+        authenticate(&tx, "digest", "admin-digest", false).unwrap(),
+        Err((
+            401,
+            r#"{"error": "unauthorized: node token revoked"}"#.into()
+        ))
+    );
+}
+
 /// A write with the process's random source replaced.
 fn write_with(raw: Json, seeds: Box<dyn Seeds>) -> Write {
     Write {
