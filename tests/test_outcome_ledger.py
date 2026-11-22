@@ -572,9 +572,32 @@ def test_a_stale_ledger_fails_once_main_has_a_newer_verdict(world, promoted):
     assert any("stale" in error for error in errors), errors
 
 
-def test_a_newer_main_commit_without_a_verdict_does_not_make_the_ledger_stale(world, promoted):
-    world.touch_skill_json(3, T % (23, "12:00:00Z"))
+@pytest.mark.parametrize("timestamp", ["12:00:00Z", "23:45:00Z"], ids=["missing", "in-grace"])
+def test_covers_lagging_an_in_scope_commit_without_a_run_is_stale(world, promoted, timestamp):
+    c3 = world.touch_skill_json(3, T % (23, timestamp))
+    errors = world.verify(promoted["raw"], promoted["genesis"], now=CUTOFF_DT)
+    assert any("stale" in error and c3[:12] in error for error in errors), errors
+
+
+@pytest.mark.parametrize("has_run", [False, True], ids=["no-run", "successful-tip"])
+def test_covers_lagging_only_out_of_scope_commits_is_accepted(world, promoted, has_run):
+    tip = world.commit({"README.md": "later\n"}, T % (23, "12:00:00Z"), branch="main")
+    if has_run:
+        world.gh.passed(tip, done=T % (23, "12:10:00Z"))
     assert world.verify(promoted["raw"], promoted["genesis"]) == []
+
+
+def test_current_fingerprint_must_match_trusted_main_even_when_scope_does_not_change(world, promoted):
+    path = "verify/manifests/skill-note.json"
+    manifest = json.loads((world.root / path).read_text())
+    manifest["scope_globs"] = ["scripts/skill_contract_check.py"]
+    covers = world.commit({path: json.dumps(manifest)}, T % (23, "06:00:00Z"), branch="main")
+    raw = world.build(prev_raw=promoted["genesis"], covers=covers, approved=promoted["approved"])
+    world.propose(raw, covers, name="narrow-scope")
+    assert world.verify(raw, promoted["genesis"], head="narrow-scope") == []
+    world.commit({f"{SKILL_DIR}/guide.md": "# New bundle content\n"}, T % (23, "12:00:00Z"), branch="main")
+    errors = world.verify(raw, promoted["genesis"], head="narrow-scope")
+    assert errors == ["skill:note: current.fingerprint does not match the bundle on trusted main"]
 
 
 def test_a_ledger_covering_history_outside_main_fails(world, promoted):
@@ -783,8 +806,7 @@ def test_failing_to_read_evidence_fails_closed(world, promoted):
         raise RuntimeError("network")
 
     world.ev = L.Evidence(world.repo, broken, SLUG, REPO_ID)
-    # Stale check reads the Actions API only when a newer scope-touching commit exists.
-    world.touch_skill_json(3, T % (23, "12:00:00Z"))
+    # The rebuild must fetch evidence for the scoped commits up to covers.
     errors = world.verify(promoted["raw"], promoted["genesis"])
     assert errors and any("could not finish" in error for error in errors)
 

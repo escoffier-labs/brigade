@@ -1,34 +1,21 @@
-"""Which trials a stretch of main history must have, and what each one says (#2589).
+"""The attest verdicts required by main's first-parent history (#2589).
 
-``outcome-attest`` runs once per push to main and plans over ``before..after`` of that
-push. The merge queue can land several commits in one push, so a run belongs to the tip
-of a group of commits and carries the verdict for all of them. The ledger cannot take
-"no run" to mean "nothing to attest", because a run deleted or cancelled through the
-Actions API looks exactly like that. So the expected verdicts come from git:
-
-- Walk the first-parent commits after the seed tip, up to ``covers``.
-- A commit with a trusted push run of the attest workflow is a push tip. Every commit
-  since the previous tip belongs to that tip's group. A deleted run therefore folds its
-  commits into the next tip's group, and that tip's run lacks the job.
-- When any commit of a group touches the manifest scope, the tip's runs must hold a
-  completed ``outcome-attest/<manifest>`` job on every attempt. Anything else is hurt.
-- Commits after the last tip with a run wait out ``ATTEST_GRACE``, then count as hurt
-  with the reason ``missing``.
-
-Hurt only ever restores approved text, so failing toward hurt is the safe direction.
+Each commit that touches the manifest scope needs its own trusted push run and a
+completed attest job on every attempt. The merge queue can land a batch in one push.
+An in-scope commit inside that batch still needs its own verdict, so it counts as
+missing after the grace window. Hurt can only restore approved text.
 """
 
 from __future__ import annotations
 
 import datetime as dt
-import hashlib
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 from . import verify_manifest
-from .outcome_ledger_actions import MISSING, EvidenceError, GhApi, parse_time, tip_verdict, trial_row, trusted_runs
+from .outcome_ledger_actions import MISSING, GhApi, parse_time, tip_verdict, trial_row, trusted_runs
 from .outcome_ledger_git import Repo
 
 MANIFESTS_DIR = "verify/manifests"
@@ -45,25 +32,101 @@ class Pending:
 
 
 @dataclass(frozen=True)
+class ScopedCommit:
+    sha: str
+    has_manifest: bool
+
+
+@dataclass(frozen=True)
+class ScopedHistory:
+    """In-scope commits and the start index of the latest cohort, if it restarted."""
+
+    commits: tuple[ScopedCommit, ...]
+    restart_at: int | None
+
+
+@dataclass(frozen=True)
 class TrialPlan:
     trials: tuple[dict[str, Any], ...]
     pending: tuple[Pending, ...]
+    restarted: bool
 
 
-def _scope_manifest(repo: Repo, sha: str, manifest_id: str, pin: str) -> verify_manifest.VerifyManifest | None:
-    """The manifest at ``sha`` when it is the pinned one, else None. The pin makes the bytes the checked ones."""
-    raw = repo.show(sha, f"{MANIFESTS_DIR}/{manifest_id}.json")
-    if raw is None or hashlib.sha256(raw).hexdigest() != pin:
+def _scope_manifest(
+    raw: bytes | None, expected: verify_manifest.VerifyManifest
+) -> verify_manifest.VerifyManifest | None:
+    """Read a historical manifest for the same subject, if usable."""
+    if raw is None:
         return None
     try:
-        return verify_manifest.manifest_from_payload(json.loads(raw.decode("utf-8")))
-    except (UnicodeDecodeError, ValueError) as exc:
-        raise EvidenceError("the pinned manifest cannot be read") from exc
+        payload = json.loads(raw.decode("utf-8"))
+        if not isinstance(payload, dict):
+            return None
+        manifest = verify_manifest.manifest_from_payload(payload)
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if (
+        manifest.manifest_id != expected.manifest_id
+        or manifest.artifact_kind != expected.artifact_kind
+        or manifest.artifact_id != expected.artifact_id
+        or manifest.subject_path != expected.subject_path
+    ):
+        return None
+    return manifest
 
 
-def _touches_scope(repo: Repo, manifest: verify_manifest.VerifyManifest, sha: str) -> bool:
-    """Whether this commit changed a path the planner would match to the manifest. Same logic as the planner."""
-    return any(verify_manifest.path_in_manifest_scope(manifest, path) for path in repo.changed_paths(f"{sha}^1", sha))
+def scope_history(repo: Repo, chain: Sequence[str], manifest: verify_manifest.VerifyManifest) -> ScopedHistory:
+    """Find in-scope commits and the latest cohort boundary, independent of Actions evidence.
+
+    A pin-changing commit is scoped by the previous manifest and belongs to the new cohort.
+    A missing or unusable manifest leaves the last usable scope in force.
+    """
+    if not chain:
+        return ScopedHistory((), None)
+    path = f"{MANIFESTS_DIR}/{manifest.manifest_id}.json"
+    active_raw = repo.show(f"{chain[0]}^1", path)
+    active = _scope_manifest(active_raw, manifest)
+    commits: list[ScopedCommit] = []
+    restart_at = None
+    for sha in chain:
+        raw = repo.show(sha, path)
+        current = active if raw == active_raw else _scope_manifest(raw, manifest)
+        scope = active or current or manifest
+        if current is not None and raw != active_raw:
+            restart_at = len(commits)
+            active, active_raw = current, raw
+        if any(verify_manifest.path_in_manifest_scope(scope, path) for path in repo.changed_paths(f"{sha}^1", sha)):
+            commits.append(ScopedCommit(sha, current is not None))
+    return ScopedHistory(tuple(commits), restart_at)
+
+
+def is_missing_trial(row: Mapping[str, Any]) -> bool:
+    return row.get("outcome") == "hurt" and row.get("reason") == MISSING
+
+
+def _missing_trial(sha: str) -> dict[str, Any]:
+    return {"sha": sha, "outcome": "hurt", "reason": MISSING, "jobs": []}
+
+
+def _verdict_at(
+    gh: GhApi,
+    slug: str,
+    repo_id: int,
+    repo: Repo,
+    commit: ScopedCommit,
+    manifest_id: str,
+    ref: dt.datetime,
+) -> dict[str, Any] | Pending:
+    sha = commit.sha
+    runs = trusted_runs(gh, slug, repo_id, sha) if commit.has_manifest else []
+    if not runs:
+        if ref - (parse_time(repo.commit_time(sha)) or ref) < ATTEST_GRACE:
+            return Pending(sha, "has no attest run yet and is inside the grace window")
+        return _missing_trial(sha)
+    verdict = tip_verdict(gh, slug, runs, manifest_id, sha, ref, required=True)
+    if verdict.pending:
+        return Pending(sha, "has an attest verdict still running")
+    return trial_row(sha, verdict) or _missing_trial(sha)
 
 
 def plan_trials(
@@ -72,50 +135,23 @@ def plan_trials(
     repo_id: int,
     repo: Repo,
     *,
-    manifest_id: str,
-    pin: str,
+    manifest: verify_manifest.VerifyManifest,
     chain: Sequence[str],
     ref: dt.datetime,
     fingerprint_at: Callable[[str], str | None],
 ) -> TrialPlan:
-    """The trials for ``chain`` (first-parent commits, oldest first) as seen at ``ref``.
-
-    ``fingerprint_at(sha)`` returns the skill bundle fingerprint at a commit, or None when it
-    holds no skill content. A group with no fingerprint records nothing.
-    """
+    """Plan per-commit verdicts as of ref, retaining missing evidence across pin changes."""
+    scope = scope_history(repo, chain, manifest)
     trials: list[dict[str, Any]] = []
     pending: list[Pending] = []
-    group: list[str] = []
-    for sha in chain:
-        group.append(sha)
-        runs = trusted_runs(gh, slug, repo_id, sha)
-        if not runs:
-            continue
-        members, group = group, []
-        manifest = _scope_manifest(repo, sha, manifest_id, pin)
-        if manifest is None:
-            continue
-        required = any(_touches_scope(repo, manifest, member) for member in members)
-        verdict = tip_verdict(gh, slug, runs, manifest_id, sha, ref, required=required)
-        if verdict.pending:
-            pending.append(Pending(sha, "has an attest verdict still running"))
-            continue
-        row = trial_row(sha, verdict)
-        fingerprint = fingerprint_at(sha) if row is not None else None
-        if row is not None and fingerprint is not None:
-            trials.append({"fingerprint": fingerprint, **row})
-    if group:
-        tail = group[-1]
-        manifest = _scope_manifest(repo, tail, manifest_id, pin)
-        in_scope = [member for member in group if manifest is not None and _touches_scope(repo, manifest, member)]
-        if in_scope:
-            newest = max(parse_time(repo.commit_time(member)) or ref for member in in_scope)
-            if ref - newest < ATTEST_GRACE:
-                pending.append(Pending(tail, "has no attest run yet and is inside the grace window"))
-            else:
-                fingerprint = fingerprint_at(tail)
-                if fingerprint is not None:
-                    trials.append(
-                        {"fingerprint": fingerprint, "sha": tail, "outcome": "hurt", "reason": MISSING, "jobs": []}
-                    )
-    return TrialPlan(tuple(trials), tuple(pending))
+    for index, commit in enumerate(scope.commits):
+        result = _verdict_at(gh, slug, repo_id, repo, commit, manifest.manifest_id, ref)
+        superseded = scope.restart_at is not None and index < scope.restart_at
+        if isinstance(result, Pending):
+            if not superseded:
+                pending.append(result)
+                continue
+            result = _missing_trial(commit.sha)
+        if not superseded or is_missing_trial(result):
+            trials.append({"fingerprint": fingerprint_at(commit.sha), **result})
+    return TrialPlan(tuple(trials), tuple(pending), scope.restart_at is not None)
