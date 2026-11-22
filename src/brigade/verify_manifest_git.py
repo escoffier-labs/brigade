@@ -39,7 +39,12 @@ class ManifestGitError(ValueError):
 
 
 def _git(target: Path, *args: str) -> subprocess.CompletedProcess[bytes]:
-    return subprocess.run(["git", *args], cwd=target, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+    command = ["git", *args]
+    try:
+        return subprocess.run(command, cwd=target, stdin=subprocess.DEVNULL, capture_output=True, timeout=30)
+    except (OSError, subprocess.TimeoutExpired):
+        # No git, or a hung git, means no trusted base. Callers treat a non-zero code as that.
+        return subprocess.CompletedProcess(command, 127, b"", b"")
 
 
 def resolve_base(target: Path) -> BaseResolution:
