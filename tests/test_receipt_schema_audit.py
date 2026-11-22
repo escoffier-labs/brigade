@@ -471,7 +471,8 @@ def test_write_reused_receipt_omits_reused_from_without_source_run_id(tmp_path):
     assert receipt["tree_fingerprint"] == fingerprint
     assert receipt["tree_fingerprint_head"] == receipt["baseline_commit"]
     assert receipt["changes_patch_sha256"]
-    assert receipt["gating"]["fallback_source"] == "none"
+    assert receipt["gating"] == gating
+    assert receipt["gating"]["mode"] == "audit_only"
 
 
 def test_work_closeout_emits_schema_version(tmp_path, monkeypatch):
