@@ -1288,13 +1288,13 @@ def test_a_descendant_that_leaves_the_session_cannot_stretch_the_cell_deadline(t
     orphan = _orphan_source(pid_file, ready_base)
     exe = make_fake(
         tmp_path / "fake",
-        steps=GOOD_STEPS,
+        steps=[{"call": "receipt"}],  # A short arm: the leader must exit well inside the deadline.
         session_orphan={"code": orphan, "ready": str(ready_base)},
     )
     outcome = {}
 
     def run():
-        outcome["result"] = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=3)
+        outcome["result"] = execute_live(LIVE, tmp_path / "output", claude_bin=str(exe), environ=ENVIRON, timeout=6)
 
     worker = start_thread(run)
     try:
