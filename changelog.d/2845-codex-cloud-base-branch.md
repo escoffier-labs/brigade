@@ -1,1 +1,1 @@
-- Codex Cloud launch accepts a base branch and verifies it on GitHub before requesting a fleet lease. It uses the repository's default branch when no branch is supplied.
+- Codex Cloud launch accepts a base branch and uses the repository's default when none is supplied. It checks GitHub through `gh` first, falls back to Git, and distinguishes a missing branch from a failed lookup before requesting a fleet lease.

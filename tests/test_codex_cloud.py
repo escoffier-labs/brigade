@@ -189,7 +189,7 @@ def _assert_windows_hub_refusal(monkeypatch, target, *, operation="launch", caps
 
 @pytest.fixture
 def launch_branch(monkeypatch):
-    monkeypatch.setattr(codex_cloud, "_resolve_launch_branch", lambda *args: "main")
+    monkeypatch.setattr(codex_cloud, "_resolve_launch_branch", lambda *args: ("main", None))
 
 
 def test_launch_task_uses_stdin_and_binds_codex_lease(launch_branch, monkeypatch, tmp_path):
@@ -365,10 +365,62 @@ def test_cli_cloud_launch_refuses_hub_on_windows(monkeypatch, tmp_path, capsys):
 
 
 @pytest.mark.parametrize(
-    ("requested", "expected"),
-    [(None, "trunk"), ("release/stable", "release/stable"), ("local-only", None), ("offline", None)],
+    ("requested", "gh_result", "git_result", "expected", "reason", "lookups"),
+    [
+        (
+            None,
+            _result(stdout='{"defaultBranchRef":{"name":"private-default"}}'),
+            _result(code=128, stderr="private transport diagnostic"),
+            "private-default",
+            None,
+            ["gh"],
+        ),
+        (
+            None,
+            _result(code=127),
+            _result(stdout="ref: refs/heads/trunk\tHEAD\nabc123\tHEAD\n"),
+            "trunk",
+            None,
+            ["gh", "git"],
+        ),
+        (
+            "release/stable",
+            _result(stdout='{"name":"release/stable"}'),
+            _result(code=128),
+            "release/stable",
+            None,
+            ["gh"],
+        ),
+        (
+            "local-only",
+            _result(code=1, stderr="gh: Not Found (HTTP 404)"),
+            _result(stdout="abc123\trefs/heads/prefix/local-only\n"),
+            None,
+            "branch-unavailable",
+            ["gh", "git"],
+        ),
+        (
+            "offline",
+            _result(code=4),
+            _result(code=128, stderr="private transport diagnostic"),
+            None,
+            "branch-unverifiable",
+            ["gh", "git"],
+        ),
+        (
+            "inaccessible",
+            _result(code=1, stderr="gh: Not Found (HTTP 404)"),
+            _result(code=128),
+            None,
+            "branch-unverifiable",
+            ["gh", "git"],
+        ),
+    ],
+    ids=["private-default", "missing-gh", "explicit-gh", "absent", "offline", "ambiguous-404"],
 )
-def test_cli_cloud_launch_codex_cloud_submission(monkeypatch, tmp_path, capsys, requested, expected):
+def test_cli_cloud_launch_codex_cloud_submission(
+    monkeypatch, tmp_path, capsys, requested, gh_result, git_result, expected, reason, lookups
+):
     monkeypatch.setenv("BRIGADE_EXTRAS", "1")
     codex_cloud.save_environment_config(tmp_path, environment_id="env-cli")
     prompt_file = tmp_path / "prompt.txt"
@@ -378,18 +430,24 @@ def test_cli_cloud_launch_codex_cloud_submission(monkeypatch, tmp_path, capsys, 
     if sys.platform == "win32":
         monkeypatch.setattr(codex_cloud, "_hub_configured", lambda: False)
     seen = {}
+    branch_lookups = []
 
     def fake_run(argv, timeout=30.0, env=None, cwd=None, stdin=None, process_registry=None):
+        if argv[0] == "gh":
+            branch_lookups.append("gh")
+            assert not calls["admit"]
+            if requested is None:
+                assert argv == ["gh", "repo", "view", "github.com/owner/repo", "--json", "defaultBranchRef"]
+            else:
+                branch_path = "release%2Fstable" if requested == "release/stable" else requested
+                assert argv == ["gh", "api", "--hostname", "github.com", f"repos/owner/repo/branches/{branch_path}"]
+            return gh_result
         if argv[:2] == ["git", "ls-remote"]:
+            branch_lookups.append("git")
             assert "https://github.com/owner/repo" in argv
             assert not calls["admit"]
-            if argv[-1] == "HEAD":
-                return _result(stdout="ref: refs/heads/trunk\tHEAD\nabc123\tHEAD\n")
-            if argv[-1] == "refs/heads/release/stable":
-                return _result(stdout="abc123\trefs/heads/release/stable\n")
-            if argv[-1] == "refs/heads/offline":
-                return _result(code=128, stderr="private transport diagnostic")
-            return _result(stdout="abc123\trefs/heads/prefix/local-only\n")
+            assert argv[-1] == ("HEAD" if requested is None else f"refs/heads/{requested}")
+            return git_result
         if argv[:3] != ["codex", "cloud", "exec"]:
             return _result(code=1)
         seen.update(argv=argv, stdin=stdin)
@@ -416,15 +474,19 @@ def test_cli_cloud_launch_codex_cloud_submission(monkeypatch, tmp_path, capsys, 
         ]
     )
 
-    payload = json.loads(capsys.readouterr().out)
+    output = capsys.readouterr()
+    payload = json.loads(output.out)
     if expected is None:
         assert rc == 1
-        assert payload["reason"] == "branch-unavailable"
+        assert payload["reason"] == reason
+        assert "private transport diagnostic" not in output.out + output.err
+        assert branch_lookups == lookups
         assert not seen
         assert not any(calls.values())
         assert not cloud_tracker.load_registry(tmp_path)["entries"]
         return
     assert rc == 0
+    assert branch_lookups == lookups
     assert payload["task_id"] == "task_cli_launch99"
     assert payload["provider"] == "codex-cloud"
     assert "holder" not in payload
