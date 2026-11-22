@@ -19,7 +19,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, model_trial_claude, model_trials, proc, proc_group, proc_windows_job
+from brigade import cli, model_trial_claude, model_trial_paired, model_trials, proc, proc_group, proc_windows_job
 from brigade.memory_verify_seat import CLAUDE_SETTINGS
 from brigade.proc_group import drain_supported
 from brigade.model_trial_claude import (
@@ -785,13 +785,15 @@ def test_windows_arm_has_a_deadline_even_when_a_descendant_holds_the_pipes(
     monkeypatch, tmp_path, leader_exited, releases_pipes, reaps
 ):
     released = threading.Event()
+    reading = threading.Event()
     actions = []
-    code = 0 if leader_exited else None
+    code = None
     workers = []
     outcomes = []
 
     class HeldPipe(io.BytesIO):
         def readline(self, size=-1):
+            reading.set()
             released.wait(2)
             return b""
 
@@ -809,6 +811,9 @@ def test_windows_arm_has_a_deadline_even_when_a_descendant_holds_the_pipes(
             self.stderr = HeldPipe()
 
         def poll(self):
+            nonlocal code
+            if code is None and leader_exited and reading.is_set():
+                code = 0
             self.returncode = code
             return code
 
@@ -826,6 +831,8 @@ def test_windows_arm_has_a_deadline_even_when_a_descendant_holds_the_pipes(
         def terminate(self):
             nonlocal code
             actions.append("terminate")
+            if leader_exited:
+                assert code == 0 and reading.is_set()
             if code is None and reaps:
                 code = 125
             if releases_pipes:
@@ -844,7 +851,8 @@ def test_windows_arm_has_a_deadline_even_when_a_descendant_holds_the_pipes(
 
     def launch(command, **kwargs):
         nonlocal code
-        code = 0 if leader_exited else None
+        code = None
+        reading.clear()
         released.clear()
         actions.append(("launch", kwargs.get("creationflags")))
         child = Child()
@@ -874,13 +882,15 @@ def test_windows_arm_has_a_deadline_even_when_a_descendant_holds_the_pipes(
         model_trial_claude, "threading", types.SimpleNamespace(Thread=TrackedThread, Event=threading.Event)
     )
     monkeypatch.setattr(model_trial_claude, "_probe_version", lambda *_: "2.1.327")
+    monkeypatch.setattr(model_trial_claude, "WINDOWS_PIPE_DRAIN_GRACE", 0.15, raising=False)
     monkeypatch.setattr(model_trial_claude, "_run_process", run_and_record)
     monkeypatch.setattr(proc_windows_job, "create_windows_child_job", create_job)
     monkeypatch.setattr(proc, "suspended_process_group_kwargs", lambda: {"creationflags": 4})
     monkeypatch.setattr(proc_windows_job, "bind_suspended_windows_child", bind)
     monkeypatch.setattr(model_trial_claude.subprocess, "Popen", launch)
     try:
-        result = execute_live(LIVE, tmp_path / "out", claude_bin=str(exe), environ=ENVIRON, timeout=0.15)
+        timeout = 20 if leader_exited else 0.15
+        result = execute_live(LIVE, tmp_path / "out", claude_bin=str(exe), environ=ENVIRON, timeout=timeout)
         code = 0 if leader_exited else (125 if reaps else None)
         drain_failed = not releases_pipes or not reaps
         assert outcomes == [(code, not leader_exited, drain_failed)] * 2
@@ -894,6 +904,30 @@ def test_windows_arm_has_a_deadline_even_when_a_descendant_holds_the_pipes(
             worker.join(timeout=1)
         for work in work_dirs:
             model_trial_claude.remove_work_dir(work)
+
+
+def test_windows_paired_tool_captures_output_when_its_cli_leaves_a_pipe_writer(monkeypatch, tmp_path):
+    script = (
+        "import subprocess, sys\n"
+        "subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(3)'], "
+        "stdin=subprocess.DEVNULL, stdout=sys.stdout, stderr=sys.stderr)\n"
+        "print('brief output', flush=True)\n"
+        "print('brief diagnostic', file=sys.stderr, flush=True)\n"
+    )
+    command = [sys.executable, "-c", script]
+    real_run = subprocess.run
+    monkeypatch.setattr(model_trial_paired, "os", types.SimpleNamespace(name="nt", environ=ENVIRON))
+    monkeypatch.setattr(
+        model_trial_paired,
+        "subprocess",
+        types.SimpleNamespace(run=lambda _args, **kwargs: real_run(command, **{**kwargs, "timeout": 2})),
+    )
+    boundary = model_trial_paired.Boundary(tmp_path, "passing-verify", {("SKILL.md",): b"# fake skill"})
+    assert boundary.call("brief", {}) == {
+        "exit_code": 0,
+        "stdout": "brief output\n",
+        "stderr": "brief diagnostic\n",
+    }
 
 
 def test_windows_arm_declares_all_win32_job_and_thread_prototypes(monkeypatch, tmp_path):

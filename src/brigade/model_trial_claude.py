@@ -64,6 +64,7 @@ ANCESTOR_INSTRUCTION_FILES = ("CLAUDE.md", "AGENTS.md")
 VERSION_TIMEOUT = 30.0
 VERSION_MAX_BYTES = 4096
 EXIT_GRACE = 10.0
+WINDOWS_PIPE_DRAIN_GRACE = 1.0
 # After the arm's leader exits, give every process it started this long to be gone before the work
 # directory is removed. The same bound the supervised scanner launches use.
 GROUP_DRAIN_SECONDS = proc.GROUP_DRAIN_SECONDS
@@ -774,11 +775,13 @@ def _run_windows_process(
     output: queue.Queue[bytes | OSError] = queue.Queue(maxsize=1)
     poll_interval = 0.01
     stopped = timed_out = cleanup_failed = False
+    drain_deadline = deadline
 
     def stop_tree() -> None:
-        nonlocal stopped, cleanup_failed
+        nonlocal stopped, cleanup_failed, drain_deadline
         if not stopped:
             stopped = True
+            drain_deadline = min(deadline, time.monotonic() + WINDOWS_PIPE_DRAIN_GRACE)
             try:
                 cleanup_failed = not job.terminate()
             finally:
@@ -823,7 +826,7 @@ def _run_windows_process(
                 stop_tree()
                 if eof:
                     return
-            remaining = deadline - time.monotonic()
+            remaining = drain_deadline - time.monotonic()
             if remaining <= 0:
                 timed_out = not exited
                 # An exited leader can still leave unread output at the deadline.
@@ -869,13 +872,13 @@ def _run_windows_process(
         for _, pipe in workers[started:]:
             pipe.close()
         for worker, _ in workers[:started]:
-            worker.join(timeout=max(0.0, deadline - time.monotonic()))
+            worker.join(timeout=max(0.0, drain_deadline - time.monotonic()))
             if worker.is_alive():
                 cleanup_failed = True
         code = child.poll()
         if code is None:
             try:
-                code = child.wait(timeout=max(0.0, deadline - time.monotonic()))
+                code = child.wait(timeout=max(0.0, drain_deadline - time.monotonic()))
             except (OSError, subprocess.TimeoutExpired):
                 cleanup_failed = True
         if primary is not None and cleanup_failed:
