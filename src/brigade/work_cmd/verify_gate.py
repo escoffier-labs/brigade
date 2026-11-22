@@ -452,9 +452,13 @@ def _receipt_policy_verdict(
     if policy.mode == "audit_only":
         problem = _blocked_reason(receipt)
         return problem is None, problem or "audit_only"
+    if problem := _blocked_reason(receipt):
+        return False, problem
+    if policy.needs_plan_coverage and policy.fallback_source is not None:
+        return False, "plan_base_unresolved"
     eligible, reason = receipt_is_gating(receipt)
     stamp = receipt.get("gating")
-    if isinstance(stamp, dict) and reason != "invalid_gating" and not _blocked_reason(receipt):
+    if isinstance(stamp, dict) and reason != "invalid_gating":
         if not policy.matches(stamp, current_tree):
             return False, "policy_changed"
     return eligible, reason
@@ -469,6 +473,13 @@ def _suggested_argv(policy: _GatePolicy) -> list[str]:
 def _policy_error(policy: _GatePolicy) -> str:
     detail = policy.error or "Git timed out reading the required check"
     return f"Could not load {_DECLARATION_PATH}: {detail}."
+
+
+def _command_span(command: str) -> str:
+    longest = max((len(run) for run in re.findall(r"`+", command)), default=0)
+    delimiter = "`" * (longest + 1)
+    contents = f" {command} " if longest else command
+    return f"{delimiter}{contents}{delimiter}"
 
 
 def _plan_guidance(receipt: Mapping[str, Any], reason: str) -> tuple[str | None, list[str] | None]:
@@ -507,7 +518,9 @@ def receipt_counts_for_policy(
         return False, f"The repository's required check could not be read. {_policy_error(policy)}"
     explanation, argv = _plan_guidance(receipt, reason)
     explanation = explanation or "The last run has an ineligible required-check verdict."
-    if policy.mode == "audit_only" or reason == "plan_error":
+    if reason == "plan_base_unresolved" and policy.base_message:
+        explanation += f" {policy.base_message}"
+    if policy.mode == "audit_only" or reason in {"plan_error", "plan_base_unresolved"}:
         return False, explanation
     command = (
         f"brigade work verify run --target {shlex.quote(str(target))} "
@@ -516,7 +529,7 @@ def receipt_counts_for_policy(
     return (
         False,
         "The latest verification run for this session is not the repository's required check. "
-        f"{explanation} Run `{command}` in a POSIX shell.",
+        f"{explanation} Run {_command_span(command)} in a POSIX shell.",
     )
 
 
@@ -626,14 +639,14 @@ class StopGate:
         if policy.mode == "unresolved":
             message = f"{self.target}: {_policy_error(policy)}"
         else:
-            message = f"{self.target}: run `{replacement}` in a POSIX shell."
+            message = f"{self.target}: run {_command_span(replacement)} in a POSIX shell."
             if policy.mode == "audit_only":
                 message += "\n  This repository declares no required check."
         threshold = localio.parse_iso_datetime(since)
         if self._last_ineligible and threshold is not None and self._last_ineligible[1] >= threshold:
             _, _, reason, receipt = self._last_ineligible
             explanation, _ = _plan_guidance(receipt, reason)
-            if reason == "plan_error":
+            if reason in {"plan_error", "plan_base_unresolved"}:
                 return f"{self.target}: {explanation}"
             if explanation:
                 message += f"\n  {explanation}"

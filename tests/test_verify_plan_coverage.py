@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import shlex
 import subprocess
 from datetime import datetime, timedelta, timezone
@@ -10,8 +12,15 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from brigade import cli, localio
-from brigade.claude_hooks import runtime
-from brigade.work_cmd import closeout_receipt, verification, verify_gate, verify_required, verify_runtime
+from brigade.claude_hooks import classify, runtime
+from brigade.work_cmd import (
+    closeout_receipt,
+    verification,
+    verify_gate,
+    verify_receipt_details,
+    verify_required,
+    verify_runtime,
+)
 
 from tests.test_verify_gate import DECLARATION, PREFIX, _declaration, _start
 from tests.test_verify_gate import repo as gate_repo
@@ -427,3 +436,162 @@ def test_stamp_staleness_and_reuse(repo, monkeypatch, capsys):
     counts(True)
     git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
     counts(False)
+
+
+def _unresolved_base(repo):
+    _setup(repo)
+    git(repo, "update-ref", "-d", "refs/remotes/origin/main")
+
+
+def _assert_unresolved_base_guidance(message):
+    assert "The required-test plan needs a resolved Git base." in message
+    assert "git remote set-head origin -a" in message
+    assert "The required check rule changed" not in message
+
+
+def test_stop_explains_unresolved_base(repo, monkeypatch, capsys):
+    _unresolved_base(repo)
+    stop, _ = _start(repo, monkeypatch)
+    _run(repo, monkeypatch, capsys, [[A, B]])
+    result = runtime.handle_payload("Stop", stop)
+    assert result["decision"] == "block"
+    _assert_unresolved_base_guidance(result["reason"])
+
+
+def test_closeout_explains_unresolved_base(repo, monkeypatch, capsys):
+    _unresolved_base(repo)
+    receipt = _run(repo, monkeypatch, capsys, [[A, B]])
+    receipt["producer_work_session_id"] = "fixture-session"
+    selected, blocker = closeout_receipt.select(repo, repo, {"id": "fixture-session"}, [receipt])
+    assert selected is receipt
+    _assert_unresolved_base_guidance(blocker)
+    assert verify_gate.reuse_gating(repo, receipt) is None
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows filenames cannot contain double quotes")
+def test_guidance_code_span_round_trips_special_filename(repo, monkeypatch, capsys):
+    required = 'tests/test `"case"``.py'
+    _setup(repo, selected=[required])
+    stop, _ = _start(repo, monkeypatch)
+    receipt = _run(repo, monkeypatch, capsys, [[OTHER]])
+    _, blocker = verify_gate.receipt_counts_for_policy(repo, receipt)
+    for message in (runtime.handle_payload("Stop", stop)["reason"], blocker):
+        span = re.search(r"(`{3}) (.*--argv-json.*?) \1", message)
+        assert span is not None
+        words = shlex.split(span.group(2))
+        assert json.loads(words[words.index("--argv-json") + 1]) == [*PREFIX, required]
+
+
+def test_empty_receipt_scan_and_classify_do_not_probe_policy(repo, monkeypatch):
+    _setup(repo, flag=False)
+    stop, state = _start(repo, monkeypatch)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("policy Git probe with no verification receipts")
+
+    monkeypatch.setattr(verify_gate.verify_manifest_git, "_git", unexpected)
+    assert not runtime._receipt_since(
+        repo, state["last_write_at"], session_fingerprint=state["session_fingerprint"], gate=verify_gate.StopGate(repo)
+    )
+    assert not runtime._session_has_completed_receipt(
+        repo, since=state["started_at"], session_fingerprint=state["session_fingerprint"]
+    )
+    assert runtime.read_session_state(repo, stop["session_id"])["write_observed"]
+    assert classify.classify(repo)["state"] == "dormant"
+
+
+def test_inherited_env_default_keeps_main_fields():
+    env = {"PY": "wrapper", "PYTHONPATH": "fixture", "PYTEST_ADDOPTS": "-q", "PYTEST_PLUGINS": "example"}
+    expected = {"pythonpath_set": True, "PYTEST_ADDOPTS": "-q", "PYTEST_PLUGINS": "example"}
+    assert verify_receipt_details.inherited_test_env(env) == expected
+    assert verify_receipt_details.inherited_test_env(env, include_py=True) == {**expected, "py_set": True}
+
+
+def test_no_declaration_keeps_audit_stamp_and_decisions(repo, monkeypatch, capsys):
+    commit(repo, "fixture without a declaration")
+    stop, _ = _start(repo, monkeypatch)
+    monkeypatch.setenv("PY", "")
+    receipt = _run(repo, monkeypatch, capsys, [[]], stdout="")
+    assert receipt["inherited_test_env"] == {"pythonpath_set": False}
+    assert receipt["gating"] == {
+        "mode": "audit_only",
+        "eligible": True,
+        "reason": "audit_only",
+        "plan_coverage": "not_checked",
+    }
+    assert verify_gate.receipt_counts_for_policy(repo, receipt) == (True, None)
+    assert verify_gate.reuse_gating(repo, receipt) == receipt["gating"]
+    result = runtime.handle_payload("Stop", stop)
+    assert result is None or result.get("decision") != "block"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["-n", "4", "-k", "x"],
+        ["--tb=short", "--deselect", A + "::t"],
+        ["-p", "xdist", "-p", "no:cacheprovider"],
+        ["-qk", "x"],
+        ["-q", "-x"],
+        ["--dese", A + "::t"],
+        ["--tb", A],
+    ],
+)
+def test_option_combinations_do_not_contribute(repo, monkeypatch, capsys, args):
+    _setup(repo)
+    files = [B] if args == ["--tb", A] else [A, B]
+    stamp = _run(repo, monkeypatch, capsys, [[*args, *files]])["gating"]
+    assert not stamp["eligible"]
+    assert stamp["plan"]["missing_files"] == [A, B]
+
+
+def test_duplicate_required_file_counts_once(repo, monkeypatch, capsys):
+    _setup(repo)
+    stamp = _run(repo, monkeypatch, capsys, [[A, A]])["gating"]
+    assert not stamp["eligible"]
+    assert stamp["plan"]["missing_files"] == [B]
+    assert _run(repo, monkeypatch, capsys, [[A, A, B]])["gating"]["eligible"]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="creating a worktree symlink can require Windows privileges")
+def test_symlink_in_verified_tree_cannot_cover_its_target(repo, monkeypatch, capsys):
+    _setup(repo)
+    alias = "tests/test_alias.py"
+    (repo / alias).symlink_to("test_a.py")
+    assert git(repo, "diff", "--name-only") == ""
+    receipt = _run(repo, monkeypatch, capsys, [[alias, B], [B]])
+    assert git(repo, "ls-tree", receipt["tree_fingerprint"], "--", alias).startswith("120000 blob")
+    assert receipt["gating"]["plan"]["missing_files"] == [A]
+    assert not receipt["gating"]["eligible"]
+
+
+@pytest.mark.parametrize("process", ["planner", "git"])
+def test_hung_process_during_planning_preserves_command_status(repo, monkeypatch, capsys, process):
+    _setup(repo)
+    run = subprocess.run
+    calls = []
+    monkeypatch.setattr(verify_gate, "monotonic", lambda: 200.0)
+    monkeypatch.setattr(verify_required, "PLANNER_TIMEOUT_SECONDS", 0.25)
+    monkeypatch.setattr(verify_required, "monotonic", lambda: 200.0)
+
+    def timeout(argv, *args, **kwargs):
+        match = (
+            argv[:3] == ["git", "--no-replace-objects", "--literal-pathspecs"]
+            if process == "git"
+            else (argv[1:3] == ["-E", "-S"])
+        )
+        if match:
+            calls.append(kwargs["timeout"])
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        return run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", timeout)
+    stop, _ = _start(repo, monkeypatch)
+    receipt = _run(repo, monkeypatch, capsys, [[A, B]])
+    assert calls == [0.25]
+    assert receipt["status"] == receipt["commands"][0]["status"] == "completed"
+    assert receipt["commands"][0]["exit_code"] == 0
+    assert receipt["gating"]["reason"] == "plan_error"
+    assert receipt["gating"]["plan"]["mode"] == "error"
+    assert "timed out" in receipt["gating"]["plan"]["reason"]
+    assert "planning failed" in runtime.handle_payload("Stop", stop)["reason"]

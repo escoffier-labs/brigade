@@ -14,6 +14,7 @@ import threading
 import time
 from datetime import datetime
 from io import StringIO
+from itertools import chain
 from queue import Empty
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Iterator
@@ -1731,11 +1732,15 @@ def _foreign_write_since(
 def _qualified_verify_receipts(
     target: Path, started: datetime, fingerprint: str | None, gate: StopGate | None
 ) -> Iterator[tuple[dict[str, Any], datetime]]:
+    matching = (receipt for receipt in _iter_verify_receipts(target) if _receipt_target_matches(receipt, target))
+    first = next(matching, None)
+    if first is None:
+        return
+    receipts = chain((first,), matching)
     if gate is None:
         from ..work_cmd.verify_gate import StopGate
 
         gate = StopGate(target)
-    receipts = (receipt for receipt in _iter_verify_receipts(target) if _receipt_target_matches(receipt, target))
     if gate.requires_plan:
         yield from gate.latest_completion(receipts, started, fingerprint)
         return
@@ -2023,6 +2028,10 @@ def _receipt_since(
     if started is None:
         return False
     target = target.expanduser().resolve()
+    receipts = _qualified_verify_receipts(target, started, session_fingerprint, gate)
+    first = next(receipts, None)
+    if first is None:
+        return False
     # Snapshotting is an optional strengthening signal.  ``None`` preserves
     # hook operation in non-Git workspaces and on local Git/tool errors.
     audited_tree = gate.current_tree if gate is not None and gate.requires_plan else localio.tree_fingerprint(target)
@@ -2030,7 +2039,7 @@ def _receipt_since(
         _session_id_for_fingerprint(target, session_fingerprint) if isinstance(session_fingerprint, str) else None
     )
     drifted: list[datetime] = []
-    for receipt, completed in _qualified_verify_receipts(target, started, session_fingerprint, gate):
+    for receipt, completed in chain((first,), receipts):
         if audited_tree is None or receipt.get("tree_fingerprint") == audited_tree:
             return True
         drifted.append(completed)

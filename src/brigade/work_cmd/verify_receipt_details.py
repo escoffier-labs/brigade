@@ -41,11 +41,11 @@ def is_busy_exit(exit_code: int | None, *streams: str) -> bool:
     )
 
 
-def inherited_test_env(environ: Mapping[str, str] | None = None) -> dict[str, Any]:
+def inherited_test_env(environ: Mapping[str, str] | None = None, *, include_py: bool = False) -> dict[str, Any]:
     """Return the bounded inherited test environment recorded by verify."""
     source = os.environ if environ is None else environ
     result: dict[str, Any] = {"pythonpath_set": "PYTHONPATH" in source}
-    if "PY" in source:
+    if include_py and "PY" in source:
         result["py_set"] = True
     for name in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS"):
         if name in source:
