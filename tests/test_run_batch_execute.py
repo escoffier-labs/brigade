@@ -45,11 +45,11 @@ role = "implement"
     return tmp_path, calls
 
 
-def invoke(setup, capsys, tasks, request="req"):
+def invoke(setup, capsys, tasks, request="req", *, extra_args=()):
     root, _ = setup
     path = root / "batch.json"
     path.write_text(json.dumps({"schema": SCHEMA, "request_id": request, "tasks": tasks}))
-    rc = cli.main(["run", "batch", str(path), "--cwd", str(root), "--json"])
+    rc = cli.main(["run", "batch", str(path), "--cwd", str(root), "--json", *extra_args])
     captured = capsys.readouterr()
     assert captured.out, captured.err
     return rc, json.loads(captured.out), captured.err
@@ -160,6 +160,35 @@ def test_cancellation_keeps_completed_sibling(setup, capsys, monkeypatch):
     assert result["tasks"]["b"]["status"] == "unknown"
     assert invoke(setup, capsys, [task("a"), task("b")])[:2] == (1, result)
     assert len(setup[1]) == 2
+
+
+def test_dispatch_budget_exhaustion_preserves_completed_task_on_retry(setup, capsys):
+    root, calls = setup
+    budget = root / "budget.json"
+    budget.write_text(
+        json.dumps(
+            {
+                "schema": "brigade.run_budget.v1",
+                "schema_version": 1,
+                "ceilings": {"worker_dispatch_count": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    tasks = [task("a"), task("b", ["a"])]
+    budget_args = ("--run-budget", str(budget))
+    rc, result, err = invoke(setup, capsys, tasks, extra_args=budget_args)
+    assert rc == 1, err
+    run_dir = root / ".brigade" / "runs" / result["run_id"]
+    run_receipt = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert run_receipt["failure"]["kind"] == "budget-exhausted"
+    assert result["tasks"]["a"]["status"] == "completed"
+    assert result["tasks"]["b"]["not_run"] is True
+    receipt = run_dir / result["tasks"]["a"]["result_ref"]
+    retained = receipt.read_bytes()
+    assert invoke(setup, capsys, tasks, extra_args=budget_args)[:2] == (1, result)
+    assert receipt.read_bytes() == retained
+    assert len(calls) == 1 and "task_id: a" in calls[0]
 
 
 def test_crash_before_fingerprint_allows_launch(setup, capsys):
