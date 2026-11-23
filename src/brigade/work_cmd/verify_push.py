@@ -12,7 +12,7 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
-from functools import cached_property, partial
+from functools import cache, cached_property, partial
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
@@ -236,12 +236,15 @@ def _check(target: Path, updates: list[tuple[str, str]], ref: str | None, deadli
     by_commit: dict[str, _Verdict] = {}
     by_tree: dict[tuple[verify_gate._GatePolicy, str], _Verdict] = {}
 
+    bases = verify_manifest_git._BaseResolver(target, deadline=deadline, git_env=git_env)
+
+    @cache
     def committed_policy(commit: str) -> verify_gate._GatePolicy | None:
         return verify_gate._committed_policy(target, commit, deadline, git_env=git_env)
 
     def check_tip(commit: str) -> _Verdict:
         _remaining(deadline)
-        base = verify_manifest_git.resolve_base(target, commit=commit, deadline=deadline, git_env=git_env)
+        base = bases.resolve(commit)
         if base.status != "resolved" or base.commit is None:
             raise _Indeterminate(base.message or "The trusted Git base is unresolved.")
         if base.default_branch_tip is None:
