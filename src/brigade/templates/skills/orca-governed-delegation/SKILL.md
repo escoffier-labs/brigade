@@ -1,8 +1,8 @@
 ---
 name: orca-governed-delegation
 description: Use when a Brigade coordinator delegates work to local Orca workers through brigade orca. Follow the governed open, claim, worker-start, accepted, observe, ack and finalize lifecycle, and use cancel, hold-resolve and status for recovery and capacity. Checked against Orca 1.4.269.
-allowed-tools: Read, Grep, Bash(brigade orca:*)
-compatibility: A Linux workspace with Brigade Orca support and the Orca 1.4.269 CLI. The command is orca-ide because /usr/bin/orca is the screen reader.
+allowed-tools: Read, Grep, Bash(brigade orca:*), Bash(brigade roster ready:*)
+compatibility: A Linux workspace with Brigade Orca support and a compatible Orca CLI. The command is orca-ide because /usr/bin/orca is the screen reader.
 ---
 
 # orca-governed-delegation
@@ -18,6 +18,13 @@ Placeholders: `<batch.json>` is a `brigade.run_batch.v1` batch;
 receipts; `<result-id>` comes from a Brigade terminal result.
 
 ## Call order
+
+Before the initial claim, run
+`brigade roster ready --route orca --worker <seat> --target <workspace> --json`
+on the coordinator with the PATH you will use to launch. Proceed only on
+`ready`. After upgrading Orca, set the seat's `orca_version` to the exact
+installed version, rerun readiness, and use a fresh enrollment for new work.
+Keep the original enrollment and retry keys for retained work.
 
 1. Enroll the batch: `brigade orca open <batch.json> --target <workspace>`. It prints a
    Brigade run and task identity and launches nothing. If it refuses with

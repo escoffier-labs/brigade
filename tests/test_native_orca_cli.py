@@ -396,7 +396,7 @@ def test_orca_1_4_269_budget_and_abandoned_capacity(coordinator):
 
 def test_orca_1_4_269_unsupported_hands_off_only_at_admission(coordinator):
     roster = coordinator.workspace / ".brigade" / "roster.toml"
-    roster.write_text(roster.read_text().replace(VERSION, "1.4.265"))
+    roster.write_text(roster.read_text().replace(VERSION, "1.4.269 extra"))
     err = coordinator.invoke("open", coordinator.batch, error="orca-unsupported")
     assert err.splitlines()[:2] == [
         "error [orca-unsupported]: task one version-unsupported",

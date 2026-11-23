@@ -105,9 +105,14 @@ def test_model_effort_and_placement_rules(agent, worktree, options, code):
     assert HOST.structural_gap(HOST.resolve_target(loaded, "builder", REVISION)) == code
 
 
-def test_unqualified_orca_version_is_refused():
+def test_new_orca_version_is_valid_enrollment_data():
+    target = target_for_seat(_roster(version="1.4.271"), "builder", source_revision=REVISION)
+    assert target.orca_version == "1.4.271"
+
+
+def test_malformed_orca_version_is_refused():
     with pytest.raises(NativeChildError) as exc:
-        target_for_seat(_roster(version="1.4.265"), "builder", source_revision=REVISION)
+        target_for_seat(_roster(version="1.4.269 extra"), "builder", source_revision=REVISION)
     assert exc.value.code == "orca-unsupported"
 
 
@@ -144,14 +149,17 @@ def test_launch_uses_the_retained_request_and_local_bound_task():
         assert exc.value.code == "retry-request-invalid"
 
 
-def test_start_replay_correlates_the_same_attempt():
+@pytest.mark.parametrize("declared_version", [VERSION, "1.4.271"])
+def test_start_replay_correlates_the_same_attempt(declared_version):
+    # The receipt is the 1.4.268 wire fixture. The declaration is separate data.
+    target = replace(_target(), orca_version=declared_version)
     payload = _start()
-    first = parse_start(_binding(), _target(), payload, exit_code=0)
+    first = parse_start(_binding(), target, payload, exit_code=0)
     payload["result"]["mutation"]["replayed"] = True
-    assert parse_start(_binding(), _target(), payload, exit_code=0) == first
+    assert parse_start(_binding(), target, payload, exit_code=0) == first
     assert (first.run_id, first.task_id, first.dispatch_id) == (RUN, TASK, DISPATCH)
     assert first.binding.brigade_attempt_id == ATTEMPT
-    assert first.orca_version == VERSION
+    assert first.orca_version == declared_version
 
 
 @pytest.mark.parametrize(

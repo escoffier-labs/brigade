@@ -145,9 +145,7 @@ def _matched_configuration(
         "source_revision": lambda value: isinstance(value, str) and re.fullmatch(REVISION, value) is not None,
         "isolation": lambda value: value in ISOLATIONS,
         "concurrency": lambda value: type(value) is int and value > 0,
-        "orca_version": lambda value: (
-            isinstance(value, str) and re.fullmatch(r"[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}", value) is not None
-        ),
+        "orca_version": native_orca_host.valid_version,
     }
     observed = {}
     mismatches = []
@@ -235,7 +233,7 @@ def collect(arm: str, run_dir: Path, status_path: Path, measurements_path: Path)
     return {
         "schema": "brigade.orca_qualification.v1",
         "arm": arm,
-        "orca_version": _pattern(measurements["orca_version"], r"[0-9]{1,6}\.[0-9]{1,6}\.[0-9]{1,6}"),
+        "orca_version": _pattern(measurements["orca_version"], native_orca_host.ORCA_VERSION_PATTERN),
         "brigade_commit": _pattern(measurements["brigade_commit"], REVISION),
         **configuration,
         "configuration_mismatch": bool(mismatches),
@@ -302,8 +300,6 @@ def main() -> None:
         NativeChildCustodyError,
     ):
         parser.exit(2, "Qualification evidence is missing or invalid. Check the local inputs.\n")
-    if record["orca_version"] not in native_orca_host.SUPPORTED_VERSIONS:
-        print("Warning: Orca version is outside Brigade's supported set.", file=sys.stderr)
     print(json.dumps(record, sort_keys=True, allow_nan=False))
 
 
