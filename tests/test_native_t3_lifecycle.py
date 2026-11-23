@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -21,6 +24,7 @@ from tests.test_native_t3_claim import (
     POSIX_ONLY,
     TASK_TEXT,
     THREAD,
+    _batch,
     _claim,
     _enroll,
     _events,
@@ -30,6 +34,7 @@ from tests.test_native_t3_claim import (
     _run_dir,
     _terminal,
     _terminal_reply,
+    _workspace,
     t3_task_id,
 )
 
@@ -65,6 +70,97 @@ def _complete(workspace: Path, run_id: str, task_id: str, *, status: str = "comp
     report = _accepted(workspace, run_id, task_id, _terminal_reply(workspace, run_id, task_id, status=status))
     assert report["result_id"] is not None
     return report["result_id"]
+
+
+@POSIX_ONLY
+def test_governed_t3_recovery_across_cli_processes(tmp_path):
+    workspace = _workspace(tmp_path)
+    batch = _batch(tmp_path, ("one",))
+    # Inherit the fixture's temporary homes and Git boundary without live Hub
+    # configuration or harness identity. Each call starts a new interpreter.
+    env = {
+        name: os.environ[name]
+        for name in (
+            "PATH",
+            "HOME",
+            "BRIGADE_HOME",
+            "BRIGADE_USER_DIR",
+            "BRIGADE_EXTRAS",
+            "GIT_CEILING_DIRECTORIES",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+        )
+        if name in os.environ
+    }
+
+    def invoke(*args: str, payload: dict | None = None, refusal: str | None = None) -> dict:
+        completed = subprocess.run(
+            [sys.executable, "-m", "brigade", "t3", *args, "--target", str(workspace)],
+            cwd=workspace,
+            env=env,
+            input=json.dumps(payload) if payload is not None else "",
+            capture_output=True,
+            encoding="utf-8",
+            timeout=30,
+            check=False,
+        )
+        if refusal:
+            assert completed.returncode == 2, completed
+            assert completed.stdout == "" and f"[{refusal}]" in completed.stderr, completed
+            return {}
+        assert completed.returncode == 0, completed
+        return json.loads(completed.stdout)
+
+    run_id = invoke("open", str(batch))["run_id"]
+    parent_args = (run_id, "one", "--parent-thread", THREAD)
+    claim = invoke("claim", *parent_args)
+    assert claim["dispatch_attempt"] == 1
+    request_key = claim["delegate_task"]["clientRequestId"]
+    assert request_key == claim["clientRequestId"]
+    identity = {"run_id": run_id, "task_id": "one", "attempt_id": claim["attempt_id"]}
+
+    native = _native(request_key=request_key)
+    accepted = invoke("accepted", *parent_args, "--native-json", "-", payload=native)
+    assert all(accepted[key] == value for key, value in identity.items())
+    assert accepted["mode"] == "parent-reported" and accepted["result_id"] is None
+    assert accepted["child_thread_id"] == native["childThreadId"]
+    assert accepted["child_run_id"] == native["childRunId"]
+    assert accepted["child_node_id"] == native["childNodeId"]
+    invoke("claim", *parent_args, refusal="already-claimed")
+
+    terminal = _terminal(request_key=request_key)
+    observe_args = ("observe", *parent_args, "--native-json", "-")
+    invoke(*observe_args, payload={**terminal, "childThreadId": "thread-other"}, refusal="handle-mismatch")
+    observed = invoke(*observe_args, payload=terminal)
+    assert all(observed[key] == value for key, value in identity.items())
+    assert observed["status"] == "completed" and observed["replayed"] is False
+    result_id = observed["result_id"]
+    assert result_id and len(result_id) == 64
+
+    journal = _journal(workspace, run_id)
+    before = journal.read_bytes()
+    assert invoke(*observe_args, payload=terminal) == {**observed, "replayed": True}
+    wrong_result_id = "0" * 64 if result_id != "0" * 64 else "1" * 64
+    invoke("ack", run_id, "one", "--result-id", wrong_result_id, refusal="result-mismatch")
+    assert journal.read_bytes() == before
+
+    ack_args = ("ack", run_id, "one", "--result-id", result_id)
+    acked = invoke(*ack_args)
+    assert (acked["run_id"], acked["task_id"], acked["result_id"]) == (run_id, "one", result_id)
+    assert acked["acknowledged"] is True and acked["replayed"] is False
+    finalized = invoke("finalize", run_id)
+    assert finalized["run_id"] == run_id and finalized["status"] == "completed"
+    assert (finalized["tasks"], finalized["terminals"], finalized["acknowledged"]) == (1, 1, 1)
+
+    before = journal.read_bytes()
+    assert invoke(*ack_args) == {**acked, "replayed": True}
+    assert journal.read_bytes() == before
+    status = invoke("status", run_id, "--json")
+    assert status["status"] == "completed"
+    (task,) = status["tasks"]
+    assert task["task_id"] == "one" and task["correlated"] and task["terminal"] and task["acked"]
+    events = [event.event_type for event in _events(workspace, run_id)]
+    assert events.count(dispatch.CLAIM_EVENT) == events.count("run.dispatch.requested") == 1
 
 
 @POSIX_ONLY
