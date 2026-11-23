@@ -174,7 +174,7 @@ class _PypiHttp(_Http):
         manifest,
         *,
         pypi_releases=None,
-        info_version: str = "0.31.0",
+        info_version: str = "0.32.0",
         tag_ref=None,
         tag_objects=None,
     ):
@@ -186,7 +186,7 @@ class _PypiHttp(_Http):
         self.urls.append(url)
         if url == update_cmd.PYPI_PROJECT_JSON_URL:
             # Mirror live PyPI: info.version stays on the latest stable release
-            # even when releases contains 0.32.0.devYYYYMMDD wheels.
+            # even when releases contains 0.33.0.devYYYYMMDD wheels.
             return {"info": {"version": self.info_version}, "releases": self.pypi_releases}
         if url == "https://api.github.com/repos/escoffier-labs/brigade":
             return {"id": update_cmd.REPOSITORY_ID, "full_name": "escoffier-labs/brigade"}
@@ -200,11 +200,11 @@ class _PypiHttp(_Http):
 
 
 def _default_beta_releases() -> dict:
-    version = "0.32.0.dev20260808"
+    version = "0.33.0.dev20260808"
     return {version: [_wheel_file(version)]}
 
 
-BETA_VERSION = "0.32.0.dev20260808"
+BETA_VERSION = "0.33.0.dev20260808"
 
 
 class _Response:
@@ -386,25 +386,25 @@ def test_cache_manifest_rejects_existing_bytes_for_the_same_digest_path(tmp_path
 
 def test_resolve_beta_cli_version_selects_newest_non_yanked_current_base_dev_wheel():
     releases = {
-        "0.32.0.dev20260801": [_wheel_file("0.32.0.dev20260801")],
-        "0.32.0.dev20260810": [_wheel_file("0.32.0.dev20260810", yanked=True)],
-        "0.32.0.dev20260809": [_wheel_file("0.32.0.dev20260809")],
-        "0.32.0.dev20260808": [_sdist_file("0.32.0.dev20260808")],
-        "0.31.0.dev20260811": [_wheel_file("0.31.0.dev20260811")],
-        "0.33.0.dev20260811": [_wheel_file("0.33.0.dev20260811")],
-        "0.32.0.dev2026080": [_wheel_file("0.32.0.dev2026080")],
-        "0.32.0.dev202608091": [_wheel_file("0.32.0.dev202608091")],
-        "0.32.0a1": [_wheel_file("0.32.0a1")],
-        "0.32.0rc1": [_wheel_file("0.32.0rc1")],
-        "0.32.0.dev20260809.post1": [_wheel_file("0.32.0.dev20260809.post1")],
-        "0.32.1.dev20260811": [_wheel_file("0.32.1.dev20260811")],
+        "0.33.0.dev20260801": [_wheel_file("0.33.0.dev20260801")],
+        "0.33.0.dev20260810": [_wheel_file("0.33.0.dev20260810", yanked=True)],
+        "0.33.0.dev20260809": [_wheel_file("0.33.0.dev20260809")],
+        "0.33.0.dev20260808": [_sdist_file("0.33.0.dev20260808")],
+        "0.32.0.dev20260811": [_wheel_file("0.32.0.dev20260811")],
+        "0.34.0.dev20260811": [_wheel_file("0.34.0.dev20260811")],
+        "0.33.0.dev2026080": [_wheel_file("0.33.0.dev2026080")],
+        "0.33.0.dev202608091": [_wheel_file("0.33.0.dev202608091")],
+        "0.33.0a1": [_wheel_file("0.33.0a1")],
+        "0.33.0rc1": [_wheel_file("0.33.0rc1")],
+        "0.33.0.dev20260809.post1": [_wheel_file("0.33.0.dev20260809.post1")],
+        "0.33.1.dev20260811": [_wheel_file("0.33.1.dev20260811")],
         "1.2.3": [_wheel_file("1.2.3")],
         "main": [_wheel_file("main")],
         "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb": [_wheel_file("bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")],
     }
     http = _PypiHttp(_release(_manifest()), _manifest(), pypi_releases=releases)
 
-    assert update_cmd.resolve_beta_cli_version(http) == "0.32.0.dev20260809"
+    assert update_cmd.resolve_beta_cli_version(http) == "0.33.0.dev20260809"
     assert update_cmd.PYPI_PROJECT_JSON_URL in http.urls
 
 
@@ -412,13 +412,13 @@ def test_resolve_beta_cli_version_selects_newest_non_yanked_current_base_dev_whe
     "releases",
     (
         {},
-        {"0.32.0.dev20260808": []},
-        {"0.32.0.dev20260808": [_wheel_file("0.32.0.dev20260808", yanked=True)]},
-        {"0.32.0.dev20260808": [_sdist_file("0.32.0.dev20260808")]},
-        {"0.32.0.dev20260808": "not-a-list"},
-        {"0.32.0.dev2026080": [_wheel_file("0.32.0.dev2026080")]},
-        {"0.31.0.dev20260808": [_wheel_file("0.31.0.dev20260808")]},
-        {"0.32.0a1": [_wheel_file("0.32.0a1")]},
+        {"0.33.0.dev20260808": []},
+        {"0.33.0.dev20260808": [_wheel_file("0.33.0.dev20260808", yanked=True)]},
+        {"0.33.0.dev20260808": [_sdist_file("0.33.0.dev20260808")]},
+        {"0.33.0.dev20260808": "not-a-list"},
+        {"0.33.0.dev2026080": [_wheel_file("0.33.0.dev2026080")]},
+        {"0.32.0.dev20260808": [_wheel_file("0.32.0.dev20260808")]},
+        {"0.33.0a1": [_wheel_file("0.33.0a1")]},
     ),
 )
 def test_resolve_beta_cli_version_fails_closed_without_installable_preview_wheel(releases):
@@ -430,33 +430,33 @@ def test_resolve_beta_cli_version_fails_closed_without_installable_preview_wheel
 def test_resolve_beta_cli_version_scans_releases_not_info_version():
     """Live PyPI shape after workflow 31422458576: info.version stays stable."""
     releases = {
-        "0.31.0": [_wheel_file("0.31.0")],
-        "0.32.0.dev20260810": [_wheel_file("0.32.0.dev20260810")],
+        "0.32.0": [_wheel_file("0.32.0")],
+        "0.33.0.dev20260810": [_wheel_file("0.33.0.dev20260810")],
     }
     http = _PypiHttp(
         _release(_manifest()),
         _manifest(),
         pypi_releases=releases,
-        info_version="0.31.0",
+        info_version="0.32.0",
     )
 
-    assert update_cmd.resolve_beta_cli_version(http) == "0.32.0.dev20260810"
-    assert http.info_version == "0.31.0"
+    assert update_cmd.resolve_beta_cli_version(http) == "0.33.0.dev20260810"
+    assert http.info_version == "0.32.0"
 
 
 def test_resolve_beta_cli_version_ignores_info_version_even_when_it_looks_like_a_dev_wheel():
     releases = {
-        "0.31.0": [_wheel_file("0.31.0")],
-        "0.32.0.dev20260810": [_wheel_file("0.32.0.dev20260810")],
+        "0.32.0": [_wheel_file("0.32.0")],
+        "0.33.0.dev20260810": [_wheel_file("0.33.0.dev20260810")],
     }
     http = _PypiHttp(
         _release(_manifest()),
         _manifest(),
         pypi_releases=releases,
-        info_version="0.32.0.dev20991231",
+        info_version="0.33.0.dev20991231",
     )
 
-    assert update_cmd.resolve_beta_cli_version(http) == "0.32.0.dev20260810"
+    assert update_cmd.resolve_beta_cli_version(http) == "0.33.0.dev20260810"
 
 
 def test_resolve_beta_cli_version_fails_closed_when_releases_map_missing():
@@ -469,7 +469,7 @@ def test_resolve_beta_cli_version_fails_closed_when_releases_map_missing():
         def json(self, url: str):
             self.urls.append(url)
             assert url == update_cmd.PYPI_PROJECT_JSON_URL
-            return {"info": {"version": "0.31.0"}}
+            return {"info": {"version": "0.32.0"}}
 
         def bytes(self, url: str) -> bytes:
             raise AssertionError(url)
@@ -480,23 +480,23 @@ def test_resolve_beta_cli_version_fails_closed_when_releases_map_missing():
 
 def test_resolve_beta_cli_version_ignores_yanked_sibling_and_keeps_older_wheel():
     releases = {
-        "0.32.0.dev20260810": [_wheel_file("0.32.0.dev20260810", yanked=True)],
-        "0.32.0.dev20260809": [
-            _wheel_file("0.32.0.dev20260809", yanked=True),
-            _wheel_file("0.32.0.dev20260809"),
+        "0.33.0.dev20260810": [_wheel_file("0.33.0.dev20260810", yanked=True)],
+        "0.33.0.dev20260809": [
+            _wheel_file("0.33.0.dev20260809", yanked=True),
+            _wheel_file("0.33.0.dev20260809"),
         ],
-        "0.32.0.dev20260801": [_wheel_file("0.32.0.dev20260801")],
+        "0.33.0.dev20260801": [_wheel_file("0.33.0.dev20260801")],
     }
     http = _PypiHttp(_release(_manifest()), _manifest(), pypi_releases=releases)
-    assert update_cmd.resolve_beta_cli_version(http) == "0.32.0.dev20260809"
+    assert update_cmd.resolve_beta_cli_version(http) == "0.33.0.dev20260809"
 
 
 def test_parse_beta_dev_version_accepts_only_exact_current_base_daily_form():
-    assert update_cmd._parse_beta_dev_version("0.32.0.dev20260808") == "20260808"
-    assert update_cmd._parse_beta_dev_version("0.32.0.dev2026080") is None
-    assert update_cmd._parse_beta_dev_version("0.31.0.dev20260808") is None
-    assert update_cmd._parse_beta_dev_version("0.33.0.dev20260808") is None
-    assert update_cmd._parse_beta_dev_version("0.32.0a1") is None
+    assert update_cmd._parse_beta_dev_version("0.33.0.dev20260808") == "20260808"
+    assert update_cmd._parse_beta_dev_version("0.33.0.dev2026080") is None
+    assert update_cmd._parse_beta_dev_version("0.32.0.dev20260808") is None
+    assert update_cmd._parse_beta_dev_version("0.34.0.dev20260808") is None
+    assert update_cmd._parse_beta_dev_version("0.33.0a1") is None
     assert update_cmd._parse_beta_dev_version("b" * 40) is None
     assert update_cmd.is_legacy_beta_git_sha("b" * 40)
     assert not update_cmd.is_legacy_beta_git_sha(BETA_VERSION)

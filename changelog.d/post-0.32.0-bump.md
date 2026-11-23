@@ -1,0 +1,1 @@
+- Move the beta update base to 0.33.0. `brigade update --channel beta` fails closed until the first 0.33.0 development wheel publishes.
