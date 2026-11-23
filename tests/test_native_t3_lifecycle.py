@@ -86,12 +86,15 @@ def test_governed_t3_recovery_across_cli_processes(tmp_path):
             "BRIGADE_HOME",
             "BRIGADE_USER_DIR",
             "BRIGADE_EXTRAS",
+            "BRIGADE_NO_UPDATE_CHECK",
+            "BRIGADE_TELEMETRY",
             "GIT_CEILING_DIRECTORIES",
             "XDG_CONFIG_HOME",
             "XDG_DATA_HOME",
         )
         if name in os.environ
     }
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
 
     def invoke(*args: str, payload: dict | None = None, refusal: str | None = None) -> dict:
         completed = subprocess.run(
@@ -159,6 +162,12 @@ def test_governed_t3_recovery_across_cli_processes(tmp_path):
     assert status["status"] == "completed"
     (task,) = status["tasks"]
     assert task["task_id"] == "one" and task["correlated"] and task["terminal"] and task["acked"]
+    (retained,) = run_tasks.read_tasks(_run_dir(workspace, run_id))
+    assert retained.handle.attempt_id == identity["attempt_id"]
+    assert retained.provider_task_id == native["taskId"]
+    assert retained.original_run_id == native["childRunId"]
+    assert retained.provider_result_id == terminal["latestTerminalRunId"]
+    assert retained.result_id == result_id and retained.acknowledged
     events = [event.event_type for event in _events(workspace, run_id)]
     assert events.count(dispatch.CLAIM_EVENT) == events.count("run.dispatch.requested") == 1
 
