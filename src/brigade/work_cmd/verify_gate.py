@@ -12,7 +12,7 @@ import unicodedata
 from collections.abc import Iterable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
-from functools import cached_property
+from functools import cached_property, partial
 from pathlib import Path
 from time import monotonic
 from typing import Any, Literal
@@ -131,8 +131,10 @@ def _unreadable(detail: str) -> _GatePolicy:
     return _GatePolicy("unresolved", "declaration_unreadable", error=detail)
 
 
-def _committed_policy(target: Path, commit: str, deadline: float | None) -> _GatePolicy | None:
-    git = verify_manifest_git._git
+def _committed_policy(
+    target: Path, commit: str, deadline: float | None, *, git_env: dict[str, str] | None = None
+) -> _GatePolicy | None:
+    git = verify_manifest_git._git if git_env is None else partial(verify_manifest_git._git, git_env=git_env)
     entry = git(target, "ls-tree", "--full-tree", "-l", "-z", commit, "--", _DECLARATION_PATH, deadline=deadline)
     if entry.returncode:
         return _unreadable("Git could not read the declaration's tree entry")
@@ -446,9 +448,12 @@ _INELIGIBLE_NOTICE = {
 }
 
 
-def _receipt_policy_verdict(
-    receipt: Mapping[str, Any], policy: _GatePolicy, current_tree: str | None
+def evaluate_receipt(
+    policy: _GatePolicy, receipt: Mapping[str, Any], tree: str | None, *, deadline: float | None = None
 ) -> tuple[bool, str]:
+    """Evaluate a saved receipt against a loaded policy and supplied tree without I/O."""
+    if deadline is not None and monotonic() >= deadline:
+        return False, "policy_timeout"
     if policy.mode == "unresolved":
         return False, policy.reason
     if policy.mode == "audit_only":
@@ -461,7 +466,7 @@ def _receipt_policy_verdict(
     eligible, reason = receipt_is_gating(receipt)
     stamp = receipt.get("gating")
     if isinstance(stamp, dict) and reason != "invalid_gating":
-        if not policy.matches(stamp, current_tree):
+        if not policy.matches(stamp, tree):
             return False, "policy_changed"
     return eligible, reason
 
@@ -507,6 +512,10 @@ def _plan_guidance(receipt: Mapping[str, Any], reason: str) -> tuple[str | None,
     return _INELIGIBLE_NOTICE.get(reason), None
 
 
+def _render_verify_command(target: Path, argv: list[str]) -> str:
+    return f"brigade work verify run --target {shlex.quote(str(target))} --argv-json {shlex.quote(json.dumps(argv))}"
+
+
 def receipt_counts_for_policy(
     target: Path, receipt: Mapping[str, Any], *, current_tree: str | None = None
 ) -> tuple[bool, str | None]:
@@ -514,7 +523,7 @@ def receipt_counts_for_policy(
     policy = _load_policy(target, deadline=monotonic() + _CLOSEOUT_POLICY_BUDGET_SECONDS)
     if policy.needs_plan_coverage and current_tree is None:
         current_tree = localio.tree_fingerprint(target)
-    eligible, reason = _receipt_policy_verdict(receipt, policy, current_tree)
+    eligible, reason = evaluate_receipt(policy, receipt, current_tree)
     if eligible:
         return True, None
     if reason == "policy_timeout" and policy.mode == "unresolved":
@@ -527,10 +536,7 @@ def receipt_counts_for_policy(
         explanation += f" {policy.base_message}"
     if policy.mode == "audit_only" or reason in {"plan_error", "plan_base_unresolved"}:
         return False, explanation
-    command = (
-        f"brigade work verify run --target {shlex.quote(str(target))} "
-        f"--argv-json {shlex.quote(json.dumps(argv or _suggested_argv(policy)))}"
-    )
+    command = _render_verify_command(target, argv or _suggested_argv(policy))
     return (
         False,
         "The latest verification run for this session is not the repository's required check. "
@@ -587,7 +593,7 @@ class StopGate:
             return None
         receipt_started, completed = times
         current_tree = self.current_tree if self.requires_plan else None
-        eligible, reason = _receipt_policy_verdict(receipt, self._policy, current_tree)
+        eligible, reason = evaluate_receipt(self._policy, receipt, current_tree)
         if eligible:
             return completed
         stamp = receipt.get("gating")

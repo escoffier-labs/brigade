@@ -1,0 +1,1 @@
+- Add `brigade work verify push-check` to report whether local verification receipts cover pushed branch tips.

@@ -246,6 +246,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_work_verify_required.add_argument("--target", "-t", type=Path, default=Path("."), help="Repository to inspect.")
     p_work_verify_required.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_verify_required.add_argument("--worktree", action="store_true", help="Plan against the current Git tree.")
+
+    p_push_check = verify_sub.add_parser("push-check", help="Check local verification receipts for pushed branch tips.")
+    p_push_check.add_argument("--target", "-t", type=Path, default=Path("."), help="Repository to inspect.")
+    p_push_check.add_argument("--ref", help="Check a local ref instead of reading pre-push lines.")
+    p_push_check.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_verify_plan = verify_sub.add_parser("plan", help="Plan local verification without running commands.")
     p_work_verify_plan.add_argument(
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."

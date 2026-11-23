@@ -110,7 +110,7 @@ def test_completions_still_walk_the_full_tree(capsys):
     out = capsys.readouterr().out
     assert '["brigade fleet msg"]=' in out
     assert '["brigade memory"]=' in out
-    assert '["brigade work verify"]="ci plan required run runs show"' in out
+    assert '["brigade work verify"]="ci plan push-check required run runs show"' in out
 
 
 _PROBE = r"""

@@ -120,3 +120,38 @@ Closeout allows up to 60 seconds for policy lookup and blocks if lookup times ou
   reads as undeclared if a stand-in fails the remote and `HEAD` probes and
   the working-tree declaration is deleted. Required CI on the head commit
   checks the change independently.
+
+## Push check
+
+`brigade work verify push-check` reads Git pre-push updates from standard
+input. Each line contains the local ref, local object ID, remote ref, and
+remote object ID. Use `--ref <name>` to check a single local ref without
+reading standard input. Use `--target <path>` to select a worktree and
+`--json` for one object with a `refs` array.
+
+The check skips tags, deletions, and unchanged refs. It compares each pushed
+branch tip's committed tree to the newest tested receipt in that worktree
+with the same tree fingerprint or saved plan snapshot. It skips running,
+busy, and canceled receipts. A newer failed or ineligible run takes
+precedence over an older pass. Changes in the working tree and session
+identity have no effect. The declaration comes from the merge base of the
+pushed tip and the fetched default branch.
+
+| Result | Meaning |
+| --- | --- |
+| `ok` | The newest matching receipt meets the required check. |
+| `missing_receipt` | There is no matching local receipt. |
+| `rejected` | The newest matching receipt fails the required check. |
+| `not_applicable` | Neither the base nor the fetched default branch tip declares a required check. Text output is silent for this result. |
+| `base_predates_policy` | Update the branch from the default branch to pick up the declaration. |
+| `indeterminate` | The check could not reach a verdict, for example because the base is unresolved, the declaration is malformed, or a limit was reached. |
+
+The exit code is 1 if any result is `missing_receipt` or `rejected`, or 3
+if the only problems are `base_predates_policy` or `indeterminate`. It
+returns 0 for `ok`, `not_applicable`, or no branch updates, and 2 for
+invalid input. Missing or rejected receipts print a verification command.
+
+This version only reports results. It installs no hook and does not block
+a push. The command shares a two-second budget across its Git calls and
+reads at most 128 local receipts. It runs offline without a planner or tests.
+Local receipts can be forged. Required CI on the head commit is the proof.
