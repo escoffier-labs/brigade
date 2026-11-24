@@ -1514,16 +1514,6 @@
     }
   },
   {
-    "path": "engines/evidence-ledger/install.sh",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "MISELEDGER": 1,
-      "miseledger": 4
-    },
-    "remove_in": "0.33.0"
-  },
-  {
     "path": "engines/evidence-ledger/internal/adapter/record.go",
     "kind": "shim",
     "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
@@ -1909,16 +1899,6 @@
     "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
     "literals": {
       "miseledger": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/scripts/bootstrap_local.sh",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "MISELEDGER": 1,
-      "miseledger": 5
     },
     "remove_in": "0.33.0"
   },
