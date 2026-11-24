@@ -256,16 +256,29 @@ def _session_state_lock(target: Path, session_id: str) -> Iterator[None]:
             process_lock.release()
 
 
+def _is_latched(state: dict[str, Any], journal_lines: int, pending_lines: int) -> bool:
+    return state.get("hook_latched") is True or bool(
+        _effective_timeout_count(state, journal_lines, pending_lines) >= _rt().HOOK_TIMEOUT_LATCH_AFTER
+    )
+
+
+def read_latch_for_state_file(target: Path, state_name: str) -> bool:
+    """Read the latch by its state basename, including when only sidecars exist."""
+    state = anchored_io.read_json(target, state_name) or {}
+    path = _rt()._sessions_root(anchored_io.requested_target(target)) / state_name
+    journal = _read_sidecar_bytes(_timeouts_path(path), _TIMEOUT_JOURNAL_MAX_BYTES)
+    pending = _read_sidecar_bytes(_pending_path(path), _PENDING_MAX_BYTES)
+    return _is_latched(
+        state, _parse_timeout_journal(journal)[0], sum(bool(line.strip()) for line in pending.splitlines())
+    )
+
+
 def _read_hook_latch(target: Path, session_id: str) -> tuple[bool, bool]:
     journal_lines, journal_announced, _claim = _read_timeout_journal(target, session_id)
     pending_lines = _pending_timeout_count(target, session_id)
     state = _rt().read_session_state(target, session_id)
     current_state = state if isinstance(state, dict) else {}
-    latched = (
-        current_state.get("hook_latched") is True
-        or _effective_timeout_count(current_state, journal_lines, pending_lines) >= _rt().HOOK_TIMEOUT_LATCH_AFTER
-    )
-    if not latched:
+    if not _is_latched(current_state, journal_lines, pending_lines):
         return False, False
     return True, not (_persisted_announce_claimed(state) or journal_announced)
 

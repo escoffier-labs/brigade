@@ -153,7 +153,7 @@ def _log_rows(repo):
 
 
 def _bare_remote(repo):
-    remote = repo.parent / "remote.git"
+    remote = repo.with_name(f"{repo.name}-remote.git")
     _git(repo, "init", "--bare", str(remote))
     _git(repo, "remote", "set-url", "origin", str(remote))
 
@@ -328,3 +328,35 @@ def test_log_byte_bound_keeps_newest_records(push_repo, monkeypatch):
     push_gate_log.append(path, [{"index": i, "padding": "a" * 64} for i in range(10)])
     assert path.stat().st_size <= 256
     assert [json.loads(line)["index"] for line in path.read_bytes().splitlines()] == [8, 9]
+
+
+@pytest.mark.parametrize("layout", ["sidecar-only", "old-state", "seventeenth"])
+def test_doctor_reads_latch_beyond_recent_state_files(tmp_path, layout):
+    import time
+
+    from brigade.claude_hooks import latch_doctor, runtime, session_state
+
+    session = "example-latched-session"
+    state = runtime._state_path(tmp_path, session)
+    if layout != "sidecar-only":
+        runtime.write_session_state(tmp_path, session, {"session_id": session})
+        if layout == "old-state":
+            old = time.time() - 48 * 3600
+            os.utime(state, (old, old))
+    for _ in range(runtime.HOOK_TIMEOUT_LATCH_AFTER):
+        session_state._append_timeout_marker(tmp_path, session)
+    if layout == "sidecar-only":
+        assert not state.exists()
+    if layout == "seventeenth":
+        older = time.time() - 60
+        journal = state.with_suffix(".json.timeouts")
+        os.utime(state, (older, older))
+        os.utime(journal, (older, older))
+        for i in range(16):
+            newer = f"example-newer-{i}"
+            runtime.write_session_state(tmp_path, newer, {"session_id": newer})
+
+    assert session_state._read_hook_latch(tmp_path, session)[0]
+    check = latch_doctor.check(tmp_path)
+    assert check is not None and check[0] == "WARN"
+    assert "1 recent session(s)" in check[2] and "64 most recent" in check[2]
