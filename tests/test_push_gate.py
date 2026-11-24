@@ -397,3 +397,16 @@ def test_hook_timeout_allows_push_and_preserves_guard_refs(push_repo, monkeypatc
     assert monotonic() - start < 8
     assert pushed.stderr.count("pre-push: push gate timed out; push continues") == 1
     assert tip in pushed.stdout.splitlines()
+
+
+def test_doctor_reports_latch_scan_cutoff(tmp_path, monkeypatch):
+    from brigade.claude_hooks import latch_doctor, runtime
+
+    monkeypatch.setattr(latch_doctor, "_SCAN_LIMIT", 2)
+    for i in range(3):
+        session = f"example-session-{i}"
+        runtime.write_session_state(tmp_path, session, {"session_id": session})
+
+    check = latch_doctor.check(tmp_path)
+    assert check is not None and check[0] == "INFO"
+    assert "directory scan cut short after 2 entries" in check[2]
