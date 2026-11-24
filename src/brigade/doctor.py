@@ -7,6 +7,7 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, List, Sequence, Tuple
@@ -1126,6 +1127,10 @@ def _gather_checks(ctx: DoctorContext) -> List[ScopedCheckResult]:
                 f"{len(missing_tools)} managed tools not installed ({', '.join(stations)}); optional, install with `brigade add <station>`",
             )
         )
+    from .claude_hooks import latch_doctor
+
+    if latch := latch_doctor.check(ctx.target):
+        checks.append(_normalize_scoped_check(latch))
     checks.append(_normalize_scoped_check(_check_receipts(ctx.target)))
     return checks
 
@@ -1629,6 +1634,16 @@ def _memory_care_today() -> date:
 
 def _check_publish_gate(target: Path) -> List[CheckResult]:
     results: List[CheckResult] = []
+    from .work_cmd import push_gate
+
+    try:
+        repo = push_gate.Repository.locate(target)
+        if repo is not None:
+            info = push_gate.status(repo, push_gate.Hook.read(repo))
+            needs_attention = info["problem"] or (info["installed"] and not info["current"])
+            results.append((WARN if needs_attention else INFO, "verify push gate", push_gate.describe(info)))
+    except (OSError, subprocess.TimeoutExpired, ValueError):
+        results.append((WARN, "verify push gate", "could not inspect the hook or its log"))
     hook = target / "hooks" / "pre-push"
     if hook.is_file():
         results.append((OK, "publish: hooks/pre-push", str(hook)))

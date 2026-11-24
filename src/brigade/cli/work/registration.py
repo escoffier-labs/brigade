@@ -251,6 +251,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_push_check.add_argument("--target", "-t", type=Path, default=Path("."), help="Repository to inspect.")
     p_push_check.add_argument("--ref", help="Check a local ref instead of reading pre-push lines.")
     p_push_check.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    from ...work_cmd.push_gate import register as register_push_gate
+
+    register_push_gate(verify_sub)
     p_work_verify_plan = verify_sub.add_parser("plan", help="Plan local verification without running commands.")
     p_work_verify_plan.add_argument(
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."

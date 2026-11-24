@@ -6,7 +6,6 @@ import heapq
 import io
 import json
 import os
-import re
 import stat
 import subprocess
 import sys
@@ -21,12 +20,11 @@ from typing import Any
 
 from .. import verify_manifest_git
 from . import verify_gate
+from .verify_push_input import INPUT_BYTES, branch_updates
 
 _BUDGET_SECONDS = 2.0
 _RECEIPT_LIMIT = 128
 _RECEIPT_BYTES = 4 * 1024 * 1024
-_INPUT_BYTES = 256 * 1024
-_OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _TIMEOUT = "The push check reached its two-second time limit."
 
 
@@ -52,7 +50,7 @@ def _read_stdin(deadline: float) -> str:
     try:
         fd = sys.stdin.fileno()
     except io.UnsupportedOperation:
-        return sys.stdin.read(_INPUT_BYTES + 1)
+        return sys.stdin.read(INPUT_BYTES + 1)
 
     result: Queue[bytes | OSError] = Queue(maxsize=1)
 
@@ -61,8 +59,8 @@ def _read_stdin(deadline: float) -> str:
         # buffered stdin lock during interpreter shutdown.
         data = bytearray()
         try:
-            while len(data) <= _INPUT_BYTES:
-                chunk = os.read(fd, min(65536, _INPUT_BYTES + 1 - len(data)))
+            while len(data) <= INPUT_BYTES:
+                chunk = os.read(fd, min(65536, INPUT_BYTES + 1 - len(data)))
                 if not chunk:
                     break
                 data.extend(chunk)
@@ -78,22 +76,6 @@ def _read_stdin(deadline: float) -> str:
     if isinstance(data, OSError):
         raise data
     return os.fsdecode(data)
-
-
-def _updates(data: str) -> list[tuple[str, str]]:
-    if len(data) > _INPUT_BYTES:
-        raise ValueError("Pre-push input exceeds the size limit.")
-    updates = []
-    for line in data.splitlines():
-        fields = line.split()
-        if len(fields) != 4:
-            raise ValueError("Expected four fields per pre-push line.")
-        _, local, remote_ref, remote = fields
-        if not (_OBJECT_ID.fullmatch(local) and _OBJECT_ID.fullmatch(remote) and len(local) == len(remote)):
-            raise ValueError("Expected full Git object IDs in pre-push input.")
-        if remote_ref.startswith("refs/heads/") and local != remote and local.strip("0"):
-            updates.append((remote_ref, local))
-    return updates
 
 
 class _Receipts:
@@ -288,7 +270,7 @@ def push_check(*, target: Path, ref: str | None, json_output: bool) -> int:
     """Read Git pre-push updates or check a single local commit ref."""
     deadline = monotonic() + _BUDGET_SECONDS
     try:
-        updates = _updates(_read_stdin(deadline)) if ref is None else []
+        updates = branch_updates(_read_stdin(deadline)) if ref is None else []
         results = _check(target, updates, ref, deadline) if updates or ref is not None else []
     except ValueError as exc:
         print(f"push-check: {exc}", file=sys.stderr)
