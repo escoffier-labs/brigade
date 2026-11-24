@@ -101,6 +101,10 @@ def conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.execute(_EVENTS_SCHEMA)
     conn.execute("CREATE INDEX events_received_at ON events (received_at)")
+    conn.execute("CREATE INDEX events_run_seq ON events (node_id, run_id, sequence)")
+    conn.execute(
+        "CREATE INDEX events_grokbot_run_seq ON events (run_id, sequence, received_at, digest) WHERE harness = 'grokbot'"
+    )
     fleet_hub_sessions.init_schema(conn)
     yield conn
     conn.close()
@@ -1071,8 +1075,17 @@ def test_active_status_seeks_recent_candidates_and_preserves_winners(conn):
         (NODE_A, "legacy-job", 3),
         (NODE_A, "offset-receipt", 1),
     ]
-    plan = [row[3] for row in conn.execute(f"EXPLAIN QUERY PLAN {statements[0]}")]
+    plan = [row[3] for statement in statements for row in conn.execute(f"EXPLAIN QUERY PLAN {statement}")]
     assert any("SEARCH" in operation and "events_received_at" in operation for operation in plan)
+    assert not any(operation.startswith(("SCAN events", "SCAN winner")) for operation in plan)
+
+
+def test_active_status_remains_available_without_receipt_index(conn):
+    _insert(conn, NODE_A, "active", 1, "run.started")
+    expected = fleet_hub_status.latest_status(conn, now=NOW)
+    assert len(expected) == 1
+    conn.execute("DROP INDEX events_received_at")
+    assert fleet_hub_status.latest_status(conn, now=NOW) == expected
 
 
 # --- HTTP integration: hub-served Command Deck (task 2) ----------------------

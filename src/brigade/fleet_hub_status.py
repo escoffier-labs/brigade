@@ -191,13 +191,20 @@ def latest_status(
     ``original_state``. Event history itself is not rewritten.
     """
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    history_sql = f"{_latest_sql()} ORDER BY node_id, run_id"
     if include_all:
-        rows = conn.execute(f"{_latest_sql()} ORDER BY node_id, run_id").fetchall()
+        rows = conn.execute(history_sql).fetchall()
     else:
         # A date-only bound with one day of slack covers stored UTC offsets.
         # Seek the winner across each candidate's full history before checking age.
         bound = (current - timedelta(days=1, seconds=active_ttl_seconds)).date().isoformat()
-        rows = conn.execute(_ACTIVE_LATEST, (bound, bound)).fetchall()
+        try:
+            rows = conn.execute(_ACTIVE_LATEST, (bound, bound)).fetchall()
+        except sqlite3.OperationalError as exc:
+            if str(exc) != "no such index: events_received_at":
+                raise
+            # The fallback serves reads without repairing the database schema.
+            rows = conn.execute(history_sql).fetchall()
     result = []
     for row in rows:
         state = row[5]
