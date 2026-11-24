@@ -32,7 +32,15 @@ STDIN_REFS="$(cat)"
 case "$(git config --get brigade.pushGate 2>/dev/null || true)" in
   warn|enforce)
     if command -v brigade >/dev/null 2>&1; then
-      printf '%s' "$STDIN_REFS" | brigade work verify push-gate run || true
+      if command -v timeout >/dev/null 2>&1; then
+        gate_rc=0
+        printf '%s' "$STDIN_REFS" | timeout -k 1 5 brigade work verify push-gate run || gate_rc=$?
+        if [[ "$gate_rc" == 124 || "$gate_rc" == 137 ]]; then
+          echo "pre-push: push gate timed out; push continues" >&2
+        fi
+      else
+        printf '%s' "$STDIN_REFS" | brigade work verify push-gate run || true
+      fi
     fi
     ;;
 esac

@@ -360,3 +360,40 @@ def test_doctor_reads_latch_beyond_recent_state_files(tmp_path, layout):
     check = latch_doctor.check(tmp_path)
     assert check is not None and check[0] == "WARN"
     assert "1 recent session(s)" in check[2] and "64 most recent" in check[2]
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX content guard shell hook fixture")
+@pytest.mark.skipif(shutil.which("timeout") is None, reason="requires GNU coreutils timeout on PATH")
+def test_hook_timeout_allows_push_and_preserves_guard_refs(push_repo, monkeypatch):
+    from time import monotonic
+
+    from brigade.work_cmd.push_gate import _guard_bytes
+
+    _policy(push_repo)
+    _bare_remote(push_repo)
+    hook = push_repo / ".git" / "hooks" / "pre-push"
+    hook.write_bytes(_guard_bytes())
+    hook.chmod(0o755)
+    tools_dir = push_repo.parent / f"{push_repo.name}-bin"
+    tools_dir.mkdir()
+    fake = tools_dir / "brigade"
+    fake.write_text(
+        '#!/bin/sh\ncase "$1 $2 $3" in\n  "work verify push-gate") exec sleep 30;;\n  guard*) cat;;\nesac\n',
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tools_dir) + os.pathsep + _path_with_brigade())
+    assert _gate(push_repo, "install") == 0
+    tip = _commit(push_repo)
+    start = monotonic()
+    pushed = subprocess.run(
+        ["git", "push", "origin", "main"],
+        cwd=push_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=8,
+    )
+    assert monotonic() - start < 8
+    assert pushed.stderr.count("pre-push: push gate timed out; push continues") == 1
+    assert tip in pushed.stdout.splitlines()
