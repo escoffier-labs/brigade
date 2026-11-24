@@ -1639,8 +1639,8 @@ def _check_publish_gate(target: Path) -> List[CheckResult]:
     try:
         repo = push_gate.Repository.locate(target)
         if repo is not None:
-            info = push_gate.status(repo, push_gate.Hook.read(repo))
-            needs_attention = info["problem"] or (info["installed"] and not info["current"])
+            info = push_gate.status(repo)
+            needs_attention = info["mode"] == "warn" and (not info["will_run"] or not info["current"])
             results.append((WARN if needs_attention else INFO, "verify push gate", push_gate.describe(info)))
     except (OSError, subprocess.TimeoutExpired, ValueError):
         results.append((WARN, "verify push gate", "could not inspect the hook or its log"))

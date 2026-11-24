@@ -158,26 +158,32 @@ Local receipts can be forged. Required CI on the head commit is the proof.
 
 ## Install the push gate
 
-Run `brigade work verify push-gate install` from your clone to enable the
-advisory hook in `warn` mode. Git runs it for every linked worktree. It prints
-a verification command for branch tips with missing or rejected receipts and
-lets the push continue. Re-run the installer to update the hook, or use
-`install --mode off` to keep it installed with checking and recording disabled.
-The mode is stored in the clone's Git config. The default for a clone without
-a configured mode is `off`.
+Run `brigade work verify push-gate install` to set this clone to `warn`.
+The gate advises on missing or rejected receipts and lets the push continue.
+Use `install --mode off` to turn off checking and recording. An unset mode
+also means `off`.
 
-Use `brigade work verify push-gate status` to inspect the installed hook and
-its log, and `brigade work verify push-gate uninstall` to remove the gate.
-The installer preserves Brigade's active content guard and its exit status.
-It refuses foreign hooks and outside hook directories. If an in-repository
-`core.hooksPath` is relative, installation pins it to its current absolute
-directory for the other worktrees and uninstall restores the prior setting.
+The effective Git pre-push hook must carry the gate's marked block, and
+`brigade` must be on the `PATH` Git uses. The shipped Brigade content-guard
+template includes the block. If the clone uses its own Git hooks directory
+and has no pre-push hook, install writes a minimal one. Install prints the
+block and the effective hook path when the hook needs updating. Existing
+hooks are left in place, including tracked hooks and hooks in a global
+`core.hooksPath`. For a global Brigade content guard, refresh that guard
+from the current shipped template or paste the printed block after it reads
+the pre-push input. Each clone still chooses its own mode.
 
-Warn mode records up to 5,000 recent branch-tip observations under the common
-Git directory at `brigade/push-gate.jsonl`. Entries include the ref, commit,
-tree, worktree, UTC time, verdict, reason code, check duration, Brigade version,
-and whether the declared check would have blocked under enforcement. Read
-the counts and timings with `brigade work verify push-gate report`. Add
-`--since YYYY-MM-DD` for an inclusive UTC date filter or `--json` for automation.
+`brigade work verify push-gate status` shows the effective hook, its version,
+and whether it can run. `brigade work verify push-gate uninstall` clears the
+clone's mode and removes an unmodified minimal hook if present. It keeps
+the records.
 
-The advisory gate does not defend against `git push --no-verify`.
+Warn mode keeps up to 5,000 branch-tip observations and 2 MiB under the common
+Git directory at `brigade/push-gate.jsonl`. Entries include the UTC time, ref,
+commit, tree, verdict, reason code, check duration, Brigade version, worktree,
+and whether the declared check would have blocked under enforcement.
+Use `brigade work verify push-gate report` for counts and timings, optionally
+with `--since YYYY-MM-DD` for an inclusive UTC date filter or `--json`.
+A push whose Git environment cannot find `brigade` leaves no observation.
+
+The gate does not defend against `git push --no-verify`.

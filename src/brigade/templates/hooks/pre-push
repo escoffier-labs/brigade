@@ -27,6 +27,17 @@ export GIT_NO_REPLACE_OBJECTS=1
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
+STDIN_REFS="$(cat)"
+# BEGIN Brigade push gate v1
+case "$(git config --get brigade.pushGate 2>/dev/null || true)" in
+  warn|enforce)
+    if command -v brigade >/dev/null 2>&1; then
+      printf '%s' "$STDIN_REFS" | brigade work verify push-gate run || true
+    fi
+    ;;
+esac
+# END Brigade push gate v1
+
 # Safety rails (#2233): `brigade work rails off` skips both scans below
 # without touching guard policies or baselines; `brigade work rails on`
 # restores them. Only exit 3 means off. Any other result, including an older
@@ -35,7 +46,6 @@ if command -v brigade >/dev/null 2>&1; then
   rails_rc=0
   brigade work rails check --target "$REPO_ROOT" >/dev/null 2>&1 || rails_rc=$?
   if [[ "$rails_rc" -eq 3 ]]; then
-    cat >/dev/null
     echo "pre-push: safety rails are off for this repo; content guard and history scans skipped" >&2
     exit 0
   fi
@@ -54,7 +64,6 @@ REMOTE_URL="${2:-}"
 
 rc=0
 PLUMBING_ERR=0
-STDIN_REFS="$(cat)"
 
 if [[ -n "${CONTENT_GUARD_DIR:-}" ]]; then
   POLICY="${CONTENT_GUARD_POLICY:-$CONTENT_GUARD_DIR/policies/public-repo.json}"

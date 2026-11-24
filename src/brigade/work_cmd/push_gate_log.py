@@ -17,6 +17,7 @@ from ..localio import write_text_atomic
 SCHEMA = "brigade.push_gate.v1"
 RECORD_LIMIT = 5000
 _LINE_LIMIT = 32768
+_BYTE_LIMIT = 2 * 1024 * 1024
 
 
 def log_path(common: Path) -> Path:
@@ -29,10 +30,15 @@ def _lines(path: Path) -> deque[bytes]:
             raise OSError("push-gate log requires a regular file in the common Git directory")
         with path.open("rb") as stream:
             # Bound even a manually edited log. The first line might be partial.
-            stream.seek(max(0, stream.seek(0, 2) - RECORD_LIMIT * _LINE_LIMIT))
-            if stream.tell():
-                stream.readline(_LINE_LIMIT)
-            return deque((line for line in stream if len(line) <= _LINE_LIMIT), maxlen=RECORD_LIMIT)
+            start = max(0, stream.seek(0, 2) - _BYTE_LIMIT)
+            stream.seek(start)
+            raw = stream.read(_BYTE_LIMIT)
+            if start:
+                raw = raw.partition(b"\n")[2]
+            return deque(
+                (line for line in raw.splitlines(keepends=True) if len(line) <= _LINE_LIMIT),
+                maxlen=RECORD_LIMIT,
+            )
     except FileNotFoundError:
         return deque(maxlen=RECORD_LIMIT)
 
@@ -43,9 +49,15 @@ def append(path: Path, rows: list[dict[str, Any]]) -> None:
     path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     if path.parent.is_symlink():
         raise OSError("push-gate log directory is a symlink")
-    with held_file_lock(path.with_suffix(".lock"), deadline_seconds=0.05):
+    with held_file_lock(path.with_suffix(".lock"), deadline_seconds=0.5):
         lines = _lines(path)
-        lines.extend((json.dumps(row, separators=(",", ":")) + "\n").encode("ascii") for row in rows)
+        for row in rows:
+            line = (json.dumps(row, separators=(",", ":")) + "\n").encode("ascii")
+            if len(line) <= min(_LINE_LIMIT, _BYTE_LIMIT):
+                lines.append(line)
+        size = sum(map(len, lines))
+        while size > _BYTE_LIMIT:
+            size -= len(lines.popleft())
         write_text_atomic(path, b"".join(lines).decode("ascii", errors="replace"))
 
 

@@ -1,12 +1,11 @@
-"""Manage the clone-local, advisory Git pre-push verification gate."""
+"""Configure and inspect the clone-local advisory Git push gate."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
-import shlex
+import re
 import stat
 import subprocess
 import sys
@@ -14,35 +13,33 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from importlib.resources import files
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from shutil import which
 from typing import Any
 
-from .. import __version__
 from . import push_gate_log
 
 _MODE_KEY = "brigade.pushGate"
-_HOOKS_KEY = "core.hooksPath"
-_MARKER = b"# Brigade managed push gate "
-_GUARD_START = b"# Brigade content guard follows\n"
 _SHEBANG = b"#!/usr/bin/env bash\n"
+_MANAGED_HEADER = b"# Brigade managed minimal push gate\n"
+_GATE_BLOCK = re.compile(rb"^# BEGIN Brigade push gate v(\d+)\n.*?^# END Brigade push gate v\1\n", re.M | re.S)
 
 
 def _git(target: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", "-C", str(target), *args], capture_output=True, text=True, timeout=2, check=False)
 
 
-def _config(target: Path, key: str, *, local: bool = False) -> str | None:
-    result = _git(target, "config", *(["--local"] if local else []), "--get", key)
+def _mode(target: Path) -> str | None:
+    result = _git(target, "config", "--get", _MODE_KEY)
     if result.returncode not in (0, 1):
-        raise OSError(f"could not read Git config key {key}")
+        raise OSError(f"could not read Git config key {_MODE_KEY}")
     return result.stdout.removesuffix("\n") if result.returncode == 0 else None
 
 
-def _write_config(target: Path, key: str, value: str | None) -> None:
-    args = ("--unset-all", key) if value is None else ("--replace-all", key, value)
+def _write_mode(target: Path, value: str | None) -> None:
+    args = ("--unset-all", _MODE_KEY) if value is None else ("--replace-all", _MODE_KEY, value)
     result = _git(target, "config", "--local", *args)
     if result.returncode != 0 and not (value is None and result.returncode == 5):
-        raise OSError(f"could not update Git config key {key}")
+        raise OSError(f"could not update Git config key {_MODE_KEY}")
 
 
 @dataclass(frozen=True)
@@ -50,8 +47,6 @@ class Repository:
     root: Path
     common: Path
     hook: Path
-    hooks_setting: str | None
-    outside: bool
 
     @classmethod
     def locate(cls, target: Path) -> Repository | None:
@@ -60,161 +55,106 @@ class Repository:
         )
         if result.returncode != 0:
             return None
-        root, common, hooks = (Path(line).resolve() for line in result.stdout.splitlines())
-        configured = _config(root, _HOOKS_KEY)
-        allowed = [root, common]
-        if common.name == ".git":
-            allowed.append(common.parent)
-        return cls(root, common, hooks / "pre-push", configured, not any(hooks.is_relative_to(p) for p in allowed))
+        root, common, hooks = (Path(line) for line in result.stdout.splitlines())
+        return cls(root, common.resolve(), hooks / "pre-push")
 
 
 def _guard_bytes() -> bytes:
-    return files("brigade").joinpath("templates", "hooks", "pre-push").read_bytes()
+    return files("brigade").joinpath("templates", "hooks", "pre-push").read_bytes().replace(b"\r\n", b"\n")
 
 
-@dataclass(frozen=True)
-class Hook:
-    installed: bool = False
-    guard: bytes = b""
-    guard_mode: int = 0o755
-    pinned: bool = False
-    prior_local: str | None = None
-    raw: bytes = b""
-    problem: str | None = None
-
-    @classmethod
-    def read(cls, repo: Repository) -> Hook:
-        if repo.outside:
-            return cls(problem="outside core.hooksPath")
-        try:
-            info = repo.hook.lstat()
-        except FileNotFoundError:
-            return cls()
-        if not stat.S_ISREG(info.st_mode) or info.st_size > 128 * 1024:
-            return cls(problem="foreign hook")
-        raw = repo.hook.read_bytes()
-        if raw == _guard_bytes():
-            return cls(guard=raw, guard_mode=stat.S_IMODE(info.st_mode))
-        first, _, rest = raw.partition(b"\n")
-        header, _, body = rest.partition(b"\n")
-        if first + b"\n" == _SHEBANG and header.startswith(_MARKER):
-            try:
-                digest, pinned, prior_local, guard_mode = json.loads(header[len(_MARKER) :])
-                if digest == hashlib.sha256(body).hexdigest():
-                    _, separator, guard = body.partition(_GUARD_START)
-                    if not separator or guard.startswith(_SHEBANG):
-                        return cls(True, guard, guard_mode, pinned, prior_local, raw)
-            except (TypeError, ValueError, RecursionError):
-                pass
-        return cls(problem="foreign hook")
-
-    def render(self, common: Path) -> bytes:
-        python = shlex.quote(Path(sys.executable).as_posix())
-        common_arg = shlex.quote(common.as_posix())
-        guard_active = bool(self.guard and self.guard_mode & 0o111)
-        body = (
-            f"# Brigade version {__version__}\n"
-            'case "$(git config --local --get brigade.pushGate 2>/dev/null)" in\n'
-            # Add enforcement here when the operator enables that mode.
-            "  warn|enforce)\n"
-            '    if refs="$(cat)"; then\n'
-            f'      {python} -I -m brigade.work_cmd.push_gate_hook {common_arg} < <(printf "%s" "$refs") || '
-            'echo "push gate: advisory hook failed" >&2\n'
-        )
-        if guard_active:
-            body += '      exec 0< <(printf "%s\\n" "$refs")\n'
-        body += "    fi\n    ;;\nesac\n"
-        if not guard_active and self.guard:
-            body += "exit 0\n"
-        payload = body.encode("utf-8") + (_GUARD_START + self.guard if self.guard else b"exit 0\n")
-        metadata = json.dumps([hashlib.sha256(payload).hexdigest(), self.pinned, self.prior_local, self.guard_mode])
-        return _SHEBANG + _MARKER + metadata.encode("ascii") + b"\n" + payload
-
-    def current(self, repo: Repository) -> bool:
-        return self.installed and self.raw == self.render(repo.common) and os.access(repo.hook, os.X_OK)
+def _snippet() -> bytes:
+    match = _GATE_BLOCK.search(_guard_bytes())
+    if match is None:
+        raise ValueError("packaged pre-push template has no push gate")
+    return match.group()
 
 
-def _replace(path: Path, content: bytes, mode: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with NamedTemporaryFile(dir=path.parent, delete=False) as stream:
-        temp = Path(stream.name)
-        try:
-            with stream:
-                stream.write(content)
-            temp.chmod(mode)
-            temp.replace(path)
-        finally:
-            temp.unlink(missing_ok=True)
+def _minimal_hook() -> bytes:
+    return _SHEBANG + _MANAGED_HEADER + b'STDIN_REFS="$(cat)"\n' + _snippet() + b"exit 0\n"
 
 
-def _install(repo: Repository, hook: Hook, mode: str) -> None:
-    prior_mode = _config(repo.root, _MODE_KEY, local=True)
-    pin = repo.hooks_setting is not None and not Path(repo.hooks_setting).is_absolute()
-    if pin:
-        hook = Hook(
-            guard=hook.guard,
-            guard_mode=hook.guard_mode,
-            pinned=True,
-            prior_local=_config(repo.root, _HOOKS_KEY, local=True),
-        )
-        # Relative hooksPath is interpreted per worktree. Pin the resolved
-        # directory so all Git worktrees reach the same installed hook.
+def _read_hook(path: Path) -> bytes | None:
     try:
-        if pin:
-            _write_config(repo.root, _HOOKS_KEY, str(repo.hook.parent))
-            if _config(repo.root, _HOOKS_KEY) != str(repo.hook.parent):
-                raise OSError("worktree-specific core.hooksPath prevents a shared hook")
-        _write_config(repo.root, _MODE_KEY, mode)
-        _replace(repo.hook, hook.render(repo.common), 0o755)
-    except (OSError, subprocess.TimeoutExpired):
-        _write_config(repo.root, _MODE_KEY, prior_mode)
-        if pin:
-            _write_config(repo.root, _HOOKS_KEY, hook.prior_local)
-        raise
+        if not stat.S_ISREG(path.stat().st_mode):
+            return b""
+        with path.open("rb") as stream:
+            return stream.read(128 * 1024)
+    except FileNotFoundError:
+        return None
 
 
-def _uninstall(repo: Repository, hook: Hook) -> None:
-    _write_config(repo.root, _MODE_KEY, None)
-    if not hook.installed:
-        return
-    if hook.guard:
-        _replace(repo.hook, hook.guard, hook.guard_mode)
-    else:
-        repo.hook.unlink()
-    if hook.pinned and _config(repo.root, _HOOKS_KEY, local=True) == str(repo.hook.parent):
-        _write_config(repo.root, _HOOKS_KEY, hook.prior_local)
-
-
-def status(repo: Repository, hook: Hook) -> dict[str, Any]:
-    mode = _config(repo.root, _MODE_KEY, local=True)
+def status(repo: Repository) -> dict[str, Any]:
+    mode = _mode(repo.root)
+    raw = _read_hook(repo.hook)
+    match = _GATE_BLOCK.search(raw.replace(b"\r\n", b"\n")) if raw else None
+    current = match is not None and match.group() == _snippet()
+    executable = raw is not None and os.access(repo.hook, os.X_OK)
+    wired = bool(executable and match and b"brigade work verify push-gate run" in match.group())
+    brigade_on_path = which("brigade") is not None
     rows = push_gate_log.read(push_gate_log.log_path(repo.common))
-    recent = (datetime.now(UTC) - timedelta(days=7)).isoformat()
+    recent = datetime.now(UTC) - timedelta(days=7)
+    stamps = [datetime.fromisoformat(row["time"]) for row in rows]
     return {
-        "installed": hook.installed,
         "mode": "warn" if mode in {"warn", "enforce"} else "off",
         "configured_mode": mode,
         "hook_path": str(repo.hook),
-        "current": hook.current(repo),
-        "content_guard": bool(hook.guard),
-        "problem": hook.problem,
-        "last_push": rows[-1]["time"] if rows else None,
-        "recent_gate_errors": sum(row["result"] == "gate_error" and row["time"] >= recent for row in rows),
+        "hook_exists": raw is not None,
+        "hook_executable": executable,
+        "hook_version": int(match[1]) if match else None,
+        "current": current,
+        "wired": wired,
+        "brigade_on_path": brigade_on_path,
+        "will_run": mode in {"warn", "enforce"} and wired and brigade_on_path,
+        "last_push": max(stamps).astimezone(UTC).isoformat() if stamps else None,
+        "recent_gate_errors": sum(
+            row["result"] == "gate_error" and stamp >= recent for row, stamp in zip(rows, stamps, strict=True)
+        ),
     }
 
 
 def describe(info: dict[str, Any]) -> str:
-    installed = "installed" if info["installed"] else "absent"
-    version = "current" if info["current"] else "outdated or inactive" if info["installed"] else "unavailable"
-    configured = info["configured_mode"]
     mode = info["mode"]
-    if configured == "enforce":
+    if info["configured_mode"] == "enforce":
         mode += " (enforce does not exist yet)"
-    elif configured not in {None, "off", "warn"}:
+    elif info["configured_mode"] not in {None, "off", "warn"}:
         mode += " (unrecognized configuration)"
-    detail = f"{installed}, mode={mode}, hook={info['hook_path']}, version={version}"
-    if info["problem"]:
-        detail += f", {info['problem']}"
-    return f"{detail}, last push={info['last_push'] or 'none'}, last 7 days gate errors={info['recent_gate_errors']}"
+    active = "wired" if info["wired"] else "not wired"
+    path_status = "brigade on PATH" if info["brigade_on_path"] else "cannot run: brigade missing from PATH"
+    version = f"v{info['hook_version']}" if info["hook_version"] is not None else "none"
+    freshness = ", update available" if info["wired"] and not info["current"] else ""
+    return (
+        f"mode={mode}, {active}, hook={info['hook_path']}, version={version}{freshness}, {path_status}, "
+        f"last push={info['last_push'] or 'none'}, last 7 days gate errors={info['recent_gate_errors']}"
+    )
+
+
+def _install(repo: Repository, mode: str) -> None:
+    _write_mode(repo.root, mode)
+    if repo.hook.parent.resolve() == repo.common / "hooks" and not os.path.lexists(repo.hook):
+        repo.hook.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with repo.hook.open("xb") as stream:
+                stream.write(_minimal_hook())
+            repo.hook.chmod(0o755)
+        except FileExistsError:
+            pass
+    info = status(repo)
+    print(describe(info))
+    if not info["wired"] or not info["current"]:
+        print("The effective hook was left in place. Add or update these lines after capturing pre-push input:")
+        print(_snippet().decode("ascii"), end="")
+        print("For a Brigade content guard hook, refresh from the shipped templates/hooks/pre-push file.")
+
+
+def _uninstall(repo: Repository) -> None:
+    _write_mode(repo.root, None)
+    if (
+        repo.hook.parent.resolve() == repo.common / "hooks"
+        and not repo.hook.is_symlink()
+        and _read_hook(repo.hook) == _minimal_hook()
+    ):
+        repo.hook.unlink()
 
 
 def _report_text(report: dict[str, Any]) -> None:
@@ -233,6 +173,7 @@ def _report_text(report: dict[str, Any]) -> None:
 def register(parsers: Any) -> None:
     gate = parsers.add_parser("push-gate", help="Manage the advisory pre-push verification gate.")
     commands = gate.add_subparsers(dest="push_gate_command", required=True)
+    commands.add_parser("run", help="Run the advisory check from a Git pre-push hook.")
     for name in ("install", "status", "uninstall", "report"):
         parser = commands.add_parser(name)
         parser.add_argument("--target", "-t", type=Path, default=Path("."))
@@ -246,6 +187,10 @@ def register(parsers: Any) -> None:
 
 def dispatch(args: argparse.Namespace) -> int:
     command = args.push_gate_command
+    if command == "run":
+        from .push_gate_hook import run
+
+        return run()
     if command == "install" and args.mode not in {"warn", "off"}:
         error = "enforce mode does not exist yet" if args.mode == "enforce" else "expected mode warn or off"
         print(f"push gate: {error}", file=sys.stderr)
@@ -261,20 +206,14 @@ def dispatch(args: argparse.Namespace) -> int:
                 print(json.dumps(report))
             else:
                 _report_text(report)
-            return 0
-
-        hook = Hook.read(repo)
-        if command == "status":
-            info = status(repo, hook)
+        elif command == "status":
+            info = status(repo)
             print(json.dumps(info) if args.json else describe(info))
+        elif command == "install":
+            _install(repo, args.mode)
         else:
-            if hook.problem:
-                raise OSError(f"{hook.problem} at {repo.hook}; existing hooks were preserved")
-            if command == "install":
-                _install(repo, hook, args.mode)
-            else:
-                _uninstall(repo, hook)
-            print(f"push gate: {command} complete for {repo.hook}")
+            _uninstall(repo)
+            print(f"push gate: mode unset for {repo.root}")
     except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
         print(f"push gate: {exc}", file=sys.stderr)
         return 1

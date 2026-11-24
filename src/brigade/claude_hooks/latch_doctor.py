@@ -17,7 +17,7 @@ def check(target: Path) -> tuple[str, str, str] | None:
             for state in anchored_io.iter_states(target, modified_since=recent, limit=16)
             if isinstance(session_id := state.get("session_id"), str) and session_id
         )
-    except OSError:
+    except Exception:
         return "WARN", label, "could not read recent Claude hook session state"
     if count:
         return "WARN", label, f"{count} recent session(s) bypass Claude hooks after repeated timeouts"

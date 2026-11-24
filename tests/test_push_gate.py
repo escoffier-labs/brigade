@@ -7,6 +7,8 @@ import os
 import shutil
 import subprocess
 import sys
+import shlex
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import pytest
@@ -33,20 +35,26 @@ def _status(target, capsys):
     return json.loads(capsys.readouterr().out)
 
 
-def test_install_upgrade_uninstall(push_repo, capsys, monkeypatch):
+def _doctor(target):
+    return next(check for check in doctor._check_publish_gate(target) if check[1] == "verify push gate")
+
+
+def test_install_mode_and_uninstall(push_repo, capsys):
     assert _status(push_repo, capsys)["mode"] == "off"
+    assert _doctor(push_repo)[0] == "INFO"
     assert _gate(push_repo, "install", "--mode", "enforce") == 2
     assert "does not exist yet" in capsys.readouterr().err
-    assert _gate(push_repo, "install") == 0
-    capsys.readouterr()
-    status = _status(push_repo, capsys)
-    assert status["installed"] and status["current"] and status["mode"] == "warn"
-    hook = Path(status["hook_path"])
-    monkeypatch.setattr(sys, "executable", sys.executable + "-new")
-    assert not _status(push_repo, capsys)["current"]
     assert _gate(push_repo, "install", "--mode", "off") == 0
     capsys.readouterr()
-    assert _status(push_repo, capsys)["current"]
+    status = _status(push_repo, capsys)
+    assert status["wired"] and status["current"] and status["hook_version"] == 1
+    assert not status["will_run"]
+    assert _doctor(push_repo)[0] == "INFO"
+    hook = Path(status["hook_path"])
+    original = hook.read_bytes()
+    assert _gate(push_repo, "install") == 0
+    capsys.readouterr()
+    assert hook.read_bytes() == original
     _git(push_repo, "config", "brigade.pushGate", "enforce")
     status = _status(push_repo, capsys)
     assert status["configured_mode"] == "enforce" and status["mode"] == "warn"
@@ -56,40 +64,49 @@ def test_install_upgrade_uninstall(push_repo, capsys, monkeypatch):
     assert _status(push_repo, capsys)["mode"] == "off"
 
 
-def test_refuses_foreign_hook(push_repo, capsys):
+def test_foreign_hook_is_preserved(push_repo, capsys):
     hook = push_repo / ".git" / "hooks" / "pre-push"
-    hook.write_text("#!/bin/sh\nexit 3\n", encoding="utf-8")
-    assert _gate(push_repo, "install") == 1
+    hook.write_bytes(b"#!/bin/sh\nexit 3\n")
+    assert _gate(push_repo, "install") == 0
+    assert "mode=warn, not wired" in capsys.readouterr().out.splitlines()[0]
+    assert _doctor(push_repo)[0] == "WARN"
+    assert not _status(push_repo, capsys)["wired"]
+    assert _gate(push_repo, "uninstall") == 0
+    assert hook.read_bytes() == b"#!/bin/sh\nexit 3\n"
+
+
+def test_modified_minimal_hook_is_preserved(push_repo, capsys):
+    assert _gate(push_repo, "install") == 0
     capsys.readouterr()
-    assert _status(push_repo, capsys)["problem"] == "foreign hook"
-    assert _gate(push_repo, "uninstall") == 1
-    assert hook.read_text(encoding="utf-8") == "#!/bin/sh\nexit 3\n"
+    hook = Path(_status(push_repo, capsys)["hook_path"])
+    modified = hook.read_bytes() + b"# local change\n"
+    hook.write_bytes(modified)
+    assert _gate(push_repo, "uninstall") == 0
+    assert hook.read_bytes() == modified
 
 
-def test_refuses_outside_hooks_path(push_repo, capsys):
-    outside = push_repo.parent / "outside"
-    _git(push_repo, "config", "core.hooksPath", str(outside))
-    assert _gate(push_repo, "install") == 1
-    capsys.readouterr()
-    assert _status(push_repo, capsys)["problem"] == "outside core.hooksPath"
-    assert not outside.exists()
-
-
-def test_relative_content_guard_is_restored(push_repo, capsys):
+def test_relative_tracked_hook_is_untouched_from_linked_worktree(push_repo, capsys):
     from brigade.work_cmd.push_gate import _guard_bytes
 
     hook = push_repo / "hooks" / "pre-push"
     hook.parent.mkdir()
     original = _guard_bytes()
     hook.write_bytes(original)
+    hook.chmod(0o755)
+    _commit(push_repo)
     _git(push_repo, "config", "core.hooksPath", "hooks")
-    assert _gate(push_repo, "install") == 0
+    linked = push_repo.parent / "linked path"
+    _git(push_repo, "worktree", "add", "-b", "feature", str(linked))
+    before = _git(push_repo, "config", "--local", "--list")
+    assert _gate(linked, "install") == 0
     capsys.readouterr()
-    assert _status(push_repo, capsys)["content_guard"]
-    assert _git(push_repo, "config", "core.hooksPath") == str(hook.parent)
-    assert _gate(push_repo, "uninstall") == 0
-    assert _git(push_repo, "config", "core.hooksPath") == "hooks"
-    assert hook.read_bytes() == original
+    assert _status(linked, capsys)["wired"]
+    assert _status(push_repo, capsys)["wired"]
+    assert _git(push_repo, "config", "--local", "--list") == before + "\nbrigade.pushgate=warn"
+    assert _git(push_repo, "status", "--short") == _git(linked, "status", "--short") == ""
+    assert (linked / "hooks" / "pre-push").read_bytes() == original
+    assert _gate(linked, "uninstall") == 0
+    assert _git(push_repo, "config", "--local", "--list") == before
 
 
 def test_bounded_records_and_report(push_repo, capsys, monkeypatch):
@@ -126,55 +143,142 @@ def test_bounded_records_and_report(push_repo, capsys, monkeypatch):
     )
 
 
+def _path_with_brigade():
+    return str(Path(sys.executable).parent) + os.pathsep + os.environ["PATH"]
+
+
+def _log_rows(repo):
+    log = repo / ".git" / "brigade" / "push-gate.jsonl"
+    return [json.loads(line) for line in log.read_text().splitlines()]
+
+
+def _bare_remote(repo):
+    remote = repo.parent / "remote.git"
+    _git(repo, "init", "--bare", str(remote))
+    _git(repo, "remote", "set-url", "origin", str(remote))
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX pre-push hook and restricted PATH fixture")
-def test_linked_worktree_push(push_repo, capsys):
+def test_concurrent_push_from_worktrees_and_missing_brigade(push_repo, capsys, monkeypatch):
     _policy(push_repo)
-    remote = push_repo.parent / "remote.git"
-    _git(push_repo, "init", "--bare", str(remote))
-    _git(push_repo, "remote", "set-url", "origin", str(remote))
-    assert _gate(push_repo, "install") == 0
+    _bare_remote(push_repo)
+    links = [push_repo.parent / f"linked path {i}" for i in range(2)]
+    for i, linked in enumerate(links):
+        _git(push_repo, "worktree", "add", "-b", f"feature{i}", str(linked))
+    assert _gate(links[0], "install") == 0
     capsys.readouterr()
-    linked = push_repo.parent / "linked"
-    _git(push_repo, "worktree", "add", "-b", "feature", str(linked))
-    tip = _commit(linked)
+    tips = [_commit(linked) for linked in links]
     git = shutil.which("git")
     assert git is not None
-    path = str(Path(git).parent) + os.pathsep + os.defpath
 
-    def push(bin_path):
+    def push(index, bin_path):
         return subprocess.run(
-            [git, "push", "origin", "feature"],
-            cwd=linked,
+            [git, "push", "origin", f"feature{index}"],
+            cwd=links[index],
             env={**os.environ, "PATH": bin_path},
             capture_output=True,
             text=True,
             check=True,
         )
 
-    first = push(str(Path(sys.executable).parent) + os.pathsep + path)
-    assert "missing_receipt" in first.stderr
-    assert "brigade work verify run" in first.stderr
-    log = push_repo / ".git" / "brigade" / "push-gate.jsonl"
-    (row,) = [json.loads(line) for line in log.read_text().splitlines()]
-    assert (row["ref"], row["tip"], row["tree"]) == ("refs/heads/feature", tip, _tree(linked))
-    assert row["would_block"] is True and row["worktree"] == str(linked)
+    with ThreadPoolExecutor(2) as pool:
+        jobs = [pool.submit(push, i, _path_with_brigade()) for i in range(2)]
+        for job in jobs:
+            pushed = job.result()
+            assert "missing_receipt" in pushed.stderr
+            assert "brigade work verify run" in pushed.stderr
+    rows = sorted(_log_rows(push_repo), key=lambda row: row["ref"])
+    assert [(row["ref"], row["tip"], row["tree"], row["worktree"]) for row in rows] == [
+        (f"refs/heads/feature{i}", tip, _tree(link), str(link))
+        for i, (tip, link) in enumerate(zip(tips, links, strict=True))
+    ]
+    assert all(row["would_block"] for row in rows)
 
-    _commit(linked)
+    _commit(links[0])
     isolated = push_repo.parent / "isolated-bin"
     isolated.mkdir()
     for command in ("git", "bash", "cat"):
         executable = shutil.which(command)
         assert executable is not None
         (isolated / command).symlink_to(executable)
-    push(str(isolated))
-    row = json.loads(log.read_text().splitlines()[-1])
-    assert row["result"] == "gate_error"
-    assert row["reason"] == "brigade_missing"
-    assert _gate(linked, "install", "--mode", "off") == 0
-    prior = log.read_bytes()
-    _commit(linked)
-    push(str(isolated))
-    assert log.read_bytes() == prior
+    monkeypatch.setenv("PATH", str(isolated))
+    push(0, str(isolated))
+    assert sorted(_log_rows(push_repo), key=lambda row: row["ref"]) == rows
+    info = _status(links[0], capsys)
+    assert info["wired"] and not info["brigade_on_path"] and not info["will_run"]
+    assert _doctor(links[0])[0] == "WARN"
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX content guard shell hook fixture")
+def test_global_template_preserves_history_guard(push_repo, capsys, monkeypatch):
+    from brigade.work_cmd.push_gate import _guard_bytes, _snippet
+
+    _policy(push_repo)
+    _bare_remote(push_repo)
+    shared = push_repo.parent / "shared hooks"
+    shared.mkdir()
+    global_config = push_repo.parent / "global config"
+    _git(push_repo, "config", "--file", str(global_config), "core.hooksPath", str(shared))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    global_before = global_config.read_bytes()
+    hook = shared / "pre-push"
+    old = _guard_bytes().replace(_snippet(), b"")
+    hook.write_bytes(old)
+    hook.chmod(0o755)
+    assert _gate(push_repo, "install") == 0
+    notice = capsys.readouterr().out
+    assert "mode=warn, not wired" in notice.splitlines()[0]
+    assert _snippet().decode("ascii") in notice and str(hook) in notice
+    assert hook.read_bytes() == old and _doctor(push_repo)[0] == "WARN"
+
+    tools_dir = push_repo.parent / "tools with spaces"
+    tools_dir.mkdir()
+    fake = tools_dir / "brigade"
+    real = shlex.quote(str(Path(sys.executable).parent / "brigade"))
+    fake.write_text(
+        '#!/bin/sh\ncase "$1" in\n'
+        '  guard) cat; exit "${TEST_GUARD_EXIT:-0}";;\n'
+        "  scrub) exit 0;;\n"
+        '  work) if [ "$2" = rails ]; then exit 0; fi;;\n'
+        f'esac\nexec {real} "$@"\n',
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tools_dir) + os.pathsep + _path_with_brigade())
+    tip = _commit(push_repo)
+    monkeypatch.setenv("TEST_GUARD_EXIT", "1")
+    line = f"refs/heads/main {tip} refs/heads/main {'0' * len(tip)}\n"
+
+    def run_hook():
+        return subprocess.run(
+            [str(hook), "origin", _git(push_repo, "remote", "get-url", "origin")],
+            cwd=push_repo,
+            input=line,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+
+    baseline = run_hook()
+    assert baseline.returncode == 1 and tip in baseline.stdout and "BLOCKED" in baseline.stderr
+    current = _guard_bytes()
+    hook.write_bytes(current)
+    assert _gate(push_repo, "install") == 0
+    assert "mode=warn, wired" in capsys.readouterr().out
+    assert hook.read_bytes() == current and global_config.read_bytes() == global_before
+    assert _status(push_repo, capsys)["will_run"] and _doctor(push_repo)[0] == "INFO"
+    blocked = run_hook()
+    assert blocked.returncode == baseline.returncode and blocked.stdout == baseline.stdout
+    assert "BLOCKED" in blocked.stderr and "missing_receipt" in blocked.stderr
+    (row,) = _log_rows(push_repo)
+    assert row["tip"] == tip
+
+    monkeypatch.setenv("TEST_GUARD_EXIT", "0")
+    _git(push_repo, "push", "origin", "main")
+    assert len(_log_rows(push_repo)) == 2
+    assert _gate(push_repo, "uninstall") == 0
+    assert hook.read_bytes() == current and global_config.read_bytes() == global_before
+    assert len(_log_rows(push_repo)) == 2
 
 
 def test_doctor_reports_claude_latch(tmp_path):
@@ -190,48 +294,37 @@ def test_doctor_reports_claude_latch(tmp_path):
     assert "1 recent session(s)" in check[2]
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="POSIX seeded content-guard shell hook fixture")
-def test_managed_hook_preserves_guard_exit(push_repo, capsys):
-    from brigade.work_cmd.push_gate import _guard_bytes
+@pytest.mark.parametrize("failure", ["timeout", "crash"])
+def test_evaluator_failure_is_a_gate_error(push_repo, monkeypatch, failure):
+    import io
 
-    hook = push_repo / ".git" / "hooks" / "pre-push"
-    hook.write_bytes(_guard_bytes())
-    hook.chmod(0o755)
-    env = {**os.environ, "CONTENT_GUARD_DIR": str(push_repo / "nonexistent")}
-
-    def run():
-        return subprocess.run(
-            [str(hook)], cwd=push_repo, input="", text=True, capture_output=True, env=env, check=False
-        )
-
-    before = run()
-    assert before.returncode == 1
-    assert _gate(push_repo, "install") == 0
-    capsys.readouterr()
-    after = run()
-    assert (after.returncode, after.stdout, after.stderr) == (before.returncode, before.stdout, before.stderr)
-
-
-@pytest.mark.parametrize("failure", ["timeout", "crash", "invalid"])
-def test_unavailable_push_check_is_a_gate_error(push_repo, monkeypatch, failure):
-    from brigade.work_cmd import push_gate_hook, push_gate_log
+    from brigade.work_cmd import push_gate_hook, verify_push
 
     tip = _git(push_repo, "rev-parse", "HEAD")
-    tree = _tree(push_repo)
+    _policy(push_repo)
+    monkeypatch.chdir(push_repo)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(f"HEAD {tip} refs/heads/topic {'0' * len(tip)}\n"))
+    git = verify_push.verify_manifest_git._git
 
-    def child(argv, *, stdout, **kwargs):
-        assert argv[0] == "brigade"
-        assert kwargs["timeout"] == 2.25
-        if failure == "timeout":
-            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
-        stdout.write(b"invalid output")
-        return subprocess.CompletedProcess(argv, 137 if failure == "crash" else 0)
+    def child(*argv, **kwargs):
+        if "merge-base" in argv:
+            if failure == "timeout":
+                raise subprocess.TimeoutExpired(argv, 1)
+            raise RuntimeError("fixture crash")
+        return git(*argv, **kwargs)
 
-    monkeypatch.setattr(push_gate_hook, "_trees", lambda _: {tip: tree})
-    monkeypatch.setattr(push_gate_hook.subprocess, "run", child)
-    data = f"HEAD {tip} refs/heads/topic {'0' * len(tip)}\n".encode()
-    push_gate_hook.run(push_repo / ".git", data)
-    (row,) = push_gate_log.read(push_gate_log.log_path(push_repo / ".git"))
-    assert row["result"] == "gate_error"
-    assert row["would_block"] is False
-    assert row["reason"] == {"timeout": "check_timeout", "crash": "check_failed", "invalid": "invalid_output"}[failure]
+    monkeypatch.setattr(verify_push.verify_manifest_git, "_git", child)
+    assert push_gate_hook.run() == 0
+    (row,) = _log_rows(push_repo)
+    assert row["result"] == "gate_error" and row["would_block"] is False
+    assert row["reason"] == {"timeout": "check_timeout", "crash": "check_failed"}[failure]
+
+
+def test_log_byte_bound_keeps_newest_records(push_repo, monkeypatch):
+    from brigade.work_cmd import push_gate_log
+
+    path = push_gate_log.log_path(push_repo / ".git")
+    monkeypatch.setattr(push_gate_log, "_BYTE_LIMIT", 256)
+    push_gate_log.append(path, [{"index": i, "padding": "a" * 64} for i in range(10)])
+    assert path.stat().st_size <= 256
+    assert [json.loads(line)["index"] for line in path.read_bytes().splitlines()] == [8, 9]
