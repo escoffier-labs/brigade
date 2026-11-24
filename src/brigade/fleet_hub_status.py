@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from . import fleet_command_deck
@@ -34,6 +34,23 @@ _LATEST_PARTITION = (
     "  ORDER BY e.sequence DESC, e.received_at DESC, e.digest DESC"
     ") AS rn FROM events e"
 )
+_ACTIVE_LATEST = f"""
+SELECT {_LATEST_COLUMNS} FROM events WHERE rowid IN (
+    SELECT (SELECT winner.rowid FROM events AS winner
+            WHERE winner.node_id = candidate.node_id AND winner.run_id = candidate.run_id
+              AND winner.harness IS NOT 'grokbot'
+            ORDER BY winner.sequence DESC, winner.received_at DESC, winner.digest DESC LIMIT 1)
+    FROM (SELECT DISTINCT node_id, run_id FROM events INDEXED BY events_received_at
+          WHERE received_at >= ? AND harness IS NOT 'grokbot') AS candidate
+    UNION ALL
+    SELECT (SELECT winner.rowid FROM events AS winner
+            WHERE winner.run_id = candidate.run_id AND winner.harness = 'grokbot'
+            ORDER BY winner.sequence DESC, winner.received_at DESC, winner.digest DESC LIMIT 1)
+    FROM (SELECT DISTINCT run_id FROM events INDEXED BY events_received_at
+          WHERE received_at >= ? AND harness = 'grokbot') AS candidate
+)
+ORDER BY node_id, run_id, harness IS NOT 'grokbot'
+"""
 
 
 @dataclass(frozen=True)
@@ -173,8 +190,14 @@ def latest_status(
     ``run.stale`` from Hub ``received_at``, keeping the recorded state in
     ``original_state``. Event history itself is not rewritten.
     """
-    rows = conn.execute(f"{_latest_sql()} ORDER BY node_id, run_id").fetchall()
     current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    if include_all:
+        rows = conn.execute(f"{_latest_sql()} ORDER BY node_id, run_id").fetchall()
+    else:
+        # A date-only bound with one day of slack covers stored UTC offsets.
+        # Seek the winner across each candidate's full history before checking age.
+        bound = (current - timedelta(days=1, seconds=active_ttl_seconds)).date().isoformat()
+        rows = conn.execute(_ACTIVE_LATEST, (bound, bound)).fetchall()
     result = []
     for row in rows:
         state = row[5]

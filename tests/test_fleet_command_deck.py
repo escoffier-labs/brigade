@@ -100,6 +100,7 @@ def _failed(conn: sqlite3.Connection, *, lookback_seconds: int = 86400, stale_af
 def conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.execute(_EVENTS_SCHEMA)
+    conn.execute("CREATE INDEX events_received_at ON events (received_at)")
     fleet_hub_sessions.init_schema(conn)
     yield conn
     conn.close()
@@ -1049,6 +1050,29 @@ def test_grokbot_cross_node_revisions_use_one_global_latest_row(conn):
         (NODE_B, "grok-terminal-3", "external.expired"),
         (NODE_B, "shared-normal-run", "run.started"),
     ]
+
+
+def test_active_status_seeks_recent_candidates_and_preserves_winners(conn):
+    _insert(conn, NODE_A, "offset-receipt", 1, "run.started", received_at="2026-08-24 23:55:00-12:00")
+    _insert(conn, NODE_A, "older-winner", 1, "run.started")
+    _insert(conn, NODE_A, "older-winner", 2, "run.started", received_at=_ts(3 * 86400))
+    _insert(conn, NODE_A, "legacy-job", 1, "external.running", harness="grokbot")
+    _insert(conn, NODE_B, "legacy-job", 2, "external.completed", harness="grokbot")
+    _insert(conn, NODE_A, "legacy-job", 3, "run.started")
+
+    statements = []
+    conn.set_trace_callback(statements.append)
+    try:
+        active = fleet_hub_status.latest_status(conn, now=NOW)
+    finally:
+        conn.set_trace_callback(None)
+
+    assert [(row["node_id"], row["run_id"], row["sequence"]) for row in active] == [
+        (NODE_A, "legacy-job", 3),
+        (NODE_A, "offset-receipt", 1),
+    ]
+    plan = [row[3] for row in conn.execute(f"EXPLAIN QUERY PLAN {statements[0]}")]
+    assert any("SEARCH" in operation and "events_received_at" in operation for operation in plan)
 
 
 # --- HTTP integration: hub-served Command Deck (task 2) ----------------------
