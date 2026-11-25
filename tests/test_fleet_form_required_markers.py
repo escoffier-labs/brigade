@@ -32,7 +32,7 @@ class Control:
 
 
 class _Controls(HTMLParser):
-    """Visible named controls with the Required/Optional marker of the label around them."""
+    """Visible named controls with the requirement marker from their label or group."""
 
     def __init__(self) -> None:
         super().__init__()
@@ -42,12 +42,17 @@ class _Controls(HTMLParser):
         self._in_label = False
         self._marker: list[str] | None = None
         self._label_marker = ""
+        self._decision_markers: dict[str, str] | None = None
+        self._decision_heading: str | None = None
 
     def handle_starttag(self, tag, attrs):
         attributes = dict(attrs)
         classes = (attributes.get("class") or "").split()
         if tag == "form":
             self._scope = ""
+            self._decision_markers = {} if "decision" in classes else None
+        elif self._decision_markers is not None and tag in {"h3", "th"}:
+            self._decision_heading = tag
         elif tag == "label":
             self._in_label, self._label_marker, self._pending = True, "", []
         elif tag == "span" and "field-req" in classes:
@@ -61,7 +66,11 @@ class _Controls(HTMLParser):
             if tag == "input" and attributes.get("type") in {"submit", "button"}:
                 return
             if name:
-                control = Control(self._scope, name, "required" in attributes, None)
+                marker = None
+                if self._decision_markers is not None:
+                    field = "ov" if name.startswith("ov:") else name
+                    marker = self._decision_markers.get(field)
+                control = Control(self._scope, name, "required" in attributes, marker)
                 self.controls.append(control)
                 if self._in_label:
                     self._pending.append(control)
@@ -74,9 +83,16 @@ class _Controls(HTMLParser):
         if tag == "span" and self._marker is not None:
             self._label_marker = "".join(self._marker)
             self._marker = None
+            if self._decision_markers is not None and self._decision_heading is not None:
+                field = "decision" if self._decision_heading == "h3" else "ov"
+                self._decision_markers[field] = self._label_marker
+        elif tag == self._decision_heading:
+            self._decision_heading = None
+        elif tag == "form":
+            self._decision_markers = None
         elif tag == "label":
             for control in self._pending:
-                control.marker = self._label_marker or None
+                control.marker = self._label_marker or control.marker
             self._in_label, self._pending = False, []
 
     def handle_startendtag(self, tag, attrs):
@@ -345,12 +361,20 @@ def test_dashboard_filters_do_not_show_requirement_markers():
     assert all(c.marker is None and not c.required for c in found)
 
 
-def test_the_skill_decision_is_required_and_the_per_machine_override_is_optional(tmp_path):
-    page = render_skills(tmp_path)
-    detail = page.split('id="' + "sample-lint" + '"', 1)[0:2][-1]
-    assert '<h3>Decision <span class="field-req field-req--required">Required</span></h3>' in detail
-    assert '<input type="radio" name="decision" value="keep" required' in detail
-    assert 'Decision <span class="field-req field-req--optional">Optional</span></th>' in page
+def test_skills_decision_controls_match_the_form_declaration(tmp_path):
+    seen = set()
+    for control in controls(render_skills(tmp_path)):
+        if control.name == "decision":
+            name = "decision"
+        elif control.name.startswith("ov:"):
+            name = "ov"
+        else:
+            continue
+        field = review.DECISION_FORM[name]
+        assert control.marker == expected_marker(field), control.name
+        assert control.required is field.is_required, control.name
+        seen.add(name)
+    assert seen == set(review.DECISION_FORM)
 
 
 def test_a_blank_skill_decision_is_refused_with_the_declared_message(tmp_path):
