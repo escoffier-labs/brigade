@@ -27,7 +27,7 @@ from .memory_log_retractions import retraction
 
 
 # Workspace files can only veto. Enable archive moves only after the hub anchor
-# in escoffier-labs/brigade#2620 can detect ledger rollback and erased failures.
+# in escoffier-labs/brigadestack#2620 can detect ledger rollback and erased failures.
 AUTOMATIC_ARCHIVE_ENABLED = False
 ARCHIVE_DISABLED_REASON = "automatic archive awaits hub anchor (#2620)"
 

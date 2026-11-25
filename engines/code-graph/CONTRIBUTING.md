@@ -26,7 +26,7 @@ GraphTrail is a local code-graph sidecar: it indexes a repository into a small S
 ## Local dev
 
 ```bash
-git clone https://github.com/escoffier-labs/brigade.git
+git clone https://github.com/escoffier-labs/brigadestack.git
 cd brigade/engines/code-graph
 cargo build
 cargo test --all-features

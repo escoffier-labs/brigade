@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  <img src="https://shieldcn.dev/github/ci/escoffier-labs/brigade.svg?branch=main&workflow=ci.yml" alt="CI status">
+  <img src="https://shieldcn.dev/github/ci/escoffier-labs/brigadestack.svg?branch=main&workflow=ci.yml" alt="CI status">
   <img src="https://img.shields.io/crates/v/graphtrail.svg" alt="crates.io version">
   <img src="https://shieldcn.dev/badge/license-MIT-green.svg" alt="MIT license">
   <img src="https://shieldcn.dev/badge/MCP-server-8A2BE2.svg" alt="MCP server">
@@ -226,7 +226,7 @@ brigade code context "rate limiting" --markdown
 brigade code impact dispatch --json
 brigade evidence crawl plan --target .
 brigade evidence search "dispatch"
-brigade evidence search "dispatch" --code-reference '{"schema":"brigade.code-reference.v1","repository":"escoffier-labs/brigade","revision":{"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"file_path":"src/brigade/receipts_cmd.py","qualified_name":"brigade.receipts_cmd._metadata_with_delta","symbol_kind":"function","source_span":{"start_line":788,"line_count":3}}'
+brigade evidence search "dispatch" --code-reference '{"schema":"brigade.code-reference.v1","repository":"escoffier-labs/brigadestack","revision":{"commit":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"file_path":"src/brigade/receipts_cmd.py","qualified_name":"brigade.receipts_cmd._metadata_with_delta","symbol_kind":"function","source_span":{"start_line":788,"line_count":3}}'
 brigade evidence doctor --target .
 ```
 

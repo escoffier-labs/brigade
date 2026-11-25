@@ -93,7 +93,7 @@ unless you say so:
   `--discard-local-edits`. With the flag, the edited bytes are snapshotted under
   the rollback tree (named in the rollback receipt as `edit_snapshot`) before the
   copy is rolled back, so the edit stays recoverable.
-- `brigade outcome reconcile --apply` is routing only ([decision on #2589](https://github.com/escoffier-labs/brigade/issues/2589#issuecomment-6965099265)):
+- `brigade outcome reconcile --apply` is routing only ([decision on #2589](https://github.com/escoffier-labs/brigadestack/issues/2589#issuecomment-6965099265)):
   it never installs, rolls back or uninstalls a skill file, so it cannot touch
   an edited copy at all. It lists the `skills install` or `skills rollback`
   command that would apply a status change, and you run it. See

@@ -183,7 +183,7 @@ For a new name, this creates a public `0.0.0-stage` placeholder. The staged vers
 Once all six placeholders exist, verify each package's organization ownership. Set `package_name` to each exact approved name in turn, configure its trusted publisher, complete the 2FA prompt and read back the configuration:
 
 ```sh
-npm trust github "$package_name" --repo escoffier-labs/brigade --file npm-publish.yml --env npm --allow-publish
+npm trust github "$package_name" --repo escoffier-labs/brigadestack --file npm-publish.yml --env npm --allow-publish
 npm trust list "$package_name"
 ```
 

@@ -1,4 +1,4 @@
-# Brigade Stack distributions
+# BrigadeStack distributions
 
 `brigadestack` is the real package on PyPI and on npm. On PyPI the root `pyproject.toml`
 builds it, and it contains the whole CLI. On npm [`npm/feasibility`](../../npm/feasibility/README.md)
@@ -24,7 +24,7 @@ Both PyPI distributions use the existing CLI behavior, Python imports, workspace
 files, and storage formats. Install only one package per ecosystem globally: the real package
 and its old-name or compatibility package both link a `brigade` command. Documentation lives at
 [brigade.tools](https://brigade.tools/docs). The source repository is
-[escoffier-labs/brigade](https://github.com/escoffier-labs/brigade/tree/main/distribution/brigadestack).
+[escoffier-labs/brigadestack](https://github.com/escoffier-labs/brigadestack/tree/main/distribution/brigadestack).
 
 ## Publishing the Python distributions
 
@@ -86,7 +86,7 @@ npm accepts one trusted publisher per package, and every package names this work
 | npm trust field | Value |
 | --- | --- |
 | Package | each of `brigadestack`, `@escoffier-labs/brigade` and the five `@escoffier-labs/brigade-uv-*` companions |
-| Repository | `escoffier-labs/brigade` |
+| Repository | `escoffier-labs/brigadestack` |
 | Workflow file | `npm-publish.yml` |
 | Environment | `npm` |
 
@@ -97,7 +97,7 @@ needs its trust entry replaced. From a logged-in maintainer session:
 ```sh
 npm trust list brigadestack
 npm trust revoke brigadestack --id <id of the brigadestack-npm-publish.yml entry>
-npm trust github brigadestack --repo escoffier-labs/brigade \
+npm trust github brigadestack --repo escoffier-labs/brigadestack \
   --file npm-publish.yml --env npm --allow-publish
 ```
 

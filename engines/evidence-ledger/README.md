@@ -21,8 +21,8 @@
 </p>
 
 <p align="center">
-  <img src="https://shieldcn.dev/github/ci/escoffier-labs/brigade.svg?branch=main&workflow=ci.yml" alt="CI status">
-  <img src="https://shieldcn.dev/github/release/escoffier-labs/brigade.svg" alt="Latest release">
+  <img src="https://shieldcn.dev/github/ci/escoffier-labs/brigadestack.svg?branch=main&workflow=ci.yml" alt="CI status">
+  <img src="https://shieldcn.dev/github/release/escoffier-labs/brigadestack.svg" alt="Latest release">
   <img src="https://shieldcn.dev/badge/go-1.26%2B-00ADD8.svg?logo=go&logoColor=white" alt="Go 1.26+">
   <img src="https://shieldcn.dev/badge/license-MIT-green.svg" alt="MIT license">
 </p>
@@ -56,7 +56,7 @@ Review `install.sh` before running it. The installer downloads release binaries 
 Or from source:
 
 ```bash
-git clone https://github.com/escoffier-labs/brigade.git
+git clone https://github.com/escoffier-labs/brigadestack.git
 cd brigade/engines/evidence-ledger
 go build -o bin/brigade-evidence ./cmd/brigade-evidence
 ```

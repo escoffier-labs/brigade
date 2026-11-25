@@ -22,7 +22,7 @@ Learning columns also differ. Brigade scores captured verification receipts, the
 
 | Project | Ready work | Claim safety | Parallel and run control | Task-store boundary | Verification | Official source |
 | --- | --- | --- | --- | --- | --- | --- |
-| Brigade | Ready set plus parallel-safe waves | Fail-closed compare-and-set claims, optional hub-arbitrated repo claims | Per-repo waves, campaign-composed waves, declared wall-clock and worker-dispatch limits, named retry/reroute, fleet board | Machine-local JSON under `.brigade/`. Optional hub for events and claims, not a task DB | Verify receipts (command, exit code, Git state) | [README](https://github.com/escoffier-labs/brigade) |
+| Brigade | Ready set plus parallel-safe waves | Fail-closed compare-and-set claims, optional hub-arbitrated repo claims | Per-repo waves, campaign-composed waves, declared wall-clock and worker-dispatch limits, named retry/reroute, fleet board | Machine-local JSON under `.brigade/`. Optional hub for events and claims, not a task DB | Verify receipts (command, exit code, Git state) | [README](https://github.com/escoffier-labs/brigadestack) |
 | Beads | Built-in ready / dependency graph | Atomic claim | Agent workflow plus Dolt sync | Dolt-backed distributed store (`bd dolt push` / `pull`) | Task history | [README](https://github.com/gastownhall/beads) |
 | Gas Town | Beads-backed work | Not documented | Multi-agent runtime (Mayor, rigs, polecats, convoys) | Beads ledger | Refinery merge-queue verification gates | [README](https://github.com/gastownhall/gastown) |
 | nWave *(docs only)* | Artifacts across 7 waves | Not documented | Human approval between waves plus TDD gates | Git-tracked artifacts | Phase validation and audit logs | [README](https://github.com/nWave-ai/nWave) |
@@ -36,7 +36,7 @@ Honest neighbor strengths: Beads for the distributed Dolt store. Gas Town for th
 
 | Project | Durable memory | Capture and recall | Care and operations | Learning | Provenance | Official source |
 | --- | --- | --- | --- | --- | --- | --- |
-| Brigade | Shared markdown cards plus index | Linted handoffs, bounded session-start recall | Owner policy, Memory Operations (topology, inventory), vault project/search/propose | Outcome score, promote, rollback from receipts | Work receipts and source paths | [README](https://github.com/escoffier-labs/brigade) |
+| Brigade | Shared markdown cards plus index | Linted handoffs, bounded session-start recall | Owner policy, Memory Operations (topology, inventory), vault project/search/propose | Outcome score, promote, rollback from receipts | Work receipts and source paths | [README](https://github.com/escoffier-labs/brigadestack) |
 | Mem0 / OpenMemory | User, agent, session, application memory | Extraction and hybrid search | History and metadata APIs | Extraction plus retrieval | Timestamps and entities | [README](https://github.com/mem0ai/mem0) |
 | Letta Code *(docs only)* | Git-tracked memory filesystem plus blocks | Agent-managed memory | Editable memory | Dreaming plus skill learning | Git history of memory files | [README](https://github.com/letta-ai/letta-code) |
 | agentmemory (`rohitg00/agentmemory`) | Shared coding-agent memory | Hooks, MCP, REST, host plugins | Lifecycle, decay, audit, governed delete | Lessons and reflection (`/lesson`, slot reflection) | Write-time origin channel and citation provenance | [README](https://github.com/rohitg00/agentmemory) |
@@ -54,7 +54,7 @@ Beads now documents persistent project memory (`bd remember`, `bd prime`) as of 
 
 | Project | MCP | Reviewed rules and skills | Projection behavior | Source of truth | Audit and rollback | Official source |
 | --- | --- | --- | --- | --- | --- | --- |
-| Brigade | MCP and tools catalog | Skills and harness adapters | Dry-run-first (`mcp sync`, `tools plan`), then apply | Brigade catalog | Preserve unmanaged entries, gate writes, rollback via files | [README](https://github.com/escoffier-labs/brigade) |
+| Brigade | MCP and tools catalog | Skills and harness adapters | Dry-run-first (`mcp sync`, `tools plan`), then apply | Brigade catalog | Preserve unmanaged entries, gate writes, rollback via files | [README](https://github.com/escoffier-labs/brigadestack) |
 | add-mcp | MCP servers across native configs | Not documented | Maps supported fields into native files | Native files plus `sync` / `unify` commands | Warns when a field is dropped | [README](https://github.com/neon-solutions/add-mcp) |
 | Rulesync | Supported | Rules, skills, hooks, commands, subagents | Per-target generation | Rulesync project | Generated outputs | [README](https://github.com/dyoshikawa/rulesync) |
 | chezmoi *(docs only)* | As ordinary files | As ordinary files | Templates and apply | Git-backed source directory | Diff, templates, merge | [Docs](https://www.chezmoi.io/) |
@@ -67,7 +67,7 @@ Beads now documents persistent project memory (`bd remember`, `bd prime`) as of 
 
 | Project | Receipts | Code impact | Agent activity | Cloud state | Learning / replay | Official source |
 | --- | --- | --- | --- | --- | --- | --- |
-| Brigade | Command, exit code, Git state, optional graph delta, causal lineage receipts | `brigade code` impact, Center code-graph views and blast radius | Center activity, hub-served fleet board, external harness sessions, Command Deck fleet overview | Registered Codex Cloud and Cursor cloud agent task status (best-effort). Claude cloud sessions register only | Score, promote, rollback. Run child, diff, resume | [README](https://github.com/escoffier-labs/brigade) |
+| Brigade | Command, exit code, Git state, optional graph delta, causal lineage receipts | `brigade code` impact, Center code-graph views and blast radius | Center activity, hub-served fleet board, external harness sessions, Command Deck fleet overview | Registered Codex Cloud and Cursor cloud agent task status (best-effort). Claude cloud sessions register only | Score, promote, rollback. Run child, diff, resume | [README](https://github.com/escoffier-labs/brigadestack) |
 | ActiveGraph | Event trace | Not documented | Reactive behaviors | Not documented | Replay, fork, and diff | [README](https://github.com/yoheinakajima/activegraph) |
 | Graphiti | Episode provenance and validity windows | Not documented | Not documented | Not documented | Temporal fact updates | [README](https://github.com/getzep/graphiti) |
 | Codex Cloud | Changed files and test results for review | Not documented | Task review and follow-ups | Hosted task workspaces that keep running while you are away | Not documented | [Docs](https://developers.openai.com/codex/cloud) |
@@ -98,7 +98,7 @@ Beads now documents persistent project memory (`bd remember`, `bd prime`) as of 
 
 All rows were re-checked on 2026-10-18 against official READMEs and docs. Brigade cells were checked against v0.29.0 and have not been re-read for v0.30.0 or v0.31.0. chezmoi docs were not re-read, so its row rests on the earlier pass.
 
-- https://github.com/escoffier-labs/brigade
+- https://github.com/escoffier-labs/brigadestack
 - https://github.com/gastownhall/beads
 - https://beads.gascity.com/
 - https://github.com/gastownhall/gastown

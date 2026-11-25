@@ -20,7 +20,7 @@ back under a recovery name and the worktree is kept. Residual risk: a write
 that lands between the final check and the unlink is lost. That needs a
 writer stalled longer than the quiescence window with a descriptor still
 open. Closing it needs an atomic publication contract for handoff writers
-(write a private temp, fsync, publish with a no-replace rename), tracked in escoffier-labs/brigade#2397.
+(write a private temp, fsync, publish with a no-replace rename), tracked in escoffier-labs/brigadestack#2397.
 
 Known conservative limit: git does not look inside an embedded repository
 (an untracked nested repo, at any depth and in ignored trees too) or an
