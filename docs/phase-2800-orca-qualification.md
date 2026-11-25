@@ -257,6 +257,10 @@ from clean worktrees at the pinned revision and ended with zero held
 capacity. All 30 Codex worker sessions recorded `service_tier = "default"`
 in their applied thread settings. Arm A used a read-only prompt. Arm B
 enforced read-only access through Brigade's batch policy.
+The projected `brigade.orca_qualification.v1` schema omits service tier
+and transcript clipping, which this report verifies from the retained
+local worker `thread_settings_applied` events and Brigade `observe`
+receipts, respectively.
 
 Peak observed swap was 6.17 GiB. The first repository verification capture
 after the ledger engine switch to v0.32.0 could drain up to about 45 seconds
@@ -293,3 +297,23 @@ input, output, and cached input tokens from the worker session counters.
 | 4A | 18.341 | 22.720 | 24.800 | 320,636 | 520 | 272,768 |
 | 5A | 15.776 | 20.470 | 22.433 | 320,628 | 525 | 233,856 |
 | 5B | Unobserved | Unobserved | 5.586 | 210,540 | 236 | 131,584 |
+
+### Matched repeat of pair 1
+
+The original pair 1 used different Brigade builds because 1A needed recovery.
+Use the repeat below as matched pair 1 for comparison with pairs 2 through 5.
+The original 1A remains recovery evidence, and the original 1B remains the
+baseline record from that sequence.
+
+The repeat ran A then B using Brigade commit
+`225cc9ca4538f40ad36089916e46268eee814618` and workload revision
+`0c29e690312b88ec99adb266281e476cc3fa5516` in both arms. Each arm returned
+three exact outputs from clean worktrees, with zero parent interventions.
+All six sessions recorded the default tier. Each governed transcript used
+two pages and reported clipping. Swap usage was 6.15 GiB at both batch
+boundaries, below the 8 GiB stop threshold.
+
+| Batch | Verdict | Verified completion (seconds) | Held capacity at close |
+| --- | --- | ---: | ---: |
+| [Repeat 1A](research/evidence/orca-qualification/attempt-6-pair-01-repeat-a/record.json) | Passed | 60.818 | 0 |
+| [Repeat 1B](research/evidence/orca-qualification/attempt-6-pair-01-repeat-b/record.json) | Passed | 14.457 | 0 |
