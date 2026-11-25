@@ -1,0 +1,1 @@
+- Limit each code graph operation during verify receipt capture to 0.5 seconds by default. Receipts still record timeouts, and the workspace setting and `--code-graph-timeout` can override the limit.

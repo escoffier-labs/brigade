@@ -16,7 +16,8 @@ WORKSPACE_DIRNAME = ".brigade"
 LEGACY_WORKSPACE_DIRNAMES = (".solo-mise",)
 CONFIG_REL_PATH = f"{WORKSPACE_DIRNAME}/config.json"
 SUPPORTED_VERSIONS = (1,)
-DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS = 10.0
+# Keep optional graph capture within an interactive verify run's latency budget.
+DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS = 0.5
 CODE_GRAPH_DELTA_TIMEOUT_KEY = "code_graph_delta_timeout_seconds"
 # Retained for the doctor warning on existing workspace configs.
 LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY = "graphtrail_delta_timeout_seconds"

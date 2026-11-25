@@ -2285,6 +2285,35 @@ def test_work_verify_graphtrail_delta_malformed_diff_fails_open(tmp_path, capsys
     assert sidecar["ok"] is False
 
 
+def test_work_verify_code_graph_default_timeout_is_recorded(tmp_path, capsys, monkeypatch):
+    _init_git_repo(tmp_path)
+    monkeypatch.setattr(code_graph_delta, "_graphtrail_bin", lambda: "brigade-code-graph")
+
+    def time_out(binary, db_path, command, *extra, timeout, stage, **kwargs):
+        assert command == "sync"
+        return code_graph_delta._command_result(
+            argv=[binary, "--db", str(db_path), command],
+            returncode=124,
+            stdout="",
+            stderr="sync timed out",
+            timed_out=True,
+            duration_seconds=timeout,
+            timeout=timeout,
+            stage=stage,
+        )
+
+    monkeypatch.setattr(code_graph_delta, "_run_graphtrail", time_out)
+
+    assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""], json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    delta = receipt["code_graph_delta"]
+    assert receipt["commands"][0]["exit_code"] == 0
+    assert delta["status"] == "sync_timed_out"
+    assert delta["graphtrail_timeout_seconds"] == 0.5
+    assert delta["commands"]["before_sync"]["timed_out"] is True
+    assert delta["commands"]["after_sync"] is None
+
+
 def test_work_verify_graphtrail_delta_config_timeout_reaches_pre_and_post_sync(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
     _write_brigade_config(tmp_path, code_graph_delta_timeout_seconds=25)
