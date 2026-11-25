@@ -195,7 +195,9 @@ def denied(*a,**kw):
 socket.socket=denied; socket.create_connection=denied; u.default_paths=denied
 requests=[]; spawns=[]
 def fetch(request,timeout):
- requests.append((request,timeout)); return closing(io.BytesIO(b'{"latest":"98.0.0"}'))
+ requests.append((request,timeout))
+ response=io.BytesIO(b'{"latest":"98.0.0"}'); response.status=200
+ return closing(response)
 n.urllib.request.urlopen=fetch
 n.subprocess.Popen=lambda *a,**kw: spawns.append((a,kw))
 class TTY(io.StringIO):
@@ -217,9 +219,9 @@ for extra in ({},{'DO_NOT_TRACK':'1'},{'BRIGADE_TELEMETRY':'0'}):
  assert n.run_refresh(now=1000000)==0
  assert len(requests)==1
  request,timeout=requests[0]
- assert request.full_url==n.CHECK_URL and request.get_method()=='GET' and request.data is None and timeout==5
+ assert request.full_url=='https://check.brigade.tools/v1/version' and request.get_method()=='GET' and request.data is None and timeout==5
  if extra:
-  assert request.get_header('User-agent')=='Python-urllib' and request.get_header('X-brigade-channel') is None
+  assert dict(request.header_items())=={'User-agent':'brigadestack-update-check'}
  else:
   assert request.get_header('User-agent')==f'brigadestack/{__version__} ({platform.system()})'
   assert request.get_header('X-brigade-channel')=='npm'

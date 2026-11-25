@@ -28,9 +28,10 @@ no command arguments, filesystem paths, or repository names.
 
 `DO_NOT_TRACK` also accepts any nonempty value except `0`, `off`, `false`, and
 `no`. `BRIGADE_TELEMETRY` also accepts `off` and `false`. Both settings ignore
-case and surrounding whitespace. Any nonempty `BRIGADE_NO_UPDATE_CHECK` value
-disables the automatic check. An explicit `brigade update` still contacts
-release services.
+case and surrounding whitespace. For `BRIGADE_NO_UPDATE_CHECK`, empty values
+and `0`, `false`, `no`, and `off` leave checks enabled, ignoring case and
+surrounding whitespace. Any other value disables the automatic check.
+An explicit `brigade update` still contacts release services.
 
 The request has a five-second timeout. The CLI waits 24 hours after a valid
 response. A failed check keeps the previous result, and the one-hour refresh
@@ -46,8 +47,12 @@ purge deletes historical rows older than 90 days. Those rows could contain a
 weekly salted address hash, UTC dates and timestamps, the version, a request
 count, and an operator-egress flag. See the [service privacy notice](https://check.brigade.tools/privacy).
 
+The controller is Solomon Neas (Escoffier Labs). Use the contact in
+[SECURITY.md](../SECURITY.md#reporting-a-vulnerability) for privacy questions
+and erasure requests.
+
 The local cache at `<cache_root>/brigade/update-notify.json` holds the latest
-version and check and notice timestamps. The adjacent `update-notify.claim`
+version along with timestamps for the last successful check and the last notice. The adjacent `update-notify.claim`
 file uses its modification time to space out refresh launches. Both files can
 be deleted and have no automatic expiry.
 

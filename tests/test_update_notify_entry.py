@@ -338,15 +338,36 @@ def version_listener(monkeypatch):
             thread.join()
 
 
+def _version_cache_env(tmp_path):
+    return {"HOME": str(tmp_path), "USERPROFILE": str(tmp_path), "LOCALAPPDATA": str(tmp_path)}
+
+
 @pytest.mark.parametrize(
-    "mode",
-    [{}, {"DO_NOT_TRACK": "1"}, {"BRIGADE_TELEMETRY": "0"}, {"BRIGADE_NO_UPDATE_CHECK": "1"}, {"CI": "true"}],
+    "mode,expected",
+    [
+        ({}, "default"),
+        ({"DO_NOT_TRACK": "1"}, "private"),
+        ({"DO_NOT_TRACK": " TrUe "}, "private"),
+        ({"DO_NOT_TRACK": " 0 "}, "default"),
+        ({"DO_NOT_TRACK": " Off "}, "default"),
+        ({"BRIGADE_TELEMETRY": "0"}, "private"),
+        ({"BRIGADE_TELEMETRY": " FALSE "}, "private"),
+        ({"BRIGADE_TELEMETRY": " Off "}, "private"),
+        ({"BRIGADE_TELEMETRY": " TrUe "}, "default"),
+        ({"BRIGADE_NO_UPDATE_CHECK": "1"}, "skip"),
+        ({"BRIGADE_NO_UPDATE_CHECK": " TrUe "}, "skip"),
+        ({"BRIGADE_NO_UPDATE_CHECK": " FaLsE "}, "default"),
+        ({"BRIGADE_NO_UPDATE_CHECK": "   "}, "default"),
+        ({"CI": "true"}, "skip"),
+        ({"CI": " FaLsE "}, "skip"),
+        ({"CI": ""}, "default"),
+    ],
 )
-def test_version_request_on_wire(tmp_path, version_listener, mode):
+def test_version_request_on_wire(tmp_path, version_listener, mode, expected):
     _, requests = version_listener
-    env = {"HOME": str(tmp_path), "USERPROFILE": str(tmp_path), "BRIGADE_INSTALL_CHANNEL": "plugin", **mode}
+    env = {**_version_cache_env(tmp_path), "BRIGADE_INSTALL_CHANNEL": "plugin", **mode}
     update_notify.run_refresh(env=env, now=42.0)
-    if "BRIGADE_NO_UPDATE_CHECK" in mode or "CI" in mode:
+    if expected == "skip":
         assert requests == []
         assert not update_notify.cache_path(env).exists()
         return
@@ -356,7 +377,7 @@ def test_version_request_on_wire(tmp_path, version_listener, mode):
     assert body == b""
     assert "Content-Length" not in headers
     assert "Transfer-Encoding" not in headers
-    if mode:
+    if expected == "private":
         assert headers.pop("User-Agent") == "brigadestack-update-check"
         assert set(headers) == {"Accept-Encoding", "Host", "Connection"}
     else:
@@ -370,7 +391,7 @@ def test_invalid_version_response_preserves_cache(tmp_path, version_listener, st
     server, requests = version_listener
     server.response_status = status
     server.response_body = body
-    env = {"HOME": str(tmp_path), "USERPROFILE": str(tmp_path)}
+    env = _version_cache_env(tmp_path)
     cache = update_notify.cache_path(env)
     cache.parent.mkdir(parents=True, exist_ok=True)
     original = {"checked_at": 1.0, "latest": "1.2.3"}

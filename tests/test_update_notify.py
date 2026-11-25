@@ -135,6 +135,24 @@ def test_notifies_from_cache_and_throttles(tmp_path):
     assert "99.0.0" in err3.getvalue()
 
 
+def test_future_notified_at_allows_notice(tmp_path):
+    state = _write_state(tmp_path, checked_at=999.0, notified_at=2_000.0, latest="99.0.0")
+    err = _Tty()
+    update_notify.maybe_notify(["work"], 0, env=_env(tmp_path), now=1_000.0, stderr=err, spawn=_no_spawn)
+    assert "99.0.0" in err.getvalue()
+    assert json.loads(state.read_text())["notified_at"] == 1_000.0
+
+
+@pytest.mark.parametrize("value", ["", " 0 ", " FaLsE ", " No ", " OFF "])
+def test_disabled_flag_false_values_keep_cached_notice(tmp_path, value):
+    _write_state(tmp_path, checked_at=999.0, latest="99.0.0")
+    env = _env(tmp_path, BRIGADE_NO_UPDATE_CHECK=value)
+    assert update_notify.available_update(env=env)["latest"] == "99.0.0"
+    err = _Tty()
+    update_notify.maybe_notify(["work"], 0, env=env, now=1_000.0, stderr=err, spawn=_no_spawn)
+    assert "99.0.0" in err.getvalue()
+
+
 def test_stale_cache_spawns_refresh_and_older_latest_is_silent(tmp_path):
     _write_state(tmp_path, checked_at=0.0, latest="0.0.1")
     err = _Tty()
@@ -371,6 +389,27 @@ def test_run_refresh_success_writes_latest(tmp_path, monkeypatch):
     assert captured["url"] == update_notify.CHECK_URL
     assert captured["timeout"] == 5
     assert str(captured["ua"]).startswith(f"brigadestack/{__version__}")
+
+
+def test_run_refresh_keeps_notice_written_during_fetch(tmp_path, monkeypatch):
+    from contextlib import closing
+
+    cache = _write_state(tmp_path, checked_at=1.0, latest="98.0.0")
+
+    def fetch(request, timeout):
+        _write_state(tmp_path, checked_at=1.0, latest="98.0.0", notified_at=43.0, notified_version="98.0.0")
+        response = io.BytesIO(b'{"latest":"99.0.0"}')
+        response.status = 200
+        return closing(response)
+
+    monkeypatch.setattr(update_notify.urllib.request, "urlopen", fetch)
+    update_notify.run_refresh(env=_env(tmp_path), now=42.0)
+    assert json.loads(cache.read_text()) == {
+        "checked_at": 42.0,
+        "latest": "99.0.0",
+        "notified_at": 43.0,
+        "notified_version": "98.0.0",
+    }
 
 
 def test_run_refresh_failure_preserves_checked_at(tmp_path, monkeypatch):
