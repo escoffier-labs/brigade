@@ -1,0 +1,1 @@
+- Remove repeated Optional badges from board filters and keep policy defaults markers on the editable form.
