@@ -14,6 +14,7 @@ _STOP_DOMAIN = "brigade.native-orca.worker-stop.v1"
 _RESULT_DOMAIN = "brigade.native-orca.result.v1"
 _WAIT_SOURCES = ("hook", "prompt-text", "title")
 _TERMINAL_WORKER = {"completed": "succeeded", "failed": "failed"}
+_MAX_TRANSCRIPT_PAGES = 8
 
 
 def _dispatch_argv(command: str, worker: WorkerReference) -> tuple[str, ...]:
@@ -165,31 +166,81 @@ def _report_id(worker: WorkerReference, worker_done: object, status: str) -> str
     return min(matches) if matches else None
 
 
-def _transcript_digest(worker: WorkerReference, payload: object, worker_state: str) -> str | None:
-    reply = result_fields(payload)
-    page = _fields(reply.get("transcript"))
-    status = _fields(reply.get("status"))
-    source = reply.get("sourceIdentity")
-    messages = page.get("messages")
-    if (
-        reply.get("dispatchId") != worker.dispatch_id
-        or reply.get("source") != "transcript"
-        or reply.get("sourceExact") is not True
-        or reply.get("contentComplete") is not True
-        or reply.get("fallbackReason") is not None
-        or reply.get("clipping") not in (None, [])
-        or status.get("worker") != worker_state
-        or not isinstance(source, str)
-        or not source
-        or not isinstance(messages, list)
-        or not messages
-        or page.get("limited") is not False
-        or type(page.get("returnedMessageCount")) is not int
-        or page.get("returnedMessageCount") != len(messages)
-    ):
+def _ends_in_assistant_text(message: object) -> bool:
+    row = _fields(message)
+    blocks = row.get("blocks")
+    if row.get("role") != "assistant" or not isinstance(blocks, list) or not blocks:
+        return False
+    block = _fields(blocks[-1])
+    text = block.get("text")
+    return block.get("type") == "text" and isinstance(text, str) and bool(text.strip())
+
+
+def _transcript_digest(worker: WorkerReference, payload: object, worker_state: str) -> tuple[str, bool] | None:
+    pages = payload if isinstance(payload, list) else [payload]
+    if not 1 <= len(pages) <= _MAX_TRANSCRIPT_PAGES:
+        return None
+    messages: list[object] = []
+    message_ids: set[str] = set()
+    cursors: set[str] = set()
+    previous_cursor: str | None = None
+    source_identity: str | None = None
+    clipped = False
+    for index, envelope in enumerate(pages, 1):
+        reply = result_fields(envelope)
+        page = _fields(reply.get("transcript"))
+        source = reply.get("sourceIdentity")
+        page_messages = page.get("messages")
+        more = index < len(pages)
+        complete = reply.get("contentComplete")
+        clipping = reply.get("clipping")
+        cursor = page.get("nextCursor")
+        if (
+            _fields(envelope).get("error") is not None
+            or reply.get("dispatchId") != worker.dispatch_id
+            or reply.get("source") != "transcript"
+            or reply.get("sourceExact") is not True
+            or reply.get("fallbackReason") is not None
+            or _fields(reply.get("status")).get("worker") != worker_state
+            or not isinstance(source, str)
+            or not source
+            or (source_identity is not None and source_identity != source)
+            or not isinstance(page_messages, list)
+            or "cursor" not in reply
+            or "nextCursor" not in page
+            or reply["cursor"] != cursor
+            or page.get("limited") is not more
+            or type(complete) is not bool
+            or (not more and not complete)
+            or type(page.get("returnedMessageCount")) is not int
+            or page.get("returnedMessageCount") != len(page_messages)
+        ):
+            return None
+        if clipping == ["transcript_payload"]:
+            clipped = True
+        elif clipping not in (None, []):
+            return None
+        if more:
+            if not isinstance(cursor, str) or not cursor or cursor in cursors:
+                return None
+            cursors.add(cursor)
+            previous_cursor = cursor
+        # Orca echoes the current page's next cursor, not the request cursor.
+        # An empty final page repeats it, but the replies cannot prove a gap
+        # did not occur before a non-empty final page.
+        elif not page_messages and previous_cursor is not None and cursor != previous_cursor:
+            return None
+        for message in page_messages:
+            message_id = _fields(message).get("id")
+            if not isinstance(message_id, str) or not message_id or message_id in message_ids:
+                return None
+            message_ids.add(message_id)
+        source_identity = source
+        messages.extend(page_messages)
+    if not messages or (clipped and not _ends_in_assistant_text(messages[-1])):
         return None
     try:
-        return digest({"source": source, "messages": messages}, _RESULT_DOMAIN)
+        return digest({"source": source_identity, "messages": messages}, _RESULT_DOMAIN), clipped
     except (ValueError, TypeError, RecursionError):
         return None
 
@@ -226,14 +277,22 @@ def classify_show(
     if _fields(reply.get("worker")).get("state") != worker_state:
         return _awaiting(worker, "terminal-status-mismatch")
     report_id = _report_id(worker, worker_done, status)
-    artifact = _transcript_digest(worker, transcript, worker_state)
-    if report_id is None or artifact is None:
+    evidence = _transcript_digest(worker, transcript, worker_state)
+    if report_id is None or evidence is None:
         return _awaiting(worker, "result-transfer-missing")
+    artifact, clipped = evidence
     transfer = digest(
         {"handle": worker.handle_digest, "status": status, "report": report_id, "artifact": artifact}, _RESULT_DOMAIN
     )
     return NativeObservation(
-        "terminal-candidate", "terminal-evidence-complete", worker, status, worker.run_id, transfer, "quiescent"
+        "terminal-candidate",
+        "terminal-evidence-complete",
+        worker,
+        status,
+        worker.run_id,
+        transfer,
+        "quiescent",
+        transcript_clipped=clipped,
     )
 
 
