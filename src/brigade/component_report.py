@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -44,6 +45,7 @@ class ComponentInspection:
     actual_sha256: str | None
     path_binary: str | None
     installed_component_id: str | None = None
+    outdated: bool = False
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,7 @@ def inspect_components(
     env: Mapping[str, str] | None = None,
     system: str | None = None,
     manifest_path: Path | None = None,
+    verify_bytes: bool = True,
 ) -> ComponentReport:
     """Inspect managed native components without mutating user data."""
     environment = dict(env if env is not None else os.environ)
@@ -165,6 +168,7 @@ def inspect_components(
                 installed_state=installed_state,
                 state_file_status=state_file_status,
                 env=environment,
+                verify_bytes=verify_bytes,
             )
         )
 
@@ -264,10 +268,8 @@ def _installed_state_matches_manifest(
     manifest: component_manifest.ComponentManifest,
 ) -> bool:
     """Return whether installed components use the manifest's exact recorded coordinates."""
-    if (
-        installed_state.manifest_revision != manifest.manifest_revision
-        or installed_state.brigade_version != manifest.brigade_version
-    ):
+    # installed_state.brigade_version identifies the CLI that ran setup.
+    if installed_state.manifest_revision != manifest.manifest_revision:
         return False
     for component_id in component_manifest.manifest_component_ids(manifest):
         installed_key = component_manifest.wire_id(installed_state.components, component_id)
@@ -316,6 +318,20 @@ def doctor_checks(
             (_doctor_severity(component, report), f"components: {component.component_id}", _doctor_detail(component))
         )
     return checks
+
+
+def outdated_doctor_checks(
+    *, env: Mapping[str, str] | None = None, system: str | None = None
+) -> list[tuple[str, str, str]]:
+    """Warn about recorded older engines without hashing their executables."""
+    from .doctor import WARN
+
+    report = inspect_components(env=env, system=system, verify_bytes=False)
+    return [
+        (WARN, f"components: {component.component_id}", _doctor_detail(component))
+        for component in report.components
+        if component.outdated
+    ]
 
 
 def render_text(report: ComponentReport) -> str:
@@ -437,6 +453,7 @@ def _inspect_component(
     installed_state: component_state.InstalledState | None,
     state_file_status: STATE_FILE_STATUS,
     env: Mapping[str, str],
+    verify_bytes: bool,
 ) -> ComponentInspection:
     component = manifest.components[component_id]
     installed_key = component_manifest.wire_id(installed_state.components, component_id) if installed_state else None
@@ -461,12 +478,22 @@ def _inspect_component(
         managed_exists = managed_file.is_file()
         if managed_exists:
             actual_byte_size = managed_file.stat().st_size
-            actual_sha256 = localio.file_sha256(managed_file)
+            if verify_bytes:
+                actual_sha256 = localio.file_sha256(managed_file)
     except OSError as exc:
         file_inspection_error = str(exc)
         managed_exists = True
 
     installed_record = installed_state.components.get(installed_key) if installed_state and installed_key else None
+    older_asset = (
+        asset is not None
+        and installed_state is not None
+        and installed_record is not None
+        and installed_state.manifest_revision != manifest.manifest_revision
+        and installed_record.executable == managed_path
+        and (installed_record.byte_size, installed_record.sha256) != (asset.byte_size, asset.sha256)
+        and _older_release(installed_state, manifest.brigade_version)
+    )
     status, detail = _diagnose_component(
         platform=platform,
         platform_error=platform_error,
@@ -483,7 +510,13 @@ def _inspect_component(
         actual_sha256=actual_sha256,
         managed_path=managed_path,
         file_inspection_error=file_inspection_error,
+        verify_bytes=verify_bytes,
+        older_asset=older_asset,
     )
+    outdated = older_asset and managed_exists and status == "stale"
+    if outdated:
+        subject = "installed engine" if verify_bytes else "installed engine record"
+        detail = f"{subject} is older than this CLI expects. {component_install.engine_repair_hint(roots)}"
     return ComponentInspection(
         component_id=component_id,
         status=status,
@@ -502,7 +535,18 @@ def _inspect_component(
         actual_sha256=actual_sha256,
         path_binary=path_binary,
         installed_component_id=installed_key,
+        outdated=outdated,
     )
+
+
+def _older_release(installed: component_state.InstalledState, expected: str) -> bool:
+    pattern = r"([0-9]{1,9})\.([0-9]{1,9})\.([0-9]{1,9})(?:\.dev[0-9]+)?"
+    # Release manifests record v<version>+<commit> even when a newer CLI installs them.
+    previous = re.fullmatch(rf"v{pattern}\+[0-9a-f]{{40}}", installed.manifest_revision)
+    if previous is None:
+        previous = re.fullmatch(pattern, installed.brigade_version)
+    selected = re.fullmatch(pattern, expected)
+    return bool(previous and selected and tuple(map(int, previous.groups())) < tuple(map(int, selected.groups())))
 
 
 def _diagnose_component(
@@ -522,6 +566,8 @@ def _diagnose_component(
     actual_sha256: str | None,
     managed_path: str,
     file_inspection_error: str | None = None,
+    verify_bytes: bool = True,
+    older_asset: bool = False,
 ) -> tuple[ComponentStatus, str]:
     findings: dict[ComponentStatus, str] = {}
 
@@ -542,12 +588,15 @@ def _diagnose_component(
         findings["corrupt"] = "managed executable exists but component is absent from installed state"
 
     if managed_exists and asset is not None and file_inspection_error is None:
-        if actual_byte_size != asset.byte_size:
+        reference = installed_record if older_asset and installed_record is not None else asset
+        if actual_byte_size != reference.byte_size:
             findings["corrupt"] = (
-                f"byte_size mismatch for {managed_path}: expected {asset.byte_size}, got {actual_byte_size}"
+                f"byte_size mismatch for {managed_path}: expected {reference.byte_size}, got {actual_byte_size}"
             )
-        elif actual_sha256 != asset.sha256:
-            findings["corrupt"] = f"sha256 mismatch for {managed_path}: expected {asset.sha256}, got {actual_sha256}"
+        elif verify_bytes and actual_sha256 != reference.sha256:
+            findings["corrupt"] = (
+                f"sha256 mismatch for {managed_path}: expected {reference.sha256}, got {actual_sha256}"
+            )
 
     if installed_state is not None and platform is not None and installed_state.platform != platform:
         findings["unsupported"] = (
@@ -587,7 +636,7 @@ def _diagnose_component(
         findings["missing"] = f"managed executable missing: {managed_path}"
 
     if not findings:
-        findings["healthy"] = "installed and verified"
+        findings["healthy"] = "installed and verified" if verify_bytes else "installed metadata matches"
 
     for status in STATUS_PRECEDENCE:
         if status in findings:

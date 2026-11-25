@@ -105,6 +105,25 @@ def uses_bundled_compatibility_manifest() -> bool:
     return component_manifest.manifest_path() == bundled_path
 
 
+def engine_repair_hint(roots: SetupRoots | None = None) -> str:
+    """Describe setup routes without resolving or downloading a release."""
+    from brigade import update_cmd
+
+    explicit = "`brigade setup --manifest <verified manifest> --allow-compatible-stable-manifest <version>`"
+    try:
+        roots = roots or resolve_roots()
+    except ValueError:
+        state = None
+    else:
+        state = update_cmd.load_update_state(Path(component_paths.update_state_path(roots.data_root)))
+    if state is not None and state.channel == "beta" and uses_bundled_compatibility_manifest():
+        return (
+            f"Beta setup can reuse its {state.component_tag} pin. "
+            f"Use {explicit} with a compatible release (see docs/update-channels.md#repair-managed-engines)."
+        )
+    return f"Run `brigade setup` on a released stable CLI. For an unreleased source build, use {explicit}."
+
+
 def load_verified_exact_release_manifest(
     roots: SetupRoots,
     *,

@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 
+class MissingImportAcknowledgement(ValueError):
+    """A zero-exit importer returned counts without a completion status."""
+
+
 def _miseledger_import_summary(payload: object) -> tuple[int, bool | int]:
     """Require explicit completion, including restoration after pruning."""
     if not isinstance(payload, dict):
@@ -26,6 +30,8 @@ def _miseledger_import_summary(payload: object) -> tuple[int, bool | int]:
             if bool(value) != bool(known):
                 raise ValueError("inconsistent known flag aliases")
     status = payload.get("status")
+    if status is None:
+        raise MissingImportAcknowledgement("The installed evidence engine is older than this CLI expects.")
     if status not in ("complete", "already_known"):
         raise ValueError("import summary requires explicit completion from a repaired importer")
     if (status == "already_known") != bool(known):

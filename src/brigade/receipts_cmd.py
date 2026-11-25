@@ -23,7 +23,7 @@ from . import receipt_json
 from . import receipt_signing
 from . import trust_gate
 from .inbox_lock import held_file_lock
-from .receipts_import_contract import _miseledger_import_summary
+from .receipts_import_contract import MissingImportAcknowledgement, _miseledger_import_summary
 from .untrusted import scan_handoff_injection_heuristics
 
 OK = "OK"
@@ -1489,11 +1489,11 @@ def _temporary_miseledger_export_path(target: Path) -> Path:
 
 def _import_miseledger_file(
     path: Path, *, strict: bool = False, quiet: bool = False, failed_on_error: bool | None = None
-) -> tuple[bool, bool]:
+) -> tuple[bool, bool, str | None]:
     """Import a JSONL export with miseledger.
 
-    Returns ``(attempted, failed)``. ``attempted`` is False when the subprocess
-    was skipped entirely (for example a zero-row export).
+    Returns ``(attempted, failed, repair)``. A repair is supplied for a missing
+    acknowledgement. ``attempted`` is False if the import was skipped.
     """
     if failed_on_error is None:
         failed_on_error = strict
@@ -1504,13 +1504,13 @@ def _import_miseledger_file(
                 f"error: miseledger import failed; export kept at {path}: binary not found",
                 file=sys.stderr,
             )
-            return True, True
+            return True, True, None
         message = f"warning: miseledger binary not found on PATH; export kept at {path}"
         if failed_on_error:
             print(message, file=sys.stderr)
-            return True, True
+            return True, True, None
         print(message, file=sys.stderr)
-        return True, False
+        return True, False, None
     try:
         result = subprocess.run(
             [binary, "import", "adapter", str(path), "--source", "brigade", "--json"],
@@ -1526,27 +1526,34 @@ def _import_miseledger_file(
         if failed_on_error:
             prefix = "error" if strict else "warning"
             print(f"{prefix}: miseledger import failed; export kept at {path}: {detail}", file=sys.stderr)
-            return True, True
+            return True, True, None
         print(f"warning: miseledger import failed; export kept at {path}: {exc}", file=sys.stderr)
-        return True, False
+        return True, False, None
     if result.returncode != 0:
         detail = _one_line(result.stderr or result.stdout or f"exit {result.returncode}", 500)
         if failed_on_error:
             prefix = "error" if strict else "warning"
             print(f"{prefix}: miseledger import failed; export kept at {path}: {detail}", file=sys.stderr)
-            return True, True
+            return True, True, None
         print(f"warning: miseledger import failed; export kept at {path}: {detail}", file=sys.stderr)
-        return True, False
+        return True, False, None
     try:
         payload = json.loads(result.stdout)
         inserted, known = _miseledger_import_summary(payload)
+    except MissingImportAcknowledgement as exc:
+        from .component_install import engine_repair_hint
+
+        repair = engine_repair_hint()
+        prefix = "error" if strict else "warning"
+        print(f"{prefix}: miseledger import failed; export kept at {path}: {exc} {repair}", file=sys.stderr)
+        return True, True, repair
     except (ValueError, TypeError) as exc:
         prefix = "error" if strict else "warning"
         print(f"{prefix}: miseledger import failed; export kept at {path}: {exc}", file=sys.stderr)
-        return True, True
+        return True, True, None
     if not quiet:
         print(f"miseledger import: inserted_items={inserted} already_known={known}")
-    return True, False
+    return True, False, None
 
 
 def _single_repo_export_status(
@@ -1732,10 +1739,15 @@ def index_miseledger_receipts(*, target: Path, quiet: bool = False) -> dict[str,
         payload["message"] = "miseledger indexing: export write failed"
         return payload
 
-    attempted, import_failed = _import_miseledger_file(output_path, strict=False, quiet=quiet, failed_on_error=True)
+    attempted, import_failed, repair = _import_miseledger_file(
+        output_path, strict=False, quiet=quiet, failed_on_error=True
+    )
     if attempted and import_failed:
         payload = _index_result_payload(result, status="failed")
         payload["message"] = "miseledger indexing: import failed (receipts pending)"
+        if repair is not None:
+            payload["reason"] = "outdated_evidence_engine"
+            payload["repair"] = repair
         return payload
 
     cursor_hashes = result.get("cursor_hashes")
@@ -1834,7 +1846,7 @@ def _export_miseledger_fleet(
     import_error_count = 0
     import_failed = False
     if import_miseledger and aggregate_lines:
-        attempted, import_failed = _import_miseledger_file(output_path, strict=True, quiet=True)
+        attempted, import_failed, _repair = _import_miseledger_file(output_path, strict=True, quiet=True)
         if attempted and import_failed:
             import_error_count = 1
         elif not import_failed:
@@ -1959,7 +1971,7 @@ def export_miseledger(
         import_error_count = 0
         if import_miseledger:
             if lines:
-                attempted, import_failed = _import_miseledger_file(json_output_path, strict=True, quiet=True)
+                attempted, import_failed, _repair = _import_miseledger_file(json_output_path, strict=True, quiet=True)
                 if attempted and import_failed:
                     import_error_count = 1
                 elif not import_failed and new_only and written_hashes:
@@ -2025,7 +2037,7 @@ def export_miseledger(
     import_failed = False
     if import_miseledger and output_path is not None:
         if lines:
-            attempted, import_failed = _import_miseledger_file(output_path, failed_on_error=True)
+            attempted, import_failed, _repair = _import_miseledger_file(output_path, failed_on_error=True)
             if attempted and import_failed:
                 return 1
         else:

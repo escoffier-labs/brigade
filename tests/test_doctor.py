@@ -299,6 +299,29 @@ def test_doctor_hides_operator_scoped_checks_by_default(tmp_target: Path, capsys
     assert "guard: embedded content guard" not in out
 
 
+def test_workspace_doctor_warns_about_old_engine_without_hashing_it(tmp_target: Path, tmp_path, capsys, monkeypatch):
+    from brigade import component_manifest, localio
+    from tests.test_component_report import _install_fixture_manifest, _write_old_evidence_install
+
+    env = _install_fixture_manifest(tmp_path, monkeypatch)
+    engine = _write_old_evidence_install(env, component_manifest.manifest_path())
+    install_selection(tmp_target, Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]))
+    real_sha256 = localio.file_sha256
+
+    def skip_engine_hash(path):
+        assert path != engine, "workspace doctor read the engine bytes"
+        return real_sha256(path)
+
+    monkeypatch.setattr(localio, "file_sha256", skip_engine_hash)
+    capsys.readouterr()
+    assert doctor_mod.run(target=tmp_target, json_output=True) == 0
+    checks = json.loads(capsys.readouterr().out)["checks"]
+    finding = next(item for item in checks if "installed engine record is older" in item["detail"])
+    assert finding["status"] == doctor_mod.WARN
+    assert finding["scope"] == "target"
+    assert "brigade setup" in finding["detail"]
+
+
 def test_doctor_json_tags_operator_scope_when_requested(tmp_target: Path, capsys):
     install_selection(
         tmp_target,

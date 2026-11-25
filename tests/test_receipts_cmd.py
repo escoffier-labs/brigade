@@ -2140,6 +2140,59 @@ def test_index_rejects_zero_exit_incomplete_summary_and_retains_export(tmp_path,
     assert len(_jsonl(exports[0].read_text())) == 1
 
 
+@pytest.mark.parametrize("route", ["stable", "npm", "beta"])
+def test_verify_receipt_import_names_repair_for_missing_acknowledgement(tmp_path, monkeypatch, capsys, route):
+    from brigade import component_install, component_paths, distribution, update_cmd
+    from brigade.work_cmd import verification
+
+    monkeypatch.setattr(distribution, "_name", "npm" if route == "npm" else None)
+    if route == "beta":
+        roots = component_install.resolve_roots()
+        update_cmd.write_update_state(
+            Path(component_paths.update_state_path(roots.data_root)),
+            update_cmd.UpdateState(
+                1,
+                "beta",
+                "brigade update",
+                "0.33.0.dev1",
+                1,
+                "v0.30.0",
+                "a" * 40,
+                "https://github.com/escoffier-labs/brigade/releases/download/v0.30.0/component-manifest-v1.json",
+                "b" * 64,
+                "2026-07-08T00:00:00Z",
+            ),
+        )
+    _write_verify_export_receipt(tmp_path, "missing-ack", started_at="2026-07-08T12:00:00Z")
+    monkeypatch.setattr(receipts_cmd.component_bins, "resolve", lambda _: "fake-ledger")
+    monkeypatch.setattr(
+        receipts_cmd.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, '{"inserted_items":1,"already_known":false,"warnings":null}', ""
+        ),
+    )
+
+    receipt = {}
+    verification._attach_miseledger_indexing(receipt, target=tmp_path, json_output=False)
+    output = capsys.readouterr()
+    reason = "The installed evidence engine is older than this CLI expects."
+    assert sum(reason in line for line in output.err.splitlines()) == 1
+    assert "miseledger indexing: import failed (receipts pending)" in output.out
+
+    verification._attach_miseledger_indexing(receipt, target=tmp_path, json_output=True)
+    indexing = receipt["miseledger_indexing"]
+    assert indexing["status"] == "failed"
+    assert indexing["reason"] == "outdated_evidence_engine"
+    assert indexing["repair"] in output.err
+    assert "brigade update" not in indexing["repair"]
+    assert ("run `brigade setup`" in indexing["repair"].lower()) == (route != "beta")
+    assert "--allow-compatible-stable-manifest" in indexing["repair"]
+    assert capsys.readouterr() == ("", "")
+    assert not (tmp_path / receipts_cmd.MISELEDGER_CURSOR_REL).exists()
+    assert len(list((tmp_path / ".brigade/work").glob("miseledger-export-*.jsonl"))) == 2
+
+
 def test_index_timeout_retains_export_for_clean_replay(tmp_path, monkeypatch):
     _write_verify_export_receipt(tmp_path, "timeout-replay", started_at="2026-07-08T12:00:00Z")
     monkeypatch.setattr(receipts_cmd.component_bins, "resolve", lambda _: "fake-ledger")
