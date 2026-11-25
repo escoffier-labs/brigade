@@ -87,19 +87,22 @@ def test_removable_allowance_requires_deadline(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("source_version", "release_version", "status", "message"),
+    ("source_version", "release_version", "deadline", "status", "message"),
     [
-        ("0.33.0", None, 0, ""),
-        ("0.32.0", "0.32.0", 0, ""),
-        ("0.33.0", "0.33.0", 1, "expired in 0.33.0"),
-        ("0.33.0", "0.32.0", 2, "does not match package version"),
-        ("0.33.0.dev0", "0.33.0.dev0", 2, "expected a stable version"),
+        ("0.33.0", None, "0.33.0", 0, ""),
+        ("0.32.0", "0.32.0", "0.33.0", 0, ""),
+        ("0.33.0", "0.33.0", "0.33.0", 1, "expired in 0.33.0"),
+        ("0.33.0", "0.33.0", "0.34.0", 0, ""),
+        ("0.34.0", "0.34.0", "0.34.0", 1, "expired in 0.34.0"),
+        ("0.33.0", "0.32.0", "0.33.0", 2, "does not match package version"),
+        ("0.33.0.dev0", "0.33.0.dev0", "0.33.0", 2, "expected a stable version"),
     ],
 )
 def test_guard_cli_applies_expiry_at_stable_release_cut(
-    tmp_path: Path, source_version: str, release_version: str | None, status: int, message: str
+    tmp_path: Path, source_version: str, release_version: str | None, deadline: str, status: int, message: str
 ) -> None:
     _, entries = _repo(tmp_path)
+    entries[0]["remove_in"] = deadline
     package = tmp_path / "src/brigade/__init__.py"
     package.parent.mkdir(parents=True)
     package.write_text(f'__version__ = "{source_version}"\n', encoding="utf-8")

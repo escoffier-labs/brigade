@@ -49,7 +49,7 @@ type scheduleRunResult struct {
 
 func cmdSchedule(args []string, out, errw io.Writer) int {
 	if len(args) == 0 || hasBoolFlag(args, "help") || hasBoolFlag(args, "h") {
-		fmt.Fprintln(out, "usage: miseledger schedule run|daemon <config.toml> [--json] [--interval DURATION] [--max-runs N]")
+		fmt.Fprintln(out, "usage: brigade-evidence schedule run|daemon <config.toml> [--json] [--interval DURATION] [--max-runs N]")
 		return 0
 	}
 	switch args[0] {
@@ -58,7 +58,7 @@ func cmdSchedule(args []string, out, errw io.Writer) int {
 	case "daemon":
 		return cmdScheduleDaemon(args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger schedule run|daemon <config.toml> [--json] [--interval DURATION] [--max-runs N]")
+		return fatalf(errw, "usage: brigade-evidence schedule run|daemon <config.toml> [--json] [--interval DURATION] [--max-runs N]")
 	}
 }
 
@@ -68,7 +68,7 @@ func cmdScheduleRun(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "schedule run: %s", err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: miseledger schedule run <config.toml> [--json]")
+		return fatalf(errw, "usage: brigade-evidence schedule run <config.toml> [--json]")
 	}
 	result, code := runScheduleConfig(rest[0])
 	if bools["json"] {
@@ -98,7 +98,7 @@ func cmdScheduleDaemon(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "schedule daemon: %s", err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: miseledger schedule daemon <config.toml> [--interval DURATION] [--max-runs N] [--json]")
+		return fatalf(errw, "usage: brigade-evidence schedule daemon <config.toml> [--interval DURATION] [--max-runs N] [--json]")
 	}
 	cfg, err := readScheduleConfig(rest[0])
 	if err != nil {

@@ -1,6 +1,6 @@
 {
   "title": "Index once, then ask the graph",
-  "eyebrow": "GRAPHTRAIL WORKFLOW",
+  "eyebrow": "BRIGADE CODE GRAPH WORKFLOW",
   "description": "Tree-sitter extracts structure into one local SQLite file for CLI and MCP queries.",
   "meta": "no daemon · no network",
   "columns": [
@@ -20,13 +20,13 @@
       "nodes": [
         {
           "id": "init",
-          "label": "graphtrail init",
+          "label": "brigade-code-graph init",
           "detail": "first full pass",
           "kind": "accent"
         },
         {
           "id": "sync",
-          "label": "graphtrail sync",
+          "label": "brigade-code-graph sync",
           "detail": "changed files only",
           "kind": "focus",
           "badge": "incremental"
@@ -38,7 +38,7 @@
       "nodes": [
         {
           "id": "db",
-          "label": "graphtrail.db",
+          "label": "code-graph.db",
           "detail": "symbols · imports · calls",
           "kind": "success"
         }

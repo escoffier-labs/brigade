@@ -30,7 +30,6 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode
 
 from . import fleet_command_deck
-from . import fleet_form_fields as ff
 from .fleet_command_deck import is_terminal_state
 
 REFRESH_SECONDS = 10
@@ -446,17 +445,13 @@ def _nav(query: DashboardQuery) -> str:
     return f'<nav class="board-nav" aria-label="Board views">{" ".join(items)}</nav>'
 
 
-# Every board filter is optional: a blank filter matches everything.
-FILTER_FORM = ff.form(*(ff.optional(name) for name in (*FILTER_KEYS, "sort", "attention", "all")))
-
-
 def _controls(query: DashboardQuery) -> str:
     options = "".join(
         f'<option value="{esc(sort)}"{" selected" if sort == query.sort else ""}>{esc(sort)}</option>' for sort in SORTS
     )
     inputs = {
         key: (
-            f'<label>{ff.caption(key, FILTER_FORM[key])} <input type="search" name="{esc(key)}" value="{esc(getattr(query, key))}" '
+            f'<label>{esc(key)} <input type="search" name="{esc(key)}" value="{esc(getattr(query, key))}" '
             f'placeholder="{esc("contains")}" maxlength="{_MAX_FILTER_LEN}"></label>'
         )
         for key in FILTER_KEYS
@@ -473,10 +468,10 @@ def _controls(query: DashboardQuery) -> str:
         f"{inputs['repo']}{inputs['state']}"
         '<button type="submit">Apply</button>'
         '<details class="advanced-filters"><summary>Advanced filters</summary><div class="filter-fields">'
-        f'<label>{ff.caption("sort", FILTER_FORM["sort"])} <select name="sort">{options}</select></label>'
+        f'<label>sort <select name="sort">{options}</select></label>'
         + "".join(value for key, value in inputs.items() if key not in {"repo", "state"})
-        + f'<label><input type="checkbox" name="attention" value="1"{attention_checked}> {ff.caption("needs attention", FILTER_FORM["attention"])}</label>'
-        f'<label><input type="checkbox" name="all" value="1"{all_checked}> {ff.caption("include finished", FILTER_FORM["all"])}</label>'
+        + f'<label><input type="checkbox" name="attention" value="1"{attention_checked}> needs attention</label>'
+        f'<label><input type="checkbox" name="all" value="1"{all_checked}> include finished</label>'
         f'<button type="submit">{esc("apply")}</button>'
         f'<span class="fleet-quick">{quick}</span>'
         f"</div></details></form>"

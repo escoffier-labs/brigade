@@ -17,7 +17,7 @@ import (
 
 var migrateBatchSize = 1000
 
-// cmdMigrate dispatches `miseledger migrate <target>`; mirrors cmdPrune.
+// cmdMigrate dispatches `brigade-evidence migrate <target>`; mirrors cmdPrune.
 func cmdMigrate(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
 		return fatalf(errw, "usage: "+program+" migrate codex-arguments [--dry-run] [--apply] [--json]")

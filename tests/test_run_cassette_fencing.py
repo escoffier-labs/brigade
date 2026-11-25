@@ -135,6 +135,51 @@ def test_purge_keeps_stop_marker_under_live_owner(tmp_path):
     assert not list(marker.parent.iterdir())
 
 
+def test_store_purge_waits_for_in_flight_publication(tmp_path, monkeypatch):
+    run = tmp_path / ".brigade" / "runs" / "current"
+    publishing, release, purge_reached = Event(), Event(), Event()
+    publish = store.publish
+    pair = run_lifecycle.checkpoint_event_pair
+    refs, removed = [], []
+
+    def pause_before_publish(*args):
+        if not publishing.is_set():
+            publishing.set()
+            assert release.wait(10)
+        return publish(*args)
+
+    @contextmanager
+    def observe_fence():
+        if current_thread() is purger:
+            purge_reached.set()
+        with pair():
+            yield
+
+    def purge():
+        removed.append(store.purge(run))
+        purge_reached.set()
+
+    recorder = Thread(target=lambda: refs.append(_record(run, cwd=tmp_path)))
+    purger = Thread(target=purge)
+    monkeypatch.setattr(store, "publish", pause_before_publish)
+    monkeypatch.setattr(run_lifecycle, "checkpoint_event_pair", observe_fence)
+    recorder.start()
+    try:
+        assert publishing.wait(10)
+        purger.start()
+        # Release publication when purge reaches the fence or returns without it.
+        assert purge_reached.wait(10)
+    finally:
+        release.set()
+        recorder.join(10)
+        if purger.ident is not None:
+            purger.join(10)
+    assert not recorder.is_alive() and not purger.is_alive()
+    assert len(refs) == 1 and refs[0] is not None
+    assert not list((run / "events" / store.DIRECTORY).glob("*.json"))
+    assert len(removed) == 1 and removed[0] > 0
+
+
 def test_journalless_publication_and_purge_hold_the_same_file_lock(tmp_path, monkeypatch):
     fcntl = pytest.importorskip("fcntl")
     run = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
@@ -144,7 +189,7 @@ def test_journalless_publication_and_purge_hold_the_same_file_lock(tmp_path, mon
     lock = journal.with_suffix(".jsonl.lock")
     lock.touch()
     unfenced = []
-    publish, purge = store.publish, store.purge
+    publish, purge = store.publish, store._purge_locked
 
     def probe(operation):
         # A separately opened descriptor contends with the real file lock.
@@ -165,7 +210,7 @@ def test_journalless_publication_and_purge_hold_the_same_file_lock(tmp_path, mon
         return purge(*args, **kwargs)
 
     monkeypatch.setattr(store, "publish", publish_with_probe)
-    monkeypatch.setattr(store, "purge", purge_with_probe)
+    monkeypatch.setattr(store, "_purge_locked", purge_with_probe)
 
     ref = _record(run, cwd=tmp_path)
     assert ref is not None and (run / ref["path"]).is_file()

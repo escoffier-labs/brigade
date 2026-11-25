@@ -16,7 +16,7 @@ from contextlib import contextmanager
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from threading import Lock
-from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping
+from typing import Sequence, TYPE_CHECKING, Any, Callable, Iterator, Mapping
 from uuid import uuid4
 
 from . import agents, config, dirfd, run_audit, run_events, run_journal, runguard, worker_events
@@ -636,12 +636,28 @@ def redaction_affects(event: run_journal.RunEvent, start: int, end: int) -> bool
     )
 
 
+def expanded_redaction_range(
+    events: Sequence[run_journal.RunEvent], start: int, end: int, operation_id: str
+) -> tuple[int, int] | None:
+    """Include cassette tombstones written by this operation outside its request."""
+    first, last = start, end
+    for event in events:
+        if (
+            event.event_type == EVENT_TYPE
+            and event.payload == REDACTED_REFERENCE
+            and event.idempotency_key == f"redaction:{operation_id}:{event.sequence}"
+        ):
+            first = min(first, event.sequence)
+            last = max(last, event.sequence)
+    return (first, last) if (first, last) != (start, end) else None
+
+
 def redact_sidecars(run_dir: Path) -> None:
-    """Delete only after durable journal redaction and its anchor, also on retry."""
+    """Delete under the publication fence after durable redaction and its anchor."""
     from .run_redaction import RedactionError
 
     try:
-        store.purge(run_dir)
+        store._purge_locked(run_dir)
     except (OSError, ValueError, RuntimeError) as exc:
         raise RedactionError("cassette sidecar redaction failed") from exc
 

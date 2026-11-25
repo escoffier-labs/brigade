@@ -9,6 +9,8 @@ import pytest
 
 from brigade.work_cmd import verification
 
+PYTHON_PROGRAM = os.path.basename(sys.executable)
+
 
 @pytest.fixture
 def verify_target(tmp_path, monkeypatch):
@@ -32,12 +34,13 @@ def verify_target(tmp_path, monkeypatch):
         ],
         check=True,
     )
+    monkeypatch.setenv("PATH", os.path.dirname(sys.executable) + os.pathsep + os.environ.get("PATH", ""))
     monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_path / "missing-graph"))
     return target
 
 
 def run_script(target, script):
-    assert verification.verify_run(target=target, commands=[[sys.executable, str(script)]], timeout=30) == 0
+    assert verification.verify_run(target=target, commands=[[PYTHON_PROGRAM, str(script)]], timeout=30) == 0
     return verification._verify_receipts(target)[0]
 
 
@@ -76,8 +79,11 @@ def test_legacy_receipt_cannot_reuse_external_file(verify_target, tmp_path):
     assert "reused_from" not in run_script(verify_target, script)
 
 
-@pytest.mark.parametrize("kind", ["directory", "oversized", "unreadable"])
-def test_unhashable_argument_disables_reuse(verify_target, tmp_path, monkeypatch, kind):
+@pytest.mark.parametrize(
+    ("kind", "json_output"),
+    [("directory", False), ("oversized", False), ("oversized", True), ("unreadable", False)],
+)
+def test_unhashable_argument_disables_reuse(verify_target, tmp_path, monkeypatch, capsys, kind, json_output):
     from pathlib import Path
 
     from brigade.work_cmd import verify_argv_files
@@ -90,7 +96,8 @@ def test_unhashable_argument_disables_reuse(verify_target, tmp_path, monkeypatch
     else:
         argument.write_bytes(b"abc")
     if kind == "oversized":
-        monkeypatch.setattr(verify_argv_files, "MAX_ARGV_FILE_BYTES", 2)
+        argument.write_bytes(b"a" * 128)
+        monkeypatch.setattr(verify_argv_files, "MAX_ARGV_FILE_BYTES", 64)
     if kind == "unreadable":
         original = Path.open
 
@@ -100,10 +107,20 @@ def test_unhashable_argument_disables_reuse(verify_target, tmp_path, monkeypatch
             return original(path, *args, **kwargs)
 
         monkeypatch.setattr(Path, "open", denied)
-    commands = [[sys.executable, str(script), str(argument)]]
+    commands = [[PYTHON_PROGRAM, str(script), str(argument)]]
     assert verification.verify_run(target=verify_target, commands=commands) == 0
-    assert verification.verify_run(target=verify_target, commands=commands) == 0
-    assert "reused_from" not in verification._verify_receipts(verify_target)[0]
+    capsys.readouterr()
+    assert verification.verify_run(target=verify_target, commands=commands, json_output=json_output) == 0
+    output = capsys.readouterr()
+    receipt = verification._verify_receipts(verify_target)[0]
+    if json_output:
+        assert json.loads(output.out)["reuse_skipped"] == "argv_file_too_large"
+    assert "reused_from" not in receipt
+    if kind == "oversized":
+        assert receipt["reuse_skipped"] == "argv_file_too_large"
+    else:
+        assert "reuse_skipped" not in receipt
+    assert ("argv_file_too_large" in output.err) == (kind == "oversized")
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="executable shebang requires POSIX")
@@ -111,7 +128,7 @@ def test_changed_explicit_script_path_executes_again(verify_target, tmp_path, mo
     script = tmp_path / "verify-probe"
     script.write_text(f"#!{sys.executable}\nprint('before')\n")
     script.chmod(0o755)
-    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ.get("PATH", ""))
     commands = [[str(script)]]
     assert verification.verify_run(target=verify_target, commands=commands) == 0
     script.write_text(f"#!{sys.executable}\nprint('after')\n")
@@ -126,7 +143,7 @@ def test_in_tree_directory_reuses(verify_target, tmp_path, argument):
     (verify_target / "tests").mkdir()
     script = tmp_path / "verify.py"
     script.write_text("print('ok')\n")
-    commands = [[sys.executable, str(script), argument]]
+    commands = [[PYTHON_PROGRAM, str(script), argument]]
     assert verification.verify_run(target=verify_target, commands=commands) == 0
     first = verification._verify_receipts(verify_target)[0]
     assert verification.verify_run(target=verify_target, commands=commands) == 0
@@ -145,7 +162,7 @@ def test_uncovered_directory_does_not_reuse(verify_target, tmp_path, kind):
         directory = link
     script = tmp_path / "verify.py"
     script.write_text("print('ok')\n")
-    commands = [[sys.executable, str(script), str(directory)]]
+    commands = [[PYTHON_PROGRAM, str(script), str(directory)]]
     assert verification.verify_run(target=verify_target, commands=commands) == 0
     assert verification.verify_run(target=verify_target, commands=commands) == 0
     assert "reused_from" not in verification._verify_receipts(verify_target)[0]
@@ -158,7 +175,7 @@ def test_oversized_bare_program_reuses(verify_target, tmp_path, monkeypatch):
     script = tmp_path / "verify-probe"
     script.write_text(f"#!{sys.executable}\nprint('ok')\n")
     script.chmod(0o755)
-    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("PATH", str(tmp_path) + os.pathsep + os.environ.get("PATH", ""))
     monkeypatch.setattr(verify_argv_files, "MAX_ARGV_FILE_BYTES", 2)
     commands = [[script.name]]
     assert verification.verify_run(target=verify_target, commands=commands) == 0
@@ -181,7 +198,7 @@ def test_missing_bare_program_does_not_block_reuse(verify_target, monkeypatch, c
         "commands": [{"status": "completed", "exit_code": 0}],
         "argv_file_hashes": {},
     }
-    assert verify_argv_files.reusable_receipt(verify_target, [command], ["probe"], "unchanged", latest)
+    assert verify_argv_files.reusable_receipt(verify_target, [command], ["probe"], "unchanged", latest) == (True, None)
 
 
 def test_directory_ignore_check_failure_disables_reuse(verify_target, monkeypatch):
@@ -189,4 +206,4 @@ def test_directory_ignore_check_failure_disables_reuse(verify_target, monkeypatc
     from brigade.work_cmd import verify_argv_files
 
     monkeypatch.setattr(localio.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess(args, 128))
-    assert verify_argv_files.argv_file_hashes(verify_target, [[sys.executable, "."]]) is None
+    assert verify_argv_files.argv_file_hashes(verify_target, [[PYTHON_PROGRAM, "."]]) == (None, None)

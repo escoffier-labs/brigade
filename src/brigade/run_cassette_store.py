@@ -247,7 +247,16 @@ def inventory(parent: int, *, private_only: bool = False) -> list[tuple[str, os.
 
 
 def purge(run_dir: Path, *, private_only: bool = False) -> int:
-    """Remove bodies or the entire cassette inventory, never the journal."""
+    """Remove cassette bodies under the same fence used by publication."""
+    try:
+        with publication_scope(run_dir):
+            return _purge_locked(run_dir, private_only=private_only)
+    except FileNotFoundError:
+        return 0
+
+
+def _purge_locked(run_dir: Path, *, private_only: bool = False) -> int:
+    """Remove cassette entries while the caller holds the publication fence."""
     try:
         with directory(run_dir) as parent:
             removed = _remove_owned_temps(parent)
@@ -259,8 +268,6 @@ def purge(run_dir: Path, *, private_only: bool = False) -> int:
                             continue
                     dirfd.unlink_child(parent, name)
                 except FileNotFoundError:
-                    # Retention may concurrently delete another inventoried body.
-                    # Keep deleting the remaining entries rather than returning early.
                     continue
                 except (ValueError, CassetteError):
                     if private_only:
@@ -282,7 +289,7 @@ def purge_inactive(run_dir: Path, *, workspace: Path, private_only: bool = False
         # must never lose its stop marker, publication temp, or private bodies.
         if runguard.has_active_run_owner(workspace, run_dir) and not runguard.is_active_run_owner(workspace, run_dir):
             raise CassetteError("cassette purge requires an inactive run")
-        return purge(run_dir, private_only=private_only)
+        return _purge_locked(run_dir, private_only=private_only)
 
 
 def _remove_owned_temps(parent: int) -> int:

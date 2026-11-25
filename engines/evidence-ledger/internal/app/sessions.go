@@ -38,7 +38,7 @@ type SessionFilters struct {
 
 func cmdSessions(args []string, out, errw io.Writer) int {
 	if len(args) == 0 {
-		return fatalf(errw, "usage: miseledger sessions list|search")
+		return fatalf(errw, "usage: brigade-evidence sessions list|search")
 	}
 	switch args[0] {
 	case "list":
@@ -46,7 +46,7 @@ func cmdSessions(args []string, out, errw io.Writer) int {
 	case "search":
 		return cmdSessionsSearch(args[1:], out, errw)
 	default:
-		return fatalf(errw, "usage: miseledger sessions list|search")
+		return fatalf(errw, "usage: brigade-evidence sessions list|search")
 	}
 }
 
@@ -56,7 +56,7 @@ func cmdSessionsList(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "sessions list: %s", err)
 	}
 	if len(rest) != 0 {
-		return fatalf(errw, "usage: miseledger sessions list [--source KIND] [--project NAME] [--model NAME] [--limit N] [--json]")
+		return fatalf(errw, "usage: brigade-evidence sessions list [--source KIND] [--project NAME] [--model NAME] [--limit N] [--json]")
 	}
 	limit, err := parseLimit(values["limit"], 50)
 	if err != nil {
@@ -86,7 +86,7 @@ func cmdSessionsSearch(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "sessions search: %s", err)
 	}
 	if len(rest) == 0 {
-		return fatalf(errw, "usage: miseledger sessions search <query> [--source KIND] [--project NAME] [--model NAME] [--limit N] [--json]")
+		return fatalf(errw, "usage: brigade-evidence sessions search <query> [--source KIND] [--project NAME] [--model NAME] [--limit N] [--json]")
 	}
 	limit, err := parseLimit(values["limit"], 20)
 	if err != nil {

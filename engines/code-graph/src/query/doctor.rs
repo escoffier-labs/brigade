@@ -416,7 +416,7 @@ mod tests {
     fn coverage_distinguishes_same_line_call_identities() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let db = root.join("graphtrail.db");
+        let db = root.join("code-graph.db");
         std::fs::write(root.join("util.py"), "def helper(): pass\n").unwrap();
         std::fs::write(
             root.join("app.py"),

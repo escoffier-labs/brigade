@@ -18,9 +18,11 @@ from typing import Any
 from . import __version__
 from .install import build_render_context, resolve_manifests
 from .selection import Selection
-from .templates import canonical_template_bytes, is_text, render, template_root
+from .templates import canonical_template_bytes, is_text, render, template_data_path, template_root
 
 SCHEMA = "brigade.template_profile_snapshot.v1"
+SNAPSHOT_NAME = "template-profile-snapshot.json"
+FIXTURES_PATH = "docs/research/fixtures/harness-contract.v1"
 HARNESS_CONTRACT_SCHEMA = "harness-contract.v1"
 
 # Selection harness id -> primary harness-contract.v1 fixture stem.
@@ -76,12 +78,12 @@ class UnknownTemplateProfile(ValueError):
 
 
 def snapshot_path() -> Path:
-    return template_root() / "template-profile-snapshot.json"
+    return template_root() / SNAPSHOT_NAME
 
 
 def harness_contract_fixtures_dir() -> Path:
     """Repo-relative harness-contract.v1 fixture directory."""
-    return Path(__file__).resolve().parents[2] / "docs" / "research" / "fixtures" / "harness-contract.v1"
+    return Path(__file__).resolve().parents[2] / FIXTURES_PATH
 
 
 def _selection_from_mapping(raw: Mapping[str, Any]) -> Selection:
@@ -220,14 +222,18 @@ def _profile_record(
     }
 
 
-def compute_profile_renders(selection: Selection) -> list[dict[str, Any]]:
+def compute_profile_renders(selection: Selection, *, templates_root: Path | None = None) -> list[dict[str, Any]]:
     """Return deterministic rendered-file hashes for a selection."""
-    files, _, _ = resolve_manifests(selection)
+    if templates_root is None:
+        files, _, _ = resolve_manifests(selection)
+        root = template_root()
+    else:
+        files, _, _ = resolve_manifests(selection, templates_root=templates_root)
+        root = templates_root
     context = build_render_context(selection)
-    root = template_root()
     renders: list[dict[str, Any]] = []
     for entry in sorted(files, key=lambda item: item["dst"]):
-        src = root / entry["src"]
+        src = template_data_path(root, entry["src"]) if templates_root is not None else root / entry["src"]
         if not src.is_file():
             raise FileNotFoundError(f"template missing for render hash: {src}")
         if is_text(entry["src"]):
@@ -251,6 +257,7 @@ def build_snapshot(
     profile_names: Sequence[str] | None = None,
     *,
     fixtures_dir: Path | None = None,
+    templates_root: Path | None = None,
 ) -> dict[str, Any]:
     names = sorted(profile_names or BUILTIN_PROFILES)
     profiles: dict[str, dict[str, Any]] = {}
@@ -262,7 +269,7 @@ def build_snapshot(
         profile = _profile_record(name, raw, fixtures_dir=fixtures_dir)
         profiles[name] = profile
         selection = _selection_from_mapping(profile["selection"])
-        renders[name] = compute_profile_renders(selection)
+        renders[name] = compute_profile_renders(selection, templates_root=templates_root)
     return {
         "schema": SCHEMA,
         "brigade_version": __version__,

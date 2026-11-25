@@ -249,7 +249,7 @@ scripts/*.md
 # <<< brigade gitignore block <<<
 
 
-# GraphTrail code-graph index
+# Retired Code Graph index
 .graphtrail/
 
 # Local Fleet Hub container credential

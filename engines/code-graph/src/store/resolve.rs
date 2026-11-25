@@ -1598,8 +1598,7 @@ fn append_module_path(prefix: &mut String, module: &str) {
 fn rust_module_prefix(module: &str) -> Option<String> {
     let stripped = module
         .strip_prefix("crate")
-        .or_else(|| module.strip_prefix("brigade_code_graph"))
-        .or_else(|| module.strip_prefix("graphtrail"))?;
+        .or_else(|| module.strip_prefix("brigade_code_graph"))?;
     let stripped = stripped.strip_prefix("::").unwrap_or(stripped);
     if stripped.is_empty() {
         Some("src/lib".to_string())

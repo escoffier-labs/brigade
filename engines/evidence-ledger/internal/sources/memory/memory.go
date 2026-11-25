@@ -91,7 +91,7 @@ func CollectionExternalID(namespace string) string {
 	return namespace
 }
 
-// Generate walks workspace memory cards and emits miseledger.adapter.v1 records.
+// Generate walks workspace memory cards and emits records conforming to adapter.SchemaV1.
 func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, error) {
 	outcomes, result, err := Walk(path, opts)
 	if err != nil {

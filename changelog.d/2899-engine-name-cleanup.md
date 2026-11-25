@@ -1,0 +1,1 @@
+- Finish the canonical naming of engine help, diagnostics, crawl plans, and setup smoke checks. Preserve the existing evidence wire formats, incremental export paths, and legacy index exclusions.

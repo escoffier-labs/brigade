@@ -8,7 +8,7 @@
 //     typed. This is the primary Ctrl+F surface for recalling a session.
 //   - chats/<hash>/meta.json and acp-sessions/<id>/meta.json: per-session
 //     metadata (title, timestamps, workspace). Each becomes an agent_session
-//     collection so it shows up in `miseledger sessions`.
+//     collection so it shows up in `brigade-evidence sessions`.
 //
 // Legacy per-session store.db files hold message bodies as binary blobs (a versioned
 // internal encoding), so message text is intentionally NOT decoded here. A
