@@ -104,6 +104,30 @@ selected `0.33.0.devYYYYMMDD` wheel plus native bytes from the latest verified s
 
 The updater runs `pipx install --force` with an exact requirement, then calls the newly installed absolute `brigade` executable with `setup --manifest <verified-cache-path>`. It does not use the prior executable for setup. This sequence is not an atomic installation transaction: pipx replacement happens before component setup. State publication is transactional, so a failed pipx install or setup leaves the prior update state untouched; rerun the same update to repair components.
 
+## Repair managed engines
+
+After `pipx upgrade brigadestack` or `npm update --global brigadestack` on a
+released stable CLI, run `brigade setup` to match the managed engines to the CLI.
+The package manager upgrades the CLI. If v0.30.0 engines are still installed with
+CLI 0.31.0 or 0.32.0, a captured verification can exit 0 and print
+`miseledger indexing: import failed (receipts pending)`.
+
+For an unreleased source build or a beta install pinned to v0.30.0, obtain and
+verify a compatible stable release's `component-manifest-v1.json`. The v0.32.0
+bundle supports receipt acknowledgements. Check the manifest's SHA-256 against
+the digest published for the release asset, then pass the verified manifest and
+its Brigade version explicitly:
+
+```bash
+brigade setup --manifest /path/to/component-manifest-v1.json --allow-compatible-stable-manifest 0.32.0
+```
+
+The explicit manifest bypasses the saved beta pin for this setup run. A later
+plain `brigade setup` on that beta install can still reuse the pinned release.
+Repeat the captured verification to import the pending receipts. An `indexed`
+result confirms receipt import even if doctor still warns that the installed
+release differs from the CLI's bundled manifest.
+
 ## Timer migration after release
 
 When the external development timer is migrated, replace its direct pipx script with the thin invocation `brigade update --channel beta`. Disable the old direct-pipx script at the same time. This repository does not modify live timer files.

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -84,7 +85,9 @@ def _prepare_unified_release_setup(tmp_path: Path, monkeypatch) -> tuple[dict[st
     monkeypatch.setattr(
         update_cmd,
         "validate_release_manifest_bytes",
-        lambda resolved: component_manifest.load_bytes(resolved.manifest_bytes, source=Path(resolved.manifest_url)),
+        lambda resolved, **options: component_manifest.load_bytes(
+            resolved.manifest_bytes, source=Path(resolved.manifest_url), **options
+        ),
     )
     monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
     return env, release
@@ -480,6 +483,166 @@ def test_corrupt_managed_executable_hash(tmp_path, monkeypatch):
     by_id = {component.component_id: component for component in report.components}
     assert by_id["brigade-code-graph"].status == "corrupt"
     assert by_id["brigade-evidence"].status == "healthy"
+
+
+def _write_old_evidence_install(env: dict[str, str], manifest_path: Path, monkeypatch) -> Path:
+    _write_healthy_install(env, manifest_path)
+    roots = resolve_roots(env=env, system="linux")
+    state_path = Path(component_paths.installed_state_path(roots.data_root))
+    state = component_state.load_installed_state(state_path)
+    assert state is not None
+    key = component_manifest.wire_id(state.components, "brigade-evidence")
+    assert key is not None
+    component = state.components[key]
+    path = Path(component.executable)
+    old_bytes = b"older evidence engine"
+    pin = len(old_bytes), hashlib.sha256(old_bytes).hexdigest()
+    monkeypatch.setattr(
+        component_report,
+        "release_asset_pin",
+        lambda revision, component_id, platform: (
+            pin if revision == "v0.30.0+" + "a" * 40 and component_id == "brigade-evidence" and platform else None
+        ),
+    )
+    path.write_bytes(old_bytes)
+    components = state.components | {
+        key: replace(component, byte_size=len(old_bytes), sha256=hashlib.sha256(old_bytes).hexdigest())
+    }
+    component_state.write_installed_state(
+        state_path, replace(state, manifest_revision="v0.30.0+" + "a" * 40, components=components)
+    )
+    return path
+
+
+@pytest.mark.parametrize("damaged", [False, True])
+def test_old_evidence_engine_integrity_uses_pinned_bytes(tmp_path, monkeypatch, damaged):
+    env = _install_fixture_manifest(tmp_path, monkeypatch)
+    path = _write_old_evidence_install(env, component_manifest.manifest_path(), monkeypatch)
+    if damaged:
+        path.write_bytes(b"B" * path.stat().st_size)
+    report = component_report.inspect_components(env=env, system="linux")
+    evidence = next(row for row in report.components if row.recorded_executable == str(path))
+    checks = component_report.doctor_checks(env=env, system="linux")
+    severity, _, detail = next(check for check in checks if check[1] == f"components: {evidence.component_id}")
+    if damaged:
+        assert evidence.status == "corrupt"
+        assert severity == doctor_mod.FAIL
+        assert "sha256 mismatch" in detail
+    else:
+        assert evidence.status == "stale"
+        assert severity == doctor_mod.WARN
+        assert "installed engine is older than this CLI expects" in detail
+        assert "brigade setup" in detail
+
+
+@pytest.mark.parametrize("has_pin", [False, True])
+def test_old_evidence_engine_rejects_forged_installed_record(tmp_path, monkeypatch, has_pin):
+    env = _install_fixture_manifest(tmp_path, monkeypatch)
+    path = _write_old_evidence_install(env, component_manifest.manifest_path(), monkeypatch)
+    forged = b"B" * path.stat().st_size
+    path.write_bytes(forged)
+    roots = resolve_roots(env=env, system="linux")
+    state_path = Path(component_paths.installed_state_path(roots.data_root))
+    state = component_state.load_installed_state(state_path)
+    assert state is not None
+    key = component_manifest.wire_id(state.components, "brigade-evidence")
+    assert key is not None
+    components = state.components | {key: replace(state.components[key], sha256=hashlib.sha256(forged).hexdigest())}
+    component_state.write_installed_state(state_path, replace(state, components=components))
+    if not has_pin:
+        monkeypatch.setattr(component_report, "release_asset_pin", lambda *_args: None)
+    severity, _, detail = next(
+        row for row in component_report.doctor_checks(env=env, system="linux") if row[1] == f"components: {key}"
+    )
+    assert severity == doctor_mod.FAIL
+    assert ("sha256 mismatch" if has_pin else "byte_size mismatch") in detail
+
+
+def test_v030_beta_pin_warns_even_when_it_matches_selected_manifest(tmp_path, monkeypatch):
+    monkeypatch.setattr(brigade, "__version__", "0.30.0")
+    env, _ = _prepare_unified_release_setup(tmp_path, monkeypatch)
+    roots = resolve_roots(env=env, system="linux")
+    monkeypatch.setattr(component_install, "resolve_roots", lambda **_kwargs: roots)
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+    state_path = Path(component_paths.update_state_path(roots.data_root))
+    state = update_cmd.load_update_state(state_path)
+    assert state is not None
+    beta_version = "0.33.0.dev1"
+    update_cmd.write_update_state(state_path, replace(state, channel="beta", cli_coordinate=beta_version))
+    monkeypatch.setattr(brigade, "__version__", beta_version)
+    _, size, digest = fixture_payload("brigade-evidence")
+    monkeypatch.setattr(
+        component_report,
+        "release_asset_pin",
+        lambda revision, component_id, platform: (
+            (size, digest)
+            if (revision, component_id, platform) == ("fixture", "brigade-evidence", "linux-amd64")
+            else None
+        ),
+    )
+    shallow_checks = component_report.outdated_doctor_checks(env=env, system="linux")
+    for checks in (shallow_checks, component_report.doctor_checks(env=env, system="linux")):
+        severity, _, detail = next(row for row in checks if row[1] == "components: brigade-evidence")
+        assert severity == doctor_mod.WARN
+        assert "Beta setup can reuse its v0.30.0 pin" in detail
+        assert "--allow-compatible-stable-manifest" in detail
+    monkeypatch.setattr(component_report, "release_asset_pin", lambda *_args: None)
+    severity, _, detail = next(
+        row
+        for row in component_report.doctor_checks(env=env, system="linux")
+        if row[1] == "components: brigade-evidence"
+    )
+    assert severity == doctor_mod.FAIL
+    assert "no packaged integrity reference" in detail
+
+
+def test_windows_path_case_does_not_mask_outdated_asset(tmp_path, monkeypatch):
+    env = _install_fixture_manifest(tmp_path, monkeypatch)
+    path = _write_old_evidence_install(env, component_manifest.manifest_path(), monkeypatch)
+    roots = resolve_roots(env=env, system="linux")
+    state_path = Path(component_paths.installed_state_path(roots.data_root))
+    state = component_state.load_installed_state(state_path)
+    assert state is not None
+    key = component_manifest.wire_id(state.components, "brigade-evidence")
+    assert key is not None
+    components = state.components | {key: replace(state.components[key], executable=str(path).swapcase())}
+    component_state.write_installed_state(state_path, replace(state, platform="windows-amd64", components=components))
+    monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "windows-amd64")
+    report = component_report.inspect_components(env=env, system="linux")
+    assert next(row for row in report.components if row.component_id == key).outdated
+
+
+def test_managed_paths_use_platform_case_rules():
+    windows_root = component_paths.data_root(env={"LOCALAPPDATA": r"C:\Example\AppData"}, system="windows")
+    windows_path = component_paths.managed_executable_path(windows_root, "brigade-evidence")
+    assert component_report._same_managed_path(windows_path, windows_path.swapcase(), "windows-amd64")
+    mac_root = component_paths.data_root(env={"HOME": "/example"}, system="darwin")
+    mac_path = component_paths.managed_executable_path(mac_root, "brigade-evidence")
+    assert component_report._same_managed_path(mac_path, mac_path, "darwin-arm64")
+    if os.name != "nt":
+        assert not component_report._same_managed_path(mac_path, mac_path.swapcase(), "darwin-arm64")
+
+
+def test_verified_beta_pairing_with_stable_components_stays_quiet(tmp_path, monkeypatch):
+    env, release = _prepare_unified_release_setup(tmp_path, monkeypatch)
+    roots = resolve_roots(env=env, system="linux")
+    monkeypatch.setattr(component_install, "resolve_roots", lambda **_kwargs: roots)
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+    state_path = Path(component_paths.update_state_path(roots.data_root))
+    state = update_cmd.load_update_state(state_path)
+    assert state is not None
+    beta_version = "0.34.0.dev1"
+    update_cmd.write_update_state(state_path, replace(state, channel="beta", cli_coordinate=beta_version))
+    monkeypatch.setattr(brigade, "__version__", beta_version)
+    data = json.loads(release.manifest_bytes)
+    data["brigade_version"] = beta_version
+    data["manifest_revision"] = "beta-bundled"
+    component_manifest.manifest_path().write_text(json.dumps(data))
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
+
+    checks = component_report.doctor_checks(env=env, system="linux")
+    assert checks and all(status == doctor_mod.OK for status, _name, _detail in checks)
+    assert component_report.outdated_doctor_checks(env=env, system="linux") == []
 
 
 def test_corrupt_managed_executable_read_error(tmp_path, monkeypatch):

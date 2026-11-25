@@ -2140,6 +2140,131 @@ def test_index_rejects_zero_exit_incomplete_summary_and_retains_export(tmp_path,
     assert len(_jsonl(exports[0].read_text())) == 1
 
 
+@pytest.mark.parametrize("route", ["stable", "npm", "beta", "prerelease", "source"])
+def test_verify_receipt_import_names_repair_for_missing_acknowledgement(tmp_path, monkeypatch, capsys, route):
+    from importlib import metadata
+    from types import SimpleNamespace
+
+    import brigade
+    from brigade import component_install, component_paths, distribution, update_cmd
+    from brigade.work_cmd import verification
+
+    monkeypatch.setattr(distribution, "_name", "npm" if route == "npm" else None)
+    monkeypatch.setattr(brigade, "__version__", "0.33.0.dev1" if route == "prerelease" else "0.33.0")
+    monkeypatch.setattr(
+        metadata,
+        "distribution",
+        lambda _name: SimpleNamespace(
+            read_text=lambda _file: '{"url":"file:///checkout","dir_info":{}}' if route in ("source", "npm") else None
+        ),
+    )
+    if route == "beta":
+        roots = component_install.resolve_roots()
+        update_cmd.write_update_state(
+            Path(component_paths.update_state_path(roots.data_root)),
+            update_cmd.UpdateState(
+                1,
+                "beta",
+                "brigade update",
+                "0.33.0.dev1",
+                1,
+                "v0.30.0",
+                "a" * 40,
+                "https://github.com/escoffier-labs/brigade/releases/download/v0.30.0/component-manifest-v1.json",
+                "b" * 64,
+                "2026-07-08T00:00:00Z",
+            ),
+        )
+    _write_verify_export_receipt(tmp_path, "missing-ack", started_at="2026-07-08T12:00:00Z")
+    monkeypatch.setattr(receipts_cmd.component_bins, "resolve", lambda _: "fake-ledger")
+    monkeypatch.setattr(
+        receipts_cmd.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(
+            args[0], 0, '{"inserted_items":1,"already_known":false,"warnings":null}', ""
+        ),
+    )
+
+    receipt = {}
+    verification._attach_miseledger_indexing(receipt, target=tmp_path, json_output=False)
+    output = capsys.readouterr()
+    reason = "The installed evidence engine is older than this CLI expects."
+    assert sum(reason in line for line in output.err.splitlines()) == 1
+    assert "miseledger indexing: import failed (receipts pending)" in output.out
+
+    verification._attach_miseledger_indexing(receipt, target=tmp_path, json_output=True)
+    indexing = receipt["miseledger_indexing"]
+    assert indexing["status"] == "failed"
+    assert indexing["reason"] == "outdated_evidence_engine"
+    assert indexing["repair"] in output.err
+    assert "brigade update" not in indexing["repair"]
+    assert ("run `brigade setup`" in indexing["repair"].lower()) == (route in ("stable", "npm"))
+    assert "--allow-compatible-stable-manifest" in indexing["repair"]
+    assert capsys.readouterr() == ("", "")
+    assert not (tmp_path / receipts_cmd.MISELEDGER_CURSOR_REL).exists()
+    assert len(list((tmp_path / ".brigade/work").glob("miseledger-export-*.jsonl"))) == 2
+
+
+@pytest.mark.parametrize("status", [None, "complete"])
+@pytest.mark.parametrize(
+    ("problem", "message"),
+    [
+        ({"errors": ["database locked"]}, "import summary reports errors"),
+        ({"warnings": ["incomplete"]}, "import summary reports warnings"),
+        ({"failed_items": 1}, "import summary reports failed_items"),
+        ({"error_count": 1}, "import summary reports error_count"),
+        ({"warning_count": 1}, "import summary reports warning_count"),
+        ({"failed": True}, "import summary requires failed to be false"),
+        ({"error": "database locked"}, "import summary reports an invalid or nonempty error"),
+    ],
+)
+def test_index_reports_import_failures_before_missing_acknowledgement(
+    tmp_path, monkeypatch, capsys, status, problem, message
+):
+    _write_verify_export_receipt(tmp_path, "failed-import", started_at="2026-07-08T12:00:00Z")
+    monkeypatch.setattr(receipts_cmd.component_bins, "resolve", lambda _: "fake-ledger")
+    summary = {"inserted_items": 0, "already_known": False, **problem}
+    if status is not None:
+        summary["status"] = status
+    monkeypatch.setattr(
+        receipts_cmd.subprocess,
+        "run",
+        lambda *args, **kwargs: subprocess.CompletedProcess(args[0], 0, json.dumps(summary), ""),
+    )
+    result = receipts_cmd.index_miseledger_receipts(target=tmp_path)
+    assert result["status"] == "failed"
+    assert "reason" not in result and "repair" not in result
+    assert message in capsys.readouterr().err
+    assert not (tmp_path / receipts_cmd.MISELEDGER_CURSOR_REL).exists()
+
+
+def test_fleet_export_missing_acknowledgement_prints_one_repair(tmp_path, monkeypatch, capsys):
+    fleet = tmp_path / "fleet"
+    repos = [tmp_path / "first", tmp_path / "second"]
+    for repo in repos:
+        _write_verify_export_receipt(repo, "pending", started_at="2026-07-08T12:00:00Z")
+    _write_repo_catalog(fleet, [(repo.name, repo.name, repo, True) for repo in repos])
+    real_run = subprocess.run
+
+    def run(args, *positional, **kwargs):
+        if args[0] == "fake-ledger":
+            return subprocess.CompletedProcess(args, 0, '{"inserted_items":2,"already_known":false}', "")
+        return real_run(args, *positional, **kwargs)
+
+    monkeypatch.setattr(receipts_cmd.component_bins, "resolve", lambda _: "fake-ledger")
+    monkeypatch.setattr(receipts_cmd.subprocess, "run", run)
+    assert (
+        cli.main(
+            ["receipts", "export", "evidence", "--target", str(fleet), "--fleet", "--new-only", "--json", "--import"]
+        )
+        == 1
+    )
+    captured = capsys.readouterr()
+    assert captured.err.count("The installed evidence engine is older than this CLI expects.") == 1
+    assert len(json.loads(captured.out)["repos"]) == 2
+    assert all(not (repo / receipts_cmd.MISELEDGER_CURSOR_REL).exists() for repo in repos)
+
+
 def test_index_timeout_retains_export_for_clean_replay(tmp_path, monkeypatch):
     _write_verify_export_receipt(tmp_path, "timeout-replay", started_at="2026-07-08T12:00:00Z")
     monkeypatch.setattr(receipts_cmd.component_bins, "resolve", lambda _: "fake-ledger")
