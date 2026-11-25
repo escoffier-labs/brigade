@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable, List
 
-from . import proc
+from . import proc, receipt_schema
 from .antigravity_help import (  # noqa: F401  re-exported for callers and tests
     _ANTIGRAVITY_PRINT_TIMEOUT_HELP,
     _ANTIGRAVITY_PRINT_TIMEOUT_CACHE_LIMIT,
@@ -1235,6 +1235,24 @@ def codex_stdin_hang_detail(raw: str, *, seat: str | None = None, transport: str
     )
 
 
+def _local_batch_result(cli_ref: str, text: str, stderr: str) -> tuple[str, str | None]:
+    if cli_ref == "codex":
+        # In text mode Codex exec prints the thread ID in its stderr preamble.
+        match = re.search(r"^session id: ([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})[ \t]*$", stderr, re.MULTILINE)
+        return text, match[1] if match else None
+    if cli_ref == "claude":
+        try:
+            payload = json.loads(text)
+        except (ValueError, RecursionError):
+            return text, None
+        if isinstance(payload, dict) and payload.get("type") == "result":
+            answer, identifier = payload.get("result"), payload.get("session_id")
+            return answer.strip() if isinstance(answer, str) else "", identifier if isinstance(
+                identifier, str
+            ) else None
+    return text, None
+
+
 def run_agent(
     cli_ref: str,
     prompt: str,
@@ -1474,6 +1492,9 @@ def run_agent(
             requested_model=model,
             reasoning=reasoning,
         )
+    local_batch = cli_ref in {"codex", "claude"} and bool(env and env.get(receipt_schema.BRIGADE_ATTEMPT_ID_ENV))
+    if local_batch and cli_ref == "claude":
+        argv[1:1] = ["--output-format", "json"]
     # Both modes emit a JSON envelope, but only read-only constrains the model
     # to the {kind, answer} schema; write mode must stay free to use tools.
     grok_envelope = cli_ref == "grok"
@@ -1608,7 +1629,9 @@ def run_agent(
     text = result.stdout.strip()
     structured_error = ""
     structured_diagnostic = ""
-    grok_session_id = None
+    session_id = None
+    if local_batch:
+        text, session_id = _local_batch_result(cli_ref, text, result.stderr)
     grok_request_id = None
     grok_stop_reason = None
     if grok_envelope:
@@ -1616,14 +1639,14 @@ def run_agent(
         text = grok_final.text
         structured_error = grok_final.error
         structured_diagnostic = grok_final.diagnostic
-        grok_session_id = grok_final.session_id
+        session_id = grok_final.session_id
         grok_request_id = grok_final.request_id
         grok_stop_reason = grok_final.stop_reason
     safe_text = _scrub_env_override_values(text, resolved_overrides, resolved_secret_targets)
     safe_structured_error = _scrub_env_override_values(structured_error, resolved_overrides, resolved_secret_targets)[
         :200
     ]
-    if structured_grok and session_binding_id is not None and grok_session_id != session_binding_id:
+    if structured_grok and session_binding_id is not None and session_id != session_binding_id:
         return AgentResult(
             text="",
             ok=False,
@@ -1659,7 +1682,7 @@ def run_agent(
                 requested_model=model,
                 reasoning=reasoning,
                 stop_reason=grok_stop_reason,
-                session_id=grok_session_id,
+                session_id=session_id,
                 request_id=grok_request_id,
             )
         if result.code == 127 and "command not found" in safe_stderr.lower():
@@ -1676,7 +1699,7 @@ def run_agent(
                 requested_model=model,
                 reasoning=reasoning,
                 stop_reason=grok_stop_reason,
-                session_id=grok_session_id,
+                session_id=session_id,
                 request_id=grok_request_id,
             )
         raw_detail = safe_stderr.strip() or f"exit {result.code}"
@@ -1719,7 +1742,7 @@ def run_agent(
             requested_model=model,
             reasoning=reasoning,
             stop_reason=grok_stop_reason,
-            session_id=grok_session_id,
+            session_id=session_id,
             request_id=grok_request_id,
         )
     if structured_error:
@@ -1738,7 +1761,7 @@ def run_agent(
                     requested_model=model,
                     reasoning=reasoning,
                     stop_reason=grok_stop_reason,
-                    session_id=grok_session_id,
+                    session_id=session_id,
                     request_id=grok_request_id,
                 )
         return AgentResult(
@@ -1753,7 +1776,7 @@ def run_agent(
             requested_model=model,
             reasoning=reasoning,
             stop_reason=grok_stop_reason,
-            session_id=grok_session_id,
+            session_id=session_id,
             request_id=grok_request_id,
         )
     antigravity_no_output = (
@@ -1803,7 +1826,7 @@ def run_agent(
             requested_model=model,
             reasoning=reasoning,
             stop_reason=grok_stop_reason,
-            session_id=grok_session_id,
+            session_id=session_id,
             request_id=grok_request_id,
         )
     # #1144: truncation metadata rides along whichever result the contract
@@ -1825,7 +1848,7 @@ def run_agent(
             requested_model=model,
             reasoning=reasoning,
             stop_reason=grok_stop_reason,
-            session_id=grok_session_id,
+            session_id=session_id,
             request_id=grok_request_id,
             output_bytes=truncation_bytes,
             output_cap_bytes=truncation_cap,
@@ -1845,7 +1868,7 @@ def run_agent(
         requested_model=model,
         reasoning=reasoning,
         stop_reason=grok_stop_reason,
-        session_id=grok_session_id,
+        session_id=session_id,
         request_id=grok_request_id,
         output_bytes=truncation_bytes,
         output_cap_bytes=truncation_cap,

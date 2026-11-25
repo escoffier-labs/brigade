@@ -405,6 +405,24 @@ def prepare_requests(
         payload["request_id"] = control_requests[old["request_id"]]
         requests[index] = (payload, f"{event.event_type}:{payload['request_id']}")
 
+    # Budget facts can outlive a redacted task descriptor or observation.
+    # Remap their retained references along with the corresponding claim.
+    for index, event in enumerate(events):
+        if not event.event_type.startswith("run_budget.") or "attempt_id" not in event.payload:
+            continue
+        old = event.payload
+        task_id, attempt_id = old["task_id"], old["attempt_id"]
+        payload, key = requests[index]
+        if key != event.idempotency_key:
+            continue
+        new_task_id = mapped(task_id, "task_id", task_id)
+        new_attempt_id = attempts.get((task_id, attempt_id), attempt_id)
+        if (new_task_id, new_attempt_id) != (task_id, attempt_id):
+            requests[index] = (
+                {**payload, "task_id": new_task_id, "attempt_id": new_attempt_id},
+                f"redaction:{operation_id}:{event.sequence}",
+            )
+
 
 def assert_affected_task_values_removed(
     original: Sequence[run_journal.RunEvent],
@@ -450,6 +468,10 @@ def assert_affected_task_values_removed(
             structural = STRUCTURAL_FIELDS
         elif event.event_type in {"control.requested", "control.observed", "control.failed"}:
             structural = CONTROL_STRUCTURAL_FIELDS
+        elif event.event_type.startswith("run_budget.") and "attempt_id" in event.payload:
+            if selected_references.intersection((event.payload["task_id"], event.payload["attempt_id"])):
+                raise error_type("rewritten budget fact still contains affected task references")
+            continue
         else:
             continue
         if any(field not in structural and value in selected_references for field, value in private_scalars(event)):

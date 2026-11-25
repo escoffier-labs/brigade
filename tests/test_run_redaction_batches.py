@@ -13,6 +13,7 @@ from brigade import (
     run_checkpoint,
     run_control_journal as control,
     run_journal,
+    run_lifecycle,
     run_redaction,
     run_redaction_rewrite,
     run_task_journal,
@@ -138,6 +139,24 @@ def closed_batches(tmp_path, monkeypatch, request):
             tasks.acknowledge_result(
                 run_dir, workspace=workspace, task_id=handle.spec.task_id, result_id=result.result_id
             )
+        if mode == "budget":
+            handle = handles[0]
+            run_lifecycle.record_lifecycle_event(
+                run_dir,
+                workspace=workspace,
+                event_type="run_budget.usage_reconciled",
+                payload={
+                    "dimension": "output_tokens",
+                    "mode": "observed",
+                    "usage_source": "provider_reconciled",
+                    "used": 5,
+                    "request_id": "dispatch:worker:1",
+                    "reason_class": "usage_reconcile",
+                    "task_id": handle.spec.task_id,
+                    "attempt_id": handle.attempt_id,
+                },
+                idempotency_key="budget-usage",
+            )
         aboyeur._write_json(run_dir / "run.json", {**snapshot, "status": "ok"})
     # Targeted controls straddle later task/checkpoint facts, without transport.
     events = _events(run_dir)
@@ -186,6 +205,27 @@ def closed_batches(tmp_path, monkeypatch, request):
     _publish(run_dir, events)
     assert aboyeur._resolve_authority_state(run_dir) == "authoritative"
     return run_dir
+
+
+@requires_secure_transactions
+@pytest.mark.parametrize("closed_batches", ["budget"], indirect=True)
+def test_batch_redaction_remaps_retained_budget_references(closed_batches):
+    run_dir = closed_batches
+    batch = next(event for event in _events(run_dir) if event.event_type == "task.batch-accepted")
+    state = tasks.read_task_batch(run_dir, request_id=batch.payload["request_id"]).members[0]
+    run_redaction.redact_journal(
+        run_dir,
+        sequence_start=batch.sequence,
+        sequence_end=batch.sequence,
+        reason="credential-exposure",
+        operator_confirmed=True,
+    )
+    rewritten = _events(run_dir)
+    replacement_batch = next(event for event in rewritten if event.event_type == "task.batch-accepted")
+    member = tasks.read_task_batch(run_dir, request_id=replacement_batch.payload["request_id"]).members[0]
+    usage = next(event.payload for event in rewritten if event.event_type == "run_budget.usage_reconciled")
+    assert usage["task_id"] == member.handle.spec.task_id != state.handle.spec.task_id
+    assert usage["attempt_id"] == member.handle.attempt_id != state.handle.attempt_id
 
 
 @requires_secure_transactions

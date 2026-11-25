@@ -1,13 +1,15 @@
 """Offline execution through the real guarded orchestrator and dispatcher."""
 
 import json
+import os
 import subprocess
+import sys
 import threading
 from unittest.mock import Mock
 
 import pytest
 
-from brigade import aboyeur, agents, cli, run_tasks
+from brigade import aboyeur, agents, cli, run_journal, run_lifecycle, run_tasks
 from brigade.run_batch import SCHEMA
 
 
@@ -81,6 +83,71 @@ def test_separate_results_retry_and_conflict(setup, capsys):
     assert rc == 2
     assert conflict["error"]["code"] == "request-conflict"
     assert len(setup[1]) == 3
+
+
+@pytest.mark.parametrize(("harness", "identity"), [("codex", "thread_id"), ("claude", "session_id")])
+def test_batch_observes_local_provider_session(setup, capsys, monkeypatch, harness, identity):
+    root, _ = setup
+    roster = root / ".brigade" / "roster.toml"
+    roster.write_text(roster.read_text().replace('[agents.coder]\ncli = "codex"', f'[agents.coder]\ncli = "{harness}"'))
+    monkeypatch.setattr(
+        agents, "run_agent", lambda *args, **kwargs: agents.AgentResult(text="done", ok=True, **{identity: "session-1"})
+    )
+    rc, result, err = invoke(setup, capsys, [task("a")])
+    assert rc == 0, err
+    run_dir = root / ".brigade" / "runs" / result["run_id"]
+    events = run_journal.read_journal(run_lifecycle._journal_path(run_dir)).events
+    observation = next(event.payload for event in events if event.event_type == "task.observed")
+    assert observation["task_id"] == "a"
+    assert observation["provider_task_id"] == "session-1"
+
+
+def test_batch_result_joins_exact_verification_receipt(setup, capsys, monkeypatch):
+    root, _ = setup
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / ".git" / "info" / "exclude").write_text("batch.json\n.brigade/\nhome/\n")
+    _commit(root, "base", allow_empty=True)
+    command = [
+        sys.executable,
+        "-m",
+        "brigade",
+        "work",
+        "verify",
+        "run",
+        "--target",
+        str(root),
+        "--argv-json",
+        json.dumps([sys.executable, "-c", "print('private command body')"]),
+    ]
+    older = subprocess.run(command, capture_output=True, text=True)
+    assert older.returncode == 0, older.stderr
+    receipt_dir = root / ".brigade" / "work" / "verify-runs"
+    prior = set(receipt_dir.glob("*/receipt.json"))
+
+    def model(agent, prompt, **kwargs):
+        if "task_id: b" not in prompt:
+            verify = subprocess.run(command, env={**os.environ, **kwargs["env"]}, capture_output=True, text=True)
+            assert verify.returncode == 0, verify.stderr
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", model)
+    rc, result, err = invoke(setup, capsys, [task("a"), task("b", ["a"])])
+    assert rc == 0, err
+    run_dir = root / ".brigade" / "runs" / result["run_id"]
+    (receipt_path,) = set(receipt_dir.glob("*/receipt.json")) - prior
+    verify_receipt = json.loads(receipt_path.read_text())
+    state = next(state for state in run_tasks.read_tasks(run_dir) if state.handle.spec.task_id == "a")
+    payload = json.loads((run_dir / result["tasks"]["a"]["result_ref"]).read_text())
+    assert payload["verification"] == {
+        "task_id": "a",
+        "attempt_id": state.handle.attempt_id,
+        "receipt_digest": verify_receipt["digests"]["receipt_sha256"],
+        "status": "completed",
+    }
+    assert "private command body" not in json.dumps(payload)
+    assert str(root) not in json.dumps(payload["verification"])
+    sibling = json.loads((run_dir / result["tasks"]["b"]["result_ref"]).read_text())
+    assert "verification" not in sibling
 
 
 def test_bounded_waves(setup, capsys, monkeypatch):
@@ -184,6 +251,17 @@ def test_dispatch_budget_exhaustion_preserves_completed_task_on_retry(setup, cap
     assert run_receipt["failure"]["kind"] == "budget-exhausted"
     assert result["tasks"]["a"]["status"] == "completed"
     assert result["tasks"]["b"]["not_run"] is True
+    events = run_journal.read_journal(run_lifecycle._journal_path(run_dir)).events
+    states = {state.handle.spec.task_id: state for state in run_tasks.read_tasks(run_dir)}
+    denied = {
+        event.event_type: event.payload
+        for event in events
+        if event.event_type in {"run_budget.reservation_denied", "run_budget.exhausted"}
+    }
+    assert set(denied) == {"run_budget.reservation_denied", "run_budget.exhausted"}
+    for payload in denied.values():
+        assert payload["task_id"] == "b"
+        assert payload["attempt_id"] == states["b"].handle.attempt_id
     receipt = run_dir / result["tasks"]["a"]["result_ref"]
     retained = receipt.read_bytes()
     assert invoke(setup, capsys, tasks, extra_args=budget_args)[:2] == (1, result)

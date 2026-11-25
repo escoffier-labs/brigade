@@ -36,6 +36,24 @@ def _stub_agent_executable(monkeypatch, *, path_for=None):
     monkeypatch.setattr(agents, "resolve_agent_executable", _resolve)
 
 
+@pytest.mark.parametrize("harness", ["codex", "claude"])
+def test_local_batch_agent_returns_provider_session(monkeypatch, harness):
+    _stub_agent_executable(monkeypatch)
+    session = "00000000-0000-4000-8000-000000000001"
+
+    def run(argv, **kwargs):
+        if harness == "claude":
+            assert argv[1:3] == ["--output-format", "json"]
+            return agents.proc.Result(0, json.dumps({"type": "result", "result": "done", "session_id": session}), "")
+        return agents.proc.Result(0, "done", f"session id: {session}\n")
+
+    monkeypatch.setattr(agents.proc, "run", run)
+    result = agents.run_agent(harness, "hi", read_only=True, env={"BRIGADE_ATTEMPT_ID": "a" * 64})
+    assert result.ok
+    assert result.text == "done"
+    assert result.session_id == session
+
+
 def test_build_argv_for_known_clis():
     # A claude write run with no explicit sandbox must fail safely rather than
     # silently grant full access (or stall on a permission prompt).

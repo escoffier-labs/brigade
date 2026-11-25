@@ -1149,6 +1149,10 @@ def _stamp_verify_causal_receipt(receipt: dict[str, Any]) -> None:
     verify_id = receipt.get("run_id")
     if not isinstance(verify_id, str) or not verify_id:
         return
+    # Batch dispatch supplies the attempt digest, which binds the run and task.
+    attempt_id = os.environ.get(receipt_schema.BRIGADE_ATTEMPT_ID_ENV)
+    if attempt_id is not None and re.fullmatch(r"[0-9a-f]{64}", attempt_id):
+        receipt["producer_attempt_id"] = attempt_id
     producer = receipt.get("producer_run_id")
     run_id = producer if isinstance(producer, str) and producer else None
     causal_receipt.stamp_causal_receipt(
@@ -1242,6 +1246,34 @@ def _verify_receipts(target: Path) -> list[dict[str, Any]]:
     valid = [item for item in receipts if isinstance(item, dict)]
     valid.sort(key=lambda item: str(item.get("started_at") or item.get("run_id") or ""), reverse=True)
     return valid
+
+
+def task_verification(target: Path, *, task_id: str, attempt_id: str) -> dict[str, str] | None:
+    """Project one sealed verifier receipt for this attempt and exact checkout tree."""
+    tree: str | None = None
+    for receipt in _verify_receipts(target):
+        status = receipt.get("status")
+        if (
+            receipt.get("producer_attempt_id") != attempt_id
+            or receipt.get("target") != str(target)
+            or status not in ("completed", "failed", "rejected")
+            or (
+                receipt.get("tree_stable") is not True
+                and not (status == "completed" and isinstance(receipt.get("reused_from"), str))
+            )
+        ):
+            continue
+        if tree is None:
+            tree = localio.tree_fingerprint(target)
+            if tree is None:
+                return None
+        if receipt.get("tree_fingerprint") != tree or receipt.get("tree_fingerprint_after") != tree:
+            continue
+        digests = receipt.get("digests")
+        digest = digests.get("receipt_sha256") if isinstance(digests, dict) else None
+        if digest == localio.canonical_json_digest(receipt, exclude_keys={"digests"}):
+            return {"task_id": task_id, "attempt_id": attempt_id, "receipt_digest": digest, "status": status}
+    return None
 
 
 def _resolve_verify_receipt(target: Path, run_id: str) -> tuple[dict[str, Any] | None, str | None]:

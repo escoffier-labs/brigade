@@ -685,6 +685,7 @@ def dispatch(
         return merged
 
     def run_direct_agent(*args: Any, **kwargs: Any) -> agents.AgentResult:
+        worker_attempt_id = kwargs.pop("worker_attempt_id", None)
         runner = agents.run_agent
         parameters = inspect.signature(runner).parameters.values()
         accepts_var_keyword = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
@@ -702,12 +703,14 @@ def dispatch(
             kwargs.pop("cloud_safe_mode", None)
         if not accepts_session_binding:
             kwargs.pop("session_binding_id", None)
-        if orchestrator_run_id is not None:
+        if orchestrator_run_id is not None or worker_attempt_id is not None:
             # Real agents.run_agent accepts env=; legacy fixed-signature test
             # doubles do not. Mirror the process_registry gate so BRIGADE_RUN_ID
             # still reaches production workers without crashing the doubles.
             merged_env = _with_orchestrator_run_id(kwargs.get("env"))
             if accepts_env:
+                if worker_attempt_id is not None:
+                    merged_env = {**(merged_env or {}), receipt_schema.BRIGADE_ATTEMPT_ID_ENV: worker_attempt_id}
                 kwargs["env"] = merged_env
             else:
                 kwargs.pop("env", None)
@@ -860,7 +863,9 @@ def dispatch(
                 seat_process_registry.check_cancellation()
             else:
                 seat_process_registry = process_registry.for_seat(selected_agent.name)
-            cloud_dispatch_kwargs = {"cloud_safe_mode": selected_agent.cloud_safe_mode}
+            dispatch_kwargs: dict[str, Any] = {"cloud_safe_mode": selected_agent.cloud_safe_mode}
+            if not cli_ref.startswith("codex-cloud:"):
+                dispatch_kwargs["worker_attempt_id"] = assignment.attempt_id
             session_binding_id = (
                 resume_session_id or str(uuid.uuid4())
                 if (
@@ -926,7 +931,7 @@ def dispatch(
                     resume_session_id=resume_session_id,
                     session_binding_id=session_binding_id,
                     process_registry=seat_process_registry,
-                    **cloud_dispatch_kwargs,
+                    **dispatch_kwargs,
                 )
             if selected_agent.env is not None:
                 # Env seats use direct CLI because app-server cannot apply per-seat env.
@@ -945,7 +950,7 @@ def dispatch(
                     read_only=effective_read_only,
                     env=dict(selected_agent.env),
                     process_registry=seat_process_registry,
-                    **cloud_dispatch_kwargs,
+                    **dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                     **env_kwargs,
                     session_binding_id=session_binding_id,
@@ -957,6 +962,12 @@ def dispatch(
                     f"`BRIGADE_APPROVAL_CORRELATION={approval_correlation_marker}`. "
                     "Do not print or return that marker."
                 )
+                if assignment.attempt_id is not None:
+                    approval_prompt += (
+                        f" Also set `{receipt_schema.BRIGADE_ATTEMPT_ID_ENV}={assignment.attempt_id}` "
+                        "on Brigade verification commands in this turn."
+                    )
+                    recording.prompt = approval_prompt
                 try:
                     on_event = event_writer(
                         events_dir,
@@ -1012,7 +1023,7 @@ def dispatch(
                     cwd=worker_cwd,
                     read_only=effective_read_only,
                     process_registry=seat_process_registry,
-                    **cloud_dispatch_kwargs,
+                    **dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                     session_binding_id=session_binding_id,
                 )
@@ -1025,7 +1036,7 @@ def dispatch(
                     read_only=effective_read_only,
                     sandbox=sandbox,
                     process_registry=seat_process_registry,
-                    **cloud_dispatch_kwargs,
+                    **dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                     session_binding_id=session_binding_id,
                 )
@@ -1038,7 +1049,7 @@ def dispatch(
                     read_only=effective_read_only,
                     model=selected_agent.model,
                     process_registry=seat_process_registry,
-                    **cloud_dispatch_kwargs,
+                    **dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                     session_binding_id=session_binding_id,
                 )
@@ -1051,7 +1062,7 @@ def dispatch(
                     read_only=effective_read_only,
                     reasoning=selected_agent.reasoning,
                     process_registry=seat_process_registry,
-                    **cloud_dispatch_kwargs,
+                    **dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                     session_binding_id=session_binding_id,
                 )
@@ -1065,7 +1076,7 @@ def dispatch(
                     sandbox=sandbox,
                     model=selected_agent.model,
                     process_registry=seat_process_registry,
-                    **cloud_dispatch_kwargs,
+                    **dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                     session_binding_id=session_binding_id,
                 )
@@ -1079,7 +1090,7 @@ def dispatch(
                     sandbox=sandbox,
                     reasoning=selected_agent.reasoning,
                     process_registry=seat_process_registry,
-                    **cloud_dispatch_kwargs,
+                    **dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                     session_binding_id=session_binding_id,
                 )
@@ -1093,7 +1104,7 @@ def dispatch(
                     model=selected_agent.model,
                     reasoning=selected_agent.reasoning,
                     process_registry=seat_process_registry,
-                    **cloud_dispatch_kwargs,
+                    **dispatch_kwargs,
                     **direct_command_kwargs(selected_agent),
                     session_binding_id=session_binding_id,
                 )
@@ -1110,7 +1121,7 @@ def dispatch(
                 model=selected_agent.model,
                 reasoning=selected_agent.reasoning,
                 process_registry=seat_process_registry,
-                **cloud_dispatch_kwargs,
+                **dispatch_kwargs,
                 **direct_command_kwargs(selected_agent),
                 session_binding_id=session_binding_id,
             )
@@ -1229,6 +1240,14 @@ def dispatch(
             delivered_text = bounded_text if captured.delivered else ""
             delivered_ok = (result.ok or preserved) if captured.delivered else False
             delivered_detail = result.detail if captured.delivered else (captured.reason or result.detail)
+            provider_task_id = None
+            if result.cloud_environment is not None:
+                provider_task_id = result.thread_id
+            elif assignment.task_id is not None and remote_disposition[0] is None:
+                if terminal_agent.cli == "codex":
+                    provider_task_id = result.thread_id or result.session_id
+                elif terminal_agent.cli == "claude":
+                    provider_task_id = result.session_id
             return WorkerResult(
                 worker=assignment.worker,
                 task=assignment.task,
@@ -1274,9 +1293,7 @@ def dispatch(
                 output_bytes=result.output_bytes,
                 output_cap_bytes=result.output_cap_bytes,
                 remote=remote_disposition[0],
-                # codex-cloud documents its provider task ID as the result thread_id (codex_cloud.run_cloud_task).
-                # No transport documents an original run or result ID, so those stay None.
-                provider_task_id=result.thread_id if result.cloud_environment is not None else None,
+                provider_task_id=provider_task_id,
             )
 
         initial_started = _attempt_timestamp()

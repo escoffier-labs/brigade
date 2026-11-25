@@ -1,0 +1,1 @@
+- Explicit batches correlate worker dispatch budget facts, local Codex and Claude sessions, and matching verification receipt digests with the task attempts they cover.
