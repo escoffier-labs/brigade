@@ -4,6 +4,7 @@ import os
 import sys
 from datetime import date
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -420,6 +421,41 @@ def test_portable_reflect_threshold_honored(tmp_target: Path, portable_config):
     outcome = ingest._decide_create_card_match(content, target=tmp_target)
     assert outcome is not None
     assert outcome.code == "near-match-proposal"
+
+
+@pytest.mark.parametrize("closing_ctime", [200, 300], ids=["stable-handle", "changed-handle"])
+def test_portable_reflect_windows_stat_times(tmp_target: Path, monkeypatch, closing_ctime: int):
+    from brigade import memory_reflect_near as near
+
+    config = tmp_target / near.CONFIG
+    config.parent.mkdir(parents=True, exist_ok=True)
+    config.write_text("[reflect]\nnear_duplicate_threshold = 0.85\n")
+    info = config.stat()
+
+    def snapshot(ctime: int) -> SimpleNamespace:
+        return SimpleNamespace(
+            st_dev=info.st_dev,
+            st_ino=info.st_ino,
+            st_mode=info.st_mode,
+            st_nlink=info.st_nlink,
+            st_size=info.st_size,
+            st_mtime_ns=info.st_mtime_ns,
+            st_ctime_ns=ctime,
+            st_birthtime_ns=100,
+        )
+
+    # Windows path stat reports creation time as ctime; descriptor stat can
+    # report the last metadata change instead.
+    descriptor_stats = iter((snapshot(200), snapshot(closing_ctime)))
+    with monkeypatch.context() as patch:
+        patch.delattr(os, "O_NOFOLLOW", raising=False)
+        patch.setattr(os, "lstat", lambda path: snapshot(100))
+        patch.setattr(os, "fstat", lambda fd: next(descriptor_stats))
+        if closing_ctime == 200:
+            assert near.settings(tmp_target) == (0.85, near.DEFAULT_MAX_PROPOSALS)
+        else:
+            with pytest.raises(OSError, match="config changed during read"):
+                near.settings(tmp_target)
 
 
 @pytest.mark.parametrize("config_text", ["[reflect]\nnear_duplicate_threshold = 1.1\n", "[reflect"])
