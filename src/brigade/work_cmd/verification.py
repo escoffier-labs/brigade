@@ -1528,6 +1528,7 @@ def _run_verify_commands(
     timeout: int,
     *,
     code_graph_timeout: float,
+    code_graph_capture_timeout: float | None = None,
     manifest: verify_manifest.VerifyManifest | None = None,
     capture: str | None = None,
     capture_kind: str = "skill",
@@ -1535,6 +1536,7 @@ def _run_verify_commands(
     reuse_skipped: str | None = None,
 ) -> tuple[dict[str, Any], int]:
     started = helpers._now()
+    graph_capture_timeout = code_graph_timeout if code_graph_capture_timeout is None else code_graph_capture_timeout
     run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-work-verify-{uuid4().hex[:6]}"
     run_dir = helpers._verify_runs_root(target) / run_id
     receipt: dict[str, Any] | None = None
@@ -1570,7 +1572,9 @@ def _run_verify_commands(
         receipt["producer_work_session_id"] = _active_work_session_id(target)
         _stamp_outcome_capture(receipt, capture, capture_kind, capture_meta)
         try:
-            graph_delta_before = code_graph_delta.capture_before(target, run_dir, timeout=code_graph_timeout)
+            graph_delta_before = code_graph_delta.capture_before(
+                target, run_dir, timeout=code_graph_timeout, snapshot_timeout=graph_capture_timeout, defer_sync=True
+            )
         except KeyboardInterrupt:
             canceled = True
             rc = verify_runtime._VERIFY_CANCELED_RC
@@ -1665,7 +1669,7 @@ def _run_verify_commands(
             _cancel_verify_graph(receipt, run_dir)
         else:
             receipt["code_graph_delta"] = code_graph_delta.capture_after_and_diff(
-                target, run_dir, graph_delta_before, timeout=code_graph_timeout
+                target, run_dir, graph_delta_before, timeout=graph_capture_timeout, sync_timeout=code_graph_timeout
             )
     except KeyboardInterrupt:
         if receipt is None:
@@ -1984,6 +1988,7 @@ def verify_run(
         return 2
     try:
         effective_code_graph_timeout = config.resolve_code_graph_delta_timeout(target, code_graph_timeout)
+        graph_capture_timeout = config.resolve_code_graph_delta_timeout(target, code_graph_timeout, default=10.0)
     except ValueError as exc:
         verify_runtime._print_verify_console(f"error: {exc}", file=sys.stderr)
         return 2
@@ -2046,6 +2051,7 @@ def verify_run(
                     planned,
                     timeout,
                     code_graph_timeout=effective_code_graph_timeout,
+                    code_graph_capture_timeout=graph_capture_timeout,
                     manifest=manifest,
                     capture=capture,
                     capture_kind=capture_kind,
