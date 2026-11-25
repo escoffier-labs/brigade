@@ -108,10 +108,12 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         category="pii",
         # Match before home-path so /Users inside a drive-qualified path
         # cannot claim a partial span and suppress the complete Windows path.
-        # Quotes bound paths with spaced directory leaves. Without quotes,
-        # spaces need a following separator or filename extension so prose
-        # after the path is not consumed. Forward slashes and raw or escaped
-        # backslashes can be mixed independently at each component boundary.
+        # Matching quotes and filename extensions keep their existing priority.
+        # Otherwise, a spaced leaf must end at a line ending, end of input,
+        # tab, comma, semicolon, colon, closing bracket, or pipe. Padding spaces
+        # stay outside the match. A final dot or a word starting with "--"
+        # makes the leaf ambiguous, so the rule falls back to one token.
+        # Forward slashes and raw or escaped backslashes can be mixed.
         # As in root-path, the opening quote lives inside the quoted branch and
         # the unquoted branch has no quote lookbehind: a path that opens with
         # one quote and closes with another falls back to the unquoted branch
@@ -125,7 +127,10 @@ DEFAULT_RULES: tuple[Rule, ...] = (
             r"[A-Z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/)"
             r"(?:[A-Za-z0-9._@+-]+(?: +[A-Za-z0-9._@+-]+)*(?:\\{1,2}|/))*"
             r"(?:[A-Za-z0-9_@+-]+(?:[ .]+[A-Za-z0-9_@+-]+)*?\.[A-Za-z0-9]+"
-            r"(?![\w-]|\.[\w-])|[A-Za-z0-9._@+-]+)"
+            r"(?![\w-]|\.[\w-])"
+            r"|[A-Za-z0-9._@+-]+(?: +(?!--)[A-Za-z0-9._@+-]+)+(?<!\.)(?:\\{1,2}|/)?"
+            r"(?= *(?:$|[\r\n\t,;:)\]}|]))"
+            r"|[A-Za-z0-9._@+-]+)"
             r")"
         ),
         replacement="<PRIVATE_HOME_PATH>",
