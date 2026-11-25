@@ -215,9 +215,11 @@ def _correlate(task: ClaimedTask, worker: dispatch.WorkerReference, *, mode: str
                 worker.handle_digest,
             )
         raise journal.refuse("accept-conflict", "a different native handle already correlates this task")
+    if held == journal.ACCEPT_CONFLICT and prior is None:
+        raise journal.refuse("journal-refused", "the held task has no retained correlation")
+    if mode == "operator-asserted":
+        journal.close_lost_request(task.workspace, task.run_dir, task.events, task.verified.result)
     if held == journal.ACCEPT_CONFLICT:
-        if prior is None:
-            raise journal.refuse("journal-refused", "the held task has no retained correlation")
         task.append(
             journal.HOLD_RESOLVED_EVENT,
             {"reason": held, "evidence_digest": worker.handle_digest},
@@ -242,14 +244,23 @@ def _correlate(task: ClaimedTask, worker: dispatch.WorkerReference, *, mode: str
     }
 
 
-def _record_start_refusal(task: ClaimedTask, reason: str) -> dict[str, Any]:
+def _record_start_refusal(task: ClaimedTask, reason: str, *, resolving: bool = False) -> dict[str, Any]:
     result = task.verified.result
+    resource = journal.latest(task.events, RESOURCE_EVENT, task.task_id)
+    if reason != "start-failed" and resource is not None and resource.get("reason") == START_UNCONFIRMED:
+        raise journal.refuse("start-unknown", "the Task refusal cannot settle an earlier ambiguous worker start")
     prior = journal.start_refusal(task.events, task.task_id)
-    if task.correlated_worker() is not None or (prior is not None and prior != reason):
+    if (
+        journal.held(task.events, task.task_id) == journal.ACCEPT_CONFLICT
+        or task.correlated_worker() is not None
+        or (prior is not None and prior != reason)
+    ):
         raise journal.refuse("accept-conflict", "the refusal contradicts the retained Orca start outcome")
+    if prior is None and result.result_id is not None:
+        raise journal.refuse("task-terminal", "the task already has a terminal result")
+    if resolving:
+        journal.close_lost_request(task.workspace, task.run_dir, task.events, result)
     if prior is None:
-        if result.result_id is not None:
-            raise journal.refuse("task-terminal", "the task already has a terminal result")
         # Seal the no-worker verdict first. If the next write is interrupted,
         # reporting the same receipt repairs the result without admitting a new launch.
         task.append(RESOURCE_EVENT, {"reason": reason}, reason)
@@ -278,19 +289,44 @@ def _record_start_refusal(task: ClaimedTask, reason: str) -> dict[str, Any]:
     }
 
 
-def accepted(*, workspace: Path, run_id: str, task_id: str, payload: object, exit_code: int) -> dict[str, Any]:
+def _parse_start(
+    task: ClaimedTask, payload: object, *, exit_code: int, show: object, recover_unknown: bool = False
+) -> dispatch.WorkerReference:
+    target = task.verified.target
+    try:
+        return dispatch.parse_start(task.binding, target, payload, exit_code=exit_code)
+    except NativeChildError as exc:
+        if exc.code != "start-unknown" or show is None:
+            raise
+        failed = dispatch.failed_start_with_residuals(task.binding, target, payload, exit_code=exit_code)
+        if failed is None and not recover_unknown:
+            raise
+        if failed is not None:
+            worker, residuals = failed
+            if not observations.failed_start_released(worker, show, residuals):
+                raise journal.refuse(
+                    "start-unknown", "the failed Orca worker has no confirmed release and exit"
+                ) from None
+            raise dispatch.DefiniteStartRefusal("start-failed", "Orca released the failed worker start") from None
+    worker = dispatch.unconfirmed_start(task.binding, target, payload)
+    if not observations.settled_start(worker, show):
+        raise journal.refuse("start-unknown", "the exact Orca worker has no confirmed start or settlement")
+    return worker
+
+
+def accepted(
+    *, workspace: Path, run_id: str, task_id: str, payload: object, exit_code: int, show: object = None
+) -> dict[str, Any]:
     with claimed_task(workspace, run_id, task_id) as task:
         task.require_unheld()
-        resource = journal.latest(task.events, RESOURCE_EVENT, task_id)
         try:
-            worker = dispatch.parse_start(task.binding, task.verified.target, payload, exit_code=exit_code)
+            worker = _parse_start(task, payload, exit_code=exit_code, show=show)
         except dispatch.DefiniteStartRefusal as exc:
-            if exc.code != "start-failed" and resource is not None and resource.get("reason") == START_UNCONFIRMED:
-                raise journal.refuse(
-                    "start-unknown", "the Task refusal cannot settle an earlier ambiguous worker start"
-                ) from None
             return _record_start_refusal(task, exc.code)
         except NativeChildError as exc:
+            if show is not None and dispatch.result_fields(payload).get("state") == "outcome_unknown":
+                raise
+            resource = journal.latest(task.events, RESOURCE_EVENT, task_id)
             if exc.code == "start-unknown" and resource is None and task.correlated_worker() is None:
                 task.append(RESOURCE_EVENT, {"reason": START_UNCONFIRMED}, START_UNCONFIRMED)
             raise
@@ -322,11 +358,8 @@ def hold_resolve(
             task.require_unheld()
         if result.launch_claim is None:
             raise journal.refuse("no-claim", "the task has no durable launch claim")
-        if show is None:
-            worker = dispatch.parse_start(task.binding, task.verified.target, payload, exit_code=exit_code)
-        else:
-            worker = dispatch.unconfirmed_start(task.binding, task.verified.target, payload)
-            if not observations.settled_start(worker, show):
-                raise journal.refuse("start-unknown", "the exact Orca worker has no confirmed start or settlement")
-        journal.close_lost_request(task.workspace, task.run_dir, task.events, result)
+        try:
+            worker = _parse_start(task, payload, exit_code=exit_code, show=show, recover_unknown=True)
+        except dispatch.DefiniteStartRefusal as exc:
+            return _record_start_refusal(task, exc.code, resolving=True)
         return _correlate(task, worker, mode="operator-asserted", held=held)

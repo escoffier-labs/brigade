@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Mapping
 
+from .native_child_host import NativeChildError
 from .native_child_journal import digest
 from .native_child_observations import NativeObservation
 from .native_orca_dispatch import CLI, WorkerReference, mutation_key, result_fields, valid_id
@@ -53,12 +54,6 @@ def _show(worker: WorkerReference, payload: object) -> tuple[Mapping[str, object
     dispatch = _fields(reply.get("dispatch"))
     if not dispatch:
         return {}, _awaiting(worker, "snapshot-unavailable")
-    if (dispatch.get("runId"), dispatch.get("taskId"), dispatch.get("id")) != (
-        worker.run_id,
-        worker.task_id,
-        worker.dispatch_id,
-    ):
-        return {}, NativeObservation("refused", "task-mismatch", worker, None, None, None, "unknown")
     host_scope = _fields(dispatch.get("hostScope"))
     if (
         reply.get("server") is not None
@@ -68,9 +63,15 @@ def _show(worker: WorkerReference, payload: object) -> tuple[Mapping[str, object
         return {}, NativeObservation("refused", "remote-mismatch", worker, None, None, None, "unknown")
     if dispatch.get("status") == "circuit_broken":
         return {}, NativeObservation("refused", "circuit-broken", worker, None, None, None, "unknown")
+    if (dispatch.get("runId"), dispatch.get("taskId"), dispatch.get("id")) != (
+        worker.run_id,
+        worker.task_id,
+        worker.dispatch_id,
+    ):
+        return reply, NativeObservation("refused", "task-mismatch", worker, None, None, None, "unknown")
     shown_worker = _fields(reply.get("worker"))
     if shown_worker.get("dispatchId") != worker.dispatch_id:
-        return {}, _awaiting(worker, "missing-evidence")
+        return reply, _awaiting(worker, "missing-evidence")
     return reply, None
 
 
@@ -286,6 +287,35 @@ def resource_state(worker: WorkerReference, payload: object, *, retained_status:
     ):
         return "structured-tab-open"
     return "worker-not-released"
+
+
+def failed_start_released(worker: WorkerReference, payload: object, residuals: list[object]) -> bool:
+    """Require a released resource for every residual handle in the failed receipt."""
+    reply, refusal = _show(worker, payload)
+    if refusal is not None and refusal.reason in ("remote-mismatch", "circuit-broken"):
+        raise NativeChildError(refusal.reason, "Orca refused the failed-start worker snapshot")
+    dispatch = _fields(reply.get("dispatch"))
+    shown_worker = _fields(reply.get("worker"))
+    resource = _fields(reply.get("terminalResource"))
+    identities = (
+        (dispatch.get("runId"), worker.run_id),
+        (dispatch.get("taskId"), worker.task_id),
+        (dispatch.get("id"), worker.dispatch_id),
+        (shown_worker.get("dispatchId"), worker.dispatch_id),
+        (resource.get("ownerDispatchId"), worker.dispatch_id),
+    )
+    if any(actual is not None and actual != expected for actual, expected in identities):
+        raise NativeChildError("native-mismatch", "the Orca worker-show does not match the start receipt")
+    # A full worker-show exposes one terminal resource for the dispatch.
+    handle = resource.get("terminalHandle")
+    return (
+        refusal is None
+        and isinstance(handle, str)
+        and bool(handle)
+        and bool(residuals)
+        and all(residual == handle for residual in residuals)
+        and resource_state(worker, payload, retained_status="failed") == "released"
+    )
 
 
 def parse_stop(

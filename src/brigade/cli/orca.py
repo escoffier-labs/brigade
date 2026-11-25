@@ -51,12 +51,13 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     _run(accepted)
     _receipt(accepted, required=True)
+    accepted.add_argument("--show-json", help="Full worker-show JSON for recovering an uncertain start.")
 
     hold = commands.add_parser("hold-resolve", help="Assert a recovered launch or abandon it while retaining capacity.")
     _run(hold)
     _receipt(hold)
     hold.add_argument("--abandon", action="store_true")
-    hold.add_argument("--show-json", help="Full worker-show JSON for recovering an outcome_unknown start.")
+    hold.add_argument("--show-json", help="Full worker-show JSON for recovering an uncertain start.")
 
     observe = commands.add_parser(
         "observe",
@@ -128,7 +129,7 @@ def _dispatch(args: Any) -> dict[str, Any]:
     payload = read(args.native_json)
     exit_code = args.exit_code if reporting else 0
     if verb == "accepted":
-        return native_orca_verbs.accepted(**task, payload=payload, exit_code=exit_code)
+        return native_orca_verbs.accepted(**task, payload=payload, exit_code=exit_code, show=read(show))
     if verb == "hold-resolve":
         if args.abandon == reporting:
             raise refuse("native-invalid", "supply exactly one of --abandon or the native start receipt")
