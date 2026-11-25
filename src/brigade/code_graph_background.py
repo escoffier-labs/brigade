@@ -103,17 +103,6 @@ def status_or_start(target: Path, db: Path, binary: str | None = None) -> dict[s
         return {"status": "launch_failed", "reason": str(exc)}
 
 
-def wait_for_refresh(target: Path, db: Path, timeout: float) -> bool:
-    """Let a stale-baseline run see the refreshed graph within its post-sync budget."""
-    deadline = time.monotonic() + timeout
-    while (refresh := status_or_start(target, db)) and refresh["status"] == "busy":
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            return False
-        time.sleep(min(0.05, remaining))
-    return True
-
-
 def _worker(lock_path: str, binary: str, db: str, target: str) -> None:
     lock = Path(lock_path)
     reservation = lock.with_suffix(".json")

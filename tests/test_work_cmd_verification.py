@@ -2571,8 +2571,18 @@ def test_work_verify_graphtrail_delta_invalid_config_timeout_returns_2_without_o
     assert _count_verify_run_dirs(tmp_path) == 0
 
 
-def test_work_verify_graphtrail_delta_post_sync_timeout_after_successful_pre_sync(tmp_path, capsys, monkeypatch):
-    _init_git_repo(tmp_path)
+@pytest.mark.parametrize("usable_index", [False, True])
+def test_work_verify_graphtrail_delta_post_sync_timeout_after_successful_pre_sync(
+    tmp_path, capsys, monkeypatch, usable_index
+):
+    if usable_index:
+        _init_git_repo_with_head(tmp_path)
+        _seed_code_graph_db(tmp_path)
+        monkeypatch.setattr(
+            proc, "spawn_detached", lambda *args, **kwargs: (SimpleNamespace(pid=12345, wait=lambda: 0), "test")
+        )
+    else:
+        _init_git_repo(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path)
     monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
     _derace_graphtrail_sync_timing(monkeypatch, graphtrail, time_out_sync_call=2)
@@ -2590,7 +2600,7 @@ def test_work_verify_graphtrail_delta_post_sync_timeout_after_successful_pre_syn
         work_cmd.verify_run(
             target=tmp_path,
             commands=["python3 -c \"print('ok')\""],
-            code_graph_timeout=_GRAPHTRAIL_TIGHT_TIMEOUT_SECONDS,
+            code_graph_timeout=None if usable_index else _GRAPHTRAIL_TIGHT_TIMEOUT_SECONDS,
             json_output=True,
         )
         == 0
@@ -2602,8 +2612,16 @@ def test_work_verify_graphtrail_delta_post_sync_timeout_after_successful_pre_syn
 
     assert receipt["commands"][0]["status"] == "completed"
     assert receipt["commands"][0]["exit_code"] == 0
-    assert receipt["code_graph_delta"]["status"] == "sync_timed_out"
-    assert sidecar["status"] == "sync_timed_out"
+    assert receipt["code_graph_delta"]["status"] == sidecar["status"]
+    if usable_index:
+        assert sidecar["status"] == "ok"
+        assert sidecar["stale_graph_used"] is True
+        assert sidecar["stale_after"] is True
+        assert sidecar["background_refresh"] == {"status": "started", "in_progress": True}
+        assert "timeout after 0.5s" in after_sync["stderr"]
+        assert sidecar["snapshots"]["after"]["timeout_seconds"] == 10.0
+    else:
+        assert sidecar["status"] == "sync_timed_out"
     assert before_sync["timed_out"] is False
     assert after_sync["stage"] == "incremental-sync"
     assert after_sync["timed_out"] is True
@@ -2707,12 +2725,20 @@ def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline
 
     if active_refresh:
         monkeypatch.setattr(code_graph_background, "status_or_start", lambda *args: {"status": "busy"})
-        monkeypatch.setattr(code_graph_background, "wait_for_refresh", lambda *args: True)
+
+        def unexpected_wait(*args):
+            pytest.fail("post-check capture must not wait for a refresh")
+
+        def diff_only(binary, db_path, command, *args, **kwargs):
+            assert command == "diff"
+            return real_run(binary, db_path, command, *args, **kwargs)
+
+        monkeypatch.setattr(code_graph_background, "wait_for_refresh", unexpected_wait, raising=False)
     else:
-        monkeypatch.setattr(code_graph_delta, "_run_graphtrail", timeout_first_sync)
         monkeypatch.setattr(
             proc, "spawn_detached", lambda *args, **kwargs: (SimpleNamespace(pid=12345, wait=lambda: 0), "test")
         )
+    monkeypatch.setattr(code_graph_delta, "_run_graphtrail", diff_only if active_refresh else timeout_first_sync)
 
     assert (
         work_cmd.verify_run(
@@ -2736,6 +2762,9 @@ def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline
     assert sidecar["stale_graph_used"] is True
     if active_refresh:
         assert before_sync is None
+        assert sidecar["commands"]["after_sync"] is None
+        assert sidecar["background_refresh"]["in_progress"] is True
+        assert sidecar["stale_after"] is True
     else:
         assert before_sync["duration_seconds"] == 0.5
         assert before_sync["stage"] == "incremental-sync"

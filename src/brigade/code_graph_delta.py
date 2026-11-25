@@ -124,6 +124,7 @@ def capture_after_and_diff(
     before: dict[str, Any] | None,
     *,
     timeout: float = 10.0,
+    sync_timeout: float | None = None,
 ) -> dict[str, Any]:
     """Sync after verification, diff against the snapshot, write sidecar when available."""
     try:
@@ -144,38 +145,56 @@ def capture_after_and_diff(
         binary = str(before.get("binary") or "")
         db_path = Path(str(before.get("db_path") or engine_paths.code_graph_db(target).path))
         snapshot_path = Path(str(before.get("before_snapshot_path") or run_dir / SNAPSHOT_NAME))
-        sync_budget = timeout
-        refresh = before.get("background_refresh")
-        if isinstance(refresh, dict) and refresh.get("status") in ("started", "busy"):
-            started = time.monotonic()
-            finished = code_graph_background.wait_for_refresh(target, db_path, timeout)
-            elapsed = time.monotonic() - started
-            before["background_wait_seconds"] = elapsed
-            sync_budget = timeout - elapsed
-            if not finished or sync_budget <= 0:
-                payload = _failure_payload(
-                    target, before, "sync_timed_out", summary="background code graph refresh exceeded post-sync budget"
-                )
-                return _write_and_compact(run_dir, payload, snapshot_path=snapshot_path)
-        sync = _run_graphtrail(binary, db_path, "sync", timeout=sync_budget, stage="incremental-sync", cwd=target)
-        if sync.get("timed_out"):
+        # A live refresh owns the write path. Read the last committed index instead.
+        refresh = code_graph_background.status_or_start(target, db_path) if sync_timeout is not None else None
+        stale_after = bool(refresh and refresh["status"] == "busy")
+        sync = None
+        if not stale_after:
+            sync_budget = timeout if sync_timeout is None else sync_timeout
+            sync = _run_graphtrail(binary, db_path, "sync", timeout=sync_budget, stage="incremental-sync", cwd=target)
+            if sync.get("timed_out") and sync_timeout is not None:
+                stale_after = True
+                refresh = code_graph_background.status_or_start(target, db_path, binary)
+            elif sync["returncode"] != 0 and sync_timeout is not None:
+                refresh = code_graph_background.status_or_start(target, db_path)
+                stale_after = bool(refresh and refresh["status"] == "busy")
+
+        if stale_after:
+            previous_refresh = before.get("background_refresh")
+            if refresh and refresh["status"] in ("started", "busy"):
+                before["background_refresh"] = {
+                    **refresh,
+                    "status": "started"
+                    if previous_refresh and previous_refresh.get("status") == "started"
+                    else refresh["status"],
+                    "in_progress": True,
+                }
+            elif refresh:
+                before["background_refresh"] = refresh
+            if not code_graph_background.index_ready(db_path):
+                if refresh and refresh["status"] in ("started", "busy"):
+                    payload = _failure_payload(
+                        target,
+                        before,
+                        "sync_deferred",
+                        summary="code graph after-state deferred to background sync",
+                        after_sync=sync,
+                    )
+                    return _write_and_compact(run_dir, payload, snapshot_path=snapshot_path)
+                stale_after = False
+            else:
+                before["stale_graph_used"] = True
+                before["stale_after"] = True
+
+        if not stale_after and sync is not None and sync["returncode"] != 0:
+            timed_out = sync.get("timed_out")
+            reason = f"timed out after {sync_budget:g}s" if timed_out else f"failed ({sync['returncode']})"
             payload = _failure_payload(
                 target,
                 before,
-                "sync_timed_out",
-                summary=f"code graph delta unavailable: graphtrail incremental-sync timed out after {timeout:g}s",
+                "sync_timed_out" if timed_out else "sync_failed",
+                summary=f"code graph delta unavailable: incremental sync {reason}",
                 after_sync=sync,
-                graphtrail_timeout_seconds=timeout,
-            )
-            return _write_and_compact(run_dir, payload, snapshot_path=snapshot_path)
-        if sync["returncode"] != 0:
-            payload = _failure_payload(
-                target,
-                before,
-                "sync_failed",
-                summary=f"code graph delta unavailable: graphtrail sync failed ({sync['returncode']})",
-                after_sync=sync,
-                graphtrail_timeout_seconds=timeout,
             )
             return _write_and_compact(run_dir, payload, snapshot_path=snapshot_path)
 
@@ -263,7 +282,8 @@ def capture_after_and_diff(
             "status": "ok",
             "target": str(target),
             "graphtrail_timeout_seconds": timeout,
-            "summary": _summary("ok", raw_counts, edge_churn, len(changed_symbols)),
+            "summary": _summary("ok", raw_counts, edge_churn, len(changed_symbols))
+            + (" (stale after-state)" if stale_after else ""),
             "raw_counts": raw_counts,
             "changed_symbols": changed_symbols,
             "changed_symbol_count": len(changed_symbols),
@@ -407,13 +427,16 @@ def _backup_sqlite(source: Path, destination: Path, *, timeout: float | None = N
     source_uri = f"file:{source}?mode=ro"
     started = time.monotonic()
 
-    def progress(_status: int, _remaining: int, _total: int) -> None:
+    def progress(status: int, _remaining: int, _total: int) -> None:
+        if status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+            raise TimeoutError("code graph snapshot is busy")
         if timeout is not None and time.monotonic() - started >= timeout:
             raise TimeoutError(f"timeout after {timeout:g}s")
 
     try:
-        with sqlite3.connect(source_uri, uri=True) as source_conn:
-            with sqlite3.connect(destination) as dest_conn:
+        busy_timeout = 5.0 if timeout is None else 0.0
+        with sqlite3.connect(source_uri, uri=True, timeout=busy_timeout) as source_conn:
+            with sqlite3.connect(destination, timeout=busy_timeout) as dest_conn:
                 if timeout is None:
                     source_conn.backup(dest_conn)
                 else:
@@ -485,9 +508,7 @@ def _write_and_compact(
 
 def _capture_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     return {
-        key: payload[key]
-        for key in ("snapshots", "background_refresh", "background_wait_seconds")
-        if payload.get(key) is not None
+        key: payload[key] for key in ("snapshots", "background_refresh", "stale_after") if payload.get(key) is not None
     }
 
 

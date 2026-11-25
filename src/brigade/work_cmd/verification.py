@@ -1669,7 +1669,7 @@ def _run_verify_commands(
             _cancel_verify_graph(receipt, run_dir)
         else:
             receipt["code_graph_delta"] = code_graph_delta.capture_after_and_diff(
-                target, run_dir, graph_delta_before, timeout=graph_capture_timeout
+                target, run_dir, graph_delta_before, timeout=graph_capture_timeout, sync_timeout=code_graph_timeout
             )
     except KeyboardInterrupt:
         if receipt is None:
