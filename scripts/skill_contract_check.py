@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Check that a skill's text still carries the steps its contract requires (#2589).
 
-The ``skill-note`` verify manifest runs this against the bundled ``note`` skill. It is
-not a pytest test on purpose. The normal CI suite never runs it on the live skill
-text, so a worse revision can merge. The ``outcome-attest`` run on the merge commit
-fails it, which is the evidence the outcome ledger counts as a regression.
+The ``skill-note`` verification manifest checks the bundled ``note`` text.
+After merge, ``outcome-attest`` runs the manifest on the merge commit and
+records any missing markers as a regression in the outcome ledger.
+The regular pytest suite exercises the checker on fixtures.
 
 Usage: skill_contract_check.py [SKILL_DIR]   (default: src/brigade/templates/skills/note)
 Exit 0 when every required marker is present, 1 and a list of misses otherwise.
