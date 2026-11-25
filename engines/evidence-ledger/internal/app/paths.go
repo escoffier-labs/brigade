@@ -26,8 +26,8 @@ type evidenceLayout struct {
 
 var (
 	canonicalLayout = evidenceLayout{leaf: []string{"brigade", "evidence"}, dbName: "evidence.db"}
-	// legacyLayout is read and written in place while it exists and the
-	// canonical layout does not. Nothing is copied or moved.
+	// legacyLayout detects existing archives after v0.33. Keep using this
+	// layout in place until a data migration with recovery proof ships.
 	legacyLayout = evidenceLayout{leaf: []string{"miseledger"}, dbName: "miseledger.db"}
 )
 
