@@ -84,7 +84,7 @@ The reason is the trust model. A receipt from ordinary work carries attribution 
 
 ## CI results shown on the host (display only)
 
-Every trial scored on the workspace host is **local**. `local_trials` and `attested_trials` stay as the scorecard computes them, and `attested_trials` is zero until [#2591](https://github.com/escoffier-labs/brigade/issues/2591) lands.
+Every trial scored on the workspace host is **local**. `local_trials` and `attested_trials` stay as the scorecard computes them, and `attested_trials` is zero until [#2591](https://github.com/escoffier-labs/brigadestack/issues/2591) lands.
 
 Beside them the host can show a separate **seen passing in CI** count. It is informational. The host lookup is forgeable by a same-user agent, so nothing on the host may promote, rank, band or gate from it. The count lives outside the scorecard dimensions, it is not written into the persisted scorecard, and the promotion decision reads none of it. The brief line reads `trials: 12 local, 3 seen passing in CI (display only)`, and `outcome rank` appends `seen_passing_in_ci=N (display only)` for a skill when N is above zero.
 
@@ -229,7 +229,7 @@ brigade outcome explain <skill-or-card-id> --target .
 
 ### Routing only
 
-`outcome reconcile --apply` is routing only ([owner decision on #2589](https://github.com/escoffier-labs/brigade/issues/2589#issuecomment-6965099265), 2026-11-18). It changes a skill's status and route policy marker and nothing else: it never installs, rolls back, uninstalls or otherwise writes a skill file, under any harness directory, receipt or rollback snapshot.
+`outcome reconcile --apply` is routing only ([owner decision on #2589](https://github.com/escoffier-labs/brigadestack/issues/2589#issuecomment-6965099265), 2026-11-18). It changes a skill's status and route policy marker and nothing else: it never installs, rolls back, uninstalls or otherwise writes a skill file, under any harness directory, receipt or rollback snapshot.
 
 Why: every local input to a physical change is writable by the agent being gated. Install receipts, rollback snapshot pointers and fingerprints, and the registry all sit in a workspace that agent's own user controls, so a scheduled rollback could install bytes the agent chose. Forgeable state may veto a change, never authorize one, so no unattended path acts on it.
 

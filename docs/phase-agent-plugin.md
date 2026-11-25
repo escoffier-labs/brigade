@@ -84,7 +84,7 @@ plugins/brigade/
 - **Skill copy**: the plugin's `brigade-work` skill is generated from the canonical skill source by a script, and a test fails when the copy drifts. The plugin directory is not a third hand-maintained skill location.
 - **SessionStart hook**: Claude Code only; Codex has no verified plugin hook contract in codex-cli 0.163.0. Calls `brigade work brief` in compact form when the cwd is Brigade-wired, otherwise prints one line naming the user store. It runs under a 5-second timeout and always exits 0, so a missing CLI, slow npx cold start, or broken repo never blocks a session.
 - **`/brigade:enforce`** (a plugin skill named `enforce`, so it exists in both harnesses): runs `brigade init --target . --depth repo --harnesses <current harness> --git-exclude` after showing the user what it will wire. That reuses the existing enforced hooks (verify capture, raw-check blocking, handoff Stop gate). The plugin itself ships none of those hooks.
-- **Install path**: `/plugin marketplace add escoffier-labs/brigade` then `/plugin install brigade@brigade` in Claude Code; the equivalent `codex plugin` commands in Codex.
+- **Install path**: `/plugin marketplace add escoffier-labs/brigadestack` then `/plugin install brigade@brigade` in Claude Code; the equivalent `codex plugin` commands in Codex.
 
 ## Data flow
 

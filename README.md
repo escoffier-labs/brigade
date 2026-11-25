@@ -1,7 +1,7 @@
 <p align="center">
   <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/brigade-wordmark-dark.svg">
-    <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/brigade-wordmark.svg" alt="BrigadeStack by Escoffier Labs" width="640">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/escoffier-labs/brigadestack/main/docs/assets/brigade-wordmark-dark.svg">
+    <img src="https://raw.githubusercontent.com/escoffier-labs/brigadestack/main/docs/assets/brigade-wordmark.svg" alt="BrigadeStack by Escoffier Labs" width="640">
   </picture>
 </p>
 
@@ -10,19 +10,19 @@
 <p align="center">
   <a href="https://brigadestack.com">Website</a> ·
   <a href="https://brigadestack.com/docs">Docs</a> ·
-  <a href="https://github.com/escoffier-labs/brigade/blob/main/QUICKSTART.md">Quickstart</a> ·
+  <a href="https://github.com/escoffier-labs/brigadestack/blob/main/QUICKSTART.md">Quickstart</a> ·
   <a href="https://brigadestack.com/compare">Compare</a> ·
-  <a href="https://github.com/escoffier-labs/brigade/blob/main/CHANGELOG.md">Changelog</a>
+  <a href="https://github.com/escoffier-labs/brigadestack/blob/main/CHANGELOG.md">Changelog</a>
 </p>
 
 <p align="center">
-  <a href="https://github.com/escoffier-labs/brigade/actions/workflows/ci.yml?query=event%3Amerge_group"><img src="https://github.com/escoffier-labs/brigade/actions/workflows/ci.yml/badge.svg?event=merge_group" alt="CI status of the merge queue"></a>
+  <a href="https://github.com/escoffier-labs/brigadestack/actions/workflows/ci.yml?query=event%3Amerge_group"><img src="https://github.com/escoffier-labs/brigadestack/actions/workflows/ci.yml/badge.svg?event=merge_group" alt="CI status of the merge queue"></a>
   <a href="https://pypi.org/project/brigadestack/"><img src="https://shieldcn.dev/pypi/v/brigadestack.svg?label=pypi&size=xs" alt="PyPI version of brigadestack"></a>
-  <img src="https://shieldcn.dev/https/raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json.svg?size=xs" alt="Combined PyPI and npm downloads per month">
+  <img src="https://shieldcn.dev/https/raw.githubusercontent.com/escoffier-labs/brigadestack/download-metrics/downloads.json.svg?size=xs" alt="Combined PyPI and npm downloads per month">
   <img src="https://shieldcn.dev/badge/python-3.11+-blue.svg?logo=python&logoColor=white&size=xs" alt="Python 3.11+">
   <img src="https://shieldcn.dev/badge/rust-code_graph-b7410e.svg?logo=rust&logoColor=white&size=xs" alt="Rust: code graph engine">
   <img src="https://shieldcn.dev/badge/go-evidence_log-00add8.svg?logo=go&logoColor=white&size=xs" alt="Go: evidence log engine">
-  <a href="https://github.com/escoffier-labs/brigade/blob/main/LICENSE"><img src="https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs" alt="MIT license"></a>
+  <a href="https://github.com/escoffier-labs/brigadestack/blob/main/LICENSE"><img src="https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs" alt="MIT license"></a>
 </p>
 
 BrigadeStack gives the agent tools you already use one shared memory and one set of MCP servers and skills. It keeps a record of the work they check.
@@ -47,11 +47,11 @@ BrigadeStack keeps memory as markdown cards in your repository. An agent that le
 Claude Code also gets recall at session start. Codex gets memory through its handoff inbox and an agent-run `memory search`.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-shared-memory.svg" alt="Claude Code, Codex, Cursor, OpenCode, ChatGPT dots and Claude Duet connect to BrigadeStack shared memory, and share memory, check records, MCP servers and skills through it." width="720">
+  <img src="https://raw.githubusercontent.com/escoffier-labs/brigadestack/main/docs/assets/readme-shared-memory.svg" alt="Claude Code, Codex, Cursor, OpenCode, ChatGPT dots and Claude Duet connect to BrigadeStack shared memory, and share memory, check records, MCP servers and skills through it." width="720">
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-handoff-flow.svg" alt="Three steps: one session drafts a handoff, a reviewer files it as the card payments-retry-policy.md, and brigade memory search in a second checkout finds that card." width="720">
+  <img src="https://raw.githubusercontent.com/escoffier-labs/brigadestack/main/docs/assets/readme-handoff-flow.svg" alt="Three steps: one session drafts a handoff, a reviewer files it as the card payments-retry-policy.md, and brigade memory search in a second checkout finds that card." width="720">
 </p>
 
 <details>
@@ -91,7 +91,7 @@ MCP servers and skills follow the same rule as memory. List a server once in `.b
 <sup>*</sup> In the 0.32.0 beta, sync also keeps Claude Code's own auth helper and refuses to remove or re-point an entry that has one.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-shared-tools.svg" alt="The MCP catalog .brigade/mcp.json and the skill registry are each kept once, then written to the config and skills folder of Claude Code, Codex, Cursor and OpenCode." width="720">
+  <img src="https://raw.githubusercontent.com/escoffier-labs/brigadestack/main/docs/assets/readme-shared-tools.svg" alt="The MCP catalog .brigade/mcp.json and the skill registry are each kept once, then written to the config and skills folder of Claude Code, Codex, Cursor and OpenCode." width="720">
 </p>
 
 ## Then prove it
@@ -101,7 +101,7 @@ MCP servers and skills follow the same rule as memory. List a server once in `.b
 Records live under `.brigade/work/verify-runs/`, one folder per run. A failing command leaves a failed record too.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-check-record.svg" alt="A check record: the command python -m pytest -q, exit code 0, the two log files, and the fingerprint of the tree that was tested." width="720">
+  <img src="https://raw.githubusercontent.com/escoffier-labs/brigadestack/main/docs/assets/readme-check-record.svg" alt="A check record: the command python -m pytest -q, exit code 0, the two log files, and the fingerprint of the tree that was tested." width="720">
 </p>
 
 ### Know what a change touches
@@ -109,7 +109,7 @@ Records live under `.brigade/work/verify-runs/`, one folder per run. A failing c
 The code graph is a local index of your repository's symbols and the calls between them. `brigadestack setup` installs the optional engine, and `brigadestack code sync` builds the index. `brigadestack code callers <symbol>` shows who calls a function, `impact` adds callees, and `affected <files>` lists the tests that reach changed files. Below is a real answer for one function here.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/escoffier-labs/brigade/main/docs/assets/readme-code-graph.svg" alt="Code graph for the function normalized_url in src/brigade/mcp_native_auth.py, lines 201 to 208. Its direct callers are merge_imported_native_auth and two tests. merge_imported_native_auth is called by import_servers and two more tests. In total 6 functions in 3 files call it, 4 of them tests." width="720">
+  <img src="https://raw.githubusercontent.com/escoffier-labs/brigadestack/main/docs/assets/readme-code-graph.svg" alt="Code graph for the function normalized_url in src/brigade/mcp_native_auth.py, lines 201 to 208. Its direct callers are merge_imported_native_auth and two tests. merge_imported_native_auth is called by import_servers and two more tests. In total 6 functions in 3 files call it, 4 of them tests." width="720">
 </p>
 
 ## Modes<sup>*</sup>
@@ -140,7 +140,7 @@ brigadestack handoff draft --type setup --title "Test command" \
 brigadestack work verify run --command "git diff --check"
 ```
 
-The first command writes `.brigade/`, a handoff inbox for each tool you name, and the MCP config. The second drafts a handoff, and lint refuses what the ingester would reject. The third records the command, exit code and logs. Keep `.brigade/` state out of commits unless you mean to share it. See the [first 10 minutes](https://github.com/escoffier-labs/brigade/blob/main/docs/first-10-minutes.md).
+The first command writes `.brigade/`, a handoff inbox for each tool you name, and the MCP config. The second drafts a handoff, and lint refuses what the ingester would reject. The third records the command, exit code and logs. Keep `.brigade/` state out of commits unless you mean to share it. See the [first 10 minutes](https://github.com/escoffier-labs/brigadestack/blob/main/docs/first-10-minutes.md).
 
 ## Works with
 
@@ -151,11 +151,11 @@ The first command writes `.brigade/`, a handoff inbox for each tool you name, an
 | Claude Duet | Memory, skills, Hub messages and read-only fleet views, through a connector you host. |
 | T3 Code | Session presence only. |
 
-Setup guides: [Dot](https://github.com/escoffier-labs/brigade/blob/main/docs/grokbot-dot.md) and [Duet](https://github.com/escoffier-labs/brigade/blob/main/docs/duet-connector.md).
+Setup guides: [Dot](https://github.com/escoffier-labs/brigadestack/blob/main/docs/grokbot-dot.md) and [Duet](https://github.com/escoffier-labs/brigadestack/blob/main/docs/duet-connector.md).
 
 ## Across machines
 
-Agents on several machines share memory through a hub service you run on a network you control. A card pushed from a laptop turns up in a search on a desktop. Task ownership, messages and model policy live in the same place. The [fleet docs](https://github.com/escoffier-labs/brigade/blob/main/docs/fleet-sync.md) cover setup.
+Agents on several machines share memory through a hub service you run on a network you control. A card pushed from a laptop turns up in a search on a desktop. Task ownership, messages and model policy live in the same place. The [fleet docs](https://github.com/escoffier-labs/brigadestack/blob/main/docs/fleet-sync.md) cover setup.
 
 ## Limits
 
@@ -171,22 +171,22 @@ A check record shows what ran. It does not show that the tests are good. A hando
 <!-- mcp-name: io.github.escoffier-labs/brigade-skills -->
 
 <p align="center">
-  <a href="https://github.com/escoffier-labs/brigade/blob/main/docs/command-inventory.md">Commands</a> ·
-  <a href="https://github.com/escoffier-labs/brigade/blob/main/docs/execution-model.md">Execution model</a> ·
-  <a href="https://github.com/escoffier-labs/brigade/blob/main/CONTRIBUTING.md">Contributing</a> ·
-  <a href="https://github.com/escoffier-labs/brigade/issues">Issues</a> ·
-  <a href="https://github.com/escoffier-labs/brigade/blob/main/LICENSE">MIT license</a>
+  <a href="https://github.com/escoffier-labs/brigadestack/blob/main/docs/command-inventory.md">Commands</a> ·
+  <a href="https://github.com/escoffier-labs/brigadestack/blob/main/docs/execution-model.md">Execution model</a> ·
+  <a href="https://github.com/escoffier-labs/brigadestack/blob/main/CONTRIBUTING.md">Contributing</a> ·
+  <a href="https://github.com/escoffier-labs/brigadestack/issues">Issues</a> ·
+  <a href="https://github.com/escoffier-labs/brigadestack/blob/main/LICENSE">MIT license</a>
 </p>
 
-Questions and ideas: [Discussions](https://github.com/escoffier-labs/brigade/discussions).
+Questions and ideas: [Discussions](https://github.com/escoffier-labs/brigadestack/discussions).
 
 BrigadeStack is built by [Escoffier Labs](https://escoffierlabs.dev). Principal engineer: [Solomon Neas](https://solomonneas.dev).
 
-The Python CLI may send a passive version request. [Telemetry](https://github.com/escoffier-labs/brigade/blob/main/docs/telemetry.md) lists its fields and opt-outs.
+The Python CLI may send a passive version request. [Telemetry](https://github.com/escoffier-labs/brigadestack/blob/main/docs/telemetry.md) lists its fields and opt-outs.
 
 <details>
 <summary>About the downloads badge</summary>
 
-The downloads badge sums `brigadestack` and `brigade-cli` on PyPI (excluding mirrors) and `brigadestack` and `@escoffier-labs/brigade` on npm over the same 30 completed UTC days. Downloads include automation and do not count unique people. The [metric JSON](https://raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json) records each source, the period, and the last successful refresh. npm platform companions are excluded. Daily refreshes retain the previous metric if a source fails validation or its latest day is more than three UTC days old.
+The downloads badge sums `brigadestack` and `brigade-cli` on PyPI (excluding mirrors) and `brigadestack` and `@escoffier-labs/brigade` on npm over the same 30 completed UTC days. Downloads include automation and do not count unique people. The [metric JSON](https://raw.githubusercontent.com/escoffier-labs/brigadestack/download-metrics/downloads.json) records each source, the period, and the last successful refresh. npm platform companions are excluded. Daily refreshes retain the previous metric if a source fails validation or its latest day is more than three UTC days old.
 
 </details>
