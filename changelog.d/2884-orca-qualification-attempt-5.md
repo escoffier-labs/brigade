@@ -1,0 +1,1 @@
+- Document live recovery of the governed Orca capacity hold and the recurring Codex startup failure in qualification attempt 5.

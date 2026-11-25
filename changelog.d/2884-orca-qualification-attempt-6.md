@@ -1,0 +1,1 @@
+- Record the governed Orca qualification run after profile recovery, including verified worker outputs, the runtime outage, and transcript clipping that prevented closeout after recovery.
