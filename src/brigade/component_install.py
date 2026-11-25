@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -103,6 +104,42 @@ def uses_bundled_compatibility_manifest() -> bool:
     """Return whether automatic manifest selection starts at the bundled fallback."""
     bundled_path = templates.template_root() / "components" / "manifest-v1.json"
     return component_manifest.manifest_path() == bundled_path
+
+
+def engine_repair_hint(roots: SetupRoots | None = None) -> str:
+    """Describe setup routes without resolving or downloading a release."""
+    from brigade import update_cmd
+    from brigade import distribution
+
+    explicit = "`brigade setup --manifest <verified manifest> --allow-compatible-stable-manifest <version>`"
+    docs = "See docs/update-channels.md#repair-managed-engines."
+    try:
+        roots = roots or resolve_roots()
+    except ValueError:
+        state = None
+    else:
+        state = update_cmd.load_update_state(Path(component_paths.update_state_path(roots.data_root)))
+    if state is not None and state.channel == "beta" and uses_bundled_compatibility_manifest():
+        return f"Beta setup can reuse its {state.component_tag} pin. Use {explicit} with a compatible release. {docs}"
+    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", brigade.__version__) is None or (
+        not distribution.is_npm() and _is_direct_install()
+    ):
+        return f"Use {explicit} with a compatible release. {docs}"
+    return f"Run `brigade setup` on a released stable CLI. For an unreleased source build, use {explicit}. {docs}"
+
+
+def _is_direct_install() -> bool:
+    """Recognize source and direct wheel installs through pip's PEP 610 metadata."""
+    from brigade.update_cmd import LEGACY_PYPI_PROJECT, PYPI_PROJECT
+
+    for name in (PYPI_PROJECT, LEGACY_PYPI_PROJECT):
+        try:
+            return bool(metadata.distribution(name).read_text("direct_url.json"))
+        except metadata.PackageNotFoundError:
+            continue
+        except OSError:
+            return False
+    return False
 
 
 def load_verified_exact_release_manifest(
