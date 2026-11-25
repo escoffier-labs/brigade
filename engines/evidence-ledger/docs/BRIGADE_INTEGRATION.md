@@ -90,7 +90,7 @@ New imports are quarantined with pending injection status. Ineligible bundle res
 The reverse direction is live. Brigade exports verify-run and brigade-run receipts as `miseledger.adapter.v1` JSONL, and brigade-evidence ingests them with the standard adapter importer. No brigade-evidence-side code is involved:
 
 ```bash
-brigade receipts export miseledger --target <repo> --out receipts.jsonl
+brigade receipts export evidence --target <repo> --out receipts.jsonl
 brigade-evidence import adapter receipts.jsonl --source brigade --json
 ```
 
@@ -112,7 +112,7 @@ brigade-evidence can receive an optional structured code reference filter. It ch
 Potential future commands:
 
 ```bash
-brigade work import context --from-miseledger "ops-deck auth errors"
-brigade work task plan <id> --write --from-miseledger "project:ops-deck"
+brigade work import context --from-evidence "ops-deck auth errors"
+brigade work task plan <id> --write --from-evidence "project:ops-deck"
 brigade work tasks add --source brigade-evidence --kind repeated-error
 ```

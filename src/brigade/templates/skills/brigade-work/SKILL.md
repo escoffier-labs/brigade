@@ -65,10 +65,10 @@ Do not invent a skill name you are not running just to have something to capture
 ### 4. Export receipts so the next run can reuse them (optional stations)
 When brigade-code-graph and brigade-evidence are installed, close the receipts-to-context loop so the next run sees measured evidence, not only a handoff. `brigade work verify run --capture auto` auto-exports and imports pending receipts after capture (fail-open when `brigade-evidence` is absent). For backlog catch-up or fleet repos, run manually:
 ```bash
-brigade receipts export miseledger --target . --new-only --import   # fail-open if brigade-evidence is absent
+brigade receipts export evidence --target . --new-only --import   # fail-open if brigade-evidence is absent
 # next brigade run attaches a capped evidence brief from brigade-evidence automatically
 # or fetch on demand:
-brigade work import context --from-miseledger "auth receipts" --target .
+brigade work import context --from-evidence "auth receipts" --target .
 ```
 brigade-code-graph is what makes the brief measurable: verify/run receipts carry `code_graph_delta`, and non-read-only runs record `context_eval.brief_hit_rate` (did the pre-run context name the files the run actually touched?). `brigade outcome rank` surfaces mean brief hit rate per skill as a quality signal (secondary sort; install/rollback still use exit-code signals only).
 

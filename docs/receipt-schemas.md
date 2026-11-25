@@ -2079,7 +2079,7 @@ Machine-readable audit observations produced by the commit-linkage verifier.
 - `brigade receipts export attestation`: export verify receipt as SSH-signed (default) or cosign-signed in-toto attestation
 - `brigade receipts verify-attestation`: offline verification of attestation against allowed_signers
 - `brigade receipts attestation-keygen`: generate Ed25519 attestation signing key and allowed_signers entry
-- `brigade receipts export miseledger`: adapter export (separate `miseledger.adapter.v1` envelope)
+- `brigade receipts export evidence`: adapter export (separate `miseledger.adapter.v1` envelope)
 - `brigade runs export` / `import` / `validate-archive`: portable `brigade.work-run` archives
 - `brigade outcome rebuild-status`: prove `status.json` matches decision receipts
 

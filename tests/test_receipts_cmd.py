@@ -10,11 +10,6 @@ from brigade import cli, localio, outcome, outcome_cmd, provenance, receipt_sign
 from tests.work_cmd_test_helpers import _init_git_repo
 
 
-def _legacy_export_notice(argv):
-    """The exact once-per-process line printed for the legacy export spelling in ``argv``."""
-    return f"receipts export {argv[2]} is deprecated; use receipts export evidence; removed in v0.33.0\n"
-
-
 def _init_git_repo_with_head(path):
     _init_git_repo(path)
     (path / ".gitignore").write_text(".brigade/\n")
@@ -776,7 +771,7 @@ def test_receipts_export_miseledger_new_only_import_mixed_skip_and_malformed_exi
             [
                 "receipts",
                 "export",
-                "miseledger",
+                "evidence",
                 "--target",
                 str(tmp_path),
                 "--new-only",
@@ -889,7 +884,7 @@ def test_receipts_export_miseledger_malformed_receipt_is_failed_after_partial_ex
             [
                 "receipts",
                 "export",
-                "miseledger",
+                "evidence",
                 "--target",
                 str(tmp_path),
                 "--out",
@@ -939,7 +934,7 @@ def test_receipts_export_miseledger_json_empty_is_typed_and_healthy(tmp_path, ca
     argv = [
         "receipts",
         "export",
-        "miseledger",
+        "evidence",
         "--target",
         str(tmp_path),
         "--out",
@@ -959,7 +954,7 @@ def test_receipts_export_miseledger_json_empty_is_typed_and_healthy(tmp_path, ca
         "status": "empty",
         "target_label": "repository",
     }
-    assert captured.err == _legacy_export_notice(argv)
+    assert captured.err == ""
 
 
 def test_receipts_export_miseledger_json_empty_write_failure_emits_failed_result(tmp_path, monkeypatch, capsys):
@@ -978,7 +973,7 @@ def test_receipts_export_miseledger_json_empty_write_failure_emits_failed_result
             [
                 "receipts",
                 "export",
-                "miseledger",
+                "evidence",
                 "--target",
                 str(tmp_path),
                 "--out",
@@ -1022,7 +1017,7 @@ def test_receipts_export_miseledger_json_nothing_new_is_idempotent(tmp_path, cap
             [
                 "receipts",
                 "export",
-                "miseledger",
+                "evidence",
                 "--target",
                 str(tmp_path),
                 "--new-only",
@@ -1058,7 +1053,7 @@ def test_receipts_export_miseledger_json_zero_row_import_emits_only_result_json(
     argv = [
         "receipts",
         "export",
-        "miseledger",
+        "evidence",
         "--target",
         str(tmp_path),
         "--new-only",
@@ -1074,7 +1069,7 @@ def test_receipts_export_miseledger_json_zero_row_import_emits_only_result_json(
     payload = json.loads(captured.out)
     assert payload["status"] == "nothing-new"
     assert captured.out.count("\n") == 1
-    assert captured.err == _legacy_export_notice(argv)
+    assert captured.err == ""
 
 
 def test_receipts_export_miseledger_json_reports_exported_counts(tmp_path, capsys):
@@ -1090,7 +1085,7 @@ def test_receipts_export_miseledger_json_reports_exported_counts(tmp_path, capsy
             [
                 "receipts",
                 "export",
-                "miseledger",
+                "evidence",
                 "--target",
                 str(tmp_path),
                 "--out",
@@ -1132,7 +1127,7 @@ def test_receipts_export_miseledger_unreadable_receipt_is_failed(tmp_path, monke
             [
                 "receipts",
                 "export",
-                "miseledger",
+                "evidence",
                 "--target",
                 str(tmp_path),
                 "--out",
@@ -1167,7 +1162,7 @@ def test_receipts_export_miseledger_import_failure_is_failed_and_keeps_batch(tmp
             [
                 "receipts",
                 "export",
-                "miseledger",
+                "evidence",
                 "--target",
                 str(tmp_path),
                 "--out",
@@ -1231,7 +1226,7 @@ def test_receipts_export_miseledger_fleet_uses_configured_repo_outside_home_repo
             [
                 "receipts",
                 "export",
-                "miseledger",
+                "evidence",
                 "--target",
                 str(fleet),
                 "--fleet",
@@ -1303,7 +1298,7 @@ def test_receipts_export_miseledger_fleet_config_errors_fail_before_export(tmp_p
                 [
                     "receipts",
                     "export",
-                    "miseledger",
+                    "evidence",
                     "--target",
                     str(fleet),
                     "--fleet",
@@ -1350,7 +1345,7 @@ def test_receipts_export_miseledger_fleet_empty_and_nothing_new_are_healthy(tmp_
     argv = [
         "receipts",
         "export",
-        "miseledger",
+        "evidence",
         "--target",
         str(fleet),
         "--fleet",
@@ -1375,7 +1370,7 @@ def test_receipts_export_miseledger_fleet_empty_and_nothing_new_are_healthy(tmp_
         "seen": "nothing-new",
     }
     assert captured.out.count("\n") == 1
-    assert captured.err == _legacy_export_notice(argv)
+    assert captured.err == ""
 
 
 def test_receipts_export_miseledger_fleet_preserves_failure_and_continues(tmp_path, monkeypatch, capsys):
@@ -1404,7 +1399,7 @@ def test_receipts_export_miseledger_fleet_preserves_failure_and_continues(tmp_pa
             [
                 "receipts",
                 "export",
-                "miseledger",
+                "evidence",
                 "--target",
                 str(fleet),
                 "--fleet",
@@ -1462,7 +1457,7 @@ def test_receipts_export_miseledger_fleet_error_summaries_distinguish_collection
             [
                 "receipts",
                 "export",
-                "miseledger",
+                "evidence",
                 "--target",
                 str(fleet),
                 "--fleet",
@@ -1504,7 +1499,7 @@ def test_receipts_export_miseledger_fleet_import_failure_does_not_count_as_repo_
             [
                 "receipts",
                 "export",
-                "miseledger",
+                "evidence",
                 "--target",
                 str(fleet),
                 "--fleet",
@@ -1587,7 +1582,7 @@ def test_receipts_export_miseledger_fleet_missing_enabled_path_fails_and_disable
             [
                 "receipts",
                 "export",
-                "miseledger",
+                "evidence",
                 "--target",
                 str(fleet),
                 "--fleet",
@@ -1633,7 +1628,7 @@ def test_receipts_export_miseledger_fleet_requires_output_or_import_temp_path(tm
             [
                 "receipts",
                 "export",
-                "miseledger",
+                "evidence",
                 "--target",
                 str(fleet),
                 "--fleet",
@@ -1654,7 +1649,7 @@ def test_receipts_export_miseledger_fleet_requires_output_or_import_temp_path(tm
             [
                 "receipts",
                 "export",
-                "miseledger",
+                "evidence",
                 "--target",
                 str(fleet),
                 "--fleet",

@@ -134,8 +134,8 @@ old spelling stays forever and is pinned by a test.
 | JSON output keys | `miseledger_binary`, `miseledger_version`, `tools["graphtrail"]`, ... | `evidence_binary`, `evidence_version`, `tools["brigade-code-graph"]`, ... | Dual-emit | v0.31, v0.32 | v0.33 (schema id bumps to v2 where a key is dropped) |
 | Code graph output sentinels | `__graphtrail_limit_truncated__`, `__graphtrail_truncated_<dir>__` | unchanged | Frozen (machine-matched ids in query output) | forever | never |
 | DOT export graph name | `digraph graphtrail` | `digraph code_graph` | Migrate (cosmetic label) | none | v0.31 |
-| CLI flags and subcommands | `receipts export miseledger`, `work import --from-miseledger`, `work verify run --graphtrail-timeout` | `receipts export evidence`, `--from-evidence`, `--code-graph-timeout` | Dual-accept (hidden alias, warning) | v0.31, v0.32 | v0.33 |
-| Workspace config key | `graphtrail_delta_timeout_seconds` | `code_graph_delta_timeout_seconds` | Dual-read, doctor INFO on legacy use (stderr notice from R5) | v0.31, v0.32 | v0.33 |
+| CLI flags and subcommands | `receipts export miseledger`, `work import --from-miseledger`, `work verify run --graphtrail-timeout` | `receipts export evidence`, `--from-evidence`, `--code-graph-timeout` | Dual-accept during the rename window, with a warning | v0.31, v0.32 | Done for v0.33. Only the canonical commands and options are accepted. |
+| Workspace config key | `graphtrail_delta_timeout_seconds` | `code_graph_delta_timeout_seconds` | Dual-read during the rename window, with doctor INFO and an R5 stderr notice | v0.31, v0.32 | Done for v0.33. Doctor warns about the unknown key and names its replacement. |
 | Station ids and manifests | station `graphtrail`, `miseledger` in `station.json` and `managed-snapshot.json` | `brigade-code-graph`, `brigade-evidence` | Dual-accept (legacy id resolves as an alias) | v0.31, v0.32 | v0.33 |
 | Rust package and crate | package and lib `graphtrail` | `brigade-code-graph` / `brigade_code_graph` | Migrate (in-repo only) | none | v0.31 |
 | Go module path | `github.com/escoffier-labs/miseledger` | `github.com/escoffier-labs/brigade/engines/evidence-ledger` | Migrate (all packages are under `internal/`) | none | v0.31 |
@@ -645,9 +645,9 @@ release:
    deleted, and the walker keeps skipping it so a stale database is never
    indexed.
 6. Evidence legacy directories: as decided under open question 1.
-7. Remove the CLI aliases (`receipts export miseledger`, `--from-miseledger`,
-   `--graphtrail-timeout`) and the `graphtrail_delta_timeout_seconds` read. A
-   leftover key produces the existing unknown-key warning.
+7. Done for v0.33. Removed the CLI aliases (`receipts export miseledger`, `--from-miseledger`,
+   `--graphtrail-timeout`) and the `graphtrail_delta_timeout_seconds` read. Doctor
+   warns about the unknown key and points to `code_graph_delta_timeout_seconds`.
 8. Drop the legacy JSON keys and bump each affected output schema id to `v2`.
 9. Drop legacy station id aliases from `managed.py` and the snapshot.
 10. `brigade mcp sync` renames owned `graphtrail` and `miseledger` keys by
