@@ -288,6 +288,7 @@ Synthesis is described in [explicit task batches](run-batch.md#synthesis).
 | `harness_session` | object | no | `{harness, fingerprint}` |
 | `digests` | object | no | `{algorithm, logs, receipt_sha256, signature?, key_id?}` |
 | `reused_from` | string | no | Prior run id when reused |
+| `reuse_skipped` | string | no (additive) | `argv_file_too_large` when an argument file exceeds the 16 MiB hashing cap during a reuse check and verification runs again. Also returned by `verify run --json` |
 | `interruption` | object | no | Cancel metadata |
 | `verify_manifest_id` | string | no | Registered manifest id when the run was manifest-selected |
 | `required_utility_check_ids` | array of string | no | Manifest-owned utility guardrail ids required for scoring (#503) |
