@@ -18,7 +18,7 @@ from pathlib import Path
 
 DEFAULT_DIR = "src/brigade/templates/skills/note"
 
-# (label, regex that must match somewhere in SKILL.md)
+# Each pair gives the failure label and the pattern required in SKILL.md.
 REQUIRED = (
     ("frontmatter names the skill", r"(?m)\A---\nname: note\n"),
     ("process step: choose a mode", r"(?m)^1\. Decide which mode applies"),
