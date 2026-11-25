@@ -11,18 +11,17 @@
   {
     "path": ".github/workflows/ci.yml",
     "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "reason": "Keep CI coverage until the Cargo adapter deprecation window and crate identity are resolved.",
     "literals": {
       "miseledger": 2
     },
-    "remove_in": "0.33.0"
+    "remove_in": "0.34.0"
   },
   {
     "path": ".gitignore",
     "kind": "frozen",
     "reason": "Exclude the retired per-repository index from Git status while leaving the original index in place.",
     "literals": {
-      "GraphTrail": 1,
       "graphtrail": 1
     }
   },
@@ -372,20 +371,20 @@
   {
     "path": "engines/code-graph/.github/workflows/ci.yml",
     "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "reason": "Move the embedded workflow feature and MSRV contracts to root CI.",
     "literals": {
       "miseledger": 2
     },
-    "remove_in": "0.33.0"
+    "remove_in": "0.34.0"
   },
   {
     "path": "engines/code-graph/.github/workflows/publish.yml",
     "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "reason": "Move embedded registry publication contract checks to the supported release workflow.",
     "literals": {
       "graphtrail": 1
     },
-    "remove_in": "0.33.0"
+    "remove_in": "0.34.0"
   },
   {
     "path": "engines/code-graph/.gitignore",
@@ -436,12 +435,12 @@
   {
     "path": "engines/code-graph/Cargo.toml",
     "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "reason": "Resolve the Cargo adapter deprecation window and published crate identity.",
     "literals": {
       "graphtrail": 3,
       "miseledger": 1
     },
-    "remove_in": "0.33.0"
+    "remove_in": "0.34.0"
   },
   {
     "path": "engines/code-graph/README.md",
@@ -586,13 +585,13 @@
   {
     "path": "engines/code-graph/build.rs",
     "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "reason": "Keep the warning until the Cargo adapter deprecation window closes.",
     "literals": {
       "GraphTrail": 3,
       "MISELEDGER": 2,
       "MiseLedger": 1
     },
-    "remove_in": "0.33.0"
+    "remove_in": "0.34.0"
   },
   {
     "path": "engines/code-graph/content/announcements/v0.2.0-drafts.md",
@@ -724,12 +723,12 @@
   {
     "path": "engines/code-graph/src/cli.rs",
     "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "reason": "Keep the adapter CLI until the Cargo deprecation window closes.",
     "literals": {
       "MiseLedger": 2,
       "miseledger": 17
     },
-    "remove_in": "0.33.0"
+    "remove_in": "0.34.0"
   },
   {
     "path": "engines/code-graph/src/query/graph.rs",
@@ -2171,11 +2170,11 @@
   {
     "path": "src/brigade/code_cmd.py",
     "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "reason": "Coordinate legacy help handling with component alias retirement and historical verification.",
     "literals": {
       "graphtrail": 3
     },
-    "remove_in": "0.33.0"
+    "remove_in": "0.34.0"
   },
   {
     "path": "src/brigade/code_export.py",
@@ -2205,24 +2204,24 @@
   {
     "path": "src/brigade/component_bins.py",
     "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "reason": "Coordinate live resolver cutover with component alias retirement and historical verification.",
     "literals": {
       "GRAPHTRAIL": 2,
       "MISELEDGER": 1,
       "graphtrail": 6,
       "miseledger": 3
     },
-    "remove_in": "0.33.0"
+    "remove_in": "0.34.0"
   },
   {
     "path": "src/brigade/component_manifest.py",
     "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "reason": "Separate historical release verification from live component alias resolution.",
     "literals": {
       "graphtrail": 2,
       "miseledger": 1
     },
-    "remove_in": "0.33.0"
+    "remove_in": "0.34.0"
   },
   {
     "path": "src/brigade/config.py",
@@ -2281,10 +2280,9 @@
   {
     "path": "src/brigade/evidence_brief.py",
     "kind": "frozen",
-    "reason": "Persisted schema, receipt or import identity and internal reader names.",
+    "reason": "Preserve the exact run evidence heading asserted by prompt fixtures and emitted in stored session notes.",
     "literals": {
-      "MiseLedger": 2,
-      "miseledger": 2
+      "MiseLedger": 1
     }
   },
   {
@@ -2292,7 +2290,7 @@
     "kind": "frozen",
     "reason": "Read the existing export cursor for deduplication and identify the v1 adapter schema in the export plan.",
     "literals": {
-      "miseledger": 3
+      "miseledger": 2
     }
   },
   {
@@ -2386,7 +2384,7 @@
       "GraphTrail": 5,
       "MiseLedger": 5,
       "graphtrail": 17,
-      "miseledger": 5
+      "miseledger": 4
     }
   },
   {
@@ -2701,7 +2699,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "graphtrail": 8,
-      "miseledger": 4
+      "miseledger": 3
     }
   },
   {
@@ -2797,7 +2795,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "miseledger": 22
+      "miseledger": 16
     }
   },
   {
@@ -2805,10 +2803,9 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "MISELEDGER": 7,
       "MiseLedger": 1,
       "graphtrail": 2,
-      "miseledger": 179
+      "miseledger": 124
     }
   },
   {
@@ -2862,7 +2859,7 @@
       "GraphTrail": 1,
       "MiseLedger": 1,
       "graphtrail": 30,
-      "miseledger": 28
+      "miseledger": 21
     }
   },
   {
@@ -2937,7 +2934,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "graphtrail": 5,
-      "miseledger": 9
+      "miseledger": 7
     }
   },
   {

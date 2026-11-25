@@ -1,4 +1,4 @@
-"""MiseLedger-backed run evidence briefs for aboyeur prompts."""
+"""Brigade Evidence run briefs for aboyeur prompts."""
 
 from __future__ import annotations
 

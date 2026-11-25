@@ -585,7 +585,7 @@ def _run_crawl(arguments: list[str]) -> int:
         return 1
 
     # Prepend the resolved crawler directory so Brigade Evidence rediscovers the same
-    # binary.  This is a Brigade-side substitute for a miseledger --crawler flag.
+    # binary.  This is a Brigade-side substitute for a brigade-evidence --crawler flag.
     crawler_dir = str(Path(runtime.resolved_path).parent)
     env["PATH"] = crawler_dir + os.pathsep + env.get("PATH", "")
 

@@ -16,8 +16,9 @@ Rules that apply to every slice:
 
 - Old names live on as compatibility shims or legacy readers for at most two
   releases (v0.31 and v0.32, including their patch releases). They are removed
-  at the v0.33.0 release cut. The one proposed exception is the evidence data
-  directory. See [Open questions](#open-questions).
+  at the v0.33.0 release cut, except for the nine rows listed under the v0.34
+  follow-up. The evidence data directory has its own migration boundary.
+  See [Open questions](#open-questions).
 - Historical receipts, memory cards, and evidence are never rewritten, and old
   evidence is never re-signed to change branding (ROADMAP, "Finish engine
   identity before moving existing data").
@@ -659,10 +660,19 @@ release:
 12. In progress. Evidence standalone release tooling was retired. The Code
     Graph repository contract tests still verify the embedded CI and registry
     publication workflows. Move the applicable checks before deleting them.
-13. In progress. Retired active presentation names and pinned the exact
-    counts of persisted identifiers and old-index exclusions. The release
-    gate still requires the component resolution cutover (task 3) and a
-    decision on the independently deprecated Cargo adapter.
+13. Done for v0.33. Removed expired rows, pinned required literals at their
+    current counts, and assigned the nine approved exceptions a v0.34.0 expiry.
+
+### v0.34 follow-up
+
+1. Verify that the Cargo adapter's separate deprecation window has elapsed.
+   Decide the disposition of the published crate identity and registry
+   metadata before retiring the feature, its CLI options, and its CI entry.
+2. Move the embedded Code Graph workflow contract checks to root CI and the
+   supported release workflow, preserving MSRV and registry publication checks.
+3. Remove live legacy component aliases, resolver fallbacks, and help-banner
+   handling in one cutover. Keep historical release verification and safe
+   cleanup of aliases from existing installs.
 
 ## Installer acceptance
 
