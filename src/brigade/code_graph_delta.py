@@ -57,6 +57,7 @@ def capture_before(
         }
         refresh = code_graph_background.status_or_start(target, db_path) if defer_sync else None
         ready = code_graph_background.index_ready(db_path) if defer_sync else db_path.is_file()
+        sync_budget = timeout
         if defer_sync and not ready:
             if refresh is None:
                 refresh = code_graph_background.status_or_start(target, db_path, binary)
@@ -64,19 +65,34 @@ def capture_before(
                 details["background_refresh"] = refresh
                 if refresh["status"] != "launch_failed":
                     return _status("sync_deferred", "code graph delta deferred to background sync", **details)
+                if refresh.get("failure_kind") == "detach_refused":
+                    sync_budget = backup_budget
+                    details["foreground_fallback"] = {
+                        "reason": "detached launch refused",
+                        "timeout_seconds": sync_budget,
+                    }
 
         sync = None
-        if refresh and refresh["status"] == "busy":
-            details["background_refresh"] = refresh
-        else:
-            stage = "incremental-sync" if db_path.is_file() else "initial-index"
-            sync = _run_graphtrail(binary, db_path, "sync", timeout=timeout, stage=stage, cwd=target)
+        busy = bool(refresh and refresh["status"] == "busy")
+        if not busy:
+            stage = "initial-index" if "foreground_fallback" in details or not db_path.is_file() else "incremental-sync"
+            sync = _run_graphtrail(binary, db_path, "sync", timeout=sync_budget, stage=stage, cwd=target)
             if sync["returncode"] != 0 and not sync.get("timed_out"):
-                return _status("sync_failed", f"code graph sync failed ({sync['returncode']})", sync=sync, **details)
-        stale = sync is None or bool(sync.get("timed_out"))
+                refresh = code_graph_background.status_or_start(target, db_path) if defer_sync else None
+                busy = bool(refresh and refresh["status"] == "busy")
+                if not busy:
+                    return _status(
+                        "sync_failed", f"code graph sync failed ({sync['returncode']})", sync=sync, **details
+                    )
+        if busy:
+            details["background_refresh"] = refresh
+            ready = ready or code_graph_background.index_ready(db_path)
+        stale = busy or sync is None or bool(sync.get("timed_out"))
         details["sync"] = sync
         if stale and not ready:
-            return _status("sync_timed_out", f"code graph sync timed out after {timeout:g}s", **details)
+            if busy:
+                return _status("sync_deferred", "code graph delta deferred to background sync", **details)
+            return _status("sync_timed_out", f"code graph sync timed out after {sync_budget:g}s", **details)
         if not db_path.is_file():
             return _status("no_database", "code graph sync did not create a database", **details)
 
@@ -87,7 +103,7 @@ def capture_before(
             if sync and sync.get("timed_out"):
                 if defer_sync:
                     details["background_refresh"] = code_graph_background.status_or_start(target, db_path, binary)
-                return _status("sync_timed_out", f"code graph sync timed out after {timeout:g}s", **details)
+                return _status("sync_timed_out", f"code graph sync timed out after {sync_budget:g}s", **details)
             return _status("capture_failed", "code graph baseline snapshot timed out", **details)
         if defer_sync and sync and sync.get("timed_out"):
             details["background_refresh"] = code_graph_background.status_or_start(target, db_path, binary)
@@ -508,7 +524,9 @@ def _write_and_compact(
 
 def _capture_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     return {
-        key: payload[key] for key in ("snapshots", "background_refresh", "stale_after") if payload.get(key) is not None
+        key: payload[key]
+        for key in ("snapshots", "background_refresh", "foreground_fallback", "stale_after")
+        if payload.get(key) is not None
     }
 
 

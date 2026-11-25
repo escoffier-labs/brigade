@@ -16,7 +16,7 @@ import pytest
 from brigade import cli
 from brigade import fleet_client
 from brigade import code_graph_background, code_graph_delta, component_bins
-from brigade import proc, proc_group
+from brigade import proc, proc_group, runguard
 from brigade import localio
 from brigade import receipts_cmd
 from brigade import verify_manifest_git
@@ -2292,7 +2292,10 @@ def test_work_verify_graphtrail_delta_malformed_diff_fails_open(tmp_path, capsys
 
 
 @pytest.mark.parametrize("index_state", ["missing", "empty"])
-def test_work_verify_defers_graph_sync_once_and_recovers_a_dead_launcher(tmp_path, capsys, monkeypatch, index_state):
+@pytest.mark.parametrize("has_start_time", [True, False])
+def test_work_verify_defers_graph_sync_once_and_recovers_a_dead_launcher(
+    tmp_path, capsys, monkeypatch, index_state, has_start_time
+):
     _init_git_repo_with_head(tmp_path)
     monkeypatch.setattr(component_bins, "resolve", lambda name: name if name == "brigade-code-graph" else None)
     db = tmp_path / ".brigade/code-graph/code-graph.db"
@@ -2302,19 +2305,33 @@ def test_work_verify_defers_graph_sync_once_and_recovers_a_dead_launcher(tmp_pat
             connection.execute("CREATE TABLE meta (key TEXT, value TEXT)")
 
     launches = []
-    identity = {12345: 7}
+    identity = {12345: 7} if has_start_time else {}
+    live_pids = {12345}
+    launch_order = []
+
+    def start_time(pid):
+        launch_order.append("read start time")
+        return identity.get(pid)
+
+    def reaper(**kwargs):
+        return SimpleNamespace(start=lambda: launch_order.append("start reaper"))
 
     def spawn(argv, **kwargs):
         launches.append((argv, kwargs))
         return SimpleNamespace(pid=12345, wait=lambda: 0), "detached"
 
     monkeypatch.setattr(proc, "spawn_detached", spawn)
-    monkeypatch.setattr(proc_group, "process_start_time", identity.get)
+    monkeypatch.setattr(proc_group, "process_start_time", start_time)
+    monkeypatch.setattr(runguard, "_pid_is_active", live_pids.__contains__)
+    monkeypatch.setattr(code_graph_background, "Thread", reaper)
 
     for step, expected in enumerate((1, 1, 2)):
         if expected == 2:
             # An old reservation for a reused PID does not own the worker.
-            identity[12345] = 9
+            if has_start_time:
+                identity[12345] = 9
+            else:
+                live_pids.clear()
         assert (
             work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True, reuse=False) == 0
         )
@@ -2326,6 +2343,7 @@ def test_work_verify_defers_graph_sync_once_and_recovers_a_dead_launcher(tmp_pat
         assert delta["commands"]["before_sync"] is None
         assert receipt["tree_stable"] is True
         assert len(launches) == expected
+    assert launch_order[:2] == ["read start time", "start reaper"]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX shebang fake engine fixture")
@@ -2364,8 +2382,8 @@ def test_work_verify_detached_worker_survives_and_releases_pipes(tmp_path, monke
         "run",
         "--target",
         str(repo),
-        "--command",
-        "python -V",
+        "--argv-json",
+        json.dumps([sys.executable, "-V"]),
         "--json",
         "--no-reuse",
     ]
@@ -2400,11 +2418,26 @@ def test_work_verify_records_detached_launch_failure(tmp_path, capsys, monkeypat
     def fail(*args, **kwargs):
         raise proc.DetachedLaunchError("detach refused")
 
+    real_run = subprocess.run
+    sync_budgets = []
+
+    def check_initial_budget(argv, *args, **kwargs):
+        if isinstance(argv, list) and argv[:1] == [str(engine)] and argv[-1] == "sync":
+            sync_budgets.append(kwargs["timeout"])
+            if len(sync_budgets) == 1 and kwargs["timeout"] < 1:
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+            kwargs["timeout"] = None
+        return real_run(argv, *args, **kwargs)
+
     monkeypatch.setattr(proc, "spawn_detached", fail)
+    monkeypatch.setattr(subprocess, "run", check_initial_budget)
     assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True) == 0
     delta = json.loads(capsys.readouterr().out)["code_graph_delta"]
-    assert delta["background_refresh"] == {"status": "launch_failed", "reason": "detach refused"}
     assert delta["status"] == "ok"
+    assert delta["background_refresh"]["status"] == "launch_failed"
+    assert delta["background_refresh"]["reason"] == "detach refused"
+    assert delta["foreground_fallback"] == {"reason": "detached launch refused", "timeout_seconds": 10.0}
+    assert sync_budgets == [10.0, 0.5]
 
 
 def test_work_verify_graphtrail_delta_config_timeout_reaches_pre_and_post_sync(tmp_path, capsys, monkeypatch):
@@ -2687,10 +2720,12 @@ def test_work_verify_graph_snapshot_timeout_marks_delta_unavailable(tmp_path, ca
         assert "timed out after 0.05s" in compact_delta["summary"]
 
 
-@pytest.mark.parametrize("active_refresh", [False, True])
+@pytest.mark.parametrize("refresh_case", ["timeout", "active", "race"])
 def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline(
-    tmp_path, capsys, monkeypatch, active_refresh
+    tmp_path, capsys, monkeypatch, refresh_case
 ):
+    active_refresh = refresh_case == "active"
+    raced = refresh_case == "race"
     _init_git_repo_with_head(tmp_path)
     _seed_code_graph_db(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path)
@@ -2704,10 +2739,10 @@ def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline
             if sync_calls["count"] == 1:
                 return code_graph_delta._command_result(
                     argv=[binary, "--db", str(db_path), command, *extra],
-                    returncode=124,
+                    returncode=5 if raced else 124,
                     stdout="",
                     stderr=f"timeout after {timeout:g}s",
-                    timed_out=True,
+                    timed_out=not raced,
                     duration_seconds=float(timeout),
                     timeout=timeout,
                     stage=stage,
@@ -2723,8 +2758,12 @@ def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline
             cwd=cwd,
         )
 
-    if active_refresh:
-        monkeypatch.setattr(code_graph_background, "status_or_start", lambda *args: {"status": "busy"})
+    if active_refresh or raced:
+
+        def observe(*args):
+            return {"status": "busy"} if active_refresh or sync_calls["count"] else None
+
+        monkeypatch.setattr(code_graph_background, "status_or_start", observe)
 
         def unexpected_wait(*args):
             pytest.fail("post-check capture must not wait for a refresh")
@@ -2755,7 +2794,9 @@ def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline
     assert receipt["commands"][0]["status"] == "completed"
     assert receipt["commands"][0]["exit_code"] == 0
     assert receipt["code_graph_delta"]["status"] == "ok"
-    assert receipt["code_graph_delta"]["background_refresh"]["status"] == ("busy" if active_refresh else "started")
+    assert receipt["code_graph_delta"]["background_refresh"]["status"] == (
+        "busy" if active_refresh or raced else "started"
+    )
     assert receipt["code_graph_delta"]["changed_symbol_count"] > 0
     assert sidecar["snapshots"]["before"]["timeout_seconds"] == 10.0
     assert receipt["code_graph_delta"]["stale_graph_used"] is True
@@ -2768,7 +2809,10 @@ def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline
     else:
         assert before_sync["duration_seconds"] == 0.5
         assert before_sync["stage"] == "incremental-sync"
-        assert before_sync["timed_out"] is True
+        assert before_sync["timed_out"] is not raced
+        if raced:
+            assert before_sync["returncode"] == 5
+            assert sidecar["commands"]["after_sync"] is None
 
 
 def test_work_verify_graphtrail_delta_diff_timeout_is_distinct_from_sync_timeout(tmp_path, capsys, monkeypatch):

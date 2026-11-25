@@ -11,7 +11,7 @@ from contextlib import closing
 from pathlib import Path
 from threading import Thread
 
-from . import engine_paths, inbox_lock, localio, proc, proc_group
+from . import engine_paths, inbox_lock, localio, proc, proc_group, runguard
 
 _START_TIMEOUT = 5.0
 _SYNC_TIMEOUT = 120.0
@@ -51,14 +51,16 @@ def _ignored_for_refresh(target: Path, db: Path, lock: Path, reservation: Path) 
 
 def _reservation_live(claim: dict) -> bool:
     pid, created, started = claim.get("pid"), claim.get("created"), claim.get("started")
-    return (
-        type(pid) is int
-        and pid > 0
-        and isinstance(created, (int, float))
-        and 0 <= time.time() - created < _START_TIMEOUT
-        and type(started) is int
-        and proc_group.process_start_time(pid) == started
-    )
+    now = time.time()
+    if type(pid) is not int or pid <= 0 or not isinstance(created, (int, float)):
+        return False
+    if not now - _START_TIMEOUT < created <= now or (started is not None and type(started) is not int):
+        return False
+    actual_start = proc_group.process_start_time(pid)
+    if started is None or actual_start is None:
+        # Platforms without /proc can still recognize a live startup reservation.
+        return runguard._pid_is_active(pid)
+    return actual_start == started
 
 
 def status_or_start(target: Path, db: Path, binary: str | None = None) -> dict[str, str] | None:
@@ -91,15 +93,18 @@ def status_or_start(target: Path, db: Path, binary: str | None = None) -> dict[s
                 ],
                 cwd=Path(sys.executable).resolve().parent,
             )
+            started = proc_group.process_start_time(child.pid)
             Thread(target=child.wait, daemon=True).start()
             localio.write_json(
                 reservation,
-                {"pid": child.pid, "created": time.time(), "started": proc_group.process_start_time(child.pid)},
+                {"pid": child.pid, "created": time.time(), "started": started},
             )
             return {"status": "started"}
     except inbox_lock.InboxLockTimeout:
         return {"status": "busy", "reason": "background sync lock held"}
-    except (OSError, ValueError, proc.DetachedLaunchError, subprocess.TimeoutExpired) as exc:
+    except proc.DetachedLaunchError as exc:
+        return {"status": "launch_failed", "reason": str(exc), "failure_kind": "detach_refused"}
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         return {"status": "launch_failed", "reason": str(exc)}
 
 
