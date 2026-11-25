@@ -221,6 +221,52 @@ def _recovery_fixture(name):
     return json.loads(path.read_text())["payload"]
 
 
+@pytest.mark.parametrize("kind", ["worktree", "terminal", "empty", "empty-with-recovery"])
+def test_failed_start_retained_worktree_in_status_after_ack(coordinator, kind):
+    run_id = coordinator.open()
+    ready = coordinator.start()
+    receipt = _recovery_fixture("start-failed-residual")
+    receipt["result"]["mutation"] = ready["result"]["mutation"]
+    receipt["result"]["residualResources"] = [
+        entry for entry in receipt["result"]["residualResources"] if entry["kind"] == kind
+    ]
+    show = _recovery_fixture("worker-show-released-exited")
+    if kind == "empty":
+        del receipt["result"]["recovery"]
+        show["result"]["dispatch"]["status"] = "circuit_broken"
+    result = coordinator.invoke(
+        "hold-resolve",
+        run_id,
+        "one",
+        "--native-json",
+        coordinator.payload("start", receipt),
+        "--exit-code",
+        1,
+        "--show-json",
+        coordinator.payload("show", show),
+        error="start-unknown" if kind == "empty-with-recovery" else None,
+    )
+    if kind == "empty-with-recovery":
+        assert "worktree_retained" not in coordinator.status()["tasks"][0]
+        return
+    assert result["reason"] == "start-failed"
+    retained = kind == "worktree"
+    assert result.get("worktree_retained", False) is retained
+    coordinator.invoke("ack", run_id, "one", "--result-id", result["result_id"])
+    status = coordinator.status()
+    assert status["capacity"]["live"] == 0
+    assert status["tasks"][0]["acked"]
+    assert status["tasks"][0]["worktree_retained"] is retained
+    fact = native_child_journal.latest(_events(coordinator.workspace, run_id), "task.native-capacity", "one")
+    assert fact is not None and set(fact) == {"task_id", "attempt_id", "reason", "worktree_retained"}
+    assert fact["worktree_retained"] is retained
+    if retained:
+        rc = cli.main(["orca", "status", run_id, "--target", str(coordinator.workspace)])
+        out, err = coordinator.capsys.readouterr()
+        assert rc == 0 and not err
+        assert "(worktree retained)" in out
+
+
 @pytest.mark.parametrize("verb", ["accepted", "hold-resolve"])
 @pytest.mark.parametrize("reason", ["start-refused", "start-failed", "circuit-broken"])
 def test_definite_start_refusal_with_show_option(coordinator, verb, reason):

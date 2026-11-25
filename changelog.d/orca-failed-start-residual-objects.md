@@ -1,1 +1,1 @@
-- Recover Orca 1.4.271 failed starts by matching residual terminal and worktree IDs in the native receipt. Report a retained worktree without holding the worker slot after acknowledgement.
+- Recover Orca 1.4.271 failed starts by matching residual terminal and worktree IDs in the native receipt. Show retained worktrees in status after acknowledgement frees the worker slot.

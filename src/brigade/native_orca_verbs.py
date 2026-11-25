@@ -266,7 +266,11 @@ def _record_start_refusal(
     if prior is None:
         # Seal the no-worker verdict first. If the next write is interrupted,
         # reporting the same receipt repairs the result without admitting a new launch.
-        task.append(RESOURCE_EVENT, {"reason": reason}, reason)
+        fact: dict[str, Any] = {"reason": reason}
+        if reason == "start-failed":
+            fact["worktree_retained"] = refusal.worktree_retained
+        task.append(RESOURCE_EVENT, fact, reason)
+        resource = fact
     evidence = journal.digest(
         {"intent": task.claim.intent_digest, "reason": reason}, "brigade.native-orca.start-refusal.v1"
     )
@@ -290,7 +294,7 @@ def _record_start_refusal(
         "result_id": updated.result_id,
         "replayed": result.result_id is not None,
     }
-    if refusal.worktree_retained:
+    if resource is not None and resource.get("worktree_retained") is True:
         report["worktree_retained"] = True
     return report
 

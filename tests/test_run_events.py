@@ -699,3 +699,16 @@ def test_workspace_bound_payload_requires_every_key():
                 recorded_at=RECORDED_AT,
                 previous_digest=None,
             )
+
+
+@pytest.mark.parametrize(
+    ("reason", "value"),
+    [("start-failed", 1), ("start-failed", "true"), ("start-failed", None), ("released", True)],
+)
+def test_native_capacity_worktree_flag_requires_a_start_failed_boolean(reason, value):
+    with pytest.raises(run_events.CanonicalizationError, match="worktree_retained"):
+        run_events.validate_event_request(
+            event_type="task.native-capacity",
+            payload={"task_id": "one", "attempt_id": "a" * 64, "reason": reason, "worktree_retained": value},
+            idempotency_key="capacity:one",
+        )

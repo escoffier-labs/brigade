@@ -268,7 +268,7 @@ EVENT_TYPES.update(
         "task.native-held": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
         "task.native-cancel-requested": frozenset({"task_id", "attempt_id", "handle_digest", "cancel_key"}),
         "task.native-hold-resolved": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
-        "task.native-capacity": frozenset({"task_id", "attempt_id", "reason"}),
+        "task.native-capacity": frozenset({"task_id", "attempt_id", "reason", "worktree_retained"}),
         # Native T3 enrollment holds one immutable delegation input asset
         # outside the journal. Only its relative name and digests are retained
         # here, never task text, options values, or raw native JSON.
@@ -445,13 +445,25 @@ def _validate_canonical_node(value: Any) -> None:
 def canonical_bytes(obj: Any) -> bytes:
     """Canonical UTF-8 JSON: sorted keys, compact separators, no ASCII escaping.
 
-    Rejects floats, booleans, oversized integers, and any non-JSON-native type
-    before serializing. Any residual ``json.dumps`` conversion failure (type
+    Rejects floats, oversized integers, and non-JSON-native types before
+    serializing. Only the native start-failure worktree flag may be a boolean.
+    Any residual ``json.dumps`` conversion failure (type
     errors, circular references, recursion/overflow) is wrapped in a bounded
     CanonicalizationError rather than escaping as a raw exception.
     """
     try:
-        _validate_canonical_node(obj)
+        validation_obj = obj
+        if isinstance(obj, dict) and obj.get("event_type") == "task.native-capacity":
+            payload = obj.get("payload")
+            if (
+                isinstance(payload, dict)
+                and payload.get("reason") == "start-failed"
+                and type(payload.get("worktree_retained")) is bool
+            ):
+                # Exempt only this field from the boolean ban. Serialize and
+                # hash the original JSON boolean in the request and envelope.
+                validation_obj = {**obj, "payload": {**payload, "worktree_retained": 0}}
+        _validate_canonical_node(validation_obj)
         return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     except CanonicalizationError:
         raise
@@ -478,8 +490,7 @@ def is_valid_recorded_at(value: object) -> bool:
 def request_digest(*, event_type: str, payload: Mapping[str, Any], idempotency_key: str) -> str:
     """SHA-256 of the canonical request object ``{event_type, payload, idempotency_key}``.
 
-    The request is canonicalized under the same strict rules; non-integer
-    numbers, booleans, and unknown types raise CanonicalizationError.
+    The request uses the same strict canonical rules as the envelope.
     """
     request = {
         "event_type": event_type,
@@ -667,7 +678,11 @@ def _validate_payload(event_type: str, payload: Any) -> None:
         raise CanonicalizationError(_bound(f"missing payload keys for {event_type}: {sorted(missing)}"))
     for key, value in payload.items():
         if event_type == "task.batch-accepted" and key == "members":
-            # The dedicated closed row validator above is the only exception.
+            # The dedicated closed row validator above checks this field.
+            continue
+        if event_type == "task.native-capacity" and key == "worktree_retained":
+            if payload.get("reason") != "start-failed" or type(value) is not bool:
+                raise CanonicalizationError("task.native-capacity worktree_retained requires a start-failed boolean")
             continue
         if value is None:
             continue
