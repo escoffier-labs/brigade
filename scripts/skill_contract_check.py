@@ -4,7 +4,7 @@
 The ``skill-note`` verification manifest checks the bundled ``note`` text.
 After merge, ``outcome-attest`` runs the manifest on the merge commit and
 records any missing markers as a regression in the outcome ledger.
-The regular pytest suite exercises the checker on fixtures.
+The pytest fixtures cover complete skill text and missing contract markers.
 
 Usage: skill_contract_check.py [SKILL_DIR]   (default: src/brigade/templates/skills/note)
 Exit 0 when every required marker is present, 1 and a list of misses otherwise.
