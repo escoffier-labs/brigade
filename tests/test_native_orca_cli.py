@@ -5,10 +5,10 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, native_child_custody, native_t3_enrollment, run_tasks
+from brigade import cli, native_child_custody, native_child_journal, native_orca_verbs, native_t3_enrollment, run_tasks
 
 from tests.test_native_orca import DISPATCH, RUN, TASK, _fixture
-from tests.test_native_t3_claim import TASK_TEXT, _batch, _git, _run_dir, _workspace
+from tests.test_native_t3_claim import TASK_TEXT, _batch, _events, _git, _run_dir, _workspace
 
 VERSION = "1.4.269"
 SECOND_TASK = "task_000000000005"
@@ -147,28 +147,41 @@ def test_orca_1_4_269_recovers_only_the_original_worker_after_a_restart(coordina
         ("worker", "dispatchId", "ctx_000000000009", "native-mismatch"),
         ("projection", "liveness", {"verdict": "unknown"}, "start-unknown"),
         ("projection", "liveness", None, "start-unknown"),
+        ("observation", "status", "live", "start-unknown"),
+        ("dispatch", "status", "circuit_broken", "circuit-broken"),
+        ("dispatch", "hostScope", {"kind": "remote"}, "remote-mismatch"),
+        ("terminalResource", "terminalHandle", "term_other", "start-unknown"),
+        ("terminalResource", "terminalHandle", None, "start-unknown"),
+        ("result", "terminalResource", None, "start-unknown"),
+        ("receipt", "residualResources", ["term_example", "term_other"], "start-unknown"),
+        ("receipt", "residualResources", ["term_example", None], "start-unknown"),
+        ("exit_code", None, 0, "start-unknown"),
     ],
 )
 def test_orca_1_4_271_recovers_failed_start_only_after_release_and_exit(coordinator, verb, row, field, value, error):
-    def fixture(name):
-        path = Path(__file__).parent / "fixtures" / "native_orca" / f"{name}-1.4.271.json"
-        return json.loads(path.read_text())["payload"]
-
     coordinator.limit_one_worker()
     roster = coordinator.workspace / ".brigade" / "roster.toml"
     roster.write_text(roster.read_text().replace(VERSION, "1.4.271"))
     run_id = coordinator.open()
-    receipt = fixture("start-failed-residual")
+    receipt = _recovery_fixture("start-failed-residual")
     receipt["result"]["mutation"]["requestId"] = coordinator.claim()["retry_request"]
     coordinator.accept(receipt, 1, error="start-unknown")
     coordinator.invoke("finalize", run_id, error="finalize-live")
 
-    show = fixture("worker-show-released-exited")
-    if row is not None:
+    show = _recovery_fixture("worker-show-released-exited")
+    exit_code = 1
+    if row == "exit_code":
+        exit_code = value
+    elif row == "receipt":
+        receipt["result"][field] = value
+    elif row is not None:
+        target = show["result"] if row == "result" else show["result"][row]
         if value is None:
-            del show["result"][row][field]
+            del target[field]
         else:
-            show["result"][row][field] = value
+            target[field] = value
+    if error in ("circuit-broken", "remote-mismatch"):
+        show["result"]["dispatch"]["id"] = "ctx_000000000009"
     args = (
         verb,
         run_id,
@@ -176,7 +189,7 @@ def test_orca_1_4_271_recovers_failed_start_only_after_release_and_exit(coordina
         "--native-json",
         coordinator.payload("start", receipt),
         "--exit-code",
-        1,
+        exit_code,
         "--show-json",
         coordinator.payload("show", show),
     )
@@ -194,6 +207,119 @@ def test_orca_1_4_271_recovers_failed_start_only_after_release_and_exit(coordina
     assert coordinator.status()["capacity"]["live"] == 0
     final = coordinator.invoke("finalize", run_id)
     assert (final["status"], final["terminals"], final["acknowledged"]) == ("failed", 1, 1)
+
+
+def _recovery_fixture(name):
+    path = Path(__file__).parent / "fixtures" / "native_orca" / f"{name}-1.4.271.json"
+    return json.loads(path.read_text())["payload"]
+
+
+@pytest.mark.parametrize("verb", ["accepted", "hold-resolve"])
+@pytest.mark.parametrize("reason", ["start-refused", "start-failed", "circuit-broken"])
+def test_definite_start_refusal_with_show_option(coordinator, verb, reason):
+    run_id = coordinator.open()
+    receipt = coordinator.start()
+    if reason == "start-failed":
+        receipt["result"]["state"] = "failed"
+    else:
+        receipt = _fixture("task-not-startable")
+        if reason == "circuit-broken":
+            receipt["error"]["data"].update(retryOf=DISPATCH, failureCount=3)
+    show = _recovery_fixture("worker-show-released-exited") if verb == "accepted" else None
+    result = coordinator.invoke(
+        verb,
+        run_id,
+        "one",
+        "--native-json",
+        coordinator.payload("start", receipt),
+        "--exit-code",
+        1,
+        "--show-json",
+        coordinator.payload("show", show),
+    )
+    assert result["reason"] == reason and result["status"] == "failed"
+
+
+def test_accepted_with_show_rejects_outcome_unknown_without_journaling(coordinator):
+    run_id = coordinator.open()
+    receipt = coordinator.start()
+    receipt["result"]["state"] = "outcome_unknown"
+    before = _events(coordinator.workspace, run_id)
+    coordinator.invoke(
+        "accepted",
+        run_id,
+        "one",
+        "--native-json",
+        coordinator.payload("start", receipt),
+        "--exit-code",
+        1,
+        "--show-json",
+        coordinator.payload("show", _fixture("worker-show")),
+        error="start-unknown",
+    )
+    assert _events(coordinator.workspace, run_id) == before
+
+
+def test_failed_start_recovery_closes_lost_dispatch_request(coordinator, monkeypatch):
+    run_id = coordinator.open()
+
+    def interrupted(*args, **kwargs):
+        raise native_child_journal.refuse("journal-refused", "synthetic interruption before dispatch request")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(native_child_journal, "record_dispatch_requested", interrupted)
+        coordinator.claim(error="journal-refused")
+    assert not native_child_journal.requested_attempts(_events(coordinator.workspace, run_id))
+    receipt = _recovery_fixture("start-failed-residual")
+    with native_orca_verbs.claimed_task(coordinator.workspace, run_id, "one", resolving=True) as task:
+        receipt["result"]["mutation"]["requestId"] = task.binding.checked_key()
+    result = coordinator.invoke(
+        "hold-resolve",
+        run_id,
+        "one",
+        "--native-json",
+        coordinator.payload("start", receipt),
+        "--exit-code",
+        1,
+        "--show-json",
+        coordinator.payload("show", _recovery_fixture("worker-show-released-exited")),
+    )
+    assert result["reason"] == "start-failed"
+    assert native_child_journal.requested_attempts(_events(coordinator.workspace, run_id)) == {("coder", 1)}
+
+
+@pytest.mark.parametrize("hold", ["accept-conflict", "abandoned"])
+def test_failed_start_recovery_checks_holds_before_closing_request(coordinator, monkeypatch, hold):
+    run_id = coordinator.open()
+    ready = coordinator.start()
+    if hold == "accept-conflict":
+        coordinator.accept(ready)
+        conflicting = json.loads(json.dumps(ready))
+        conflicting["result"]["dispatchId"] = "ctx_000000000009"
+        coordinator.accept(conflicting, error="accept-conflict")
+    else:
+        coordinator.invoke("hold-resolve", run_id, "one", "--abandon")
+    before = _events(coordinator.workspace, run_id)
+
+    def unexpected_close(*args):
+        pytest.fail("refused recovery reached the lost-request write")
+
+    monkeypatch.setattr(native_child_journal, "close_lost_request", unexpected_close)
+    receipt = _recovery_fixture("start-failed-residual")
+    receipt["result"]["mutation"] = ready["result"]["mutation"]
+    coordinator.invoke(
+        "hold-resolve",
+        run_id,
+        "one",
+        "--native-json",
+        coordinator.payload("start", receipt),
+        "--exit-code",
+        1,
+        "--show-json",
+        coordinator.payload("show", _recovery_fixture("worker-show-released-exited")),
+        error="accept-conflict" if hold == "accept-conflict" else "task-held",
+    )
+    assert _events(coordinator.workspace, run_id) == before
 
 
 def test_orca_1_4_269_circuit_breaker_never_allocates_another_launch(coordinator):
