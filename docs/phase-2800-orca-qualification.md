@@ -211,14 +211,30 @@ During closeout, a fresh worker-show failed with
 `This terminal could not connect to Orca.` The available Orca transcript
 receipts were clipped, and live terminal observations showed retained
 terminals. Brigade had no terminal result for any of the three tasks.
-Its final status for this attempt was `awaiting-native-parent` with
-`capacity.live = 3` and three held tasks. Qualification stopped there.
+Brigade status was `awaiting-native-parent` with `capacity.live = 3`
+and three held tasks when the coordinator paused the qualification.
 The three worktree and output checks establish local task results, while
 governed completion still requires terminal and release evidence.
 
+### Closeout after the runtime returned
+
+Orca returned to readiness under a user service. Fresh shows reported all
+three native dispatches completed. The coordinator matched the first
+worker's `worker_done` message, released its retained terminal, and captured
+a fresh show with release state `released` and liveness `exited`. The exact
+transcript command from Brigade still returned `contentComplete = false`
+with `clipping = ["transcript_payload"]`. Brigade returned status
+`unknown`, reason `result-transfer-missing`, and no result ID to acknowledge.
+
+The coordinator stopped at that observation. Brigade still reported
+`capacity.live = 3`, three held tasks, and zero terminal results. The
+collector counts the outage as one parent intervention. Verified completion
+time remains unobserved. An eventual verified completion time would span
+from the original batch submission through closeout, including the outage.
+
 | Batch | Verdict | Verified completion | Zero held capacity at batch close |
 | --- | --- | --- | --- |
-| 1A | Outputs matched, runtime disconnected before governed closeout | Unobserved | No, three held |
+| 1A | Outputs matched, transcript clipping blocked recovered closeout | Unobserved | No, three held |
 | 1B | Unstarted | Unobserved | Unobserved |
 | 2B | Unstarted | Unobserved | Unobserved |
 | 2A | Unstarted | Unobserved | Unobserved |
