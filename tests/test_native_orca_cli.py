@@ -136,6 +136,66 @@ def test_orca_1_4_269_recovers_only_the_original_worker_after_a_restart(coordina
     assert coordinator.claim(error="already-claimed")
 
 
+@pytest.mark.parametrize("verb", ["accepted", "hold-resolve"])
+@pytest.mark.parametrize(
+    ("row", "field", "value", "error"),
+    [
+        (None, None, None, None),
+        ("terminalResource", "releaseState", "retained", "start-unknown"),
+        ("terminalResource", "ownershipState", None, "start-unknown"),
+        ("dispatch", "id", "ctx_000000000009", "native-mismatch"),
+        ("worker", "dispatchId", "ctx_000000000009", "native-mismatch"),
+        ("projection", "liveness", {"verdict": "unknown"}, "start-unknown"),
+        ("projection", "liveness", None, "start-unknown"),
+    ],
+)
+def test_orca_1_4_271_recovers_failed_start_only_after_release_and_exit(coordinator, verb, row, field, value, error):
+    def fixture(name):
+        path = Path(__file__).parent / "fixtures" / "native_orca" / f"{name}-1.4.271.json"
+        return json.loads(path.read_text())["payload"]
+
+    coordinator.limit_one_worker()
+    roster = coordinator.workspace / ".brigade" / "roster.toml"
+    roster.write_text(roster.read_text().replace(VERSION, "1.4.271"))
+    run_id = coordinator.open()
+    receipt = fixture("start-failed-residual")
+    receipt["result"]["mutation"]["requestId"] = coordinator.claim()["retry_request"]
+    coordinator.accept(receipt, 1, error="start-unknown")
+    coordinator.invoke("finalize", run_id, error="finalize-live")
+
+    show = fixture("worker-show-released-exited")
+    if row is not None:
+        if value is None:
+            del show["result"][row][field]
+        else:
+            show["result"][row][field] = value
+    args = (
+        verb,
+        run_id,
+        "one",
+        "--native-json",
+        coordinator.payload("start", receipt),
+        "--exit-code",
+        1,
+        "--show-json",
+        coordinator.payload("show", show),
+    )
+    result = coordinator.invoke(*args, error=error)
+    if error is not None:
+        assert coordinator.status()["capacity"]["live"] == 1
+        coordinator.invoke("finalize", run_id, error="finalize-live")
+        return
+
+    assert (result["mode"], result["reason"], result["status"]) == ("start-refusal", "start-failed", "failed")
+    assert not coordinator.status()["tasks"][0]["correlated"]
+    replay = coordinator.invoke(*args)
+    assert replay["replayed"] and replay["result_id"] == result["result_id"]
+    coordinator.invoke("ack", run_id, "one", "--result-id", result["result_id"])
+    assert coordinator.status()["capacity"]["live"] == 0
+    final = coordinator.invoke("finalize", run_id)
+    assert (final["status"], final["terminals"], final["acknowledged"]) == ("failed", 1, 1)
+
+
 def test_orca_1_4_269_circuit_breaker_never_allocates_another_launch(coordinator):
     coordinator.limit_one_worker()
     run_id = coordinator.open()

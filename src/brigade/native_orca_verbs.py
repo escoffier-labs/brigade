@@ -278,12 +278,28 @@ def _record_start_refusal(task: ClaimedTask, reason: str) -> dict[str, Any]:
     }
 
 
-def accepted(*, workspace: Path, run_id: str, task_id: str, payload: object, exit_code: int) -> dict[str, Any]:
+def _recover_start(task: ClaimedTask, payload: object, *, exit_code: int, show: object) -> dispatch.WorkerReference:
+    worker, failed = dispatch.unconfirmed_start(task.binding, task.verified.target, payload, exit_code=exit_code)
+    if failed:
+        if observations.failed_start_released(worker, show):
+            raise dispatch.DefiniteStartRefusal("start-failed", "Orca released the failed worker start")
+        raise journal.refuse("start-unknown", "the failed Orca worker has no confirmed release and exit")
+    if not observations.settled_start(worker, show):
+        raise journal.refuse("start-unknown", "the exact Orca worker has no confirmed start or settlement")
+    return worker
+
+
+def accepted(
+    *, workspace: Path, run_id: str, task_id: str, payload: object, exit_code: int, show: object = None
+) -> dict[str, Any]:
     with claimed_task(workspace, run_id, task_id) as task:
         task.require_unheld()
         resource = journal.latest(task.events, RESOURCE_EVENT, task_id)
         try:
-            worker = dispatch.parse_start(task.binding, task.verified.target, payload, exit_code=exit_code)
+            if show is None:
+                worker = dispatch.parse_start(task.binding, task.verified.target, payload, exit_code=exit_code)
+            else:
+                worker = _recover_start(task, payload, exit_code=exit_code, show=show)
         except dispatch.DefiniteStartRefusal as exc:
             if exc.code != "start-failed" and resource is not None and resource.get("reason") == START_UNCONFIRMED:
                 raise journal.refuse(
@@ -325,8 +341,10 @@ def hold_resolve(
         if show is None:
             worker = dispatch.parse_start(task.binding, task.verified.target, payload, exit_code=exit_code)
         else:
-            worker = dispatch.unconfirmed_start(task.binding, task.verified.target, payload)
-            if not observations.settled_start(worker, show):
-                raise journal.refuse("start-unknown", "the exact Orca worker has no confirmed start or settlement")
+            try:
+                worker = _recover_start(task, payload, exit_code=exit_code, show=show)
+            except dispatch.DefiniteStartRefusal as exc:
+                journal.close_lost_request(task.workspace, task.run_dir, task.events, result)
+                return _record_start_refusal(task, exc.code)
         journal.close_lost_request(task.workspace, task.run_dir, task.events, result)
         return _correlate(task, worker, mode="operator-asserted", held=held)

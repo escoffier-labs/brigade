@@ -98,6 +98,15 @@ matches the retained worker. `hold-resolve --abandon` writes a permanent
 operator must follow up. `stop_unknown` and `outcome_unknown` both keep tasks
 open and capacity occupied.
 
+If a full worker-start receipt reports `failed` with residual resources,
+keep that receipt and its exit code. Once Orca releases the worker, capture a
+fresh `worker-show --json --full` for the same dispatch. Pass the original
+receipt with `--native-json` and the new snapshot with `--show-json` to
+`accepted` or `hold-resolve`. Brigade records `start-failed` only when the
+snapshot proves resource release and exited liveness. Acknowledge the
+returned result ID with `ack` to free the slot before `finalize`. If release
+or exit is unverified, the claim stays `start-unknown` and holds capacity.
+
 If `open` refuses a task as `orca-unsupported`, send it through
 `brigade run batch`. Report every receipt to Brigade, refusals included. Use
 `brigade orca status <run> --json --target <workspace>` to inspect state and

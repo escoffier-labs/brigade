@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Mapping
 
+from .native_child_host import NativeChildError
 from .native_child_journal import digest
 from .native_child_observations import NativeObservation
 from .native_orca_dispatch import CLI, WorkerReference, mutation_key, result_fields, valid_id
@@ -286,6 +287,24 @@ def resource_state(worker: WorkerReference, payload: object, *, retained_status:
     ):
         return "structured-tab-open"
     return "worker-not-released"
+
+
+def failed_start_released(worker: WorkerReference, payload: object) -> bool:
+    """Check release for a failed start and distinguish mismatched evidence from missing evidence."""
+    reply = result_fields(payload)
+    dispatch = _fields(reply.get("dispatch"))
+    shown_worker = _fields(reply.get("worker"))
+    resource = _fields(reply.get("terminalResource"))
+    identities = (
+        (dispatch.get("runId"), worker.run_id),
+        (dispatch.get("taskId"), worker.task_id),
+        (dispatch.get("id"), worker.dispatch_id),
+        (shown_worker.get("dispatchId"), worker.dispatch_id),
+        (resource.get("ownerDispatchId"), worker.dispatch_id),
+    )
+    if any(actual is not None and actual != expected for actual, expected in identities):
+        raise NativeChildError("native-mismatch", "the Orca worker-show does not match the start receipt")
+    return resource_state(worker, payload, retained_status="failed") == "released"
 
 
 def parse_stop(

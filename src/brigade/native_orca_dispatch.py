@@ -187,12 +187,16 @@ def parse_start(binding: LaunchBinding, target: NativeTarget, payload: object, *
     return _start_reference(binding, target, reply)
 
 
-def unconfirmed_start(binding: LaunchBinding, target: NativeTarget, payload: object) -> WorkerReference:
-    """Recover identity from the original unknown receipt, never from a notice."""
+def unconfirmed_start(
+    binding: LaunchBinding, target: NativeTarget, payload: object, *, exit_code: int
+) -> tuple[WorkerReference, bool]:
+    """Recover the worker identity and whether the receipt reported a failed start."""
     reply = result_fields(payload)
-    if reply.get("state") != "outcome_unknown":
-        raise NativeChildError("start-unknown", "a full outcome_unknown start receipt is required for recovery")
-    return _start_reference(binding, target, reply)
+    residual = reply.get("residualResources")
+    failed = exit_code != 0 and reply.get("state") == "failed" and isinstance(residual, list) and bool(residual)
+    if not failed and reply.get("state") != "outcome_unknown":
+        raise NativeChildError("start-unknown", "recovery requires a full uncertain start receipt")
+    return _start_reference(binding, target, reply), failed
 
 
 def _start_reference(binding: LaunchBinding, target: NativeTarget, reply: Mapping[str, object]) -> WorkerReference:
