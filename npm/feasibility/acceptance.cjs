@@ -198,7 +198,7 @@ def fetch(request,timeout):
  requests.append((request,timeout))
  response=io.BytesIO(b'{"latest":"98.0.0"}'); response.status=200
  return closing(response)
-n.urllib.request.urlopen=fetch
+n._open_version_request=fetch
 n.subprocess.Popen=lambda *a,**kw: spawns.append((a,kw))
 class TTY(io.StringIO):
  def isatty(self): return True

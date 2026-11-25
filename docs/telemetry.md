@@ -6,7 +6,7 @@ command counters, creates no install ID, and uploads no usage reports.
 ## Automatic version check
 
 The detached process sends `GET https://check.brigade.tools/v1/version` with no
-query parameters or body.
+query parameters or body. The client does not follow redirects.
 
 | Mode | User-Agent | Install channel |
 | --- | --- | --- |
@@ -27,7 +27,7 @@ no command arguments, filesystem paths, or repository names.
 | Nonempty `CI` | Sends no automatic request and suppresses the stderr update notice. A work brief can still show a cached update. |
 
 `DO_NOT_TRACK` also accepts any nonempty value except `0`, `off`, `false`, and
-`no`. `BRIGADE_TELEMETRY` also accepts `off` and `false`. Both settings ignore
+`no`. `BRIGADE_TELEMETRY` also accepts `off`, `false`, and `no`. Both settings ignore
 case and surrounding whitespace. For `BRIGADE_NO_UPDATE_CHECK`, empty values
 and `0`, `false`, `no`, and `off` leave checks enabled, ignoring case and
 surrounding whitespace. Any other value disables the automatic check.
@@ -42,7 +42,8 @@ the cache without displaying an update notice or work-brief hint.
 
 Since November 24, 2026, the version-check Worker stores nothing from incoming
 requests. It uses the URL path to route the request and ignores the headers.
-Cloudflare receives the connecting address as part of serving HTTPS. A weekly
+Cloudflare receives the connecting address as part of serving HTTPS. The client
+does not forward the request or its headers to a redirect destination. A weekly
 purge deletes historical rows older than 90 days. Those rows could contain a
 weekly salted address hash, UTC dates and timestamps, the version, a request
 count, and an operator-egress flag. See the [service privacy notice](https://check.brigade.tools/privacy).

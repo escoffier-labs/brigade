@@ -12,6 +12,7 @@ from pathlib import Path
 
 from . import distribution
 
+FALSE_VALUES = frozenset({"0", "off", "false", "no"})
 CHANNELS = frozenset({"pipx", "pip", "uvx", "npm", "source", "plugin"})
 
 
@@ -41,8 +42,5 @@ def install_channel(env: Mapping[str, str]) -> str:
 def uncounted(env: Mapping[str, str]) -> bool:
     """Return whether to omit version, OS, and channel from the request."""
     dnt = env.get("DO_NOT_TRACK", "").strip().lower()
-    return dnt not in {"", "0", "off", "false", "no"} or env.get("BRIGADE_TELEMETRY", "").strip().lower() in {
-        "0",
-        "off",
-        "false",
-    }
+    telemetry = env.get("BRIGADE_TELEMETRY", "").strip().lower()
+    return bool(dnt and dnt not in FALSE_VALUES) or telemetry in FALSE_VALUES

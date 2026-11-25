@@ -6,9 +6,9 @@ import io
 import json
 import os
 import time
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
-from threading import Barrier
+from threading import Barrier, Event
 
 import pytest
 
@@ -381,7 +381,7 @@ def test_run_refresh_success_writes_latest(tmp_path, monkeypatch):
         captured["timeout"] = timeout
         return _Resp()
 
-    monkeypatch.setattr(update_notify.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(update_notify, "_open_version_request", fake_urlopen)
     rc = update_notify.run_refresh(env=_env(tmp_path), now=555.0)
     assert rc == 0
     state = json.loads((tmp_path / "cache" / "brigade" / "update-notify.json").read_text())
@@ -402,7 +402,7 @@ def test_run_refresh_keeps_notice_written_during_fetch(tmp_path, monkeypatch):
         response.status = 200
         return closing(response)
 
-    monkeypatch.setattr(update_notify.urllib.request, "urlopen", fetch)
+    monkeypatch.setattr(update_notify, "_open_version_request", fetch)
     update_notify.run_refresh(env=_env(tmp_path), now=42.0)
     assert json.loads(cache.read_text()) == {
         "checked_at": 42.0,
@@ -412,11 +412,55 @@ def test_run_refresh_keeps_notice_written_during_fetch(tmp_path, monkeypatch):
     }
 
 
+def test_notice_and_refresh_keep_both_updates(tmp_path, monkeypatch):
+    from contextlib import closing
+
+    cache = _write_state(tmp_path, checked_at=1.0, latest="98.0.0")
+    env = _env(tmp_path)
+    at_notice_write = Event()
+    release_notice = Event()
+    fetched = Event()
+    write_json = update_notify.localio.write_json
+
+    def pause_notice_write(path, state):
+        if state["checked_at"] == 1.0:
+            at_notice_write.set()
+            assert release_notice.wait(timeout=3)
+        write_json(path, state)
+
+    def fetch(request, timeout):
+        response = io.BytesIO(b'{"latest":"99.0.0"}')
+        response.status = 200
+        fetched.set()
+        return closing(response)
+
+    monkeypatch.setattr(update_notify.localio, "write_json", pause_notice_write)
+    monkeypatch.setattr(update_notify, "_open_version_request", fetch)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        notice = pool.submit(update_notify.maybe_notify, ["work"], 0, env=env, now=42.0, stderr=_Tty(), spawn=_no_spawn)
+        try:
+            assert at_notice_write.wait(timeout=3)
+            refresh = pool.submit(update_notify.run_refresh, env=env, now=43.0)
+            assert fetched.wait(timeout=3)
+            # Give the unlocked refresh time to overwrite the old snapshot.
+            wait([refresh], timeout=0.05)
+        finally:
+            release_notice.set()
+        notice.result(timeout=3)
+        refresh.result(timeout=3)
+    assert json.loads(cache.read_text()) == {
+        "checked_at": 43.0,
+        "latest": "99.0.0",
+        "notified_at": 42.0,
+        "notified_version": "98.0.0",
+    }
+
+
 def test_run_refresh_failure_preserves_checked_at(tmp_path, monkeypatch):
     def fake_urlopen(request, timeout):
         raise OSError("endpoint down")
 
-    monkeypatch.setattr(update_notify.urllib.request, "urlopen", fake_urlopen)
+    monkeypatch.setattr(update_notify, "_open_version_request", fake_urlopen)
     _write_state(tmp_path, checked_at=1.0, latest="0.26.0")
     rc = update_notify.run_refresh(env=_env(tmp_path), now=777.0)
     assert rc == 0
@@ -437,7 +481,7 @@ def test_run_refresh_rejects_garbage_latest(tmp_path, monkeypatch):
         def read(self):
             return b'{"latest": ["not", "a", "version"]}'
 
-    monkeypatch.setattr(update_notify.urllib.request, "urlopen", lambda r, timeout: _Resp())
+    monkeypatch.setattr(update_notify, "_open_version_request", lambda r, timeout: _Resp())
     update_notify.run_refresh(env=_env(tmp_path), now=9.0)
     assert not update_notify.cache_path(_env(tmp_path)).exists()
 
@@ -446,7 +490,7 @@ def test_run_refresh_honors_optout(tmp_path, monkeypatch):
     def boom(request, timeout):
         raise AssertionError("network call despite opt-out")
 
-    monkeypatch.setattr(update_notify.urllib.request, "urlopen", boom)
+    monkeypatch.setattr(update_notify, "_open_version_request", boom)
     rc = update_notify.run_refresh(env=_env(tmp_path, BRIGADE_NO_UPDATE_CHECK="1"), now=9.0)
     assert rc == 0
     assert not (tmp_path / "cache" / "brigade" / "update-notify.json").exists()
@@ -618,7 +662,7 @@ def test_disabled_updates_do_no_state_io_spawn_or_fetch(tmp_path, monkeypatch, g
     monkeypatch.setattr(update_notify.localio, "read_json_dict", forbidden)
     monkeypatch.setattr(update_notify.localio, "write_json", forbidden)
     monkeypatch.setattr(update_notify.subprocess, "Popen", forbidden)
-    monkeypatch.setattr(update_notify.urllib.request, "urlopen", forbidden)
+    monkeypatch.setattr(update_notify, "_open_version_request", forbidden)
     err = _Tty()
     if entry == "available":
         assert update_notify.available_update(env=environment) is None
@@ -669,7 +713,7 @@ def test_refresh_privacy_headers_keep_version_fetch(tmp_path, monkeypatch, extra
         response.status = 200
         return closing(response)
 
-    monkeypatch.setattr(update_notify.urllib.request, "urlopen", fetch)
+    monkeypatch.setattr(update_notify, "_open_version_request", fetch)
     update_notify.run_refresh(env=_env(tmp_path, **extra), now=42.0)
     assert len(captured) == 1
     headers = dict(captured[0].header_items())
@@ -723,7 +767,7 @@ def test_npm_refreshes_without_notice_and_preserves_channel_in_child(tmp_path, m
 
     # A new interpreter receives the channel through its environment, not _name.
     monkeypatch.setattr(distribution, "_name", None)
-    monkeypatch.setattr(update_notify.urllib.request, "urlopen", lambda req, **kw: calls.append(req))
+    monkeypatch.setattr(update_notify, "_open_version_request", lambda req, **kw: calls.append(req))
     assert update_notify.run_refresh(env=_env(tmp_path, BRIGADE_INSTALL_CHANNEL="npm"), now=100.0) == 0
     assert calls[-1].get_header("X-brigade-channel") == "npm"
 
@@ -742,7 +786,7 @@ def test_channel_is_closed_enum(tmp_path, monkeypatch, channel):
         response.status = 200
         return closing(response)
 
-    monkeypatch.setattr(update_notify.urllib.request, "urlopen", fetch)
+    monkeypatch.setattr(update_notify, "_open_version_request", fetch)
     update_notify.run_refresh(env=_env(tmp_path, BRIGADE_INSTALL_CHANNEL=channel), now=42.0)
     value = captured[0].get_header("X-brigade-channel")
     assert value in {"pipx", "pip", "uvx", "npm", "source", "plugin"}

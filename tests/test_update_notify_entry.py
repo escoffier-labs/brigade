@@ -9,13 +9,14 @@ import subprocess
 import sysconfig
 import venv
 import zipfile
+from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from threading import Thread
 
 import pytest
 
-from brigade import __version__, update_notify
+from brigade import __version__, telemetry_usage, update_notify
 from brigade.claude_hooks.package import PACKAGE_REF
 
 
@@ -312,8 +313,8 @@ def test_entry_never_executes_workspace_update_module(notify_entry, shadow, cach
             assert json.loads(cache.read_text(encoding="utf-8"))["checked_at"] == 0.0
 
 
-@pytest.fixture
-def version_listener(monkeypatch):
+@contextmanager
+def _version_server():
     requests = []
 
     class Handler(BaseHTTPRequestHandler):
@@ -321,14 +322,15 @@ def version_listener(monkeypatch):
             size = int(self.headers.get("Content-Length", 0))
             requests.append((self.path, dict(self.headers.items()), self.rfile.read(size)))
             self.send_response(server.response_status)
+            if server.location is not None:
+                self.send_header("Location", server.location)
             self.end_headers()
             self.wfile.write(server.response_body)
 
     with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
         server.response_status = 200
         server.response_body = b'{"latest": "99.0.0"}'
-        monkeypatch.setattr(update_notify, "CHECK_URL", f"http://127.0.0.1:{server.server_port}/v1/version")
-        monkeypatch.setenv("no_proxy", "127.0.0.1")
+        server.location = None
         thread = Thread(target=server.serve_forever)
         thread.start()
         try:
@@ -336,6 +338,19 @@ def version_listener(monkeypatch):
         finally:
             server.shutdown()
             thread.join()
+
+
+@pytest.fixture
+def version_listener(monkeypatch):
+    with _version_server() as (server, requests):
+        monkeypatch.setattr(update_notify, "CHECK_URL", f"http://127.0.0.1:{server.server_port}/v1/version")
+        monkeypatch.setenv("no_proxy", "127.0.0.1")
+        yield server, requests
+
+
+@pytest.mark.parametrize("value", ["no", " No ", "NO"])
+def test_telemetry_no_opts_out(value):
+    assert telemetry_usage.uncounted({"BRIGADE_TELEMETRY": value})
 
 
 def _version_cache_env(tmp_path):
@@ -353,6 +368,7 @@ def _version_cache_env(tmp_path):
         ({"BRIGADE_TELEMETRY": "0"}, "private"),
         ({"BRIGADE_TELEMETRY": " FALSE "}, "private"),
         ({"BRIGADE_TELEMETRY": " Off "}, "private"),
+        ({"BRIGADE_TELEMETRY": " No "}, "private"),
         ({"BRIGADE_TELEMETRY": " TrUe "}, "default"),
         ({"BRIGADE_NO_UPDATE_CHECK": "1"}, "skip"),
         ({"BRIGADE_NO_UPDATE_CHECK": " TrUe "}, "skip"),
@@ -398,4 +414,21 @@ def test_invalid_version_response_preserves_cache(tmp_path, version_listener, st
     cache.write_text(json.dumps(original))
     update_notify.run_refresh(env=env, now=42.0)
     assert len(requests) == 1
+    assert json.loads(cache.read_text()) == original
+
+
+@pytest.mark.parametrize("mode", [{}, {"DO_NOT_TRACK": "1"}])
+def test_version_check_does_not_follow_redirect(tmp_path, version_listener, mode):
+    first, requests = version_listener
+    env = {**_version_cache_env(tmp_path), **mode}
+    cache = update_notify.cache_path(env)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    original = {"checked_at": 1.0, "latest": "1.2.3"}
+    cache.write_text(json.dumps(original))
+    with _version_server() as (second, redirected):
+        first.response_status = 302
+        first.location = f"http://127.0.0.1:{second.server_port}/redirected"
+        update_notify.run_refresh(env=env, now=42.0)
+        assert len(requests) == 1
+        assert redirected == []
     assert json.loads(cache.read_text()) == original
