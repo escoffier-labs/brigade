@@ -233,6 +233,16 @@ def test_every_policy_form_field_shows_the_declared_marker_and_attribute(conn): 
     assert rollback.required and rollback.marker == "Required"
 
 
+def test_read_only_policy_shows_saved_defaults_without_form_markers(conn):  # noqa: F811
+    _seed(conn)
+    view = fleet_policy_page.load_view(conn, inventory=_fresh_inventory())
+    page = render_policy(view, editable=False)
+
+    assert "Fleet defaults" in page and "seat-alpha" in page
+    assert 'name="scope" value="defaults"' not in page
+    assert "field-req--" not in re.sub(r"<style\b[^>]*>.*?</style>", "", page, flags=re.S)
+
+
 def test_a_seat_without_a_provider_or_model_is_refused_with_the_declared_message():
     def submit(**fields):
         body = {"scope": "seat", "action": "preview", "expected_version": "1", "csrf": "t", "target": "seat-x"}
@@ -328,11 +338,11 @@ def test_a_blank_repair_prompt_is_refused_with_the_declared_code():
     assert caught.value.reason == fleet_hub_actions.ACTION_FORM["prompt"].error == "invalid-prompt"
 
 
-def test_every_dashboard_filter_is_marked_optional():
+def test_dashboard_filters_do_not_show_requirement_markers():
     page = fleet_dashboard._controls(fleet_dashboard.DashboardQuery())
     found = controls(page)
     assert {c.name for c in found} == {"node", "repo", "seat", "state", "sort", "attention", "all"}
-    assert all(c.marker == "Optional" and not c.required for c in found)
+    assert all(c.marker is None and not c.required for c in found)
 
 
 def test_the_skill_decision_is_required_and_the_per_machine_override_is_optional(tmp_path):
