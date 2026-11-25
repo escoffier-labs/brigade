@@ -71,7 +71,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     _run(observe)
     observe.add_argument("--native-json", required=True, help="worker-show --json --full file, or `-`.")
     observe.add_argument("--worker-done-json", help="Orca inbox --full --json output file, or `-`.")
-    observe.add_argument("--transcript-json", help="Orca worker-read --source transcript --json output file, or `-`.")
+    observe.add_argument(
+        "--transcript-json",
+        help="Orca worker-read JSON reply or ordered array of up to eight replies, from a file or `-`.",
+    )
 
     cancel = commands.add_parser("cancel", help="Request worker-stop or record its receipt and full worker-show JSON.")
     _run(cancel)

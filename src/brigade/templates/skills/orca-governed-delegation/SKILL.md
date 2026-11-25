@@ -50,6 +50,14 @@ Keep the original enrollment and retry keys for retained work.
    `brigade orca observe <run> <task> --native-json <show.json> --worker-done-json <inbox.json> --transcript-json <transcript.json> --target <workspace>`.
    The transcript argv is for
    `orca-ide orchestration worker-read --environment local --dispatch <id> --source transcript --json`.
+   If `result.transcript.limited` is true, repeat that argv with `--cursor`
+   and `result.transcript.nextCursor` as one argument. Continue through
+   `limited: false` and pass a JSON array of the full replies in read order,
+   including any empty final page. Brigade accepts up to eight replies.
+   A source change requires a fresh read from page one.
+   An exact transcript clipped as `transcript_payload` can settle when it
+   ends with non-empty assistant text. The resulting observation receipt
+   reports `transcript_clipped: true`.
    Do not hand-build these Orca commands: the printed `inbox_argv` includes
    the required `--run` and `--limit` arguments. Read mail with `inbox --full`,
    never `check`, because `check` marks mail read. `worker-show` alone is not

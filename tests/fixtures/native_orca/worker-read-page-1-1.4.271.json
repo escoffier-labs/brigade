@@ -1,0 +1,179 @@
+{
+  "orca_version": "1.4.271",
+  "payload": {
+    "id": "rpc-example-1",
+    "ok": true,
+    "result": {
+      "dispatchId": "ctx_000000000003",
+      "source": "transcript",
+      "sourceIdentity": "example-transcript",
+      "provider": "codex",
+      "transcript": {
+        "messages": [
+          {
+            "id": "example-message-1",
+            "role": "user",
+            "blocks": [
+              {
+                "type": "text",
+                "text": "Synthetic message 1."
+              }
+            ],
+            "timestamp": 1767225600001,
+            "source": "transcript"
+          },
+          {
+            "id": "example-message-2",
+            "role": "assistant",
+            "blocks": [
+              {
+                "type": "text",
+                "text": "Synthetic message 2."
+              }
+            ],
+            "timestamp": 1767225600002,
+            "source": "transcript"
+          },
+          {
+            "id": "example-message-3",
+            "role": "assistant",
+            "blocks": [
+              {
+                "type": "tool-call",
+                "name": "ExampleTool",
+                "input": "{}",
+                "callId": "call-example-3"
+              }
+            ],
+            "timestamp": 1767225600003,
+            "source": "transcript"
+          },
+          {
+            "id": "example-message-4",
+            "role": "tool",
+            "blocks": [
+              {
+                "type": "tool-result",
+                "output": "Synthetic tool output.",
+                "callId": "call-example-3"
+              }
+            ],
+            "timestamp": 1767225600004,
+            "source": "transcript"
+          },
+          {
+            "id": "example-message-5",
+            "role": "assistant",
+            "blocks": [
+              {
+                "type": "tool-call",
+                "name": "ExampleTool",
+                "input": "{}",
+                "callId": "call-example-5"
+              }
+            ],
+            "timestamp": 1767225600005,
+            "source": "transcript"
+          },
+          {
+            "id": "example-message-6",
+            "role": "tool",
+            "blocks": [
+              {
+                "type": "tool-result",
+                "output": "Synthetic tool output.",
+                "callId": "call-example-5"
+              }
+            ],
+            "timestamp": 1767225600006,
+            "source": "transcript"
+          },
+          {
+            "id": "example-message-7",
+            "role": "assistant",
+            "blocks": [
+              {
+                "type": "text",
+                "text": "Synthetic message 7."
+              }
+            ],
+            "timestamp": 1767225600007,
+            "source": "transcript"
+          }
+        ],
+        "nextCursor": "example-cursor",
+        "limited": true,
+        "returnedMessageCount": 7
+      },
+      "cursor": "example-cursor",
+      "status": {
+        "worker": "succeeded",
+        "terminal": "exited",
+        "liveness": "exited"
+      },
+      "fallbackReason": null,
+      "warnings": [
+        "<redacted 38 chars>"
+      ],
+      "sourceExact": true,
+      "contentComplete": false,
+      "clipping": [
+        "transcript_payload"
+      ],
+      "archived": true,
+      "projection": {
+        "id": "worker-example",
+        "dispatchId": "ctx_000000000003",
+        "taskId": "task_000000000002",
+        "runId": "run_000000000001",
+        "role": "worker",
+        "parent": null,
+        "provider": null,
+        "host": {
+          "kind": "local",
+          "id": "local"
+        },
+        "workspace": {
+          "id": "workspace-example",
+          "kind": "folder_or_worktree"
+        },
+        "stage": {
+          "worker": "succeeded",
+          "dispatch": "completed",
+          "detail": "settled",
+          "activity": "unknown"
+        },
+        "outcome": "succeeded",
+        "liveness": {
+          "verdict": "exited",
+          "source": "resource_release"
+        },
+        "evidence": {
+          "durable": true,
+          "liveStatus": "<redacted 11 chars>",
+          "lastObservedAt": null
+        },
+        "resource": {
+          "state": "released",
+          "id": "wtr_000000000006",
+          "ownerDispatchId": "ctx_000000000003",
+          "releaseState": "released",
+          "terminalState": "released"
+        },
+        "nextAction": {
+          "kind": "none",
+          "argv": []
+        },
+        "attention": {
+          "categories": [
+            "<redacted 15 chars>"
+          ],
+          "requiresAction": false
+        }
+      }
+    },
+    "_meta": {
+      "runtimeId": "runtime-example"
+    }
+  }
+}

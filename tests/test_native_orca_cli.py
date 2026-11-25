@@ -1,6 +1,7 @@
 """Caller-mediated CLI scenarios against the Orca 1.4.269 contract."""
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -588,6 +589,125 @@ def test_orca_1_4_269_partial_completion_retained_tab_and_cleanup(coordinator):
     for private in (TASK_TEXT, "synthetic worker text", "synthetic transcript text", "structworker_example"):
         assert private not in data
     assert coordinator.invoke("ack", run_id, "one", "--result-id", result_id)["replayed"]
+
+
+def _set_transcript_page(reply, messages, cursor):
+    reply["transcript"].update(messages=messages, returnedMessageCount=len(messages), nextCursor=cursor)
+    reply["cursor"] = cursor
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "clipped",
+        "unclipped",
+        "other-clipping",
+        "mixed-clipping",
+        "missing-final-text",
+        "source-identity-change",
+        "source-changed",
+        "page-error",
+        "cursor-loop",
+        "duplicate-page",
+        "cursor-mismatch",
+        "empty-final-cursor-mismatch",
+        "missing-continuation",
+        "three-pages",
+        "eight-pages",
+        "nine-pages",
+        "missing-fallback-reason",
+    ],
+)
+def test_orca_1_4_271_transcript_pages(coordinator, case):
+    roster = coordinator.workspace / ".brigade" / "roster.toml"
+    roster.write_text(roster.read_text().replace(VERSION, "1.4.271"))
+    run_id = coordinator.open()
+    coordinator.accept(coordinator.start())
+    pages = [_recovery_fixture(f"worker-read-page-{number}") for number in (1, 2)]
+    first, last = (page["result"] for page in pages)
+    if case == "other-clipping":
+        first["clipping"] = ["terminal_payload"]
+    elif case == "mixed-clipping":
+        first["clipping"].append("terminal_payload")
+    elif case == "missing-final-text":
+        first["transcript"]["messages"][-1]["blocks"][0]["text"] = " "
+    elif case == "source-identity-change":
+        last["sourceIdentity"] = "other-example-transcript"
+    elif case == "source-changed":
+        last["fallbackReason"] = "source_changed"
+    elif case == "page-error":
+        pages[1] = {"ok": False, "error": {"code": "read_failed"}}
+    elif case == "cursor-loop":
+        middle = deepcopy(pages[0])
+        _set_transcript_page(middle["result"], [], first["cursor"])
+        pages.insert(1, middle)
+    elif case == "duplicate-page":
+        middle = deepcopy(pages[0])
+        _set_transcript_page(middle["result"], middle["result"]["transcript"]["messages"], "example-cursor-2")
+        pages.insert(1, middle)
+        _set_transcript_page(last, [], middle["result"]["cursor"])
+    elif case == "cursor-mismatch":
+        first["cursor"] = "other-example-cursor"
+    elif case == "empty-final-cursor-mismatch":
+        _set_transcript_page(last, [], "other-example-cursor")
+    elif case == "missing-continuation":
+        pages.pop()
+    elif case == "missing-fallback-reason":
+        del first["fallbackReason"]
+    elif case in ("three-pages", "eight-pages", "nine-pages"):
+        messages = first["transcript"]["messages"][:]
+        if case == "three-pages":
+            groups, final_messages = [messages[:2], messages[2:4]], messages[4:]
+        else:
+            groups, final_messages = [[message] for message in messages], []
+            if case == "nine-pages":
+                groups.insert(1, [{**messages[0], "id": "extra-example-message"}])
+        pages = [deepcopy(pages[0]) for _ in groups] + [pages[-1]]
+        for index, (page, group) in enumerate(zip(pages[:-1], groups, strict=True), 1):
+            _set_transcript_page(page["result"], group, f"example-cursor-{index}")
+        final_cursor = "example-cursor-end" if final_messages else pages[-2]["result"]["cursor"]
+        _set_transcript_page(last, final_messages, final_cursor)
+    transcript = _fixture("worker-read") if case == "unclipped" else pages
+    show = _fixture("worker-show-released")
+    done_file = coordinator.payload("worker-done", _fixture("worker-done"))
+    result = coordinator.observe(
+        show,
+        "--worker-done-json",
+        done_file,
+        "--transcript-json",
+        coordinator.payload("transcript", transcript),
+    )
+    if case in ("clipped", "unclipped", "three-pages", "eight-pages", "missing-fallback-reason"):
+        assert result["reason"] == "terminal-evidence-complete" and result["result_id"]
+        if case == "unclipped":
+            assert "transcript_clipped" not in result
+        else:
+            assert result["transcript_clipped"] is True
+        if case == "clipped":
+            messages = first["transcript"]["messages"]
+            _set_transcript_page(first, messages[:-1], first["cursor"])
+            _set_transcript_page(last, messages[-1:], "example-cursor-end")
+            split = coordinator.observe(
+                show,
+                "--worker-done-json",
+                done_file,
+                "--transcript-json",
+                coordinator.payload("transcript", pages),
+            )
+            assert split["result_id"] == result["result_id"]
+            assert split["transcript_clipped"] is True and "Synthetic message" not in json.dumps(split)
+            later = coordinator.observe(show)
+            assert later["result_id"] == result["result_id"] and later["transcript_clipped"] is True
+            journal_file = _run_dir(coordinator.workspace, run_id) / "events" / "lifecycle.jsonl"
+            journal_text = journal_file.read_text()
+            assert '"transcript_clipped":true' in journal_text
+            assert "Synthetic message" not in journal_text and "Synthetic tool output." not in journal_text
+        coordinator.invoke("ack", run_id, "one", "--result-id", result["result_id"])
+        assert coordinator.status()["capacity"]["live"] == 0
+        assert coordinator.invoke("finalize", run_id)["terminals"] == 1
+    else:
+        assert result["reason"] == "result-transfer-missing" and result["result_id"] is None
+        assert "transcript_clipped" not in result
 
 
 def test_orca_1_4_269_cancel_requires_exact_stop_and_exit(coordinator):

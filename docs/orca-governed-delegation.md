@@ -54,11 +54,23 @@ That result prints the exact `observe_argv`, `inbox_argv` and
 The inbox argv carries `--run` and `--limit`; a hand-built
 `orca-ide orchestration inbox --full --json` omits them. The transcript argv
 uses `orca-ide orchestration worker-read --environment local --dispatch <id> --source transcript --json`.
+If `result.transcript.limited` is true, run the same transcript argv with
+`--cursor` and the page's `result.transcript.nextCursor` as one argument.
+Continue until a page returns `limited: false`. Save the full replies in one
+JSON array in read order, including an empty final page. `--transcript-json`
+accepts one full reply or an array of up to eight full replies. Restart from
+the first page if the transcript source changes.
+
 Then submit all evidence with
 `brigade orca observe <run> <task> --native-json <show.json> --worker-done-json <inbox.json> --transcript-json <transcript.json> --target <workspace>`.
 Without both the matching worker_done report and a complete transcript,
 observation remains `result-transfer-missing`, no terminal result is available
 to acknowledge, and the slot stays occupied.
+
+Orca can clip oversized transcript text as `transcript_payload`. Brigade
+accepts that clipping when the exact transcript ends with a non-empty assistant
+text block. The terminal observation receipt then includes
+`transcript_clipped: true`.
 
 Read mail with `inbox --full`, never `check`, because `check` marks mail read.
 `worker-show` alone is not acceptance. The 1.4.269 "brief may not have been

@@ -4,8 +4,8 @@ Notices come only from the on-disk cache; the network refresh runs in a
 detached child process so no user command ever waits on it. The endpoint
 request carries no parameters and no install id. The User-Agent (version +
 OS) and a closed install-channel header are the signal. Privacy opt-outs use
-a generic agent without the channel. BRIGADE_NO_UPDATE_CHECK disables the
-notice and automatic request.
+the fixed brigadestack-update-check User-Agent without the channel.
+BRIGADE_NO_UPDATE_CHECK disables the notice and automatic request.
 
 The stderr notice is TTY-only (interactive shells). The background cache
 refresh runs even when stderr is piped so agent harness installs populate
@@ -20,19 +20,21 @@ import platform
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
+from contextlib import AbstractContextManager
 from pathlib import Path
 from typing import Any
 
 from . import __version__, component_paths, distribution, localio, telemetry_usage
+from .inbox_lock import held_file_lock
 from .isolated_exec import module_argv, trusted_cwd
 
 CHECK_URL = "https://check.brigade.tools/v1/version"
 CHECK_INTERVAL_SECONDS = 24 * 60 * 60
 REFRESH_CLAIM_SECONDS = 60 * 60
 NOTIFY_INTERVAL_SECONDS = 24 * 60 * 60
+_STATE_LOCK_TIMEOUT = 0.25
 _SKIP_COMMANDS = frozenset({"update", "completions"})
 
 
@@ -65,7 +67,7 @@ def available_update(*, env: Mapping[str, str] | None = None, now: float | None 
     """
     try:
         environment = os.environ if env is None else env
-        if distribution.is_npm() or environment.get("BRIGADE_NO_UPDATE_CHECK"):
+        if distribution.is_npm() or _update_check_disabled(environment):
             return None
 
         path = cache_path(environment)
@@ -85,8 +87,13 @@ def available_update(*, env: Mapping[str, str] | None = None, now: float | None 
         return None
 
 
+def _update_check_disabled(env: Mapping[str, str]) -> bool:
+    value = env.get("BRIGADE_NO_UPDATE_CHECK", "").strip().lower()
+    return bool(value and value not in telemetry_usage.FALSE_VALUES)
+
+
 def _notice_gated(argv: list[str], exit_code: int, env: Mapping[str, str], stderr: Any) -> bool:
-    if distribution.is_npm() or env.get("BRIGADE_NO_UPDATE_CHECK") or env.get("CI"):
+    if distribution.is_npm() or _update_check_disabled(env) or env.get("CI"):
         return True
     if exit_code != 0:
         return True
@@ -97,7 +104,7 @@ def _notice_gated(argv: list[str], exit_code: int, env: Mapping[str, str], stder
 
 
 def _refresh_gated(argv: list[str], env: Mapping[str, str]) -> bool:
-    if env.get("BRIGADE_NO_UPDATE_CHECK") or env.get("CI"):
+    if _update_check_disabled(env) or env.get("CI"):
         return True
     if argv and argv[0] in _SKIP_COMMANDS:
         return True
@@ -148,6 +155,26 @@ def _claim_refresh(path: Path, now: float) -> bool:
         return False
 
 
+def _state_lock(path: Path) -> AbstractContextManager[None]:
+    # Cache directories can be configured through a symlink.
+    lock = path.parent.resolve() / path.with_suffix(".lock").name
+    return held_file_lock(lock, deadline_seconds=_STATE_LOCK_TIMEOUT)
+
+
+def _record_notice(path: Path, now: float) -> str | None:
+    with _state_lock(path):
+        state = localio.read_json_dict(path) or {}
+        latest = state.get("latest")
+        if not isinstance(latest, str) or not is_newer(latest, __version__):
+            return None
+        notified_at = state.get("notified_at")
+        if isinstance(notified_at, (int, float)) and 0 <= now - float(notified_at) < NOTIFY_INTERVAL_SECONDS:
+            return None
+        state.update(notified_at=now, notified_version=latest)
+        localio.write_json(path, state)
+        return latest
+
+
 def maybe_notify(
     argv: list[str],
     exit_code: int,
@@ -178,28 +205,21 @@ def maybe_notify(
         path = cache_path(environment)
         state = localio.read_json_dict(path) or {}
 
-        if not _notice_gated(command_argv, exit_code, environment, err):
-            latest = state.get("latest")
-            if isinstance(latest, str) and is_newer(latest, __version__):
-                notified_at = state.get("notified_at")
-                notified_recently = (
-                    isinstance(notified_at, (int, float))
-                    and current_time - float(notified_at) < NOTIFY_INTERVAL_SECONDS
+        latest = state.get("latest")
+        if not _notice_gated(command_argv, exit_code, environment, err) and isinstance(latest, str):
+            noticed = _record_notice(path, current_time)
+            if noticed is not None:
+                err.write(
+                    f'A new brigade release is available: {noticed} (installed {__version__}). Run "brigade update".\n'
                 )
-                if not notified_recently:
-                    err.write(
-                        f'A new brigade release is available: {latest} (installed {__version__}). Run "brigade update".\n'
-                    )
-                    state["notified_at"] = current_time
-                    state["notified_version"] = latest
-                    localio.write_json(path, state)
 
         # Exit code is intentionally not gated here: failed agent commands should
         # still warm the cache so work-brief can surface available updates.
         if not _refresh_gated(command_argv, environment):
             checked_at = state.get("checked_at")
             stale = (
-                not isinstance(checked_at, (int, float)) or current_time - float(checked_at) >= CHECK_INTERVAL_SECONDS
+                not isinstance(checked_at, (int, float))
+                or not 0 <= current_time - float(checked_at) < CHECK_INTERVAL_SECONDS
             )
             if stale and _claim_refresh(path, current_time):
                 spawn_refresh()
@@ -207,18 +227,25 @@ def maybe_notify(
         return
 
 
+class _RejectRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl) -> None:
+        return None
+
+
+def _open_version_request(request: urllib.request.Request, timeout: float) -> Any:
+    return urllib.request.build_opener(_RejectRedirects()).open(request, timeout=timeout)
+
+
 def run_refresh(*, env: Mapping[str, str] | None = None, now: float | None = None) -> int:
     """Fetch the latest version into the cache. Exit 0 no matter what."""
     environment = os.environ if env is None else env
-    if environment.get("BRIGADE_NO_UPDATE_CHECK") or environment.get("CI"):
+    if _update_check_disabled(environment) or environment.get("CI"):
         return 0
     current_time = time.time() if now is None else now
     path = cache_path(environment)
-    state = localio.read_json_dict(path) or {}
-    state["checked_at"] = current_time
     try:
         headers = (
-            {"User-Agent": "Python-urllib"}
+            {"User-Agent": "brigadestack-update-check"}
             if telemetry_usage.uncounted(environment)
             else {
                 "User-Agent": f"brigadestack/{__version__} ({platform.system()})",
@@ -226,15 +253,16 @@ def run_refresh(*, env: Mapping[str, str] | None = None, now: float | None = Non
             }
         )
         request = urllib.request.Request(CHECK_URL, headers=headers)
-        with urllib.request.urlopen(request, timeout=5) as response:
+        with _open_version_request(request, timeout=5) as response:
+            if response.status != 200:
+                return 0
             payload = json.loads(response.read().decode("utf-8"))
         latest = payload.get("latest") if isinstance(payload, dict) else None
         if parse_version(latest) is not None:
-            state["latest"] = latest
+            with _state_lock(path):
+                state = localio.read_json_dict(path) or {}
+                state.update(checked_at=current_time, latest=latest)
+                localio.write_json(path, state)
     except Exception:
-        pass
-    try:
-        localio.write_json(path, state)
-    except OSError:
         pass
     return 0
