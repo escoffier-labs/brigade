@@ -2346,20 +2346,68 @@ def test_work_verify_defers_graph_sync_once_and_recovers_a_dead_launcher(
     assert launch_order[:2] == ["read start time", "start reaper"]
 
 
-@pytest.mark.skipif(os.name == "nt", reason="POSIX shebang fake engine fixture")
+@pytest.mark.parametrize(
+    ("worker_args", "exit_reason"),
+    [
+        (("claim-token",), None),
+        (("other-token",), "reservation token mismatch"),
+        ((), "missing reservation token"),
+    ],
+)
+def test_background_graph_worker_claims_by_token(tmp_path, monkeypatch, worker_args, exit_reason):
+    lock = tmp_path / "verify-sync.lock"
+    reservation = lock.with_suffix(".json")
+    localio.write_json(reservation, {"pid": 12345, "token": "claim-token"})
+    monkeypatch.setattr(os, "getpid", lambda: 54321)
+    calls = []
+
+    def sync(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", sync)
+    code_graph_background._worker(str(lock), "engine", "db", str(tmp_path), *worker_args)
+    if exit_reason is None:
+        assert calls == [["engine", "--db", "db", "sync", str(tmp_path)]]
+        assert not reservation.exists()
+        assert not lock.with_suffix(".exit.json").exists()
+    else:
+        assert calls == []
+        assert localio.read_json_dict(reservation) == {"pid": 12345, "token": "claim-token"}
+        assert localio.read_json_dict(lock.with_suffix(".exit.json")) == {"reason": exit_reason}
+
+
+def test_work_verify_reports_and_replaces_stale_legacy_graph_reservation(tmp_path, capsys, monkeypatch):
+    _init_git_repo_with_head(tmp_path)
+    lock = tmp_path / ".brigade/code-graph/verify-sync.lock"
+    reservation = lock.with_suffix(".json")
+    localio.write_json(reservation, {"pid": 12345, "created": 0, "started": None})
+    lock.touch()
+    monkeypatch.setattr(component_bins, "resolve", lambda name: name if name == "brigade-code-graph" else None)
+    monkeypatch.setattr(
+        proc, "spawn_detached", lambda *args, **kwargs: (SimpleNamespace(pid=54321, wait=lambda: 0), "detached")
+    )
+
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True, reuse=False) == 0
+    delta = json.loads(capsys.readouterr().out)["code_graph_delta"]
+    assert delta["background_refresh"]["status"] == "started"
+    assert delta["background_refresh_last_exit"] == "last background refresh exited: stale startup reservation"
+    claim = localio.read_json_dict(reservation)
+    assert claim["pid"] == 54321 and claim["token"]
+
+
 def test_work_verify_detached_worker_survives_and_releases_pipes(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     _init_git_repo_with_head(repo)
-    engine = tmp_path / "engine"
+    script = tmp_path / "engine.py"
     started, release = tmp_path / "started", tmp_path / "release"
-    engine.write_text(
-        f"#!{sys.executable}\n"
+    script.write_text(
         "import sqlite3, sys, time\n"
         "from pathlib import Path\n"
         f"assert Path(sys.argv[-1]) == Path({str(repo)!r})\n"
         f"Path({str(started)!r}).touch(exist_ok=False)\n"
-        "limit = time.monotonic() + 45\n"
+        "limit = time.monotonic() + 90\n"
         f"while not Path({str(release)!r}).exists():\n"
         "    if time.monotonic() > limit: raise TimeoutError()\n"
         "    time.sleep(0.02)\n"
@@ -2369,7 +2417,12 @@ def test_work_verify_detached_worker_survives_and_releases_pipes(tmp_path, monke
         "print('detached worker stdout')\n"
         "print('detached worker stderr', file=sys.stderr)\n"
     )
-    engine.chmod(0o755)
+    engine = tmp_path / ("engine.cmd" if os.name == "nt" else "engine")
+    if os.name == "nt":
+        engine.write_text(f'@echo off\n"{sys.executable}" "{script}" %*\n')
+    else:
+        engine.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(script))} "$@"\n')
+        engine.chmod(0o755)
     monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(engine))
     db = repo / ".brigade/code-graph/code-graph.db"
     reservation = db.parent / "verify-sync.json"
@@ -2387,19 +2440,31 @@ def test_work_verify_detached_worker_survives_and_releases_pipes(tmp_path, monke
         "--json",
         "--no-reuse",
     ]
-    deadline = time.monotonic() + 40
+    if os.name == "nt" and os.environ.get("BRIGADE_WINDOWS_TEST_PROGRESS"):
+        # The affected-tests driver contains the entire test in a job that
+        # forbids breakaway. Keep the detached worker in that outer job while
+        # testing the actual console detach, lock and verify-parent exit.
+        argv[1:3] = [
+            "-c",
+            "from brigade import cli, proc; "
+            "flags = proc.detached_launch_kwargs; "
+            "proc.detached_launch_kwargs = lambda **kw: flags(job_breakaway=False); "
+            "cli.process_main()",
+        ]
+    deadline = time.monotonic() + 90
 
     def wait_until(predicate):
         while not predicate():
-            assert time.monotonic() < deadline
+            assert (reason := code_graph_background.last_exit_reason(repo)) is None, reason
+            assert time.monotonic() < deadline, "detached graph refresh did not reach the expected state"
             time.sleep(0.02)
 
     try:
-        result = subprocess.run(argv, capture_output=True, text=True, check=True, timeout=20)
+        result = subprocess.run(argv, capture_output=True, text=True, check=True, timeout=40)
         assert json.loads(result.stdout)["code_graph_delta"]["background_refresh"]["status"] == "started"
         wait_until(started.exists)
         assert not release.exists() and not reservation.exists()
-        result = subprocess.run(argv, capture_output=True, text=True, check=True, timeout=20)
+        result = subprocess.run(argv, capture_output=True, text=True, check=True, timeout=40)
         assert json.loads(result.stdout)["code_graph_delta"]["background_refresh"]["status"] == "busy"
         assert "detached worker stdout" not in result.stdout and "detached worker stderr" not in result.stderr
     finally:

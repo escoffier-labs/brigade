@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import os
+import secrets
 import sqlite3
 import subprocess
 import sys
 import time
-from contextlib import closing
+from contextlib import closing, suppress
 from pathlib import Path
 from threading import Thread
 
@@ -32,8 +33,24 @@ def index_ready(db: Path) -> bool:
         return False
 
 
+def _lock_path(target: Path) -> Path:
+    return target / engine_paths.CODE_GRAPH_DB.parent / "verify-sync.lock"
+
+
+def last_exit_reason(target: Path) -> str | None:
+    status = localio.read_json_dict(_lock_path(target).with_suffix(".exit.json")) or {}
+    reason = status.get("reason")
+    return reason if isinstance(reason, str) else None
+
+
+def _record_exit(lock: Path, reason: str) -> None:
+    with suppress(OSError):
+        localio.write_json(lock.with_suffix(".exit.json"), {"reason": reason})
+
+
 def _ignored_for_refresh(target: Path, db: Path, lock: Path, reservation: Path) -> bool:
-    paths = {path.resolve().relative_to(target) for path in (lock.parent, lock, reservation)}
+    state_paths = (lock.parent, lock, reservation, lock.with_suffix(".exit.json"))
+    paths = {path.resolve().relative_to(target) for path in state_paths}
     for path in (db.parent, db):
         if path.resolve().is_relative_to(target):
             paths.add(path.resolve().relative_to(target))
@@ -65,7 +82,7 @@ def _reservation_live(claim: dict) -> bool:
 
 def status_or_start(target: Path, db: Path, binary: str | None = None) -> dict[str, str] | None:
     """Observe a live refresh or launch one without waiting for its work."""
-    lock = target / engine_paths.CODE_GRAPH_DB.parent / "verify-sync.lock"
+    lock = _lock_path(target)
     reservation = lock.with_suffix(".json")
     if binary is None and not lock.is_file():
         return None
@@ -75,10 +92,16 @@ def status_or_start(target: Path, db: Path, binary: str | None = None) -> dict[s
         with inbox_lock.held_file_lock(lock, deadline_seconds=0):
             if _reservation_live(localio.read_json_dict(reservation) or {}):
                 return {"status": "busy", "reason": "background sync starting"}
+            if reservation.exists() and (binary is not None or _ignored_for_refresh(target, db, lock, reservation)):
+                # Keep the unlocked file as the stable lock inode for other openers.
+                reservation.unlink()
+                if last_exit_reason(target) is None:
+                    _record_exit(lock, "stale startup reservation")
             if binary is None:
                 return None
             # Prevent the engine's first-sync setup from editing .gitignore.
             db.parent.mkdir(parents=True, exist_ok=True)
+            token = secrets.token_hex(16)
             child, _ = proc.spawn_detached(
                 [
                     sys.executable,
@@ -90,6 +113,7 @@ def status_or_start(target: Path, db: Path, binary: str | None = None) -> dict[s
                     str(Path(binary).absolute()),
                     str(db.resolve()),
                     str(target),
+                    token,
                 ],
                 cwd=Path(sys.executable).resolve().parent,
             )
@@ -97,7 +121,7 @@ def status_or_start(target: Path, db: Path, binary: str | None = None) -> dict[s
             Thread(target=child.wait, daemon=True).start()
             localio.write_json(
                 reservation,
-                {"pid": child.pid, "created": time.time(), "started": started},
+                {"pid": child.pid, "created": time.time(), "started": started, "token": token},
             )
             return {"status": "started"}
     except inbox_lock.InboxLockTimeout:
@@ -108,16 +132,34 @@ def status_or_start(target: Path, db: Path, binary: str | None = None) -> dict[s
         return {"status": "launch_failed", "reason": str(exc)}
 
 
-def _worker(lock_path: str, binary: str, db: str, target: str) -> None:
+def _worker(lock_path: str, binary: str, db: str, target: str, token: str = "") -> None:
     lock = Path(lock_path)
     reservation = lock.with_suffix(".json")
     try:
-        # The launcher holds this lock until it has published the child's PID.
-        # Once acquired here, the kernel releases it on either completion or death.
+        # The parent publishes the token under this lock. The PID is only a
+        # startup liveness hint: a venv launcher can have a different PID from
+        # the interpreter. During sync the kernel lock establishes liveness.
         with inbox_lock.held_file_lock(lock, deadline_seconds=_START_TIMEOUT):
-            if (localio.read_json_dict(reservation) or {}).get("pid") != os.getpid():
+            claim = localio.read_json_dict(reservation)
+            if not token:
+                _record_exit(lock, "missing reservation token")
+                return
+            if claim is None:
+                _record_exit(lock, "startup reservation missing or unreadable")
+                return
+            if claim.get("token") != token:
+                _record_exit(lock, "reservation token mismatch")
                 return
             reservation.unlink()
-            subprocess.run([binary, "--db", db, "sync", target], timeout=_SYNC_TIMEOUT, check=False)
-    except (OSError, TimeoutError, subprocess.TimeoutExpired):
-        return
+            result = subprocess.run([binary, "--db", db, "sync", target], timeout=_SYNC_TIMEOUT, check=False)
+            if result.returncode:
+                _record_exit(lock, f"graph sync exited with code {result.returncode}")
+            else:
+                with suppress(OSError):
+                    lock.with_suffix(".exit.json").unlink(missing_ok=True)
+    except inbox_lock.InboxLockTimeout:
+        _record_exit(lock, "startup lock timed out")
+    except subprocess.TimeoutExpired:
+        _record_exit(lock, "graph sync timed out")
+    except OSError as exc:
+        _record_exit(lock, f"worker I/O failed (errno {exc.errno})")

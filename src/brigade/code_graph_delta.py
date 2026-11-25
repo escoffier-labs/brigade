@@ -56,6 +56,8 @@ def capture_before(
             "snapshots": {},
         }
         refresh = code_graph_background.status_or_start(target, db_path) if defer_sync else None
+        if defer_sync and (last_exit := code_graph_background.last_exit_reason(target)):
+            details["background_refresh_last_exit"] = f"last background refresh exited: {last_exit}"
         ready = code_graph_background.index_ready(db_path) if defer_sync else db_path.is_file()
         sync_budget = timeout
         if defer_sync and not ready:
@@ -525,7 +527,13 @@ def _write_and_compact(
 def _capture_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         key: payload[key]
-        for key in ("snapshots", "background_refresh", "foreground_fallback", "stale_after")
+        for key in (
+            "snapshots",
+            "background_refresh",
+            "background_refresh_last_exit",
+            "foreground_fallback",
+            "stale_after",
+        )
         if payload.get(key) is not None
     }
 
