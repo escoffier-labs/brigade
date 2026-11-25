@@ -141,7 +141,7 @@ The ledger turns trials into a scorecard and calls `scorecard.decide_scorecard` 
 - A hurt trial on text that was never approved restores the newest approved text, even after helped trials.
 - When there is no approved text to restore, the ledger holds and flags it.
 
-A rollback is physical. The ledger pull request restores the whole skill bundle to the approved bytes, and the recompute checks the result byte for byte against git history. The restore commit touches the manifest scope and needs its own verdict for the restored text.
+A rollback is physical. The ledger pull request restores the whole skill bundle to the approved bytes, and the recompute checks the result byte for byte against git history. The writer refreshes `src/brigade/templates/template-profile-snapshot.json` from the restored tree. The append-only `src/brigade/templates/shipped-file-history.json` already records previously shipped text. The restore commit touches the manifest scope and needs its own verdict for the restored text.
 
 ### The required check
 
@@ -156,7 +156,7 @@ For a change that does, the check requires all of these:
 5. `cutoff_at` is not earlier than the `covers` commit time, not in the future, and at most 24 hours behind the check's clock. The writer runs at least daily and a pull request normally merges the same day, so a day leaves room for an overnight wait.
 6. Carried trials equal the previous ledger's rows exactly. A manifest restart carries forward the missing verdicts.
 7. `approved` is append only. Every entry matches git history at its commit, `release` entries match the shipped file history, and `owner_review` entries have the review described below.
-8. The change touches the ledger file and a restored skill bundle, and nothing else. A ledger pull request that also touches `scripts/`, `src/brigade/outcome_ledger*`, `.github/workflows/` or `verify/manifests/` is rejected.
+8. A ledger pull request can change the ledger file and any skill bundle it restores. A rollback can also refresh `src/brigade/templates/template-profile-snapshot.json`. Recompute runs the generator from trusted main on the proposed tree's data and compares the snapshot byte for byte. A ledger pull request that also touches `scripts/`, `src/brigade/outcome_ledger*`, `.github/workflows/` or `verify/manifests/` is rejected.
 
 For a cumulative merge queue group, the check uses the ledger pull request's squash commit for the allowed path list and checks restored bytes at the group tip.
 

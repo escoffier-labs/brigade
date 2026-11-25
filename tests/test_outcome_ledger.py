@@ -9,6 +9,7 @@ from __future__ import annotations
 import datetime as dt
 import json
 import os
+import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,7 @@ from typing import Any
 import pytest
 
 from brigade import outcome as outcome_core, outcome_ledger as L, outcome_ledger_actions as A, shipped_history
+from brigade import template_profiles
 from brigade.outcome_ledger_git import Repo, bundle_fingerprint
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -24,6 +26,8 @@ REPO_ID = 4242
 OTHER_REPO_ID = 9999
 SKILL_DIR = "src/brigade/templates/skills/note"
 SUBJECT = f"{SKILL_DIR}/SKILL.md"
+SNAPSHOT = "src/brigade/templates/template-profile-snapshot.json"
+FIXTURES = "docs/research/fixtures/harness-contract.v1"
 JOB = "outcome-attest/skill-note"
 GOOD = "---\nname: note\n---\n# note\n1. write the note\n"
 WORSE = "---\nname: note\n---\n# note\n"
@@ -139,6 +143,8 @@ class World:
         self.git("init", "-q", "-b", "main")
         manifest = (ROOT / "verify/manifests/skill-note.json").read_bytes().decode()
         history = {"schema": 1, "files": {"skill:note": [{"sha256": digest(GOOD), "tag": "v0.5.0"}]}}
+        shutil.copytree(ROOT / "src/brigade/templates", root / "src/brigade/templates")
+        shutil.copytree(ROOT / FIXTURES, root / FIXTURES)
         self.c0 = self.commit(
             {
                 "verify/manifests/skill-note.json": manifest,
@@ -665,7 +671,9 @@ def test_approved_entries_are_append_only(world, promoted):
 
 
 def test_a_release_entry_must_be_a_recorded_release_text(world, promoted):
-    worse = world.commit({SUBJECT: WORSE}, T % (23, "08:00:00Z"), branch="main")
+    worse = world.commit(
+        {SUBJECT: WORSE, SNAPSHOT: profile_snapshot(world, WORSE)}, T % (23, "08:00:00Z"), branch="main"
+    )
     unreleased = world.approved_row(worse)
     raw = world.build(prev_raw=promoted["genesis"], covers=worse, approved=(*promoted["approved"], unreleased))
     world.propose(raw, worse, name="unreleased")
@@ -682,7 +690,9 @@ def owner_pr(world, *, login="solomonneas", state="APPROVED", commit="head1", he
 
 @pytest.fixture()
 def owner_case(world, promoted):
-    worse = world.commit({SUBJECT: WORSE}, T % (23, "08:00:00Z"), branch="main")
+    worse = world.commit(
+        {SUBJECT: WORSE, SNAPSHOT: profile_snapshot(world, WORSE)}, T % (23, "08:00:00Z"), branch="main"
+    )
     row = world.approved_row(worse, "owner_review", pr=7)
     raw = world.build(prev_raw=promoted["genesis"], covers=worse, approved=(*promoted["approved"], row))
     world.propose(raw, worse, name="approval")
@@ -752,9 +762,25 @@ def test_a_ledger_change_may_not_touch_anything_else(world, promoted, path):
     assert head
 
 
+def profile_snapshot(world, text):
+    path = world.root / SUBJECT
+    original = path.read_bytes()
+    try:
+        path.write_text(text, encoding="utf-8")
+        return template_profiles.render_snapshot(
+            template_profiles.build_snapshot(
+                templates_root=world.root / "src/brigade/templates", fixtures_dir=world.root / FIXTURES
+            )
+        )
+    finally:
+        path.write_bytes(original)
+
+
 def regression(world, promoted):
     """main: promoted history plus a worse SKILL.md whose attest run failed."""
-    worse = world.commit({SUBJECT: WORSE}, T % (23, "08:00:00Z"), branch="main")
+    worse = world.commit(
+        {SUBJECT: WORSE, SNAPSHOT: profile_snapshot(world, WORSE)}, T % (23, "08:00:00Z"), branch="main"
+    )
     world.gh.failed(worse, done=T % (23, "08:10:00Z"))
     raw = world.build(prev_raw=promoted["genesis"], covers=worse, approved=promoted["approved"])
     return worse, raw
@@ -771,8 +797,25 @@ def test_a_regression_restores_the_approved_text_and_the_restore_is_verified_byt
         "to_fingerprint": promoted["approved"][0]["fingerprint"],
     }
     restored = {f"{SKILL_DIR}/{name}": data.decode() for name, data in world.repo.snapshot(world.c0, SKILL_DIR).items()}
-    world.propose(raw, worse, name="restore", extra=restored)
+    world.propose(raw, worse, name="restore", extra={**restored, SNAPSHOT: profile_snapshot(world, GOOD)})
     assert world.verify(raw, promoted["genesis"], head="restore") == []
+
+
+@pytest.mark.parametrize("snapshot", [None, "{}\n"], ids=["stale", "hand-edited"])
+def test_a_restore_rejects_a_stale_or_hand_edited_snapshot(world, promoted, snapshot):
+    worse, raw = regression(world, promoted)
+    restored = {f"{SKILL_DIR}/{name}": data.decode() for name, data in world.repo.snapshot(world.c0, SKILL_DIR).items()}
+    if snapshot is not None:
+        restored[SNAPSHOT] = snapshot
+    world.propose(raw, worse, name="bad-snapshot", extra=restored)
+    errors = world.verify(raw, promoted["genesis"], head="bad-snapshot")
+    assert any(f"{SNAPSHOT}: does not match" in error for error in errors), errors
+
+
+def test_a_ledger_with_no_restore_may_not_touch_the_snapshot(world, promoted):
+    world.propose(promoted["raw"], promoted["c2"], name="snapshot-only", extra={SNAPSHOT: "{}\n"})
+    errors = world.verify(promoted["raw"], promoted["genesis"], head="snapshot-only")
+    assert any(f"may not touch {SNAPSHOT}" in error for error in errors), errors
 
 
 def test_a_restore_that_leaves_the_bad_text_or_changes_one_byte_fails(world, promoted):
