@@ -342,6 +342,42 @@ class MissingLeakShapeTests(unittest.TestCase):
                 self.assertEqual([finding.match for finding in result.findings], [path])
                 self.assertEqual(result.redacted_text, "Config at <PRIVATE_HOME_PATH>" + after)
 
+    def test_windows_directory_does_not_stop_at_a_colon_inside_following_text(self) -> None:
+        root = "C:" + "\\" + "Users" + "\\"
+        first, second = root + "example-one", root + "example-two"
+        replacement = "<PRIVATE_HOME_PATH>"
+        for suffix, expected, matches in (
+            (" and " + second, " and " + replacement, [first, second]),
+            (" or http://", " or http://", [first]),
+            (" at 10:30", " at 10:30", [first]),
+        ):
+            with self.subTest(suffix=suffix):
+                result = scan_text("See " + first + suffix, policy=Policy(rules={"windows-home-path": "redact"}))
+                self.assertEqual([finding.match for finding in result.findings], matches)
+                self.assertEqual(result.redacted_text, "See " + replacement + expected)
+
+    def test_unquoted_windows_dotted_directories_use_the_explicit_boundary(self) -> None:
+        root = "C:" + "\\" + "Users" + "\\"
+        for leaf in ("example-user\\v1.2 Final", "Example.User Final"):
+            with self.subTest(leaf=leaf):
+                path = root + leaf
+                result = scan_text(path, policy=Policy(rules={"windows-home-path": "redact"}))
+                self.assertEqual([finding.match for finding in result.findings], [path])
+                self.assertEqual(result.redacted_text, "<PRIVATE_HOME_PATH>")
+
+    def test_windows_directories_stop_at_trailing_separator_or_markup(self) -> None:
+        for separator in ("\\", "\\\\", "/"):
+            root = "C:" + separator + "Users" + separator
+            for before, path, after in (
+                ("See ", root + "example-user" + separator + "My Documents" + separator, " for later"),
+                ("path: ", root + "Example User", " # comment"),
+                ("**", root + "Example User", "**"),
+            ):
+                with self.subTest(separator=separator, before=before):
+                    result = scan_text(before + path + after, policy=Policy(rules={"windows-home-path": "redact"}))
+                    self.assertEqual([finding.match for finding in result.findings], [path])
+                    self.assertEqual(result.redacted_text, before + "<PRIVATE_HOME_PATH>" + after)
+
     def test_compound_hostname_config_keys_match_without_broadening_code_context(self) -> None:
         host = "fixture-db" + ".internal"
         for key in (

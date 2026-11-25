@@ -108,11 +108,15 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         category="pii",
         # Match before home-path so /Users inside a drive-qualified path
         # cannot claim a partial span and suppress the complete Windows path.
-        # Matching quotes and filename extensions keep their existing priority.
-        # Otherwise, a spaced leaf must end at a line ending, end of input,
-        # tab, comma, semicolon, colon, closing bracket, or pipe. Padding spaces
-        # stay outside the match. A final dot or a word starting with "--"
-        # makes the leaf ambiguous, so the rule falls back to one token.
+        # After matching quotes, prefer a spaced leaf with an explicit boundary
+        # over a filename-like prefix such as a dotted directory name. Boundaries
+        # include line endings, tabs, commas, semicolons, closing brackets, pipes,
+        # a colon followed by whitespace or end of input, a space before "#",
+        # and "**". A trailing path separator before whitespace also bounds
+        # the leaf and stays in the match. Padding stays outside the match.
+        # Treat a final dot or a following "--" word as ambiguous. An
+        # alphabetic extension followed by a lowercase word also keeps the
+        # filename boundary, as in "notes.txt now".
         # Forward slashes and raw or escaped backslashes can be mixed.
         # As in root-path, the opening quote lives inside the quoted branch and
         # the unquoted branch has no quote lookbehind: a path that opens with
@@ -126,10 +130,12 @@ DEFAULT_RULES: tuple[Rule, ...] = (
             r"|"
             r"[A-Z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/)"
             r"(?:[A-Za-z0-9._@+-]+(?: +[A-Za-z0-9._@+-]+)*(?:\\{1,2}|/))*"
-            r"(?:[A-Za-z0-9_@+-]+(?:[ .]+[A-Za-z0-9_@+-]+)*?\.[A-Za-z0-9]+"
+            r"(?:"
+            r"(?![A-Za-z0-9._@+-]+(?: +[A-Za-z0-9._@+-]+)*\.[A-Za-z][A-Za-z0-9]* +(?-i:[a-z]))"
+            r"[A-Za-z0-9._@+-]+(?: +(?!--)[A-Za-z0-9._@+-]+)+(?<!\.)(?:\\{1,2}|/)?"
+            r"(?:(?<=[\\/])(?=[ \t])|(?= +#)|(?= *(?:$|[\r\n\t,;)\]}|]|:(?=[ \t\r\n]|$)|\*\*)))"
+            r"|[A-Za-z0-9_@+-]+(?:[ .]+[A-Za-z0-9_@+-]+)*?\.[A-Za-z0-9]+"
             r"(?![\w-]|\.[\w-])"
-            r"|[A-Za-z0-9._@+-]+(?: +(?!--)[A-Za-z0-9._@+-]+)+(?<!\.)(?:\\{1,2}|/)?"
-            r"(?= *(?:$|[\r\n\t,;:)\]}|]))"
             r"|[A-Za-z0-9._@+-]+)"
             r")"
         ),
