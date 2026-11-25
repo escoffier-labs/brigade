@@ -1,0 +1,1 @@
+- Document the fourth governed Orca qualification attempt, including the Codex startup failure and the remaining Brigade capacity hold.

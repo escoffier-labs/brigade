@@ -81,3 +81,48 @@ A uses governed Orca. B uses explicit Brigade batch execution. A dash marks an u
 | 4A | A | Unstarted | - | - | - | - | - | - | - | - | - | - | Unassessed | Unobserved |
 | 5A | A | Unstarted | - | - | - | - | - | - | - | - | - | - | Unassessed | Unobserved |
 | 5B | B | Unstarted | - | - | - | - | - | - | - | - | - | - | Unassessed | Unobserved |
+
+## Attempt 4
+
+Hub policy revision 14 admitted `sol62` and both route readiness checks passed.
+The attempt used Orca CLI `1.4.271`, Brigade executable commit
+`9606d45b536c217e1f9ee2c77449efc4ad441158`, and workload revision
+`0c29e690312b88ec99adb266281e476cc3fa5516`. Both routes were configured for
+Codex `gpt-6.2-sol` at medium effort and concurrency three in separate
+worktrees. Prompt-free app-server reads reported `service_tier = "default"`
+for both routes. The first worker exited before initialization, so effective
+worker tier remains unobserved.
+
+Pair 1A opened and its first claim succeeded. Orca's launch failed during
+agent readiness because Codex received
+`--dangerously-bypass-approvals-and-sandbox` twice. The created worktree was
+clean at the pinned workload revision. The original request lookup showed
+that the mutation completed. Orca released the retained terminal, and a fresh
+show reported the resource released and worker liveness exited. Brigade's
+`accepted` and `hold-resolve` both returned `start-unknown`. The original
+receipt had state `failed` with residual resources, and the show-assisted
+recovery requires a start receipt with state `outcome_unknown`.
+
+Brigade refused finalization with `finalize-live`. Its final status still
+reported `capacity.live = 1`, with all three tasks nonterminal. Qualification
+stopped at 1A. Max observed swap usage was 5.46 GiB, below the 8 GiB stop
+threshold. There were zero verified outputs, zero completed pairs, and no
+comparable phase timings or token usage.
+
+| Batch | Arm | Verdict |
+| --- | --- | --- |
+| 1A | A | Start unconfirmed in Brigade, one slot still occupied |
+| 1B | B | Unstarted |
+| 2B | B | Unstarted |
+| 2A | A | Unstarted |
+| 3A | A | Unstarted |
+| 3B | B | Unstarted |
+| 4B | B | Unstarted |
+| 4A | A | Unstarted |
+| 5A | A | Unstarted |
+| 5B | B | Unstarted |
+
+The collector recorded one recovery intervention and four command errors
+from worker start, acceptance, hold resolution, and finalization. It found
+no mismatch in the enrolled Arm A configuration. Pair matching remains
+unassessed. [Attempt 4 collector record](research/evidence/orca-qualification/attempt-4-pair-01-a/record.json)
