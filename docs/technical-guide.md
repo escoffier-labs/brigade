@@ -2319,18 +2319,16 @@ automatically. You can delete it and past report directories at any time.
 Bootstrap templates are packaged with the install and can be applied offline.
 The Python CLI has these local and network data flows:
 
-- The automatic update check can send a detached HTTPS version request after a
-  command. It sends version and OS in the User-Agent and a closed install-channel
-  label in a separate header. The Worker currently ignores the channel header.
-  It stores weekly-salted address hashes and version observations for 90 days.
-  `DO_NOT_TRACK=1` or `BRIGADE_TELEMETRY=0` keeps version retrieval with a generic
-  User-Agent and no channel header, so the Worker records nothing.
-  `BRIGADE_NO_UPDATE_CHECK=1` skips the automatic request entirely. CI skips it
-  too. npm refreshes without displaying an update notice. See
-  [Python CLI telemetry](telemetry.md) for fields, retention, and contact details.
-- Tier 1 usage reporting is held pending consent-wording sign-off. This slice
-  creates no install id, collects no command counters, and shows no consent
-  prompt. `brigade daily telemetry` reads local daily receipts and is unrelated.
+- The automatic update check sends a detached HTTPS request with version and
+  OS in the User-Agent and a fixed install-channel label in a separate header.
+  With `DO_NOT_TRACK=1` or `BRIGADE_TELEMETRY=0`, it sends the fixed
+  `brigadestack-update-check` User-Agent and omits the channel header. The
+  Worker stores nothing from incoming requests. A weekly purge removes legacy
+  rows older than 90 days. `BRIGADE_NO_UPDATE_CHECK=1` and nonempty `CI`
+  disable the automatic request. npm refreshes without displaying an update
+  notice. See [Python CLI telemetry](telemetry.md) for request fields and controls.
+- The Python CLI collects no command counters and creates no install ID.
+  `brigade daily telemetry` reads local daily receipts.
 - CLI failures write a local redacted error record without uploading or
   prompting. `brigade bug report --dry-run` collects and redacts locally, then
   writes a preview and receipt without network calls.

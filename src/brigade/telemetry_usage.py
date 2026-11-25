@@ -39,7 +39,7 @@ def install_channel(env: Mapping[str, str]) -> str:
 
 
 def uncounted(env: Mapping[str, str]) -> bool:
-    """Opt-outs preserve version retrieval with an uncounted generic agent."""
+    """Return whether to omit version, OS, and channel from the request."""
     dnt = env.get("DO_NOT_TRACK", "").strip().lower()
     return dnt not in {"", "0", "off", "false", "no"} or env.get("BRIGADE_TELEMETRY", "").strip().lower() in {
         "0",

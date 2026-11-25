@@ -20,7 +20,6 @@ import platform
 import subprocess
 import sys
 import time
-import urllib.error
 import urllib.request
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -199,7 +198,8 @@ def maybe_notify(
         if not _refresh_gated(command_argv, environment):
             checked_at = state.get("checked_at")
             stale = (
-                not isinstance(checked_at, (int, float)) or current_time - float(checked_at) >= CHECK_INTERVAL_SECONDS
+                not isinstance(checked_at, (int, float))
+                or not 0 <= current_time - float(checked_at) < CHECK_INTERVAL_SECONDS
             )
             if stale and _claim_refresh(path, current_time):
                 spawn_refresh()
@@ -215,10 +215,9 @@ def run_refresh(*, env: Mapping[str, str] | None = None, now: float | None = Non
     current_time = time.time() if now is None else now
     path = cache_path(environment)
     state = localio.read_json_dict(path) or {}
-    state["checked_at"] = current_time
     try:
         headers = (
-            {"User-Agent": "Python-urllib"}
+            {"User-Agent": "brigadestack-update-check"}
             if telemetry_usage.uncounted(environment)
             else {
                 "User-Agent": f"brigadestack/{__version__} ({platform.system()})",
@@ -227,14 +226,13 @@ def run_refresh(*, env: Mapping[str, str] | None = None, now: float | None = Non
         )
         request = urllib.request.Request(CHECK_URL, headers=headers)
         with urllib.request.urlopen(request, timeout=5) as response:
+            if response.status != 200:
+                return 0
             payload = json.loads(response.read().decode("utf-8"))
         latest = payload.get("latest") if isinstance(payload, dict) else None
         if parse_version(latest) is not None:
-            state["latest"] = latest
+            state.update(checked_at=current_time, latest=latest)
+            localio.write_json(path, state)
     except Exception:
-        pass
-    try:
-        localio.write_json(path, state)
-    except OSError:
         pass
     return 0

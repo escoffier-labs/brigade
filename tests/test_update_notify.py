@@ -156,6 +156,15 @@ def test_fresh_cache_does_not_spawn(tmp_path):
     update_notify.maybe_notify(["work"], 0, env=_env(tmp_path), now=1_000_000.0, stderr=_Tty(), spawn=_no_spawn)
 
 
+def test_future_checked_at_allows_refresh(tmp_path):
+    _write_state(tmp_path, checked_at=2_000_000.0)
+    spawned = []
+    update_notify.maybe_notify(
+        ["work"], 0, env=_env(tmp_path), now=1_000_000.0, stderr=_Tty(), spawn=lambda: spawned.append(True)
+    )
+    assert spawned == [True]
+
+
 @pytest.mark.parametrize("malformed", [False, True])
 def test_missing_and_malformed_cache_spawns(tmp_path, malformed):
     calls: list[str] = []
@@ -335,6 +344,8 @@ def test_maybe_notify_swallows_exceptions(tmp_path, monkeypatch):
 
 def test_run_refresh_success_writes_latest(tmp_path, monkeypatch):
     class _Resp:
+        status = 200
+
         def __enter__(self):
             return self
 
@@ -362,7 +373,7 @@ def test_run_refresh_success_writes_latest(tmp_path, monkeypatch):
     assert str(captured["ua"]).startswith(f"brigadestack/{__version__}")
 
 
-def test_run_refresh_failure_still_stamps_checked_at(tmp_path, monkeypatch):
+def test_run_refresh_failure_preserves_checked_at(tmp_path, monkeypatch):
     def fake_urlopen(request, timeout):
         raise OSError("endpoint down")
 
@@ -371,11 +382,13 @@ def test_run_refresh_failure_still_stamps_checked_at(tmp_path, monkeypatch):
     rc = update_notify.run_refresh(env=_env(tmp_path), now=777.0)
     assert rc == 0
     state = json.loads((tmp_path / "cache" / "brigade" / "update-notify.json").read_text())
-    assert state == {"checked_at": 777.0, "latest": "0.26.0"}  # old latest kept
+    assert state == {"checked_at": 1.0, "latest": "0.26.0"}
 
 
 def test_run_refresh_rejects_garbage_latest(tmp_path, monkeypatch):
     class _Resp:
+        status = 200
+
         def __enter__(self):
             return self
 
@@ -387,8 +400,7 @@ def test_run_refresh_rejects_garbage_latest(tmp_path, monkeypatch):
 
     monkeypatch.setattr(update_notify.urllib.request, "urlopen", lambda r, timeout: _Resp())
     update_notify.run_refresh(env=_env(tmp_path), now=9.0)
-    state = json.loads((tmp_path / "cache" / "brigade" / "update-notify.json").read_text())
-    assert state == {"checked_at": 9.0}
+    assert not update_notify.cache_path(_env(tmp_path)).exists()
 
 
 def test_run_refresh_honors_optout(tmp_path, monkeypatch):
@@ -614,7 +626,9 @@ def test_refresh_privacy_headers_keep_version_fetch(tmp_path, monkeypatch, extra
 
     def fetch(request, timeout):
         captured.append(request)
-        return closing(io.BytesIO(b'{"latest":"99.0.0"}'))
+        response = io.BytesIO(b'{"latest":"99.0.0"}')
+        response.status = 200
+        return closing(response)
 
     monkeypatch.setattr(update_notify.urllib.request, "urlopen", fetch)
     update_notify.run_refresh(env=_env(tmp_path, **extra), now=42.0)
@@ -626,7 +640,7 @@ def test_refresh_privacy_headers_keep_version_fetch(tmp_path, monkeypatch, extra
         if extra.get("BRIGADE_INSTALL_CHANNEL"):
             assert headers["X-brigade-channel"] == "plugin"
     else:
-        assert headers == {"User-agent": "Python-urllib"}
+        assert headers == {"User-agent": "brigadestack-update-check"}
     assert update_notify.available_update(env=_env(tmp_path))["latest"] == "99.0.0"
 
 
@@ -685,7 +699,9 @@ def test_channel_is_closed_enum(tmp_path, monkeypatch, channel):
 
     def fetch(request, timeout):
         captured.append(request)
-        return closing(io.BytesIO(b'{"latest":"99.0.0"}'))
+        response = io.BytesIO(b'{"latest":"99.0.0"}')
+        response.status = 200
+        return closing(response)
 
     monkeypatch.setattr(update_notify.urllib.request, "urlopen", fetch)
     update_notify.run_refresh(env=_env(tmp_path, BRIGADE_INSTALL_CHANNEL=channel), now=42.0)

@@ -1,84 +1,65 @@
 # Python CLI telemetry
 
-The Python CLI sends a passive version request. It does not collect command
-counters, create an install id, or upload usage reports. Tier 1 opt-in usage
-reporting from issue #1861 is held pending operator sign-off on the consent
-wording. This slice adds no Tier 1 prompt and no telemetry subcommand.
+The Python CLI checks for new releases in the background. It collects no
+command counters, creates no install ID, and uploads no usage reports.
 
-This page covers the Python CLI only. `brigade daily telemetry` inspects local
-daily receipts and is unrelated to usage reporting. Other implementations and
-notification services have their own data flows.
+## Automatic version check
 
-`brigade receipts export otel-genai` and `brigade receipts export openinference`
-write local receipts as OpenTelemetry GenAI or OpenInference JSONL and send
-nothing over the network. [Receipt telemetry mapping](telemetry-mapping.md)
-lists every exported attribute, its upstream pin, and its development status.
+The detached process sends `GET https://check.brigade.tools/v1/version` with no
+query parameters or body.
 
-## Version request fields
+| Mode | User-Agent | Install channel |
+| --- | --- | --- |
+| Default | `brigadestack/<version> (<OS>)` | `X-Brigade-Channel` is one of `pipx`, `pip`, `uvx`, `npm`, `source`, or `plugin` |
+| Privacy opt-out | `brigadestack-update-check` | Omitted |
 
-A detached child may send `GET https://check.brigade.tools/v1/version` with no
-query parameters or body. Its request headers are:
+The channel is a fixed label. `BRIGADE_INSTALL_CHANNEL` accepts only the listed
+labels, and the npm launcher sets its own channel. The version request contains
+no command arguments, filesystem paths, or repository names.
 
-| Header | Value |
+## Opt-outs
+
+| Setting | Effect on the automatic check |
 | --- | --- |
-| `User-Agent` | `brigadestack/<version> (<OS>)`, renamed from `brigade-cli/<version>` in 0.32 |
-| `X-Brigade-Channel` | `pipx`, `pip`, `uvx`, `npm`, `source`, or `plugin` |
+| `DO_NOT_TRACK=1` | Still checks for updates with the fixed User-Agent and no channel header. |
+| `BRIGADE_TELEMETRY=0` | Still checks for updates with the fixed User-Agent and no channel header. |
+| `BRIGADE_NO_UPDATE_CHECK=1` | Sends no automatic request and suppresses CLI update notices and cached work-brief hints. |
+| Nonempty `CI` | Sends no automatic request and suppresses the stderr update notice. A work brief can still show a cached update. |
 
-The channel header contains a label only. The npm launcher supplies its identity
-to the child. `BRIGADE_INSTALL_CHANNEL` can explicitly select a channel, including
-`plugin` or `uvx`. Other values are ignored. Without an override, the CLI detects
-pipx from `pipx_metadata.json` in its Python environment, including custom pipx
-homes. The `uv` marker in `pyvenv.cfg` identifies uv-created environments as
-`uvx`, including `uvx --from brigadestack brigade ...`. Other installed packages
-are `pip`, and source trees are `source`. No environment path or arbitrary
-environment value is transmitted. The currently deployed Worker ignores the
-channel header. The channel will be recorded only after the separate Worker
-update ships. Sending `X-Brigade-Channel: npm` does not yet produce a server-side
-`channel=npm` observation.
+`DO_NOT_TRACK` also accepts any nonempty value except `0`, `off`, `false`, and
+`no`. `BRIGADE_TELEMETRY` also accepts `off` and `false`. Both settings ignore
+case and surrounding whitespace. Any nonempty `BRIGADE_NO_UPDATE_CHECK` value
+disables the automatic check. An explicit `brigade update` still contacts
+release services.
 
-For requests with the exact Brigade User-Agent, the Worker records ISO week,
-UTC day, version, first and last timestamps, request count, an `internal`
-classification for configured operator egress, and a salted SHA-256 hash of the
-connecting address and ISO week. The hash changes weekly. It is not an install
-id and cannot join sources across weeks. The Worker does not store the OS
-carried in the header. The HTTPS service receives the connecting address, but
-the observation table does not store the raw address.
+The request has a five-second timeout. The CLI waits 24 hours after a valid
+response. A failed check keeps the previous result, and the one-hour refresh
+claim limits how soon another attempt can start. npm installations refresh
+the cache without displaying an update notice or work-brief hint.
 
-No command paths, arguments, working directory, repository names, usernames,
-hostnames, account identifiers, or error text are included. Weekly observations
-are not a count of people or installations.
+## Storage and retention
 
-## Retention and responsibility
+Since November 24, 2026, the version-check Worker stores nothing from incoming
+requests. It uses the URL path to route the request and ignores the headers.
+Cloudflare receives the connecting address as part of serving HTTPS. A weekly
+purge deletes historical rows older than 90 days. Those rows could contain a
+weekly salted address hash, UTC dates and timestamps, the version, a request
+count, and an operator-egress flag. See the [service privacy notice](https://check.brigade.tools/privacy).
 
-A weekly server purge deletes version observations older than 90 days. The
-local version cache at `<cache_root>/brigade/update-notify.json` stores the latest
-version and check/notice timestamps. The adjacent `update-notify.claim` file
-uses its modification time to throttle refresh launches for one hour, including
-while a detached refresh is still running. If the claim cannot be written, no
-automatic refresh is launched. Both files can be deleted at any time and have
-no automatic expiry. There is no local payload history or usage receipt because
-Tier 1 is not enabled.
+The local cache at `<cache_root>/brigade/update-notify.json` holds the latest
+version and check and notice timestamps. The adjacent `update-notify.claim`
+file uses its modification time to space out refresh launches. Both files can
+be deleted and have no automatic expiry.
 
-The controller is Solomon Neas (Escoffier Labs), reachable at the contact in
-[SECURITY.md](../SECURITY.md#reporting-a-vulnerability). Use that contact for
-privacy questions and erasure requests. Cloudflare processes the HTTPS request
-and hosts the Worker and its D1 observation table. There is no persistent
-install id to supply with a Tier 0 erasure request.
+## Other CLI data flows
 
-## Kill switches and scheduling
+In GitHub repositories, `brigade work brief` can make GitHub reads through
+`gh` using your login. Fleet Hub and memory hub features send data to their
+respective hubs only when you configure them. Fleet Hub checkout presence can
+include the node ID, repository identity, branch, checkout path, and dirty
+paths.
 
-- `DO_NOT_TRACK=1` or `BRIGADE_TELEMETRY=0` keeps the version fetch but sends
-  `User-Agent: Python-urllib` and no channel header. The Worker records no
-  observation for that User-Agent. `DO_NOT_TRACK` also accepts other nonempty
-  values except `0`, `off`, `false`, and `no`. `BRIGADE_TELEMETRY` also accepts
-  `off` and `false`. Matching is case-insensitive with surrounding spaces removed.
-- `BRIGADE_NO_UPDATE_CHECK=1` skips the automatic request and notice entirely.
-- A nonempty `CI` skips the automatic request and notice. Tests set both
-  `BRIGADE_NO_UPDATE_CHECK=1` and `BRIGADE_TELEMETRY=0`.
-
-The cache refresh is detached, makes one request with a 5 second timeout, and
-ignores network failures. The local schedule normally waits 24 hours between
-checks. A request can run with piped stderr or after a failed command. npm
-installs refresh the cache but suppress the notice and cached work-brief hint.
-`update` and `completions` do not trigger automatic refreshes. These switches do
-not disable an explicitly requested `brigade update` operation.
+`brigade daily telemetry` inspects local daily receipts.
+`brigade receipts export otel-genai` and
+`brigade receipts export openinference` write local JSONL files.
+[Receipt telemetry mapping](telemetry-mapping.md) lists the exported fields.
