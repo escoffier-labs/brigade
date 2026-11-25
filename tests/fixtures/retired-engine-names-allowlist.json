@@ -402,16 +402,6 @@
     }
   },
   {
-    "path": "docs/wiring-graphtrail-miseledger.md",
-    "kind": "shim",
-    "reason": "Redirect stub for the renamed wiring guide until v0.33.",
-    "literals": {
-      "graphtrail": 1,
-      "miseledger": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
     "path": "engines/code-graph/.github/ISSUE_TEMPLATE/bug.yml",
     "kind": "shim",
     "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
