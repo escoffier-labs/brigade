@@ -27,30 +27,39 @@ def template_root() -> Path:
     return Path(str(resources.files(TEMPLATE_PKG))) / "templates"
 
 
-def load_depth_manifest(depth_id: str) -> Dict[str, Any]:
+def load_depth_manifest(depth_id: str, *, templates_root: Path | None = None) -> Dict[str, Any]:
     """Load and merge a depth manifest, resolving `extends` chains."""
-    return _load_layered("depth", depth_id)
+    return _load_layered("depth", depth_id, templates_root=templates_root)
 
 
-def load_harness_manifest(harness_id: str) -> Dict[str, Any]:
+def load_harness_manifest(harness_id: str, *, templates_root: Path | None = None) -> Dict[str, Any]:
     """Load a harness manifest. Harness manifests do not currently use `extends`."""
-    return _load_layered("harnesses", harness_id)
+    return _load_layered("harnesses", harness_id, templates_root=templates_root)
 
 
-def load_include_manifest(include_id: str) -> Dict[str, Any]:
+def load_include_manifest(include_id: str, *, templates_root: Path | None = None) -> Dict[str, Any]:
     """Load an include (add-on) manifest, e.g. `publisher`."""
-    return _load_layered("includes", include_id)
+    return _load_layered("includes", include_id, templates_root=templates_root)
 
 
-def _load_layered(kind: str, manifest_id: str) -> Dict[str, Any]:
-    base = template_root() / kind
-    path = base / f"{manifest_id}.json"
+def template_data_path(root: Path, relative: str) -> Path:
+    path = (root / relative).resolve()
+    if not path.is_relative_to(root.resolve()):
+        raise ValueError(f"template path escapes the data root: {relative}")
+    return path
+
+
+def _load_layered(kind: str, manifest_id: str, *, templates_root: Path | None = None) -> Dict[str, Any]:
+    if templates_root is None:
+        path = template_root() / kind / f"{manifest_id}.json"
+    else:
+        path = template_data_path(templates_root, f"{kind}/{manifest_id}.json")
     if not path.is_file():
         raise FileNotFoundError(f"Unknown {kind}: {manifest_id} (looked at {path})")
     manifest = json.loads(path.read_text())
     parent_id = manifest.get("extends")
     if parent_id:
-        parent = _load_layered(kind, parent_id)
+        parent = _load_layered(kind, parent_id, templates_root=templates_root)
         merged_files = list(parent.get("files", [])) + list(manifest.get("files", []))
         merged_dirs = list(parent.get("dirs", [])) + list(manifest.get("dirs", []))
         manifest["files"] = _dedupe_files(merged_files)

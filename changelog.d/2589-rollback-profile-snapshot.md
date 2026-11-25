@@ -1,0 +1,1 @@
+- Regenerate and verify the template profile snapshot when the outcome ledger restores a skill bundle.
