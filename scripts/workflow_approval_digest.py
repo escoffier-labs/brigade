@@ -81,13 +81,13 @@ def merged_pull_requests(repo: str, default_branch: str) -> list[dict[str, Any]]
     return result
 
 
-def approval_record(repo: str, head_sha: str, number: int) -> tuple[str, str] | None:
-    status = workflow_guard.matching_approval_status(repo, head_sha, number)
+def approval_record(repo: str, head_sha: str, number: int, base: str) -> tuple[str, str] | None:
+    status = workflow_guard.matching_approval_status(repo, head_sha, number, scope=workflow_guard.base_scope(base))
     if status is None:
         return None
     created_at = status.get("created_at")
     written_at = parse_timestamp(created_at).isoformat().replace("+00:00", "Z")
-    is_success = status.get("state") == "success" and status.get("description") == f"pull request {number} approved"
+    is_success = workflow_guard.is_success_approval(status)
     return ("yes" if is_success else "no", written_at)
 
 
@@ -142,7 +142,7 @@ def main(argv: list[str] | None = None) -> int:
                 excluded_before_cutoff += 1
                 continue
             label_names = {item["name"] for item in pull["labels"]}
-            approval = approval_record(args.repo, head_sha, number)
+            approval = approval_record(args.repo, head_sha, number, default_branch)
             row = (
                 number,
                 pull["title"],
