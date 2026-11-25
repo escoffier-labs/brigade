@@ -22,6 +22,7 @@ class BaseResolution:
     commit: str | None = None
     message: str | None = None
     default_branch_tip: str | None = None
+    timed_out: bool = False
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,7 @@ class _BaseResolver:
                 "no_merge_base",
                 reference=reference,
                 message=f"Git timed out while finding the merge base for {reference}.",
+                timed_out=True,
                 default_branch_tip=tip_commit,
             )
         if merged.returncode != 0 or not merged.stdout.strip():

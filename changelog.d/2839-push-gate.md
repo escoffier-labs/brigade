@@ -1,0 +1,2 @@
+- Add a clone-local advisory pre-push verification gate with install, status, uninstall, and report commands. Warn mode logs pushed-tip verdicts across worktrees while preserving the content guard.
+- Show push-gate health and recent Claude hook timeout latches in doctor.

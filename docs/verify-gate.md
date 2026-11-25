@@ -155,3 +155,40 @@ This version only reports results. It installs no hook and does not block
 a push. The command shares a two-second budget across its Git calls and
 reads at most 128 local receipts. It runs offline without a planner or tests.
 Local receipts can be forged. Required CI on the head commit is the proof.
+
+## Install the push gate
+
+Run `brigade work verify push-gate install` to set this clone to `warn`.
+The gate advises on missing or rejected receipts and lets the push continue.
+Use `install --mode off` to turn off checking and recording. An unset mode
+also means `off`.
+
+The effective Git pre-push hook must carry the gate's marked block, and
+`brigade` must be on the `PATH` Git uses. The shipped Brigade content-guard
+template includes the block. If the clone uses its own Git hooks directory
+and has no pre-push hook, install writes a minimal one. Install prints the
+block and the effective hook path when the hook needs updating. Existing
+hooks are left in place, including tracked hooks and hooks in a global
+`core.hooksPath`. For a global Brigade content guard, refresh that guard
+from the current shipped template or paste the printed block after it reads
+the pre-push input. Each clone still chooses its own mode.
+
+`brigade work verify push-gate status` shows the effective hook, its version,
+and whether it can run. `brigade work verify push-gate uninstall` clears the
+clone's mode and removes an unmodified minimal hook if present. It keeps
+the records.
+
+Warn mode keeps up to 5,000 branch-tip observations and 2 MiB under the common
+Git directory at `brigade/push-gate.jsonl`. Entries include the UTC time, ref,
+commit, tree, verdict, reason code, check duration, Brigade version, worktree,
+and whether the declared check would have blocked under enforcement.
+Use `brigade work verify push-gate report` for counts and timings, optionally
+with `--since YYYY-MM-DD` for an inclusive UTC date filter or `--json`.
+A push whose Git environment cannot find `brigade` leaves no observation.
+
+The gate requires GNU coreutils `timeout` on Git's `PATH`. The hook asks the
+gate process to stop after five seconds and kills it one second later if
+needed. Without `timeout`, which macOS and Git for Windows may lack, the hook
+prints a skip notice and continues to the content guard.
+
+The gate does not defend against `git push --no-verify`.

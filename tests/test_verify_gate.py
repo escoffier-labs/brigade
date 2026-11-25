@@ -117,6 +117,9 @@ def _verdict(receipt, mode, eligible, reason):
     ],
 )
 def test_required_check_stop(repo, monkeypatch, capsys, argv, stdout, exit_code, change_tree, reason):
+    # This matrix tests verdicts, including on loaded Windows runners. The
+    # Stop deadline and fail-open behavior have their own timeout test below.
+    monkeypatch.setattr(verify_gate, "STOP_POLICY_BUDGET_SECONDS", 20.0)
     raw = _declaration()
     (repo / DECLARATION).write_bytes(raw)
     _commit(repo)

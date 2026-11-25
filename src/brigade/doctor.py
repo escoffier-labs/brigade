@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 from .budgets import (
     MEMORY_CARE_SCAN_STALE_DAYS,
 )
-from . import config, engine_paths, localio, memory_read_recorder_doctor
+from . import config, engine_paths, localio, memory_read_recorder_doctor, publish_doctor
 from .selection import WRITER_INBOXES
 from .station import DoctorContext
 
@@ -703,7 +703,6 @@ def _recovery_journal_chain_reason(report: run_journal.JournalReport, run_id: st
 
 
 def _recovery_checkpoint_bound_reason(run_dir: Path, event: object) -> str | None:
-    import os
 
     from brigade import run_checkpoint, run_journal
 
@@ -1083,6 +1082,7 @@ def _replace_recovery_check_with_full(
 
 
 def _gather_checks(ctx: DoctorContext) -> List[ScopedCheckResult]:
+    from .claude_hooks import latch_doctor
     from . import component_report
     from .registry import all_stations
     from . import managed
@@ -1126,6 +1126,8 @@ def _gather_checks(ctx: DoctorContext) -> List[ScopedCheckResult]:
                 f"{len(missing_tools)} managed tools not installed ({', '.join(stations)}); optional, install with `brigade add <station>`",
             )
         )
+    if latch := latch_doctor.check(ctx.target):
+        checks.append(_normalize_scoped_check(latch))
     checks.append(_normalize_scoped_check(_check_receipts(ctx.target)))
     return checks
 
@@ -1628,7 +1630,7 @@ def _memory_care_today() -> date:
 
 
 def _check_publish_gate(target: Path) -> List[CheckResult]:
-    results: List[CheckResult] = []
+    results = publish_doctor.push_gate_checks(target)
     hook = target / "hooks" / "pre-push"
     if hook.is_file():
         results.append((OK, "publish: hooks/pre-push", str(hook)))

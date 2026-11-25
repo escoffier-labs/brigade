@@ -6,12 +6,11 @@ import heapq
 import io
 import json
 import os
-import re
 import stat
 import subprocess
 import sys
 from collections.abc import Iterator
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass, replace
 from functools import cache, cached_property, partial
 from pathlib import Path
 from queue import Empty, Queue
@@ -21,12 +20,11 @@ from typing import Any
 
 from .. import verify_manifest_git
 from . import verify_gate
+from .verify_push_input import INPUT_BYTES, branch_updates
 
 _BUDGET_SECONDS = 2.0
 _RECEIPT_LIMIT = 128
 _RECEIPT_BYTES = 4 * 1024 * 1024
-_INPUT_BYTES = 256 * 1024
-_OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _TIMEOUT = "The push check reached its two-second time limit."
 
 
@@ -35,16 +33,23 @@ class _Verdict:
     status: str
     reason: str | None = None
     remedy: str | None = None
+    reason_code: str | None = None
+    tree: str | None = None
+
+    def public(self, ref: str | None) -> dict[str, Any]:
+        return {"ref": ref, "status": self.status, "reason": self.reason, "remedy": self.remedy}
 
 
 class _Indeterminate(Exception):
-    pass
+    def __init__(self, message: str, reason_code: str | None = None) -> None:
+        super().__init__(message)
+        self.reason_code = reason_code
 
 
 def _remaining(deadline: float) -> float:
     remaining = deadline - monotonic()
     if remaining <= 0:
-        raise _Indeterminate(_TIMEOUT)
+        raise _Indeterminate(_TIMEOUT, "check_timeout")
     return remaining
 
 
@@ -52,7 +57,7 @@ def _read_stdin(deadline: float) -> str:
     try:
         fd = sys.stdin.fileno()
     except io.UnsupportedOperation:
-        return sys.stdin.read(_INPUT_BYTES + 1)
+        return sys.stdin.read(INPUT_BYTES + 1)
 
     result: Queue[bytes | OSError] = Queue(maxsize=1)
 
@@ -61,8 +66,8 @@ def _read_stdin(deadline: float) -> str:
         # buffered stdin lock during interpreter shutdown.
         data = bytearray()
         try:
-            while len(data) <= _INPUT_BYTES:
-                chunk = os.read(fd, min(65536, _INPUT_BYTES + 1 - len(data)))
+            while len(data) <= INPUT_BYTES:
+                chunk = os.read(fd, min(65536, INPUT_BYTES + 1 - len(data)))
                 if not chunk:
                     break
                 data.extend(chunk)
@@ -74,26 +79,10 @@ def _read_stdin(deadline: float) -> str:
     try:
         data = result.get(timeout=_remaining(deadline))
     except Empty:
-        raise _Indeterminate(_TIMEOUT) from None
+        raise _Indeterminate(_TIMEOUT, "check_timeout") from None
     if isinstance(data, OSError):
         raise data
     return os.fsdecode(data)
-
-
-def _updates(data: str) -> list[tuple[str, str]]:
-    if len(data) > _INPUT_BYTES:
-        raise ValueError("Pre-push input exceeds the size limit.")
-    updates = []
-    for line in data.splitlines():
-        fields = line.split()
-        if len(fields) != 4:
-            raise ValueError("Expected four fields per pre-push line.")
-        _, local, remote_ref, remote = fields
-        if not (_OBJECT_ID.fullmatch(local) and _OBJECT_ID.fullmatch(remote) and len(local) == len(remote)):
-            raise ValueError("Expected full Git object IDs in pre-push input.")
-        if remote_ref.startswith("refs/heads/") and local != remote and local.strip("0"):
-            updates.append((remote_ref, local))
-    return updates
 
 
 class _Receipts:
@@ -198,7 +187,7 @@ def _tree_verdict(
     if eligible:
         return _Verdict("ok")
     if reason == "policy_timeout":
-        raise _Indeterminate(_TIMEOUT)
+        raise _Indeterminate(_TIMEOUT, "check_timeout")
     explanation, _ = verify_gate._plan_guidance(receipt, reason)
     return _Verdict(
         "rejected",
@@ -207,7 +196,9 @@ def _tree_verdict(
     )
 
 
-def _check(target: Path, updates: list[tuple[str, str]], ref: str | None, deadline: float) -> list[dict[str, Any]]:
+def _check(
+    target: Path, updates: list[tuple[str, str]], ref: str | None, deadline: float, *, details: bool = False
+) -> list[dict[str, Any]]:
     # Object reads in partial clones must stay offline even on Git versions
     # that do not recognize GIT_NO_LAZY_FETCH.
     git_env = {
@@ -228,9 +219,18 @@ def _check(target: Path, updates: list[tuple[str, str]], ref: str | None, deadli
                 raise ValueError("The supplied ref does not resolve to a local commit.")
             updates = [(ref, resolved.stdout.decode("ascii").strip())]
     except (subprocess.TimeoutExpired, _Indeterminate) as exc:
-        verdict = _Verdict("indeterminate", _TIMEOUT if isinstance(exc, subprocess.TimeoutExpired) else str(exc))
+        verdict = (
+            _Verdict("indeterminate", _TIMEOUT, reason_code="check_timeout")
+            if isinstance(exc, subprocess.TimeoutExpired)
+            else _Verdict("indeterminate", str(exc), reason_code=exc.reason_code)
+        )
+        if details:
+            return [
+                {**verdict.public(name), "tip": commit, "tree": None, "reason_code": verdict.reason_code}
+                for name, commit in updates
+            ]
         names: list[str | None] = [name for name, _ in updates] if updates else [ref]
-        return [{"ref": name, **asdict(verdict)} for name in names]
+        return [verdict.public(name) for name in names]
 
     receipts = _Receipts(target, deadline)
     by_commit: dict[str, _Verdict] = {}
@@ -242,9 +242,23 @@ def _check(target: Path, updates: list[tuple[str, str]], ref: str | None, deadli
     def committed_policy(commit: str) -> verify_gate._GatePolicy | None:
         return verify_gate._committed_policy(target, commit, deadline, git_env=git_env)
 
+    @cache
+    def read_tree(commit: str) -> str:
+        resolved = git(target, "rev-parse", "--verify", f"{commit}^{{commit}}^{{tree}}")
+        if resolved.returncode:
+            raise _Indeterminate("Git could not read the pushed commit's tree.")
+        return resolved.stdout.decode("ascii").strip()
+
+    observed_trees: dict[str, str] = {}
+
     def check_tip(commit: str) -> _Verdict:
         _remaining(deadline)
+        tree = None
+        if details:
+            tree = observed_trees[commit] = read_tree(commit)
         base = bases.resolve(commit)
+        if base.timed_out:
+            raise _Indeterminate(base.message or _TIMEOUT, "check_timeout")
         if base.status != "resolved" or base.commit is None:
             raise _Indeterminate(base.message or "The trusted Git base is unresolved.")
         if base.default_branch_tip is None:
@@ -254,22 +268,21 @@ def _check(target: Path, updates: list[tuple[str, str]], ref: str | None, deadli
             tip = base.default_branch_tip
             tip_policy = committed_policy(tip) if tip != base.commit else None
             if tip_policy is None:
-                return _Verdict("not_applicable")
+                return _Verdict("not_applicable", tree=tree)
             if tip_policy.mode == "unresolved":
                 raise _Indeterminate(verify_gate._policy_error(tip_policy))
             return _Verdict(
-                "base_predates_policy", f"Update the branch from {base.reference} to pick up the required check."
+                "base_predates_policy",
+                f"Update the branch from {base.reference} to pick up the required check.",
+                tree=tree,
             )
         if policy.mode == "unresolved":
             raise _Indeterminate(verify_gate._policy_error(policy))
-        resolved_tree = git(target, "rev-parse", "--verify", f"{commit}^{{commit}}^{{tree}}")
-        if resolved_tree.returncode:
-            raise _Indeterminate("Git could not read the pushed commit's tree.")
-        tree = resolved_tree.stdout.decode("ascii").strip()
+        tree = tree if tree is not None else read_tree(commit)
         key = (policy, tree)
         if key not in by_tree:
             by_tree[key] = _tree_verdict(target, policy, tree, receipts, deadline)
-        return by_tree[key]
+        return replace(by_tree[key], tree=tree)
 
     results = []
     for name, commit in updates:
@@ -277,10 +290,16 @@ def _check(target: Path, updates: list[tuple[str, str]], ref: str | None, deadli
             try:
                 by_commit[commit] = check_tip(commit)
             except subprocess.TimeoutExpired:
-                by_commit[commit] = _Verdict("indeterminate", _TIMEOUT)
-            except (OSError, _Indeterminate) as exc:
-                by_commit[commit] = _Verdict("indeterminate", str(exc))
-        results.append({"ref": name, **asdict(by_commit[commit])})
+                by_commit[commit] = _Verdict("indeterminate", _TIMEOUT, reason_code="check_timeout")
+            except _Indeterminate as exc:
+                by_commit[commit] = _Verdict("indeterminate", str(exc), reason_code=exc.reason_code)
+            except OSError as exc:
+                by_commit[commit] = _Verdict("indeterminate", str(exc), reason_code="check_failed")
+        verdict = by_commit[commit]
+        result = verdict.public(name)
+        if details:
+            result.update(tip=commit, tree=verdict.tree or observed_trees.get(commit), reason_code=verdict.reason_code)
+        results.append(result)
     return results
 
 
@@ -288,13 +307,13 @@ def push_check(*, target: Path, ref: str | None, json_output: bool) -> int:
     """Read Git pre-push updates or check a single local commit ref."""
     deadline = monotonic() + _BUDGET_SECONDS
     try:
-        updates = _updates(_read_stdin(deadline)) if ref is None else []
+        updates = branch_updates(_read_stdin(deadline)) if ref is None else []
         results = _check(target, updates, ref, deadline) if updates or ref is not None else []
     except ValueError as exc:
         print(f"push-check: {exc}", file=sys.stderr)
         return 2
     except (OSError, _Indeterminate) as exc:
-        results = [{"ref": ref, **asdict(_Verdict("indeterminate", str(exc)))}]
+        results = [_Verdict("indeterminate", str(exc)).public(ref)]
 
     if json_output:
         print(json.dumps({"refs": results}))
