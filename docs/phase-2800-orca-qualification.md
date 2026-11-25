@@ -1,48 +1,51 @@
 # Governed Orca qualification for epic #2800
 
-Workstream 6 (#2884) stopped before Pair 1A when the local Orca coordinator probe returned `runtime_unavailable`. Zero of ten batches started. No workers, matched pairs, slot checks, or collector records resulted from this attempt.
+Workstream 6 (#2884) reached the first governed claim after the Orca desktop RPC connection was restored. Brigade refused the claim. One batch opened, zero workers launched, and zero of the five planned pairs completed. There is no live timing or usage comparison.
 
-## Preflight configuration
+## Attempt history
 
-| Setting | Observed or planned value |
+- The first attempt stopped at preflight. The run-batch route could not admit the unregistered `worker` seat and the Orca coordinator probe returned `runtime_unavailable`.
+- The second attempt stopped at preflight. The coordinator probe again returned `runtime_unavailable` after #2892 and #2911 had merged.
+- In this attempt, Orca status reported a connected runtime and zero supervised workers. The qualification staged three native tasks in a dedicated coordinator terminal. Both route readiness checks returned `ready`, and the Pair 1A Orca check returned `ready` again immediately before the roster snapshot and batch open.
+
+## Configuration and tier evidence
+
+| Setting | Value |
 | --- | --- |
-| Orca CLI version observed | `1.4.271` |
-| Brigade checkout and local verification commit | `126cb1270e868613a4caa8814e44f3f0777af9d5` (includes #2886, #2892, and #2911) |
-| Worker seat | `sol62`, enabled in Hub registry revision 297 for `brigade-run` |
-| Model and effort | Codex `gpt-6.2-sol`, medium, confirmed in the seat registry and selected for both arms |
+| Orca CLI | `1.4.271` |
+| Daemon artifact | Desktop-bundled backend. Its live lock reported version `unknown`. The bundled `daemon-entry.js` SHA-256 was `addb2480f2e790ff5ca86a58cc44c734aac3fe78e9bd6185772f6d5e2ac4a358` |
+| Brigade executable source | `126cb1270e868613a4caa8814e44f3f0777af9d5` |
+| Workload revision | `0c29e690312b88ec99adb266281e476cc3fa5516` |
+| Worker seat, model and effort | `sol62`, Codex `gpt-6.2-sol`, medium. The model registry listed the seat as enabled at revision 297 |
 | Planned concurrency and isolation | Three workers in separate worktrees per batch |
 | Planned read-only enforcement | Worker prompt in Arm A. Hard read-only batch policy in Arm B |
-| Workload revision for this attempt | No revision staged before the stop |
 
-`brigade fleet models list --seat sol62` confirmed the provider binding, model and effort. The current plan already uses `sol62`, which replaces the unregistered `worker` example from the previous attempt. Registry enablement establishes seat selection. Batch admission and worker capacity were untested in this attempt.
+| Arm | Configuration evidence | Preflight app-server config read | Effective worker tier |
+| --- | --- | --- | --- |
+| A, governed Orca | `service_tier = "default"`, `fast_default_opt_out = true` | `{"service_tier":"default"}` | Unobserved |
+| B, Brigade run-batch | `service_tier = "default"` | `{"service_tier":"default"}` | Unobserved |
 
-## Service-tier evidence
+The app-server checks read configuration without submitting a prompt. No worker sessions existed for tier confirmation.
 
-| Arm | Configuration evidence | Effective worker tier |
-| --- | --- | --- |
-| A, governed Orca | Orca's Codex runtime-home config declared `service_tier = "default"` and `fast_default_opt_out = true` | Unobserved |
-| B, Brigade run-batch | The inherited Codex config declared `service_tier = "default"` | Unobserved |
+## Pair 1A claim and slot check
 
-Only the configuration fields were inspected for tier evidence. Worker session evidence was unavailable because zero workers started.
-
-## Coordinator stop
-
-`orca-ide orchestration run-current --environment local --json` exited 1. Its output was:
+`brigade orca open` enrolled all three tasks. The first `brigade orca claim` exited 2 with:
 
 ```text
-{"ok":false,"error":{"code":"runtime_unavailable","message":"This terminal could not connect to Orca.","data":{"nextSteps":["Orca is usually busy or restarting: wait a few seconds, then retry. If the command changes something, first check whether it already took effect, and retry with the request ID this error names, if any.","Do not run 'orca open' to recover. Run it only if the user asks, or if 'orca status --json' reports Orca is not running or still cannot connect after about 30 seconds of retries."]}}}
-error: runtime_unavailable: This terminal could not connect to Orca.
+error [admission-denied]: seat admission refused this claim (policy-denied)
 ```
 
-This was a preflight error. Per-batch readiness, roster snapshots, and post-batch capacity queries were never reached. No attempt journal or redacted collector record was generated.
+A read-only evaluation of the resolved live Hub policy returned `admissible: false` with reason `unknown-seat` for `sol62`. The enabled entry observed earlier came from the model registry. The claim gate consulted the live policy document. Qualification stopped at that gate.
+
+`brigade orca finalize` closed the run as `failed`. The subsequent `brigade orca status` recorded workspace-wide `capacity.live = 0` and zero held tasks. The collector confirmed the slot check and recorded three nonterminal tasks and one other error. Its configuration check found no mismatch in the enrolled Arm A settings. Pair matching remains unassessed because Arm B did not run. [Redacted collector record](research/evidence/orca-qualification/pair-01-a/record.json)
 
 ## Batch verdicts in planned order
 
-A uses governed Orca. B uses explicit Brigade batch execution. A dash marks an unobserved field. Times would be in seconds. Usage would include input, output, and cached-input tokens.
+A uses governed Orca. B uses explicit Brigade batch execution. A dash marks an unobserved field. Times are in seconds where observed. Usage covers input, output, and cached-input tokens.
 
 | Batch | Arm | Verdict | Verified completion time | Errors | Parent interventions | Usage | Queue | Startup | Planning | Execution | Synthesis | Delivery | Matched or mismatched | Effective service tier |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| 1A | A | Stopped at preflight | - | - | - | - | - | - | - | - | - | - | Unassessed | Unobserved |
+| 1A | A | Claim denied | - | 1 claim denial, 3 tasks nonterminal | 0 | - | - | - | - | - | - | - | Unassessed | Unobserved |
 | 1B | B | Unstarted | - | - | - | - | - | - | - | - | - | - | Unassessed | Unobserved |
 | 2B | B | Unstarted | - | - | - | - | - | - | - | - | - | - | Unassessed | Unobserved |
 | 2A | A | Unstarted | - | - | - | - | - | - | - | - | - | - | Unassessed | Unobserved |
