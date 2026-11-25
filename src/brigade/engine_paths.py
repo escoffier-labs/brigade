@@ -188,8 +188,8 @@ def legacy_findings(target: Path, *, env: Mapping[str, str] | None = None) -> li
     """Report the ignored Code Graph index and remaining engine compatibility."""
     environment = os.environ if env is None else env
     findings: list[Finding] = []
-    _, legacy = code_graph_db_paths(target)
-    if legacy.is_file():
+    canonical, legacy = code_graph_db_paths(target)
+    if not canonical.is_file() and legacy.is_file():
         findings.append(("INFO", "code graph index layout", "legacy index ignored. Run `brigade code sync`", "target"))
     try:
         roots = _evidence_roots(environment)

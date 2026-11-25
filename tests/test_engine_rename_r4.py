@@ -59,6 +59,8 @@ def test_doctor_reports_ignored_code_graph_index(tmp_path, canonical_present):
     _seed_index(legacy, 1_700_000_000)
     if canonical_present:
         _seed_index(canonical, 1_800_000_000)
+        assert engine_paths.legacy_findings(tmp_path, env=env) == []
+        return
 
     assert engine_paths.legacy_findings(tmp_path, env=env) == [
         ("INFO", "code graph index layout", "legacy index ignored. Run `brigade code sync`", "target")
@@ -102,10 +104,10 @@ def test_legacy_variables_are_info_and_conflicts_warn_without_stderr(tmp_path, c
 
 
 def test_doctor_gathers_rename_findings(tmp_path, monkeypatch):
-    canonical, legacy = engine_paths.code_graph_db_paths(tmp_path)
-    _seed_index(canonical, 1_800_000_000)
+    _, legacy = engine_paths.code_graph_db_paths(tmp_path)
     _seed_index(legacy, 1_700_000_000)
     path = config.config_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
