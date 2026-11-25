@@ -5,6 +5,7 @@ import re
 from .types import Rule
 
 _WINDOWS_USER_ROOT = r"[A-Z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/)"
+_WINDOWS_INVALID_BOUNDARY = r'(?:[<>"|?*]|:(?=[ \t\r\n]|$))'
 
 # Bound retryable spans shared by the memory scanners. Address local parts
 # permit 256 characters. Token bodies hit at 4097 and provider suffixes at
@@ -123,6 +124,8 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         # alphabetic extension followed by a lowercase word also keeps the
         # filename boundary, as in "notes.txt now".
         # Forward slashes and raw or escaped backslashes can be mixed.
+        # For underscore emphasis, invalid punctuation can end the path
+        # before the closing marker. Leave any padding before it outside.
         # As in root-path, the opening quote lives inside the quoted branch and
         # the unquoted branch has no quote lookbehind: a path that opens with
         # one quote and closes with another falls back to the unquoted branch
@@ -135,13 +138,14 @@ DEFAULT_RULES: tuple[Rule, ...] = (
             r"|"
             r"(?:(?<=(?<![\w.-])(?P<windows_bold>__))|(?<=(?<![\w.-])_))"
             + _WINDOWS_USER_ROOT
-            + r"[A-Za-z0-9._-][^\r\n\t<>:\"|?*]*?(?<! )(?=_(?(windows_bold)_)(?![\w\\/]|\.[\w-]))"
+            + r"[A-Za-z0-9._-][^\r\n\t<>:\"|?*]*?(?<! )"
+            + rf"(?=_(?(windows_bold)_)(?![\w\\/]|\.[\w-])| *+{_WINDOWS_INVALID_BOUNDARY})"
             r"|"
             r"(?<![\w.-])" + _WINDOWS_USER_ROOT + r"(?:[A-Za-z0-9._@+-]++(?: ++[A-Za-z0-9._@+-]++)*(?:\\{1,2}|/))*"
             r"(?:"
             r"(?![A-Za-z0-9._@+-]+(?: ++[A-Za-z0-9._@+-]+)*\.[A-Za-z][A-Za-z0-9]*+ ++(?-i:[a-z]))"
             r"[A-Za-z0-9._@+-]++(?: ++(?!--)[A-Za-z0-9._@+-]++)+(?<!\.)(?:\\{1,2}|/)?"
-            r"(?:(?<=[\\/])(?=[ \t])|(?= ++#)|(?= *+(?:$|[\r\n\t,;)\]}<>\"|?*]|:(?=[ \t\r\n]|$))))"
+            rf"(?:(?<=[\\/])(?=[ \t])|(?= ++#)|(?= *+(?:$|[\r\n\t,;)\]}}]|{_WINDOWS_INVALID_BOUNDARY})))"
             r"|[A-Za-z0-9_@+-]++(?:[ .]++[A-Za-z0-9_@+-]++)*?\.[A-Za-z0-9]++"
             r"(?![\w-]|\.[\w-])"
             r"|[A-Za-z0-9._@+-]+)"

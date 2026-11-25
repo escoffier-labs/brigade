@@ -415,6 +415,22 @@ class MissingLeakShapeTests(unittest.TestCase):
                 self.assertEqual([finding.match for finding in result.findings], [path])
                 self.assertEqual(result.redacted_text, "Open <PRIVATE_HOME_PATH>" + after)
 
+    def test_emphasized_windows_paths_stop_at_invalid_path_characters(self) -> None:
+        public_policy = load_policy(Path(__file__).parents[2] / "src/brigade/guard/policies/public-repo.json")
+        redact_policy = Policy(rules={"windows-home-path": "redact"})
+        root = "C:" + "\\" + "Users" + "\\"
+        for marker, leaf, boundary in product(("_", "__", "*"), ("Example", "Example User"), '<>:"|?*'):
+            with self.subTest(marker=marker, leaf=leaf, boundary=boundary):
+                path = root + leaf
+                tail = f"{boundary} More{marker}"
+                text = f"{marker}{path}{tail}"
+                blocked = scan_text(text, policy=public_policy)
+                self.assertTrue(blocked.blocked)
+                self.assertEqual([finding.match for finding in blocked.findings], [path])
+                result = scan_text(text, policy=redact_policy)
+                self.assertEqual([finding.match for finding in result.findings], [path])
+                self.assertEqual(result.redacted_text, f"{marker}<PRIVATE_HOME_PATH>{tail}")
+
     def test_windows_spaced_directory_matching_scales_linearly(self) -> None:
         rule = next(rule for rule in DEFAULT_RULES if rule.id == "windows-home-path")
         pattern = re.compile(rule.pattern, rule.flags)
