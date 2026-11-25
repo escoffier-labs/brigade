@@ -1499,18 +1499,14 @@ def _import_miseledger_file(
         failed_on_error = strict
     binary = component_bins.resolve("brigade-evidence")
     if binary is None:
-        if failed_on_error and strict:
-            print(
-                f"error: miseledger import failed; export kept at {path}: binary not found",
-                file=sys.stderr,
-            )
-            return True, True, None
-        message = f"warning: miseledger binary not found on PATH; export kept at {path}"
-        if failed_on_error:
-            print(message, file=sys.stderr)
-            return True, True, None
+        message = (
+            f"error: miseledger import failed; export kept at {path}: binary not found"
+            if failed_on_error and strict
+            else f"warning: miseledger binary not found on PATH; export kept at {path}"
+        )
         print(message, file=sys.stderr)
-        return True, False, None
+        return True, failed_on_error, None
+    prefix = "error" if failed_on_error and strict else "warning"
     try:
         result = subprocess.run(
             [binary, "import", "adapter", str(path), "--source", "brigade", "--json"],
@@ -1522,35 +1518,27 @@ def _import_miseledger_file(
             timeout=120,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
-        detail = _one_line(str(exc), 500)
-        if failed_on_error:
-            prefix = "error" if strict else "warning"
-            print(f"{prefix}: miseledger import failed; export kept at {path}: {detail}", file=sys.stderr)
-            return True, True, None
-        print(f"warning: miseledger import failed; export kept at {path}: {exc}", file=sys.stderr)
-        return True, False, None
+        detail = _one_line(str(exc), 500) if failed_on_error else str(exc)
+        print(f"{prefix}: miseledger import failed; export kept at {path}: {detail}", file=sys.stderr)
+        return True, failed_on_error, None
     if result.returncode != 0:
         detail = _one_line(result.stderr or result.stdout or f"exit {result.returncode}", 500)
-        if failed_on_error:
-            prefix = "error" if strict else "warning"
-            print(f"{prefix}: miseledger import failed; export kept at {path}: {detail}", file=sys.stderr)
-            return True, True, None
-        print(f"warning: miseledger import failed; export kept at {path}: {detail}", file=sys.stderr)
-        return True, False, None
+        print(f"{prefix}: miseledger import failed; export kept at {path}: {detail}", file=sys.stderr)
+        return True, failed_on_error, None
     try:
         payload = json.loads(result.stdout)
         inserted, known = _miseledger_import_summary(payload)
-    except MissingImportAcknowledgement as exc:
-        from .component_install import engine_repair_hint
-
-        repair = engine_repair_hint()
-        prefix = "error" if strict else "warning"
-        print(f"{prefix}: miseledger import failed; export kept at {path}: {exc} {repair}", file=sys.stderr)
-        return True, True, repair
     except (ValueError, TypeError) as exc:
+        detail = str(exc)
+        repair = None
+        if isinstance(exc, MissingImportAcknowledgement):
+            from .component_install import engine_repair_hint
+
+            repair = engine_repair_hint()
+            detail = f"{detail} {repair}"
         prefix = "error" if strict else "warning"
-        print(f"{prefix}: miseledger import failed; export kept at {path}: {exc}", file=sys.stderr)
-        return True, True, None
+        print(f"{prefix}: miseledger import failed; export kept at {path}: {detail}", file=sys.stderr)
+        return True, True, repair
     if not quiet:
         print(f"miseledger import: inserted_items={inserted} already_known={known}")
     return True, False, None

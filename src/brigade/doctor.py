@@ -1049,11 +1049,10 @@ def run(
     if ctx.selection is not None:
         sel = ctx.selection
         print(f"  harnesses: {', '.join(sel.harnesses) or '(none)'} (owner={sel.owner}, depth={sel.depth})")
+    elif ctx.harnesses:
+        print(f"  harnesses: (legacy target, no config; declared {', '.join(ctx.harnesses)})")
     else:
-        if ctx.harnesses:
-            print(f"  harnesses: (legacy target, no config; declared {', '.join(ctx.harnesses)})")
-        else:
-            print("  harnesses: (unspecified; no Brigade config and no explicit --harness)")
+        print("  harnesses: (unspecified; no Brigade config and no explicit --harness)")
     if not operator:
         print("  scope: target workspace only (pass --operator for host-global checks)")
     return _report(checks, full=full, target=ctx.target, operator=operator)

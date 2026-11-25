@@ -305,7 +305,7 @@ def test_workspace_doctor_warns_about_old_engine_without_hashing_it(tmp_target: 
 
     install_selection(tmp_target, Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]))
     env = _install_fixture_manifest(tmp_path, monkeypatch)
-    engine = _write_old_evidence_install(env, component_manifest.manifest_path())
+    engine = _write_old_evidence_install(env, component_manifest.manifest_path(), monkeypatch)
     roots = component_install.resolve_roots(env=env, system="linux")
     monkeypatch.setattr(component_install, "resolve_roots", lambda **_kwargs: roots)
     real_sha256 = localio.file_sha256

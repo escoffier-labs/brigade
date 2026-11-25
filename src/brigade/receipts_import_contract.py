@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 
+MIN_EVIDENCE_ACK_RELEASE = "0.31.0"
+
+
 class MissingImportAcknowledgement(ValueError):
     """A zero-exit importer returned counts without a completion status."""
 
@@ -29,15 +32,6 @@ def _miseledger_import_summary(payload: object) -> tuple[int, bool | int]:
                 raise ValueError("import summary requires a valid known flag")
             if bool(value) != bool(known):
                 raise ValueError("inconsistent known flag aliases")
-    status = payload.get("status")
-    if status is None:
-        raise MissingImportAcknowledgement("The installed evidence engine is older than this CLI expects.")
-    if status not in ("complete", "already_known"):
-        raise ValueError("import summary requires explicit completion from a repaired importer")
-    if (status == "already_known") != bool(known):
-        raise ValueError("inconsistent completion status and known flag")
-    # already_known identifies a previously imported source hash. A supported
-    # replay may still restore pruned items, so its inserted count can be positive.
     for field in ("warnings", "errors"):
         value = payload.get(field)
         if value is not None and not isinstance(value, list):
@@ -56,4 +50,13 @@ def _miseledger_import_summary(payload: object) -> tuple[int, bool | int]:
     error = payload.get("error")
     if error is not None and (not isinstance(error, str) or error):
         raise ValueError("import summary reports an invalid or nonempty error")
+    status = payload.get("status")
+    if status is None:
+        raise MissingImportAcknowledgement("The installed evidence engine is older than this CLI expects.")
+    if status not in ("complete", "already_known"):
+        raise ValueError("import summary requires explicit completion from a repaired importer")
+    if (status == "already_known") != bool(known):
+        raise ValueError("inconsistent completion status and known flag")
+    # already_known identifies a previously imported source hash. A supported
+    # replay may still restore pruned items, so its inserted count can be positive.
     return inserted, known

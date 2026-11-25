@@ -2417,7 +2417,7 @@
     "reason": "Persisted schema, receipt or import identity, internal reader names and import diagnostics.",
     "literals": {
       "MISELEDGER": 18,
-      "miseledger": 93
+      "miseledger": 90
     }
   },
   {
@@ -2991,8 +2991,8 @@
     "kind": "fixture",
     "reason": "Compatibility, persisted identities and historical importer output regression coverage.",
     "literals": {
-      "MISELEDGER": 4,
-      "miseledger": 129
+      "MISELEDGER": 6,
+      "miseledger": 130
     }
   },
   {
