@@ -152,9 +152,14 @@ def test_orca_1_4_269_recovers_only_the_original_worker_after_a_restart(coordina
         ("dispatch", "hostScope", {"kind": "remote"}, "remote-mismatch"),
         ("terminalResource", "terminalHandle", "term_other", "start-unknown"),
         ("terminalResource", "terminalHandle", None, "start-unknown"),
+        ("terminalResource", "worktreeId", "worktree_other", "start-unknown"),
+        ("terminalResource", "worktreeId", None, "start-unknown"),
         ("result", "terminalResource", None, "start-unknown"),
-        ("receipt", "residualResources", ["term_example", "term_other"], "start-unknown"),
-        ("receipt", "residualResources", ["term_example", None], "start-unknown"),
+        ("residual", None, {"kind": "terminal", "id": "term_other"}, "start-unknown"),
+        ("residual", None, {"kind": "helper", "id": "term_example"}, "start-unknown"),
+        ("residual", None, {"kind": "terminal"}, "start-unknown"),
+        ("residual", None, {"kind": "worktree", "id": 42}, "start-unknown"),
+        ("residual", None, "term_example", "start-unknown"),
         ("exit_code", None, 0, "start-unknown"),
     ],
 )
@@ -172,8 +177,8 @@ def test_orca_1_4_271_recovers_failed_start_only_after_release_and_exit(coordina
     exit_code = 1
     if row == "exit_code":
         exit_code = value
-    elif row == "receipt":
-        receipt["result"][field] = value
+    elif row == "residual":
+        receipt["result"]["residualResources"].append(value)
     elif row is not None:
         target = show["result"] if row == "result" else show["result"][row]
         if value is None:
@@ -200,9 +205,11 @@ def test_orca_1_4_271_recovers_failed_start_only_after_release_and_exit(coordina
         return
 
     assert (result["mode"], result["reason"], result["status"]) == ("start-refusal", "start-failed", "failed")
+    assert result["worktree_retained"] is True
     assert not coordinator.status()["tasks"][0]["correlated"]
     replay = coordinator.invoke(*args)
     assert replay["replayed"] and replay["result_id"] == result["result_id"]
+    assert replay["worktree_retained"] is True
     coordinator.invoke("ack", run_id, "one", "--result-id", result["result_id"])
     assert coordinator.status()["capacity"]["live"] == 0
     final = coordinator.invoke("finalize", run_id)

@@ -52,7 +52,7 @@
         "terminalHandle": "term_example",
         "autoReleaseAt": null,
         "id": "wtr_000000000006",
-        "worktreeId": "example-checkout",
+        "worktreeId": "worktree_example",
         "endpointId": null,
         "endpointIncarnation": null,
         "originDispatchId": "ctx_000000000003",

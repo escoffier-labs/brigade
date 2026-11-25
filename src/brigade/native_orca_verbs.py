@@ -244,7 +244,10 @@ def _correlate(task: ClaimedTask, worker: dispatch.WorkerReference, *, mode: str
     }
 
 
-def _record_start_refusal(task: ClaimedTask, reason: str, *, resolving: bool = False) -> dict[str, Any]:
+def _record_start_refusal(
+    task: ClaimedTask, refusal: dispatch.DefiniteStartRefusal, *, resolving: bool = False
+) -> dict[str, Any]:
+    reason = refusal.code
     result = task.verified.result
     resource = journal.latest(task.events, RESOURCE_EVENT, task.task_id)
     if reason != "start-failed" and resource is not None and resource.get("reason") == START_UNCONFIRMED:
@@ -279,7 +282,7 @@ def _record_start_refusal(task: ClaimedTask, reason: str, *, resolving: bool = F
         )
     except run_tasks.TaskJournalError:
         raise journal.refuse("observation-conflict", "the journal refused the Orca start outcome") from None
-    return {
+    report = {
         **task.report(CORRELATION_SCHEMA),
         "mode": "start-refusal",
         "reason": reason,
@@ -287,6 +290,9 @@ def _record_start_refusal(task: ClaimedTask, reason: str, *, resolving: bool = F
         "result_id": updated.result_id,
         "replayed": result.result_id is not None,
     }
+    if refusal.worktree_retained:
+        report["worktree_retained"] = True
+    return report
 
 
 def _parse_start(
@@ -303,11 +309,14 @@ def _parse_start(
             raise
         if failed is not None:
             worker, residuals = failed
-            if not observations.failed_start_released(worker, show, residuals):
+            matched = observations.failed_start_released(worker, show, residuals)
+            if not matched:
                 raise journal.refuse(
                     "start-unknown", "the failed Orca worker has no confirmed release and exit"
                 ) from None
-            raise dispatch.DefiniteStartRefusal("start-failed", "Orca released the failed worker start") from None
+            raise dispatch.DefiniteStartRefusal(
+                "start-failed", "Orca released the failed worker start", worktree_retained="worktree" in matched
+            ) from None
     worker = dispatch.unconfirmed_start(task.binding, target, payload)
     if not observations.settled_start(worker, show):
         raise journal.refuse("start-unknown", "the exact Orca worker has no confirmed start or settlement")
@@ -322,7 +331,7 @@ def accepted(
         try:
             worker = _parse_start(task, payload, exit_code=exit_code, show=show)
         except dispatch.DefiniteStartRefusal as exc:
-            return _record_start_refusal(task, exc.code)
+            return _record_start_refusal(task, exc)
         except NativeChildError as exc:
             if show is not None and dispatch.result_fields(payload).get("state") == "outcome_unknown":
                 raise
@@ -361,5 +370,5 @@ def hold_resolve(
         try:
             worker = _parse_start(task, payload, exit_code=exit_code, show=show, recover_unknown=True)
         except dispatch.DefiniteStartRefusal as exc:
-            return _record_start_refusal(task, exc.code, resolving=True)
+            return _record_start_refusal(task, exc, resolving=True)
         return _correlate(task, worker, mode="operator-asserted", held=held)

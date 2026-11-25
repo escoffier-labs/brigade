@@ -148,6 +148,10 @@ _TASK_STATES_FOR_REFUSAL = frozenset({"failed"})
 class DefiniteStartRefusal(NativeChildError):
     """A matching refusal that produced no live worker for this claim."""
 
+    def __init__(self, code: str, message: str, *, worktree_retained: bool = False) -> None:
+        super().__init__(code, message)
+        self.worktree_retained = worktree_retained
+
 
 def parse_start(binding: LaunchBinding, target: NativeTarget, payload: object, *, exit_code: int) -> WorkerReference:
     """Correlate a ready, replay-safe worker-start receipt, with no retry advice."""
