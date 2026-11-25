@@ -1,1 +1,1 @@
-- Redact unquoted Windows home directories with spaces when a line ending or delimiter bounds the path.
+- Redact Windows home directories with spaces when a line ending, punctuation, or Markdown emphasis bounds the path.

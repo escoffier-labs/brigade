@@ -1,12 +1,15 @@
 # content-guard: allow jwt-token file
 from __future__ import annotations
 
+import re
 import unittest
 from itertools import product
 from pathlib import Path
+from time import perf_counter
 
 from brigade.guard.engine import scan_text
 from brigade.guard.policy import Policy, load_policy
+from brigade.guard.rules import DEFAULT_RULES
 from brigade.guard.types import Rule
 
 
@@ -377,6 +380,60 @@ class MissingLeakShapeTests(unittest.TestCase):
                     result = scan_text(before + path + after, policy=Policy(rules={"windows-home-path": "redact"}))
                     self.assertEqual([finding.match for finding in result.findings], [path])
                     self.assertEqual(result.redacted_text, before + "<PRIVATE_HOME_PATH>" + after)
+
+    def test_windows_directories_inside_underscore_emphasis(self) -> None:
+        public_policy = load_policy(Path(__file__).parents[2] / "src/brigade/guard/policies/public-repo.json")
+        redact_policy = Policy(rules={"windows-home-path": "redact"})
+        root = "C:" + "\\" + "Users" + "\\"
+        for marker, leaf, after in (
+            ("_", "Example User", ""),
+            ("_", "Example_User\\Private Folder", ", then continue."),
+            ("_", "Example_User_", ""),
+            ("__", "example-user", "."),
+        ):
+            with self.subTest(marker=marker, leaf=leaf, after=after):
+                path = root + leaf
+                text = f"Open {marker}{path}{marker}{after}"
+                blocked = scan_text(text, policy=public_policy)
+                self.assertTrue(blocked.blocked)
+                self.assertEqual([finding.match for finding in blocked.findings], [path])
+                result = scan_text(text, policy=redact_policy)
+                self.assertEqual([finding.match for finding in result.findings], [path])
+                self.assertEqual(result.redacted_text, f"Open {marker}<PRIVATE_HOME_PATH>{marker}{after}")
+
+    def test_windows_directories_stop_at_invalid_path_characters(self) -> None:
+        public_policy = load_policy(Path(__file__).parents[2] / "src/brigade/guard/policies/public-repo.json")
+        redact_policy = Policy(rules={"windows-home-path": "redact"})
+        path = "C:" + "\\" + "Users" + "\\" + "Example User"
+        for after in ("?", "? Next", "<", ">", ": Next", '"', "|", "*"):
+            with self.subTest(after=after):
+                text = "Open " + path + after
+                blocked = scan_text(text, policy=public_policy)
+                self.assertTrue(blocked.blocked)
+                self.assertEqual([finding.match for finding in blocked.findings], [path])
+                result = scan_text(text, policy=redact_policy)
+                self.assertEqual([finding.match for finding in result.findings], [path])
+                self.assertEqual(result.redacted_text, "Open <PRIVATE_HOME_PATH>" + after)
+
+    def test_windows_spaced_directory_matching_scales_linearly(self) -> None:
+        rule = next(rule for rule in DEFAULT_RULES if rule.id == "windows-home-path")
+        pattern = re.compile(rule.pattern, rule.flags)
+        root = "C:" + "\\" + "Users" + "\\"
+        unit = "A" * 63 + " " * 64
+        elapsed = []
+        for repeats in (1000, 8000):
+            path = root + unit * repeats + "Example User"
+            text = path + "?"
+            timings = []
+            for _ in range(3):
+                start = perf_counter()
+                match = pattern.search(text)
+                timings.append(perf_counter() - start)
+                assert match is not None
+                self.assertEqual(match.span(), (0, len(path)))
+            elapsed.append(min(timings))
+        # An 8x input grows to about 64x runtime if matching is quadratic.
+        self.assertLess(elapsed[1] / elapsed[0], 24, elapsed)
 
     def test_compound_hostname_config_keys_match_without_broadening_code_context(self) -> None:
         host = "fixture-db" + ".internal"
