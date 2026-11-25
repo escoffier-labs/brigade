@@ -2,8 +2,8 @@
 
 use std::fs;
 
-use graphtrail::model::{ContextPack, GraphQueryResult, OutlineRow, SymbolCandidate};
-use graphtrail::store::{SCHEMA_VERSION, init_schema, meta, open_db, sync_repo};
+use brigade_code_graph::model::{ContextPack, GraphQueryResult, OutlineRow, SymbolCandidate};
+use brigade_code_graph::store::{SCHEMA_VERSION, init_schema, meta, open_db, sync_repo};
 
 #[test]
 fn context_pack_json_has_versioned_stable_shape() {
@@ -159,7 +159,7 @@ fn doctor_exposes_stale_resolver_markers_and_sync_repairs_them() {
             if let Some(value) = value {
                 meta::upsert(&conn, key, value).unwrap();
             }
-            let report = graphtrail::query::doctor(&conn, root, &db).unwrap();
+            let report = brigade_code_graph::query::doctor(&conn, root, &db).unwrap();
             assert_eq!(report.verdict, "STALE", "{key}={value:?}");
             assert_eq!(report.exit_code(), 1);
             let json = serde_json::to_value(&report).unwrap();
@@ -170,7 +170,7 @@ fn doctor_exposes_stale_resolver_markers_and_sync_repairs_them() {
                 serde_json::to_value(meta::read(&conn, "resolver_version").unwrap()).unwrap()
             );
             sync_repo(&conn, root).unwrap();
-            let fresh = graphtrail::query::doctor(&conn, root, &db).unwrap();
+            let fresh = brigade_code_graph::query::doctor(&conn, root, &db).unwrap();
             assert_eq!(fresh.verdict, "FRESH");
             assert_eq!(fresh.exit_code(), 0);
             let json = serde_json::to_value(fresh).unwrap();
@@ -192,7 +192,7 @@ fn doctor_json_reports_skipped_files_parse_errors_and_warnings() {
     init_schema(&conn).unwrap();
     sync_repo(&conn, root).unwrap();
 
-    let report = graphtrail::query::doctor(&conn, root, &db).unwrap();
+    let report = brigade_code_graph::query::doctor(&conn, root, &db).unwrap();
     let json = serde_json::to_value(&report).unwrap();
 
     assert_eq!(json["verdict"], "FRESH");
@@ -212,9 +212,10 @@ fn doctor_json_reports_skipped_files_parse_errors_and_warnings() {
     let clean = open_db(&clean_db).unwrap();
     init_schema(&clean).unwrap();
     sync_repo(&clean, clean_root).unwrap();
-    let json =
-        serde_json::to_value(graphtrail::query::doctor(&clean, clean_root, &clean_db).unwrap())
-            .unwrap();
+    let json = serde_json::to_value(
+        brigade_code_graph::query::doctor(&clean, clean_root, &clean_db).unwrap(),
+    )
+    .unwrap();
     assert_eq!(
         json["skipped"],
         serde_json::json!({"count": 0, "sample": []})
@@ -242,7 +243,8 @@ fn doctor_reports_per_language_coverage() {
     init_schema(&conn).unwrap();
     sync_repo(&conn, root).unwrap();
 
-    let json = serde_json::to_value(graphtrail::query::doctor(&conn, root, &db).unwrap()).unwrap();
+    let json =
+        serde_json::to_value(brigade_code_graph::query::doctor(&conn, root, &db).unwrap()).unwrap();
     let coverage = json["coverage"].as_object().expect("coverage object");
     assert_eq!(
         coverage.keys().map(String::as_str).collect::<Vec<_>>(),

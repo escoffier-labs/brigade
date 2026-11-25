@@ -91,25 +91,21 @@ The stable publish workflow repeats the guard after validating tag identity.
 )
 ```
 
-The next publish workflow builds the five managed components (`agent-notify`, `graphtrail`,
-`graphtrail-mcp`, `miseledger`, and `sessionfind`) for `linux-amd64`, `linux-arm64`,
-`darwin-amd64`, `darwin-arm64`, and `windows-amd64`. It also builds the canonical aliases
-`brigade-code-graph`, `brigade-code-graph-mcp`, and `brigade-evidence` as separate targets
-for every platform. It creates one Brigade release with exactly 40 native assets
-(25 legacy + 15 canonical) and exactly 42 total GitHub release files, counting the
-native assets plus `component-manifest-v1.json` and `checksums.txt`. Checksums cover
-41 entries: all native assets and the primary manifest. Attestations cover those same files.
-The primary manifest retains the five legacy component IDs and executables for
-stable 0.30.0 upgrade and offline rollback compatibility. Validators still accept
-complete historical 25-asset releases (27 total files), but new production requires
-the complete additive inventory. Partial alias sets and unrelated extras are rejected.
-The checked-in historical manifest stays unchanged. Package assembly stages the
-new tag's generated legacy-primary manifest. Default installation identities stay legacy.
+The publish workflow builds `agent-notify`, `brigade-code-graph`,
+`brigade-code-graph-mcp`, `brigade-evidence`, and `sessionfind` for
+`linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64`, and
+`windows-amd64`, plus `brigade-hub` for both Linux architectures. The release
+contains 29 total GitHub release files: 27 native assets,
+`component-manifest-v1.json`, and `checksums.txt`. Checksums and attestations
+cover 28 files, comprising the native binaries and the manifest. Package
+assembly bundles the generated manifest for the exact tag. Historical tags
+retain their original asset inventories.
+
 The release body names `brigadestack==<version>` and mentions `brigade-cli==<version>` as the same code under the old name. The `build-python-dist` job builds both distributions from one tree: the root project as `brigadestack`, then a temporary copy stamped by `scripts/stamp_brigade_cli.py` as `brigade-cli` (same version, dependencies, extras and package files; only the name and console scripts differ). Before the PyPI upload, the separate `check-cli-upgrade` job (no OIDC token) runs `scripts/check_cli_upgrade.py`, which installs the newest older stable `brigade-cli` from PyPI in a fresh venv, upgrades it to the built wheel and requires `brigade --version` and `brigade-hook --help` to work, so an in-place `pipx upgrade brigade-cli` cannot ship broken. `build-and-publish` downloads the built artifact by ID and checks it against the build job's SHA-256 manifest before it uploads. Through 0.33 `brigade-cli` stays a full build. After 0.33, add the final stub release: a `brigade-cli` with no `brigadestack` dependency whose `brigade` command prints the migration command (`pipx uninstall brigade-cli` then `pipx install brigadestack`), and drop the stamped build and this gate in the same change. Rust builds run on the exact native runner
 for each platform. Go builds are pure-Go cross builds with `CGO_ENABLED=0`.
 
-The generated manifest and all component URLs must point to
-`escoffier-labs/brigade` at the exact tag. The workflow fails before PyPI publication if inventory,
+The generated manifest and all component URLs use the repository name
+recorded by the publishing workflow and the exact release tag. The workflow fails before PyPI publication if inventory,
 checksum, release-page manifest, or `gh attestation verify` checks fail. PyPI wheel and sdist builds
 copy the final generated manifest into package data after that gate.
 

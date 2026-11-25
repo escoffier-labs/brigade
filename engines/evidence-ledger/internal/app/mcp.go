@@ -118,7 +118,7 @@ func mcpDoctorChecks() []doctorCheck {
 		server, _ := result["serverInfo"].(map[string]any)
 		name, _ := server["name"].(string)
 		version, _ := server["version"].(string)
-		add("mcp_initialize", ok && isServerName(name) && version != "", fmt.Sprintf("server=%s version=%s", name, version))
+		add("mcp_initialize", ok && name == CanonicalProgram && version != "", fmt.Sprintf("server=%s version=%s", name, version))
 	}
 
 	toolsResp := handleMCPRequest(mcpRequest{JSONRPC: "2.0", ID: "doctor-tools", Method: "tools/list"})

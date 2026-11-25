@@ -1,7 +1,8 @@
-// Share the legacy application, including argument parsing and exit behavior.
-#[path = "../main.rs"]
-mod application;
+use anyhow::Result;
 
-fn main() -> anyhow::Result<()> {
-    application::main()
+use brigade_code_graph::cli::{Cli, run};
+use clap::Parser;
+
+fn main() -> Result<()> {
+    run(Cli::parse())
 }

@@ -6,10 +6,10 @@ use std::path::Path;
 use std::thread::sleep;
 use std::time::Duration;
 
-use graphtrail::extractors::common::symbol_id;
-use graphtrail::extractors::{python, rust};
-use graphtrail::query::{doctor, freshness};
-use graphtrail::store::{SCHEMA_VERSION, init_schema, meta, open_db, sync_repo};
+use brigade_code_graph::extractors::common::symbol_id;
+use brigade_code_graph::extractors::{python, rust};
+use brigade_code_graph::query::{doctor, freshness};
+use brigade_code_graph::store::{SCHEMA_VERSION, init_schema, meta, open_db, sync_repo};
 use rusqlite::Connection;
 
 #[test]

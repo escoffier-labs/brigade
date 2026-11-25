@@ -6,13 +6,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use graphtrail::mcp::handle_request;
-use graphtrail::store::{init_schema, open_db, sync_repo};
+use brigade_code_graph::mcp::handle_request;
+use brigade_code_graph::store::{init_schema, open_db, sync_repo};
 use serde_json::{Value, json};
 use tempfile::TempDir;
 
 fn graphtrail() -> &'static str {
-    env!("CARGO_BIN_EXE_graphtrail")
+    env!("CARGO_BIN_EXE_brigade-code-graph")
 }
 
 /// A repo where `run`, `run_journal`, `runguard`, `evaluate` and `evaluated`

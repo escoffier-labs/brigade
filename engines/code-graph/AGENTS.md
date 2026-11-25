@@ -2,7 +2,7 @@
 
 Orientation for coding agents working on the Brigade Code Graph engine.
 
-The code-graph engine is a local sidecar. It parses a repository with tree-sitter in a single pass per file, extracts symbols, imports, and call edges into a small SQLite graph under `.graphtrail/`, and answers structural questions (search, callers, callees, impact, context, stats) plus freshness checks (`doctor`), a dry-run `evaluate`, edge lineage (`explain`), graph `export`, and an opt-in foreground `watch` over two surfaces: a CLI (`graphtrail`) and an MCP server (`graphtrail-mcp`). The default build makes no network calls and starts no daemon. Languages supported: Python, TypeScript/JavaScript, Astro, Rust, Go.
+The code-graph engine is a local sidecar. It parses a repository with tree-sitter in a single pass per file, extracts symbols, imports, and call edges into a small SQLite graph under `.brigade/code-graph/`, and answers structural questions (search, callers, callees, impact, context, stats) plus freshness checks (`doctor`), a dry-run `evaluate`, edge lineage (`explain`), graph `export`, and an opt-in foreground `watch` over two surfaces: a CLI (`brigade-code-graph`) and an MCP server (`brigade-code-graph-mcp`). The default build makes no network calls and starts no daemon. Languages supported: Python, TypeScript/JavaScript, Astro, Rust, Go.
 
 MCP query connections always use `SQLITE_OPEN_READ_ONLY`. `refresh: true` starts an incremental graph-index write and waits up to 10 seconds before opening the query read-only. If the refresh fails or times out, the query proceeds and appends a `refresh_error` note to its text result. A timed-out worker may finish concurrently with that read-only query. Without `refresh`, query tools do not write the graph.
 
@@ -53,7 +53,7 @@ The code is split into focused modules:
 - `mcp` (`src/mcp.rs`): JSON-RPC handling plus the MCP tool registry, argument policy, and dispatch.
 - `adapters` (`src/adapters/`): optional integrations enabled by the `codesearch` and `miseledger` Cargo features.
 - `cli` (`src/cli.rs`): a thin command-line interface.
-- Binaries: `src/main.rs` (the `graphtrail` CLI) and `src/bin/graphtrail-mcp.rs` (the `graphtrail-mcp` MCP server).
+- Binaries: `src/bin/brigade-code-graph.rs` and `src/bin/brigade-code-graph-mcp.rs`.
 
 ## MCP smoke test
 
@@ -62,12 +62,12 @@ Build, then pipe newline-delimited JSON-RPC into the server over stdio. It speak
 ```bash
 cargo run -- init .
 cargo run -- sync .
-cargo run -- --db .graphtrail/graphtrail.db stats --json
+cargo run -- --db .brigade/code-graph/code-graph.db stats --json
 cargo build --release
 printf '%s\n%s\n' \
   '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
   '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-  | ./target/release/graphtrail-mcp --db .graphtrail/graphtrail.db
+  | ./target/release/brigade-code-graph-mcp --db .brigade/code-graph/code-graph.db
 ```
 
 ## Conventions

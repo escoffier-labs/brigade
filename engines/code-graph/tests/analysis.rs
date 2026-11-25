@@ -4,8 +4,8 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
-use graphtrail::query::{affected, cycles, dead_code};
-use graphtrail::store::{init_schema, open_db, sync_repo};
+use brigade_code_graph::query::{affected, cycles, dead_code};
+use brigade_code_graph::store::{init_schema, open_db, sync_repo};
 use rusqlite::Connection;
 
 /// lib.py defines helper (imported by app.py) plus two uncalled callables;

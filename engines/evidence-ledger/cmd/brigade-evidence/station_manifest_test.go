@@ -34,7 +34,7 @@ type stationSurface struct {
 	ProbeContains  []string `json:"probe_contains"`
 }
 
-func TestBrigadeStationManifestMatchesMiseLedgerCLI(t *testing.T) {
+func TestBrigadeStationManifestMatchesEvidenceCLI(t *testing.T) {
 	body, err := os.ReadFile(filepath.Join("..", "..", "station.json"))
 	if err != nil {
 		t.Fatalf("read station.json: %v", err)

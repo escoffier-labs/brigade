@@ -52,7 +52,7 @@ def _asset_name(component: str, platform: str) -> str:
 
 def _write_inventory(root: Path) -> set[str]:
     names: set[str] = set()
-    for component in (*COMPONENTS, "graphtrail", "graphtrail-mcp", "miseledger"):
+    for component in COMPONENTS:
         for platform in _platforms(component):
             name = _asset_name(component, platform)
             (root / name).write_bytes(name.encode())
@@ -68,7 +68,7 @@ def test_generator_writes_stable_unified_release_manifest_and_checksums(generato
     checksums_path = tmp_path / "checksums.txt"
 
     generator_module.generate_manifest(
-        tag="v1.2.3",
+        tag="v0.33.0",
         commit="a" * 40,
         assets_dir=assets,
         output=manifest_path,
@@ -77,20 +77,20 @@ def test_generator_writes_stable_unified_release_manifest_and_checksums(generato
 
     manifest = json.loads(manifest_path.read_text())
     assert manifest["schema_version"] == 1
-    assert manifest["brigade_version"] == "1.2.3"
+    assert manifest["brigade_version"] == "0.33.0"
     assert manifest["supported_platforms"] == list(PLATFORMS)
     assert set(manifest["components"]) == set(COMPONENTS)
     for component in COMPONENTS:
         assert manifest["components"][component]["component_revision"] == "a" * 40
         assert manifest["components"][component]["source"] == {
             "repository": "escoffier-labs/brigade",
-            "release_tag": "v1.2.3",
+            "release_tag": "v0.33.0",
         }
         assert set(manifest["components"][component]["assets"]) == set(_platforms(component))
         for platform, asset in manifest["components"][component]["assets"].items():
             assert asset["asset_name"] == _asset_name(component, platform)
             assert asset["download_url"] == (
-                "https://github.com/escoffier-labs/brigade/releases/download/v1.2.3/" + asset["asset_name"]
+                "https://github.com/escoffier-labs/brigade/releases/download/v0.33.0/" + asset["asset_name"]
             )
             assert asset["sha256"] == hashlib.sha256(asset["asset_name"].encode()).hexdigest()
 
@@ -106,7 +106,7 @@ def test_generator_rejects_a_brigade_hub_asset_outside_linux(generator_module, t
     (assets / name).write_bytes(b"not shipped")
     with pytest.raises(ValueError, match="unexpected native assets: " + name.replace(".", r"\.")):
         generator_module.generate_manifest(
-            tag="v1.2.3",
+            tag="v0.33.0",
             commit="a" * 40,
             assets_dir=assets,
             output=tmp_path / "manifest.json",
@@ -118,22 +118,22 @@ def test_generator_rejects_missing_extra_or_duplicate_native_assets(generator_mo
     assets = tmp_path / "assets"
     assets.mkdir()
     _write_inventory(assets)
-    (assets / "graphtrail-linux-amd64").unlink()
+    (assets / "brigade-code-graph-linux-amd64").unlink()
 
     with pytest.raises(ValueError, match="missing native assets"):
         generator_module.generate_manifest(
-            tag="v1.2.3",
+            tag="v0.33.0",
             commit="a" * 40,
             assets_dir=assets,
             output=tmp_path / "manifest.json",
             checksums_output=tmp_path / "checksums.txt",
         )
 
-    (assets / "graphtrail-linux-amd64").write_bytes(b"graphtrail-linux-amd64")
+    (assets / "brigade-code-graph-linux-amd64").write_bytes(b"restored asset")
     (assets / "unexpected").write_text("no")
     with pytest.raises(ValueError, match="unexpected native assets"):
         generator_module.generate_manifest(
-            tag="v1.2.3",
+            tag="v0.33.0",
             commit="a" * 40,
             assets_dir=assets,
             output=tmp_path / "manifest.json",
@@ -141,46 +141,26 @@ def test_generator_rejects_missing_extra_or_duplicate_native_assets(generator_mo
         )
 
 
-ALIASES = ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence")
-
-
-def _write_aliases(root: Path) -> set[str]:
-    names = {_asset_name(component, platform) for component in ALIASES for platform in PLATFORMS}
-    for name in names:
-        (root / name).write_bytes(name.encode())
-    return names
-
-
-def test_generator_additive_inventory_preserves_primary_manifest_and_hashes_every_file(generator_module, tmp_path):
-    assets = tmp_path / "assets"
-    assets.mkdir()
-    legacy = _write_inventory(assets)
-    output = tmp_path / "component-manifest-v1.json"
-    checksums = tmp_path / "checksums.txt"
-    kwargs = dict(tag="v1.2.3", commit="a" * 40, assets_dir=assets, output=output, checksums_output=checksums)
-    generator_module.generate_manifest(**kwargs)
-    legacy_manifest = output.read_bytes()
-    aliases = _write_aliases(assets)
-
-    generator_module.generate_manifest(**kwargs)
-
-    assert output.read_bytes() == legacy_manifest
-    assert generator_module.expected_asset_names() <= legacy
-    entries = dict(line.split()[::-1] for line in checksums.read_text().splitlines())
-    # 40 native assets for the full-matrix components, 2 for brigade-hub, and the manifest.
-    assert len(entries) == 43
-    assert set(entries) == legacy | aliases | {output.name}
-    for name in legacy | aliases:
-        assert entries[name] == hashlib.sha256((assets / name).read_bytes()).hexdigest()
-    assert entries[output.name] == hashlib.sha256(output.read_bytes()).hexdigest()
-
-
-@pytest.mark.parametrize("defect", ["partial", "empty", "foreign", "platform", "duplicate"])
-def test_generator_rejects_invalid_additive_inventory_before_writing(generator_module, tmp_path, defect):
+def test_generator_rejects_retired_asset(generator_module, tmp_path):
     assets = tmp_path / "assets"
     assets.mkdir()
     _write_inventory(assets)
-    _write_aliases(assets)
+    (assets / "graphtrail-linux-amd64").write_bytes(b"retired asset")
+    with pytest.raises(ValueError, match="unexpected native assets"):
+        generator_module.generate_manifest(
+            tag="v0.33.0",
+            commit="a" * 40,
+            assets_dir=assets,
+            output=tmp_path / "manifest.json",
+            checksums_output=tmp_path / "checksums.txt",
+        )
+
+
+@pytest.mark.parametrize("defect", ["partial", "empty", "foreign", "platform", "duplicate"])
+def test_generator_rejects_invalid_native_inventory_before_writing(generator_module, tmp_path, defect):
+    assets = tmp_path / "assets"
+    assets.mkdir()
+    _write_inventory(assets)
     if defect == "partial":
         (assets / "brigade-evidence-windows-amd64.exe").unlink()
     elif defect == "empty":
@@ -196,7 +176,7 @@ def test_generator_rejects_invalid_additive_inventory_before_writing(generator_m
     checksums = tmp_path / "checksums.txt"
     with pytest.raises(ValueError):
         generator_module.generate_manifest(
-            tag="v1.2.3", commit="a" * 40, assets_dir=assets, output=output, checksums_output=checksums
+            tag="v0.33.0", commit="a" * 40, assets_dir=assets, output=output, checksums_output=checksums
         )
     assert not output.exists()
     assert not checksums.exists()
@@ -210,9 +190,9 @@ def test_generated_manifest_passes_release_provenance(generator_module, tmp_path
     _write_inventory(assets)
     output = tmp_path / "component-manifest-v1.json"
     manifest = generator_module.generate_manifest(
-        tag="v1.2.3", commit="a" * 40, assets_dir=assets, output=output, checksums_output=tmp_path / "checksums.txt"
+        tag="v0.33.0", commit="a" * 40, assets_dir=assets, output=output, checksums_output=tmp_path / "checksums.txt"
     )
-    release, checksums, body = _release(manifest)
+    release, checksums, body = _release(manifest, aliases=False)
     assert output.read_bytes() == body.encode()
     assert _module().verify_manifest(output, fetch=_fetcher(release, checksums, body)) == []
 
@@ -232,7 +212,7 @@ def test_generator_preserves_lf_bytes_with_windows_text_defaults(generator_modul
     output = tmp_path / "manifest.json"
     checksums = tmp_path / "checksums.txt"
     manifest = generator_module.generate_manifest(
-        tag="v1.2.3", commit="a" * 40, assets_dir=assets, output=output, checksums_output=checksums
+        tag="v0.33.0", commit="a" * 40, assets_dir=assets, output=output, checksums_output=checksums
     )
     assert output.read_bytes() == (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
     assert b"\r" not in checksums.read_bytes()
@@ -250,14 +230,14 @@ def test_generator_records_the_workflow_repository_and_the_result_verifies(
     _write_inventory(assets)
     output = tmp_path / "component-manifest-v1.json"
     manifest = generator_module.generate_manifest(
-        tag="v1.2.3", commit="a" * 40, assets_dir=assets, output=output, checksums_output=tmp_path / "checksums.txt"
+        tag="v0.33.0", commit="a" * 40, assets_dir=assets, output=output, checksums_output=tmp_path / "checksums.txt"
     )
 
     for component in manifest["components"].values():
         assert component["source"]["repository"] == repository
         for asset in component["assets"].values():
-            assert asset["download_url"].startswith(f"https://github.com/{repository}/releases/download/v1.2.3/")
-    release, checksums, body = _release(manifest, repository)
+            assert asset["download_url"].startswith(f"https://github.com/{repository}/releases/download/v0.33.0/")
+    release, checksums, body = _release(manifest, repository, aliases=False)
     fetch = _fetcher(release, checksums, body, repository=repository)
     assert _module().verify_manifest(output, fetch=fetch, expected_repository=repository) == []
 
@@ -275,7 +255,7 @@ def test_generator_refuses_to_record_an_unaccepted_repository_and_writes_nothing
 
     with pytest.raises(ValueError, match="must be one of"):
         generator_module.generate_manifest(
-            tag="v1.2.3", commit="a" * 40, assets_dir=assets, output=output, checksums_output=checksums
+            tag="v0.33.0", commit="a" * 40, assets_dir=assets, output=output, checksums_output=checksums
         )
     assert not output.exists() and not checksums.exists()
 
@@ -285,7 +265,7 @@ def test_generator_explicit_repository_overrides_the_environment(generator_modul
     assets.mkdir()
     _write_inventory(assets)
     manifest = generator_module.generate_manifest(
-        tag="v1.2.3",
+        tag="v0.33.0",
         commit="a" * 40,
         assets_dir=assets,
         output=tmp_path / "manifest.json",

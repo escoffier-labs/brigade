@@ -3,8 +3,8 @@
 
 use std::fs;
 
-use graphtrail::query::diff_graphs;
-use graphtrail::store::{SCHEMA_VERSION, init_schema, meta, open_db, sync_repo};
+use brigade_code_graph::query::diff_graphs;
+use brigade_code_graph::store::{SCHEMA_VERSION, init_schema, meta, open_db, sync_repo};
 
 /// Sync `source` (a single mod.py) into a fresh DB under `dir` and return the connection.
 fn index(dir: &std::path::Path, source: &str) -> rusqlite::Connection {
