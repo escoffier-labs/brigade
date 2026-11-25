@@ -69,7 +69,7 @@ def test_operator_checkup_is_ready_when_all_surfaces_pass(monkeypatch, capsys):
 def test_operator_checkup_loop_reports_graph_ledger_and_brief_hit_rate(monkeypatch, tmp_path, capsys):
     _patch_all_doctors(monkeypatch, skills_rc=0)
     monkeypatch.setattr("brigade.context_cmd._graphtrail_bin", lambda: "/usr/bin/graphtrail")
-    monkeypatch.setattr("brigade.evidence_brief._miseledger_bin", lambda: "/usr/bin/miseledger")
+    monkeypatch.setattr("brigade.evidence_brief._evidence_bin", lambda: "/usr/bin/miseledger")
     db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_text("ok")
@@ -129,7 +129,7 @@ def test_operator_checkup_loop_handles_runs_with_and_without_brief_precision(tmp
 
 def test_loop_stations_missing_miseledger_explains_go_install_is_one_release_compatibility(monkeypatch, tmp_path):
     monkeypatch.setattr("brigade.context_cmd._graphtrail_bin", lambda: None)
-    monkeypatch.setattr("brigade.evidence_brief._miseledger_bin", lambda: None)
+    monkeypatch.setattr("brigade.evidence_brief._evidence_bin", lambda: None)
 
     payload = lifecycle._loop_stations_payload(tmp_path)
 

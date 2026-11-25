@@ -24,7 +24,7 @@ def _patch_engine(monkeypatch, *, run_calls: list | None = None):
         stdout = '{"ok": true}\n' if "--json" in args else "engine-stdout\n"
         return proc.Result(exit_code, stdout, "")
 
-    monkeypatch.setattr(evidence_brief, "_miseledger_bin", lambda: "/fake/miseledger")
+    monkeypatch.setattr(evidence_brief, "_evidence_bin", lambda: "/fake/miseledger")
     monkeypatch.setattr(proc, "run", fake_run)
 
 
@@ -163,7 +163,7 @@ def test_evidence_verb_propagates_child_exit_code(monkeypatch, verb):
 
 @pytest.mark.parametrize("verb", ("show", "explain", "stats"))
 def test_evidence_verb_missing_engine_exits_127(monkeypatch, capsys, verb):
-    monkeypatch.setattr(evidence_brief, "_miseledger_bin", lambda: None)
+    monkeypatch.setattr(evidence_brief, "_evidence_bin", lambda: None)
 
     rc = cli.main(["evidence", verb, "item"])
 
@@ -197,7 +197,7 @@ def test_evidence_query_verb_rejects_invalid_timeout_before_starting_engine(monk
 
 
 def test_evidence_query_verb_timeout_prints_branded_retry_hint(monkeypatch, capsys):
-    monkeypatch.setattr(evidence_brief, "_miseledger_bin", lambda: "/fake/miseledger")
+    monkeypatch.setattr(evidence_brief, "_evidence_bin", lambda: "/fake/miseledger")
     monkeypatch.setattr(proc, "run", lambda *a, **k: proc.Result(124, "", "timeout after 30.0s\n"))
 
     rc = cli.main(["evidence", "stats"])
@@ -234,7 +234,7 @@ def test_evidence_status_uses_configured_timeout(monkeypatch, tmp_path):
 
 
 def test_evidence_status_timeout_summary_offers_branded_retry(monkeypatch, tmp_path):
-    monkeypatch.setattr(evidence_brief, "_miseledger_bin", lambda: "/fake/miseledger")
+    monkeypatch.setattr(evidence_brief, "_evidence_bin", lambda: "/fake/miseledger")
     monkeypatch.setattr(proc, "run", lambda *a, **k: proc.Result(124, "", "timeout\n"))
 
     payload = evidence_cmd.status_payload(tmp_path)
@@ -247,7 +247,7 @@ def test_evidence_status_timeout_summary_offers_branded_retry(monkeypatch, tmp_p
 
 def test_evidence_status_next_commands_never_name_the_engine_binary(monkeypatch, tmp_path):
     """No health state may tell the user to run the engine binary directly."""
-    monkeypatch.setattr(evidence_brief, "_miseledger_bin", lambda: "/fake/miseledger")
+    monkeypatch.setattr(evidence_brief, "_evidence_bin", lambda: "/fake/miseledger")
 
     for exit_code in (0, 2, 3, 124):
         monkeypatch.setattr(proc, "run", lambda *a, _code=exit_code, **k: proc.Result(_code, "", ""))
@@ -267,7 +267,7 @@ def test_check_label_supports_ok_bool_rows():
 
 
 def test_evidence_status_renders_ok_bool_check_rows_without_none(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(evidence_brief, "_miseledger_bin", lambda: "/fake/miseledger")
+    monkeypatch.setattr(evidence_brief, "_evidence_bin", lambda: "/fake/miseledger")
 
     def fake_run(args, timeout=30.0, **kwargs):
         if "doctor" in args:

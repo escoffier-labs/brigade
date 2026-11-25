@@ -1,6 +1,6 @@
-"""Evidence station commands for MiseLedger integration.
+"""Evidence station commands for Brigade Evidence integration.
 
-MiseLedger stays a process-boundary Go binary. Explicit user-invoked
+Brigade Evidence stays a process-boundary Go binary. Explicit user-invoked
 ``brigade evidence crawl`` and ``brigade evidence search`` commands relay work to it;
 status, doctor, and crawl/export plans remain local checks or review-only output.
 Brigade does not start daemons or upload data.
@@ -325,17 +325,17 @@ def _json_print(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, indent=2, sort_keys=True))
 
 
-def _run_miseledger_result(
+def _run_evidence_result(
     verb: str,
     arguments: list[str],
     *,
     env: dict[str, str] | None = None,
     binary: str | None = None,
 ) -> proc.Result:
-    """Run MiseLedger and return the raw result without printing.
+    """Run Brigade Evidence and return the raw result without printing.
 
     When ``binary`` is provided it is used verbatim (the preflight-resolved
-    path). Otherwise fall back to the configured MiseLedger resolver.
+    path). Otherwise fall back to the configured Brigade Evidence resolver.
     """
 
     timeout_env = _CRAWL_TIMEOUT_ENV if verb == "crawl" else _SHORT_OPERATION_TIMEOUT_ENV
@@ -346,20 +346,20 @@ def _run_miseledger_result(
         return proc.Result(2, "", "")
     timeout = configured_timeout
 
-    resolved = binary if binary is not None else evidence_brief._miseledger_bin()
+    resolved = binary if binary is not None else evidence_brief._evidence_bin()
     if resolved is None:
-        print("error: the evidence engine (miseledger) is not installed; run `brigade setup`", file=sys.stderr)
-        return proc.Result(127, "", "the evidence engine (miseledger) is not installed; run `brigade setup`")
+        print("error: the evidence engine (brigade-evidence) is not installed; run `brigade setup`", file=sys.stderr)
+        return proc.Result(127, "", "the evidence engine (brigade-evidence) is not installed; run `brigade setup`")
     run_kwargs: dict[str, Any] = {}
     if env is not None:
         run_kwargs["env"] = env
     return proc.run([resolved, verb, *arguments], timeout=timeout, **run_kwargs)
 
 
-def _run_miseledger(verb: str, arguments: list[str], *, env: dict[str, str] | None = None) -> int:
-    """Run MiseLedger, relaying output and returning the exit code."""
+def _run_evidence(verb: str, arguments: list[str], *, env: dict[str, str] | None = None) -> int:
+    """Run Brigade Evidence, relaying output and returning the exit code."""
 
-    result = _run_miseledger_result(verb, arguments, env=env)
+    result = _run_evidence_result(verb, arguments, env=env)
     if result.stdout:
         print(result.stdout, end="")
     if result.stderr:
@@ -384,7 +384,7 @@ def _run_memory_crawl(
     env: dict[str, str],
     started_at: str,
 ) -> int:
-    """Preflight MiseLedger memory projection, then delegate crawl storage."""
+    """Preflight Brigade Evidence memory projection, then delegate crawl storage."""
 
     if len(arguments) < 2:
         print(
@@ -416,7 +416,7 @@ def _run_memory_crawl(
         )
         return 2
 
-    binary = evidence_brief._miseledger_bin()
+    binary = evidence_brief._evidence_bin()
     probe = evidence_runtime.probe_memory_projection(binary, env=env)
     compat = evidence_runtime.check_memory_projection_preflight(probe)
     if compat.state == "fail":
@@ -453,7 +453,7 @@ def _run_memory_crawl(
     if "--json" not in crawl_args:
         crawl_args.append("--json")
 
-    result = _run_miseledger_result("crawl", crawl_args, env=env, binary=compat.resolved_path)
+    result = _run_evidence_result("crawl", crawl_args, env=env, binary=compat.resolved_path)
     receipt: dict[str, Any] | None = None
     parsed = result.json()
     if isinstance(parsed, dict):
@@ -536,24 +536,24 @@ def _run_memory_crawl(
 
 
 def _run_crawl(arguments: list[str]) -> int:
-    """Resolve and health-check the crawler before delegating to MiseLedger.
+    """Resolve and health-check the crawler before delegating to Brigade Evidence.
 
-    The resolved crawler's directory is prepended to PATH so that MiseLedger's
-    own discovery lands on the same binary.  A true miseledger ``--crawler``
-    pass-through flag does not exist today and is a MiseLedger-side follow-up.
+    The resolved crawler's directory is prepended to PATH so that Brigade Evidence's
+    own discovery lands on the same binary.  A true brigade-evidence ``--crawler``
+    pass-through flag does not exist today and is a Brigade Evidence-side follow-up.
     """
 
     raw_source = arguments[0] if arguments else None
     # Normalize the source for gating so a differently-cased spelling (e.g.
     # "Discord") cannot bypass the compatibility gate; the original arguments are
-    # still passed to MiseLedger unchanged.
+    # still passed to Brigade Evidence unchanged.
     source = raw_source.lower() if raw_source is not None else None
     env = dict(os.environ)
     target = Path.cwd().expanduser().resolve()
     started_at = _now()
 
     if source is None:
-        return _run_miseledger("crawl", arguments)
+        return _run_evidence("crawl", arguments)
 
     if source == evidence_runtime.MEMORY_SOURCE:
         return _run_memory_crawl(arguments, env=env, started_at=started_at)
@@ -561,7 +561,7 @@ def _run_crawl(arguments: list[str]) -> int:
     runtime = evidence_runtime.resolve_crawler(source, env=env)
     if runtime is None:
         # No crawler contract for this source; delegate directly.
-        return _run_miseledger("crawl", arguments)
+        return _run_evidence("crawl", arguments)
 
     compat = evidence_runtime.check_compatibility(runtime, env=env)
     if compat.state == "fail":
@@ -584,12 +584,12 @@ def _run_crawl(arguments: list[str]) -> int:
         print(f"error: evidence crawl refused for {source}: no executable resolved", file=sys.stderr)
         return 1
 
-    # Prepend the resolved crawler directory so MiseLedger rediscovers the same
+    # Prepend the resolved crawler directory so Brigade Evidence rediscovers the same
     # binary.  This is a Brigade-side substitute for a miseledger --crawler flag.
     crawler_dir = str(Path(runtime.resolved_path).parent)
     env["PATH"] = crawler_dir + os.pathsep + env.get("PATH", "")
 
-    result = _run_miseledger_result("crawl", arguments, env=env)
+    result = _run_evidence_result("crawl", arguments, env=env)
     status = "ok" if result.code == 0 else "fail"
     _write_last_run(
         target=target,
@@ -610,19 +610,19 @@ def _run_crawl(arguments: list[str]) -> int:
 
 
 def run_engine(verb: str, arguments: list[str]) -> int:
-    """Run MiseLedger without changing its argv, output, or data contract.
+    """Run Brigade Evidence without changing its argv, output, or data contract.
 
-    A ``--code-reference`` JSON value is relayed verbatim to MiseLedger, which
+    A ``--code-reference`` JSON value is relayed verbatim to Brigade Evidence, which
     performs exact code-reference matching before lexical fallback.
     """
 
     if verb == "crawl":
         return _run_crawl(arguments)
-    return _run_miseledger(verb, arguments)
+    return _run_evidence(verb, arguments)
 
 
 def memory_audit(*, workspaces: list[Path], json_output: bool = False) -> int:
-    """Print the read-only memory identity audit without invoking MiseLedger."""
+    """Print the read-only memory identity audit without invoking Brigade Evidence."""
 
     payload = memory_identity_audit.audit_workspaces(workspaces)
     if json_output:
@@ -674,7 +674,7 @@ def _build_status_payload(
     include_doctor: bool = True,
     timeout: float = 120.0,
 ) -> dict[str, Any]:
-    binary = evidence_brief._miseledger_bin()
+    binary = evidence_brief._evidence_bin()
     installed = binary is not None
     cursor = _cursor_path(target)
     payload: dict[str, Any] = {
@@ -1004,40 +1004,40 @@ def _memory_namespace_ready(target: Path) -> bool:
     return bool(value) and _MEMORY_NAMESPACE_RE.fullmatch(value) is not None
 
 
-def _crawl_plan_commands(miseledger_cmd: str, target: Path) -> list[list[str]]:
+def _crawl_plan_commands(evidence_cmd: str, target: Path) -> list[list[str]]:
     """Review-only plan: commands that run on a clean copy-paste of this target."""
     commands = [
-        [miseledger_cmd, "init"],
-        [miseledger_cmd, "crawl", "sessions"],
+        [evidence_cmd, "init"],
+        [evidence_cmd, "crawl", "sessions"],
     ]
     if _memory_namespace_ready(target):
-        commands.append([miseledger_cmd, "crawl", "memory", str(target)])
+        commands.append([evidence_cmd, "crawl", "memory", str(target)])
     commands.extend(
         [
-            [miseledger_cmd, "status", "--json"],
-            [miseledger_cmd, "doctor"],
+            [evidence_cmd, "status", "--json"],
+            [evidence_cmd, "doctor"],
         ]
     )
     return commands
 
 
-def _crawl_plan_omitted(miseledger_cmd: str, target: Path) -> list[dict[str, Any]]:
+def _crawl_plan_omitted(evidence_cmd: str, target: Path) -> list[dict[str, Any]]:
     omitted: list[dict[str, Any]] = []
     if not _memory_namespace_ready(target):
         omitted.append(
             {
-                "argv": [miseledger_cmd, "crawl", "memory", str(target)],
+                "argv": [evidence_cmd, "crawl", "memory", str(target)],
                 "reason": _MEMORY_NAMESPACE_OMIT_REASON,
             }
         )
     omitted.extend(
         [
             {
-                "argv": [miseledger_cmd, "crawl", "files", str(target)],
+                "argv": [evidence_cmd, "crawl", "files", str(target)],
                 "reason": _SOURCEHARVEST_OMIT_REASON,
             },
             {
-                "argv": [miseledger_cmd, "crawl", "gitlog", str(target)],
+                "argv": [evidence_cmd, "crawl", "gitlog", str(target)],
                 "reason": _SOURCEHARVEST_OMIT_REASON,
             },
         ]
@@ -1047,8 +1047,8 @@ def _crawl_plan_omitted(miseledger_cmd: str, target: Path) -> list[dict[str, Any
 
 def crawl_plan_payload(*, target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    binary = evidence_brief._miseledger_bin()
-    miseledger_cmd = binary or "miseledger"
+    binary = evidence_brief._evidence_bin()
+    evidence_cmd = binary or "brigade-evidence"
     memory_ready = _memory_namespace_ready(target)
     manual_steps = [
         "Run crawls on the machine that holds the harness session logs (often the agent host).",
@@ -1066,8 +1066,8 @@ def crawl_plan_payload(*, target: Path) -> dict[str, Any]:
         "kind": "crawl",
         "created_at": _now(),
         "installed": binary is not None,
-        "commands": _crawl_plan_commands(miseledger_cmd, target),
-        "omitted": _crawl_plan_omitted(miseledger_cmd, target),
+        "commands": _crawl_plan_commands(evidence_cmd, target),
+        "omitted": _crawl_plan_omitted(evidence_cmd, target),
         "manual_steps": manual_steps,
         "boundaries": [
             "This review-only crawl plan never executes the evidence engine.",

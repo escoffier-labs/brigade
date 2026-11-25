@@ -43,7 +43,7 @@ class EvidenceBrief:
     memory_refs: tuple[dict[str, str], ...] = ()
 
 
-def _miseledger_bin() -> str | None:
+def _evidence_bin() -> str | None:
     return component_bins.resolve("brigade-evidence")
 
 
@@ -388,7 +388,7 @@ def _render(results: list[dict[str, Any]], bundle: dict[str, Any] | None = None)
 
 
 def fetch_evidence_bundle(cwd: Path, query: str, *, limit: int = 5) -> dict[str, Any] | None:
-    binary = _miseledger_bin()
+    binary = _evidence_bin()
     if binary is None:
         return None
     rendered_query = " ".join(str(query or "").split())

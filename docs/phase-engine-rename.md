@@ -638,8 +638,8 @@ release:
    `ENV_OVERRIDES` and `_LEGACY_RELATIVE`. A legacy-keyed `installed.json`
    is then treated as absent, and doctor tells the user to run `brigade setup`.
    Setup stops creating shims and deletes the shims it created earlier.
-4. Remove `GRAPHTRAIL_DB` and `GRAPHTRAIL_ALLOW_UNSAFE_ROOT` reads.
-5. Stop reading `.graphtrail/graphtrail.db`. Doctor reports INFO "legacy
+4. Done for v0.33. Removed `GRAPHTRAIL_DB` and `GRAPHTRAIL_ALLOW_UNSAFE_ROOT` reads.
+5. Done for v0.33. Automatic resolution skips `.graphtrail/graphtrail.db`. Doctor reports INFO "legacy
    index ignored. Run `brigade code sync`". The old directory is never
    deleted, and the walker keeps skipping it so a stale database is never
    indexed.
@@ -655,15 +655,14 @@ release:
 10. `brigade mcp sync` renames owned `graphtrail` and `miseledger` keys by
     default and prints the tool-permission hint. User-authored entries are
     still left alone.
-11. Remove the stub at `docs/wiring-graphtrail-miseledger.md`.
-12. Delete the standalone engine release tooling that root CI never runs:
-    `engines/evidence-ledger/.github/workflows/release.yml`, its validator and
-    `testdata/workflows/release/*.yml`, `install.sh` and
-    `scripts/bootstrap_local.sh`, plus `engines/code-graph/.github/workflows/*`.
-    First confirm that no root workflow or test invokes them. Rename instead
-    if one does.
-13. Delete every `shim` entry from the retired-name allowlist. The version
-    check from R6 enforces this.
+11. Done for v0.33. Removed the stub at `docs/wiring-graphtrail-miseledger.md`.
+12. In progress. Evidence standalone release tooling was retired. The Code
+    Graph repository contract tests still verify the embedded CI and registry
+    publication workflows. Move the applicable checks before deleting them.
+13. In progress. Retired active presentation names and pinned the exact
+    counts of persisted identifiers and old-index exclusions. The release
+    gate still requires the component resolution cutover (task 3) and a
+    decision on the independently deprecated Cargo adapter.
 
 ## Installer acceptance
 

@@ -1,5 +1,5 @@
 name: Feature request
-description: Suggest an improvement to GraphTrail's extractors, queries, CLI, or MCP server.
+description: Suggest an improvement to Brigade Code Graph's extractors, queries, CLI, or MCP server.
 title: "[Feature]: "
 labels: ["enhancement"]
 body:
@@ -16,7 +16,7 @@ body:
     id: proposal
     attributes:
       label: Proposed behavior
-      description: What should GraphTrail do? Include the command, MCP tool, or output shape if relevant.
+      description: What should Brigade Code Graph do? Include the command, MCP tool, or output shape if relevant.
     validations:
       required: true
   - type: dropdown
@@ -31,7 +31,7 @@ body:
         - Doctor / freshness
         - CLI surface
         - MCP server / tools
-        - Optional integration (Code Search, MiseLedger, Brigade)
+        - Optional integration (Code Search, Brigade Evidence, Brigade)
         - Other
     validations:
       required: true
@@ -39,7 +39,7 @@ body:
     id: alternatives
     attributes:
       label: Alternatives considered
-      description: grep, an embedding index, an LSP, or another tool. Why does GraphTrail need to do this?
+      description: grep, an embedding index, an LSP, or another tool. Why does Brigade Code Graph need to do this?
     validations:
       required: false
   - type: checkboxes

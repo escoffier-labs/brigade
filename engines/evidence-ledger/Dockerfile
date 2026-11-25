@@ -1,5 +1,5 @@
-# Container image for the MiseLedger stdio MCP server (`brigade-evidence mcp`).
-# MiseLedger is pure Go (modernc.org/sqlite), so the build needs no CGO and the
+# Container image for the Brigade Evidence stdio MCP server (`brigade-evidence mcp`).
+# Brigade Evidence is pure Go (modernc.org/sqlite), so the build needs no CGO and the
 # result is a static, dependency-free binary.
 
 FROM golang:1.25-bookworm AS builder

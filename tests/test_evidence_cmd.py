@@ -15,7 +15,7 @@ from brigade.station import DoctorContext
 
 
 def test_evidence_status_reports_uninstalled(monkeypatch, tmp_path):
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: None)
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: None)
 
     payload = evidence_cmd.status_payload(tmp_path)
 
@@ -27,7 +27,7 @@ def test_evidence_status_reports_uninstalled(monkeypatch, tmp_path):
 
 
 def test_evidence_status_distinguishes_explicit_execution_from_review_only_plans(monkeypatch, tmp_path):
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: None)
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: None)
 
     payload = evidence_cmd.status_payload(tmp_path)
     boundaries = payload["boundaries"]
@@ -76,7 +76,7 @@ def test_code_run_relays_child_stderr_unchanged(monkeypatch, capsys):
 
 
 def test_evidence_run_engine_relays_child_stderr_unchanged(monkeypatch, capsys):
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: "/x/miseledger")
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: "/x/miseledger")
     monkeypatch.setattr(evidence_cmd.proc, "run", lambda *_, **__: evidence_cmd.proc.Result(6, "", "ledger warning\\n"))
 
     assert evidence_cmd.run_engine("search", ["needle"]) == 6
@@ -84,7 +84,7 @@ def test_evidence_run_engine_relays_child_stderr_unchanged(monkeypatch, capsys):
 
 
 def test_evidence_status_ok_with_status_json(monkeypatch, tmp_path):
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: "/x/miseledger")
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: "/x/miseledger")
 
     def fake_run(args, **kw):
         if args[:2] == ["/x/miseledger", "status"]:
@@ -104,7 +104,7 @@ def test_evidence_status_ok_with_status_json(monkeypatch, tmp_path):
 
 
 def test_evidence_summary_status_skips_doctor(monkeypatch, tmp_path):
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: "/x/miseledger")
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: "/x/miseledger")
     calls = []
 
     def fake_run_json(args, *, timeout):
@@ -127,7 +127,7 @@ def test_evidence_summary_status_skips_doctor(monkeypatch, tmp_path):
 
 
 def test_evidence_doctor_exits_nonzero_on_fail(monkeypatch, tmp_path):
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: "/x/miseledger")
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: "/x/miseledger")
 
     def fake_run(args, **kw):
         if args[:2] == ["/x/miseledger", "status"]:
@@ -208,9 +208,9 @@ def test_crawl_plan_is_review_only(tmp_path):
     payload = evidence_cmd.crawl_plan_payload(target=tmp_path)
     rendered = evidence_cmd._render_plan_md(payload)
 
-    assert ["miseledger", "crawl", "sessions"] in payload["commands"]
+    assert ["brigade-evidence", "crawl", "sessions"] in payload["commands"]
     assert "review-only crawl plan never executes the evidence engine" in payload["boundaries"][0]
-    assert "miseledger crawl sessions" in rendered
+    assert "brigade-evidence crawl sessions" in rendered
 
 
 def test_crawl_plan_omits_memory_without_namespace_and_sourceharvest(tmp_path):
@@ -218,10 +218,10 @@ def test_crawl_plan_omits_memory_without_namespace_and_sourceharvest(tmp_path):
     commands = payload["commands"]
     target = str(tmp_path.resolve())
 
-    assert ["miseledger", "init"] in commands
-    assert ["miseledger", "crawl", "sessions"] in commands
-    assert ["miseledger", "status", "--json"] in commands
-    assert ["miseledger", "doctor"] in commands
+    assert ["brigade-evidence", "init"] in commands
+    assert ["brigade-evidence", "crawl", "sessions"] in commands
+    assert ["brigade-evidence", "status", "--json"] in commands
+    assert ["brigade-evidence", "doctor"] in commands
     for command in commands:
         assert "--root" not in command
         assert "--repo" not in command
@@ -230,9 +230,9 @@ def test_crawl_plan_omits_memory_without_namespace_and_sourceharvest(tmp_path):
         assert command[1:3] != ["crawl", "gitlog"]
 
     omitted = {tuple(row["argv"]): row["reason"] for row in payload["omitted"]}
-    assert "memory/NAMESPACE" in omitted[("miseledger", "crawl", "memory", target)]
-    assert "retired sourceharvest" in omitted[("miseledger", "crawl", "files", target)]
-    assert "retired sourceharvest" in omitted[("miseledger", "crawl", "gitlog", target)]
+    assert "memory/NAMESPACE" in omitted[("brigade-evidence", "crawl", "memory", target)]
+    assert "retired sourceharvest" in omitted[("brigade-evidence", "crawl", "files", target)]
+    assert "retired sourceharvest" in omitted[("brigade-evidence", "crawl", "gitlog", target)]
     rendered = evidence_cmd._render_plan_md(payload)
     assert "Omitted" in rendered
     assert "memory/NAMESPACE" in rendered
@@ -245,16 +245,16 @@ def test_crawl_plan_prints_memory_when_namespace_is_declared(tmp_path):
     namespace.write_text(_VALID_MEMORY_NAMESPACE + "\n")
     payload = evidence_cmd.crawl_plan_payload(target=tmp_path)
     target = str(tmp_path.resolve())
-    assert ["miseledger", "crawl", "memory", target] in payload["commands"]
+    assert ["brigade-evidence", "crawl", "memory", target] in payload["commands"]
     omitted_argv = [tuple(row["argv"]) for row in payload["omitted"]]
-    assert ("miseledger", "crawl", "memory", target) not in omitted_argv
+    assert ("brigade-evidence", "crawl", "memory", target) not in omitted_argv
 
 
 def test_crawl_plan_printed_commands_exec_on_bundled_engine(tmp_path, monkeypatch):
     """Each printed argv must run on the in-tree engine at engines/evidence-ledger/bin/."""
     binary = _bundled_evidence()
     monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(binary))
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(binary))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(binary))
     workspace = tmp_path / "ws"
     workspace.mkdir()
     payload = evidence_cmd.crawl_plan_payload(target=workspace)
@@ -266,7 +266,7 @@ def test_crawl_plan_printed_commands_exec_on_bundled_engine(tmp_path, monkeypatc
 
 def test_crawl_plan_memory_command_execs_when_namespace_declared(tmp_path, monkeypatch):
     binary = _bundled_evidence()
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(binary))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(binary))
     workspace = tmp_path / "ws"
     namespace = workspace / "memory" / "NAMESPACE"
     namespace.parent.mkdir(parents=True)
@@ -348,7 +348,7 @@ exit 1
 """
     )
     binary.chmod(0o755)
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(binary))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(binary))
 
     assert evidence_cmd.run_engine("crawl", ["memory", str(workspace), "--rebuild"]) == 0
 
@@ -397,7 +397,7 @@ def test_crawl_refuses_unreadable_archive(monkeypatch, tmp_path):
         f'echo "invoked" > "{marker}"\nexit 0\n',
     )
     monkeypatch.setenv("PATH", _path_with_bin(tmp_path))
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     rc = evidence_cmd.run_engine("crawl", ["discord"])
 
@@ -421,7 +421,7 @@ def test_crawl_gate_is_case_insensitive(monkeypatch, tmp_path):
         f'echo "invoked" > "{marker}"\nexit 0\n',
     )
     monkeypatch.setenv("PATH", _path_with_bin(tmp_path))
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     rc = evidence_cmd.run_engine("crawl", ["Discord"])
 
@@ -448,7 +448,7 @@ def test_crawl_delegates_with_crawler_dir_on_path(monkeypatch, tmp_path):
         ),
     )
     monkeypatch.setenv("PATH", _path_with_bin(tmp_path))
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     rc = evidence_cmd.run_engine("crawl", ["discord"])
 
@@ -471,7 +471,7 @@ def test_crawl_propagates_nonzero_exit(monkeypatch, tmp_path):
         'if [ "$1" = "crawl" ]; then echo "boom" >&2; exit 5; fi\nexit 1\n',
     )
     monkeypatch.setenv("PATH", _path_with_bin(tmp_path))
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     rc = evidence_cmd.run_engine("crawl", ["discord"])
 
@@ -497,7 +497,7 @@ def test_status_reports_unhealthy_after_failed_last_run(monkeypatch, tmp_path):
     _write_fake_bin(tmp_path, "discrawl", _discrawl_script())
     miseledger = _write_fake_bin(tmp_path, "miseledger", _miseledger_ok_script())
     monkeypatch.setenv("PATH", _path_with_bin(tmp_path))
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     payload = evidence_cmd.status_payload(tmp_path)
 
@@ -516,7 +516,7 @@ def test_status_crawler_block_reflects_override(monkeypatch, tmp_path):
     monkeypatch.setenv("PATH", _path_with_bin(tmp_path))
     monkeypatch.setenv("DISCORD_CRAWLER_BIN", str(override))
     miseledger = _write_fake_bin(tmp_path, "miseledger", _miseledger_ok_script())
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     payload = evidence_cmd.status_payload(tmp_path, include_doctor=False)
 
@@ -540,7 +540,7 @@ def test_doctor_exits_one_on_crawler_fail(monkeypatch, tmp_path):
     _write_fake_bin(tmp_path, "discrawl", _discrawl_script())
     miseledger = _write_fake_bin(tmp_path, "miseledger", _miseledger_ok_script())
     monkeypatch.setenv("PATH", _path_with_bin(tmp_path))
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     rc = evidence_cmd.doctor(target=tmp_path, json_output=True)
 
@@ -561,7 +561,7 @@ def test_status_doctor_json_backward_compat(monkeypatch, tmp_path):
     )
     miseledger = _write_fake_bin(tmp_path, "miseledger", body)
     monkeypatch.setenv("PATH", _path_with_bin(tmp_path))
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     payload = evidence_cmd.status_payload(tmp_path)
 
@@ -580,7 +580,7 @@ def test_newer_than_supported_archive_schema_refuses_crawl(monkeypatch, tmp_path
         f'echo "invoked" > "{marker}"\nexit 0\n',
     )
     monkeypatch.setenv("PATH", _path_with_bin(tmp_path))
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     rc = evidence_cmd.run_engine("crawl", ["discord"])
 
@@ -605,7 +605,7 @@ def test_stale_cleanup_queue_after_producer_failure(monkeypatch, tmp_path):
     _write_fake_bin(tmp_path, "discrawl", _discrawl_script())
     miseledger = _write_fake_bin(tmp_path, "miseledger", _miseledger_ok_script())
     monkeypatch.setenv("PATH", _path_with_bin(tmp_path))
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     payload = evidence_cmd.status_payload(tmp_path)
 
@@ -671,7 +671,7 @@ def test_memory_crawl_delegates_when_capable(monkeypatch, tmp_path, capsys):
         _miseledger_memory_capable_script(marker=marker),
     )
     monkeypatch.setenv("PATH", _path_with_bin(tmp_path))
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     rc = evidence_cmd.run_engine("crawl", ["memory", str(workspace)])
 
@@ -701,7 +701,7 @@ def test_memory_crawl_delegates_when_capable(monkeypatch, tmp_path, capsys):
 def test_memory_crawl_refuses_missing_binary(monkeypatch, tmp_path):
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: None)
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: None)
 
     rc = evidence_cmd.run_engine("crawl", ["memory", str(workspace)])
 
@@ -721,7 +721,7 @@ def test_memory_crawl_refuses_absent_capability(monkeypatch, tmp_path):
         "miseledger",
         _miseledger_memory_capable_script(capability=None, marker=marker),
     )
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     rc = evidence_cmd.run_engine("crawl", ["memory", str(workspace)])
 
@@ -739,7 +739,7 @@ def test_memory_crawl_refuses_future_capability(monkeypatch, tmp_path):
         "miseledger",
         _miseledger_memory_capable_script(capability="memory-projection.v99", marker=marker),
     )
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     rc = evidence_cmd.run_engine("crawl", ["memory", str(workspace)])
 
@@ -756,7 +756,7 @@ def test_memory_crawl_refuses_old_version(monkeypatch, tmp_path):
         "miseledger",
         _miseledger_memory_capable_script(version="0.5.9", marker=marker),
     )
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     rc = evidence_cmd.run_engine("crawl", ["memory", str(workspace)])
 
@@ -773,7 +773,7 @@ def test_memory_crawl_refuses_unreadable_archive(monkeypatch, tmp_path):
         "miseledger",
         _miseledger_memory_capable_script(database_ok=False, marker=marker),
     )
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     rc = evidence_cmd.run_engine("crawl", ["memory", str(workspace)])
 
@@ -797,7 +797,7 @@ def test_memory_crawl_refuses_exit1_doctor_without_checks(monkeypatch, tmp_path)
             "exit 1\n"
         ),
     )
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     rc = evidence_cmd.run_engine("crawl", ["memory", str(workspace)])
 
@@ -828,7 +828,7 @@ def test_memory_crawl_partial_failed_not_healthy(monkeypatch, tmp_path):
         "miseledger",
         _miseledger_memory_capable_script(crawl_receipt=receipt),
     )
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     rc = evidence_cmd.run_engine("crawl", ["memory", str(workspace)])
 
@@ -847,7 +847,7 @@ def test_memory_projection_state_distinguishes_timeout_stale_missing_and_failed(
     workspace = tmp_path / "ws"
     workspace.mkdir()
     miseledger = _write_fake_bin(tmp_path, "miseledger", _miseledger_memory_capable_script())
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     evidence_cmd._write_last_run(
         target=workspace,
@@ -889,7 +889,7 @@ def test_memory_projection_state_distinguishes_timeout_stale_missing_and_failed(
     )
     assert evidence_cmd.status_payload(workspace)["memory_projection"]["state"] == "timed_out"
 
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: None)
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: None)
     payload = evidence_cmd.status_payload(tmp_path / "never-crawled")
     assert payload["memory_projection"]["state"] == "missing"
 
@@ -928,7 +928,7 @@ def test_memory_status_body_free(monkeypatch, tmp_path, capsys):
         },
     )
     miseledger = _write_fake_bin(tmp_path, "miseledger", _miseledger_memory_capable_script())
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     rc = evidence_cmd.status(target=workspace, json_output=False)
     out = capsys.readouterr().out
@@ -984,7 +984,7 @@ def test_memory_status_json_whitelists_latest_run(monkeypatch, tmp_path, capsys)
         },
     )
     miseledger = _write_fake_bin(tmp_path, "miseledger", _miseledger_memory_capable_script())
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     rc = evidence_cmd.status(target=workspace, json_output=True)
     printed = json.loads(capsys.readouterr().out)
@@ -1018,7 +1018,7 @@ def test_memory_status_drops_malformed_optional_health_fields(monkeypatch, tmp_p
         "miseledger",
         _miseledger_memory_capable_script(crawl_receipt=receipt),
     )
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     assert evidence_cmd.run_engine("crawl", ["memory", str(workspace)]) == 0
 
@@ -1038,7 +1038,7 @@ def test_memory_crawl_rejects_rebuild_and_full(monkeypatch, tmp_path):
         "miseledger",
         _miseledger_memory_capable_script(marker=marker),
     )
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     assert evidence_cmd.run_engine("crawl", ["memory", str(workspace), "--full"]) == 2
     assert evidence_cmd.run_engine("crawl", ["memory", str(workspace), "--full"]) == 2
@@ -1057,7 +1057,7 @@ def test_memory_crawl_dry_run_is_non_current(monkeypatch, tmp_path):
         "miseledger",
         _miseledger_memory_capable_script(crawl_receipt=dry_receipt),
     )
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     rc = evidence_cmd.run_engine("crawl", ["memory", str(workspace), "--dry-run"])
 
@@ -1084,7 +1084,7 @@ def test_memory_crawl_malformed_receipt_fail_closed_no_fabricated_zeros(monkeypa
         "miseledger",
         _miseledger_memory_capable_script(crawl_receipt=malformed),
     )
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     rc = evidence_cmd.run_engine("crawl", ["memory", str(workspace)])
 
@@ -1121,7 +1121,7 @@ def test_memory_crawl_uses_preflight_resolved_path(monkeypatch, tmp_path):
         state["n"] += 1
         return str(good) if state["n"] == 1 else str(bad)
 
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", resolver)
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", resolver)
 
     rc = evidence_cmd.run_engine("crawl", ["memory", str(workspace)])
 
@@ -1141,7 +1141,7 @@ def test_memory_file_backed_search_works_without_engine(monkeypatch, tmp_path):
         "---\ntopic: alpha-topic\nconfidence: high\nevidence: [README.md]\n---\n\n# Alpha\n\nalpha body keyword zebra\n"
     )
     (tmp_path / "MEMORY.md").write_text("- [alpha-topic](memory/cards/alpha.md)\n")
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: None)
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: None)
 
     payload = memory_cmd.search_cards_payload(tmp_path, "zebra", limit=5)
 
@@ -1151,7 +1151,7 @@ def test_memory_file_backed_search_works_without_engine(monkeypatch, tmp_path):
 
 def test_generic_show_has_no_memory_renderer(monkeypatch, tmp_path, capsys):
     miseledger = _write_fake_bin(tmp_path, "miseledger", _miseledger_memory_capable_script())
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     rc = evidence_cmd.run_engine("show", ["item-1", "--json"])
     out = capsys.readouterr().out
@@ -1175,7 +1175,7 @@ def test_discord_crawl_still_works_alongside_memory(monkeypatch, tmp_path):
         (f'echo "$*" > "{args_file}"\nif [ "$1" = "crawl" ]; then echo crawled; exit 0; fi\nexit 1\n'),
     )
     monkeypatch.setenv("PATH", _path_with_bin(tmp_path))
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(miseledger))
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: str(miseledger))
 
     rc = evidence_cmd.run_engine("crawl", ["discord"])
 
