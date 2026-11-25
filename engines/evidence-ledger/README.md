@@ -57,7 +57,7 @@ Or from source:
 
 ```bash
 git clone https://github.com/escoffier-labs/brigadestack.git
-cd brigade/engines/evidence-ledger
+cd brigadestack/engines/evidence-ledger
 go build -o bin/brigade-evidence ./cmd/brigade-evidence
 ```
 

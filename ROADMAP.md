@@ -68,7 +68,7 @@ Harness adoption follows actual usage with fresh catalog/load/pin acceptance and
 
 The functional BrigadeStack site/docs refresh is a held draft. Its draft status does not establish merge, deployment or domain readiness. Keep a functional site live while reviewing the concise homepage, docs, benefits and official marks.
 
-The approved direction is `brigadestack.com` as primary, with `brigadestack.dev` and `brigade.tools` redirecting to matching pages. Domain purchase does not establish DNS or redirect configuration. Release acceptance must verify actual package versions/pins and fresh installs, canonical URLs, path/query redirects and analytics continuity before announcement. Further registry publication, site merge/deployment, DNS changes and announcement remain held pending their explicit release decisions. Repository/organization renaming remains future coordination. The separate organization-site hub design is adjacent work outside refresh launch acceptance.
+The approved direction is `brigadestack.com` as primary, with `brigadestack.dev` and `brigade.tools` redirecting to matching pages. Domain purchase does not establish DNS or redirect configuration. Release acceptance must verify actual package versions/pins and fresh installs, canonical URLs, path/query redirects and analytics continuity before announcement. Further registry publication, site merge/deployment, DNS changes and announcement remain held pending their explicit release decisions. The repository rename is complete. The separate organization-site hub design is adjacent work outside refresh launch acceptance.
 
 ## Next: close demonstrated product gaps
 

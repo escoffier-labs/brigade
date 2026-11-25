@@ -126,7 +126,7 @@ From a repo clone with Python 3.11+:
 
 ```bash
 git clone https://github.com/escoffier-labs/brigadestack.git
-cd brigade
+cd brigadestack
 python -m venv .venv
 ```
 
