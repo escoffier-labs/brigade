@@ -816,9 +816,11 @@ def _same_coordinates(left: UpdateState, right: UpdateState) -> bool:
     )
 
 
-def _installed_engines_match(paths: UpdatePaths, manifest: component_manifest.ComponentManifest) -> bool:
-    roots = component_install.SetupRoots(str(paths.data_root), str(paths.cache_root), {})
-    installed = component_state.load_installed_state(Path(component_paths.installed_state_path(roots.data_root)))
+def _installed_engines_match(
+    roots: component_install.SetupRoots,
+    installed: component_state.InstalledState | None,
+    manifest: component_manifest.ComponentManifest,
+) -> bool:
     platform = component_manifest.platform_key()
     if installed is None or installed.manifest_revision != manifest.manifest_revision or installed.platform != platform:
         return False
@@ -835,6 +837,7 @@ def _installed_engines_match(paths: UpdatePaths, manifest: component_manifest.Co
             or record.asset_name != entry.asset_name
             or record.byte_size != entry.byte_size
             or record.sha256 != entry.sha256
+            or _canonical_release_url(record.download_url) != _canonical_release_url(entry.download_url)
             or record.executable != entry.managed_path
             or not component_install._managed_executable_is_ready(
                 Path(entry.managed_path), byte_size=entry.byte_size, sha256=entry.sha256
@@ -842,6 +845,92 @@ def _installed_engines_match(paths: UpdatePaths, manifest: component_manifest.Co
         ):
             return False
     return True
+
+
+def _repair_matching_engines(
+    paths: UpdatePaths,
+    release: ResolvedRelease,
+    manifest: component_manifest.ComponentManifest,
+    setup_command: list[str],
+    *,
+    channel: str,
+    coordinate: str,
+    http: UpdateHttp,
+    runner: Callable[[list[str]], Any],
+    dry_run: bool,
+) -> None:
+    roots = component_install.SetupRoots(str(paths.data_root), str(paths.cache_root), {})
+    installed = component_state.load_installed_state(Path(component_paths.installed_state_path(roots.data_root)))
+    repair_tag = release.tag
+    cache_release: ResolvedRelease | None = release
+    preserving = None
+    if installed is not None and installed.manifest_revision != manifest.manifest_revision:
+        tag = installed.manifest_revision.partition("+")[0]
+        installed_version = tag[1:] if tag.startswith("v") else installed.brigade_version
+        bundled = None
+        if not tag.startswith("v") and component_install.uses_bundled_compatibility_manifest():
+            candidate = component_manifest.load(allow_standalone_legacy_revisions=True)
+            if candidate.manifest_revision == installed.manifest_revision:
+                bundled = candidate
+                installed_version = bundled.brigade_version
+        version = component_install.release_version_tuple(installed_version)
+        target = component_install.release_version_tuple(release.version)
+        if version is not None and target is not None and version > target:
+            repair_tag = f"v{installed_version}"
+            preserving = (
+                f"brigade update: preserving newer managed engine release {repair_tag} (selected {release.tag})"
+            )
+            cache_release = None
+            if bundled is not None:
+                manifest = bundled
+                setup_command = [setup_command[0], "setup", "--manifest-source", "standalone"]
+            else:
+                for candidate, candidate_path in component_install.cached_release_manifests(roots.cache_root):
+                    if candidate.manifest_revision == installed.manifest_revision:
+                        manifest, path = candidate, candidate_path
+                        break
+                else:
+                    # Without its manifest, an intact newer install stays in place.
+                    intact = bool(installed.components) and all(
+                        component_install._managed_executable_is_ready(
+                            Path(component_paths.managed_executable_path(roots.data_root, name)),
+                            byte_size=record.byte_size,
+                            sha256=record.sha256,
+                        )
+                        for name, record in installed.components.items()
+                    )
+                    if intact:
+                        print(f"{preserving}. No verified manifest for the installed revision is cached.")
+                        return
+                    if _parse_tag(tag) is None:
+                        raise UpdateError(
+                            f"cannot repair newer engine release {repair_tag} without its verified manifest. "
+                            "Run setup from the corresponding CLI or pass its verified manifest explicitly."
+                        )
+                    cache_release = resolve_release(http, latest=False, tag=tag, cache_root=paths.cache_root)
+                    manifest = validate_release_manifest_bytes(cache_release, allow_compatible_stable_manifest=True)
+                    if manifest.manifest_revision != installed.manifest_revision:
+                        raise UpdateError(f"published manifest for {tag} does not match the installed revision")
+                    path = Path(component_paths.verified_manifest_path(roots.cache_root, cache_release.manifest_sha256))
+                setup_command = [
+                    setup_command[0],
+                    "setup",
+                    "--manifest",
+                    str(path),
+                    "--allow-compatible-stable-manifest",
+                    manifest.brigade_version,
+                ]
+    if _installed_engines_match(roots, installed, manifest):
+        print(preserving or f"brigade update: {channel} already owns {coordinate}; no changes")
+        return
+    if dry_run:
+        print(f"brigade update: would run setup with the verified manifest for {repair_tag}")
+        return
+    print(f"brigade update: repairing managed engines for {repair_tag}", flush=True)
+    if cache_release is not None:
+        _cache_manifest(paths, cache_release)
+    if _returncode(runner(setup_command)) != 0:
+        raise UpdateError(f"engine repair failed: {' '.join(setup_command)}")
 
 
 def installed_pypi_project() -> str:
@@ -902,8 +991,11 @@ def run_update(
     if distribution.is_npm():
         print(
             "brigade update: this installation is managed by npm. "
-            "Run `npm update --global brigadestack` (or `npm update --global @escoffier-labs/brigade` "
-            "if you installed that package), then run `brigade setup` to repair the managed engines.",
+            "Use the package you installed (`brigadestack` or `@escoffier-labs/brigade`) for <package>. "
+            "For a global install, run `npm install --global <package>@latest` then `brigade setup`. "
+            "For a project install, run `npm install <package>@latest` from that project, "
+            "then `npm exec -- brigade setup`. "
+            "For npx, run `npx --package <package>@latest brigade setup`.",
             file=sys.stderr,
         )
         return 1
@@ -950,16 +1042,17 @@ def run_update(
             if compatible_manifest_version is not None:
                 setup_command.extend(["--allow-compatible-stable-manifest", compatible_manifest_version])
             if current is not None and _same_coordinates(current, next_state):
-                if _installed_engines_match(selected_paths, manifest):
-                    print(f"brigade update: {channel} already owns {coordinate}; no changes")
-                    return 0
-                if dry_run:
-                    print(" ".join(setup_command))
-                    return 0
-                print(f"brigade update: repairing managed engines for {release.tag}", flush=True)
-                _cache_manifest(selected_paths, release)
-                if _returncode(selected_runner(setup_command)) != 0:
-                    raise UpdateError(f"engine repair failed: {' '.join(setup_command)}")
+                _repair_matching_engines(
+                    selected_paths,
+                    release,
+                    manifest,
+                    setup_command,
+                    channel=channel,
+                    coordinate=coordinate,
+                    http=selected_http,
+                    runner=selected_runner,
+                    dry_run=dry_run,
+                )
                 return 0
             # Stable and beta both force-reinstall the one user-global pipx app
             # with an exact package pin. Beta never uses a mutable Git main SHA.
@@ -991,13 +1084,16 @@ def run_update(
             retire_command = [selected_paths.pipx_executable, "uninstall", LEGACY_PYPI_PROJECT]
             retire_now = retire_legacy and not retire_after_exit
             commands = [install_command, retire_command, install_command] if retire_now else [install_command]
-            commands.append(setup_command)
             if dry_run:
                 for command in commands:
                     print(" ".join(command))
+                print(
+                    f"brigade update: would run setup with the verified manifest for {release.tag} using {setup_executable}"
+                )
                 if retire_after_exit:
                     print(_retire_after_exit_hint(retire_command, install_command))
                 return 0
+            commands.append(setup_command)
             manifest_path = _cache_manifest(selected_paths, release)
             if manifest_path != cached_manifest_path:
                 raise UpdateError("verified manifest cache path changed unexpectedly")

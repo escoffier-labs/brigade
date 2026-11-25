@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import ssl
 import stat
@@ -14,7 +15,7 @@ import sys
 import tempfile
 import urllib.error
 import urllib.request
-from collections.abc import Callable, Collection, Mapping, Sequence
+from collections.abc import Callable, Collection, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from http.client import HTTPException
 from pathlib import Path
@@ -369,19 +370,26 @@ def _snapshot_managed_executables(paths: Sequence[Path]) -> tuple[_ManagedExecut
 
 
 def _restore_managed_executables(snapshots: Sequence[_ManagedExecutableSnapshot]) -> None:
+    errors = []
     for snapshot in snapshots:
-        if snapshot.link_target is not None:
-            _restore_symlink_atomically(snapshot.path, snapshot.link_target)
-        elif snapshot.existed:
-            if snapshot.content is None or snapshot.mode is None:
-                raise ComponentInstallError(f"invalid managed executable snapshot for {snapshot.path}")
-            _restore_file_atomically(
-                snapshot.path,
-                content=snapshot.content,
-                mode=snapshot.mode,
-            )
-        elif snapshot.path.exists():
-            snapshot.path.unlink()
+        path = snapshot.path
+        try:
+            if snapshot.link_target is not None:
+                _restore_symlink_atomically(path, snapshot.link_target)
+            elif snapshot.existed:
+                if snapshot.content is None or snapshot.mode is None:
+                    raise ComponentInstallError("invalid managed executable snapshot")
+                if not path.is_symlink() and path.is_file() and path.read_bytes() == snapshot.content:
+                    if path.stat().st_mode != snapshot.mode:
+                        path.chmod(stat.S_IMODE(snapshot.mode))
+                    continue
+                _restore_file_atomically(path, content=snapshot.content, mode=snapshot.mode)
+            else:
+                path.unlink(missing_ok=True)
+        except (ComponentInstallError, OSError) as exc:
+            errors.append(f"{path}: {exc}")
+    if errors:
+        raise ComponentInstallError(" | ".join(errors))
 
 
 def _restore_symlink_atomically(path: Path, target: str) -> None:
@@ -1112,47 +1120,116 @@ def _setup_rollback(
         component_state.write_installed_state(previous_state_path, current_state)
     except (ComponentInstallError, OSError, ValueError) as exc:
         try:
-            _restore_managed_executables(managed_snapshots)
-            _restore_managed_executables(state_snapshots)
+            _restore_managed_executables((*managed_snapshots, *state_snapshots))
         except (ComponentInstallError, OSError) as restore_exc:
             raise ComponentInstallError(f"{exc}; failed to restore rollback transaction: {restore_exc}") from exc
         raise
     return 0
 
 
-def _check_saved_beta_pin(roots: SetupRoots, manifest: component_manifest.ComponentManifest) -> None:
-    from brigade import update_notify
+def release_version_tuple(value: str) -> tuple[int, ...] | None:
+    """Return the PEP 440 release segments, ignoring epoch and build qualifiers.
 
-    pin = update_notify.parse_version(manifest.brigade_version)
-    running = update_notify.parse_version(brigade.__version__.split(".dev", 1)[0])
-    # v0.31.0 first shipped the explicit completion status required by the receipt importer.
-    importer_floor = (0, 31, 0)
+    Compatibility follows the code's release series, including its dev, RC,
+    post and locally built wheels. Brigade has no runtime packaging dependency.
+    """
+    match = re.fullmatch(
+        r"v?(?:[0-9]+!)?(?P<release>[0-9]+(?:\.[0-9]+)*)"
+        r"(?:[-_.]?(?:a|b|c|rc|alpha|beta|pre|preview)[-_.]?[0-9]*)?"
+        r"(?:-[0-9]+|[-_.]?(?:post|rev|r)[-_.]?[0-9]*)?"
+        r"(?:[-_.]?dev[-_.]?[0-9]*)?(?:\+[a-z0-9]+(?:[-_.][a-z0-9]+)*)?",
+        value.strip(),
+        flags=re.IGNORECASE | re.ASCII,
+    )
+    if match is None:
+        return None
+    try:
+        release = tuple(int(segment) for segment in match["release"].split("."))
+    except ValueError:
+        return None
+    while len(release) > 3 and release[-1] == 0:
+        release = release[:-1]
+    return release + (0,) * max(0, 3 - len(release))
+
+
+def cached_release_manifests(cache_root: str) -> Iterator[tuple[component_manifest.ComponentManifest, Path]]:
+    """Read valid exact-release manifests from the updater's content-addressed cache."""
+    from brigade import update_cmd
+
+    directory = Path(component_paths.verified_manifest_path(cache_root, "0" * 64)).parent
+    for path in sorted(directory.glob("*.json")):
+        try:
+            content = path.read_bytes()
+            if hashlib.sha256(content).hexdigest() != path.stem:
+                continue
+            manifest = component_manifest.load_bytes(content, source=path, allow_compatible_stable_manifest=True)
+            tag, _, commit = manifest.manifest_revision.partition("+")
+            version = update_cmd._parse_tag(tag)
+            if version is None or not update_cmd._SHA.fullmatch(commit):
+                continue
+            release = update_cmd.ResolvedRelease(0, tag, version, commit, "", len(content), path.stem, content)
+            yield update_cmd._validate_manifest_coordinates(release, manifest), path
+        except (update_cmd.UpdateError, OSError, ValueError):
+            continue
+
+
+def _beta_pin_repair_hint(
+    roots: SetupRoots, installed: component_state.InstalledState | None, minimum: tuple[int, ...]
+) -> str:
+    for candidate, path in cached_release_manifests(roots.cache_root):
+        version = release_version_tuple(candidate.brigade_version)
+        if version is None or version < minimum:
+            continue
+        try:
+            build_setup_plan(
+                candidate, platform=component_manifest.platform_key(), roots=roots, opt_in=_setup_opt_in((), installed)
+            )
+        except ValueError:
+            continue
+        argv = [
+            "brigade",
+            "setup",
+            "--manifest",
+            str(path),
+            "--allow-compatible-stable-manifest",
+            candidate.brigade_version,
+        ]
+        command = subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
+        return f"Use the cached manifest with: {command}"
+    return "A compatible manifest is not cached. With network access, run `brigade update --channel beta`."
+
+
+def _check_saved_beta_pin(roots: SetupRoots, manifest: component_manifest.ComponentManifest) -> None:
+    pin = release_version_tuple(manifest.brigade_version)
+    running = release_version_tuple(brigade.__version__)
+    pin_path = component_paths.update_state_path(roots.data_root)
+    if running is None:
+        raise ComponentInstallError(
+            f"cannot parse running Brigade version {brigade.__version__!r} for saved pin in {pin_path}"
+        )
     if pin is None:
         raise ComponentInstallError(f"invalid beta engine release version: {manifest.brigade_version}")
-    if running is not None and running >= importer_floor > pin:
-        reason = "the receipt importer requires engines from v0.31.0 or newer"
-    else:
-        installed = component_state.load_installed_state(Path(component_paths.installed_state_path(roots.data_root)))
-        if installed is None:
-            return
+    # v0.31.0 first shipped the explicit completion status required by the receipt importer.
+    importer_floor = (0, 31, 0)
+    minimum: tuple[int, ...] = importer_floor if running >= importer_floor else (0, 0, 0)
+    reason = "the receipt importer requires engines from v0.31.0 or newer"
+    installed = component_state.load_installed_state(Path(component_paths.installed_state_path(roots.data_root)))
+    if installed is not None:
         tag = installed.manifest_revision.partition("+")[0]
-        version = update_notify.parse_version(tag.removeprefix("v"))
-        if version is None or version <= pin:
-            return
-        for component_id, record in installed.components.items():
-            managed = Path(component_paths.managed_executable_path(roots.data_root, component_id))
-            if _managed_executable_is_ready(managed, byte_size=record.byte_size, sha256=record.sha256):
-                break
-        else:
-            return
-        reason = f"verified managed engines from {tag} are already installed"
-
-    pin_path = component_paths.update_state_path(roots.data_root)
-    raise ComponentInstallError(
-        f"saved beta pin v{manifest.brigade_version} in {pin_path} refused: {reason}. "
-        "Refresh the pin with `brigade update --channel beta`, or install a verified compatible release with "
-        "`brigade setup --manifest <verified-manifest> --allow-compatible-stable-manifest <version>`."
-    )
+        installed_version = tag if tag.startswith("v") else installed.brigade_version
+        version = release_version_tuple(installed_version)
+        if version is not None and version > max(minimum, pin):
+            for component_id, record in installed.components.items():
+                managed = Path(component_paths.managed_executable_path(roots.data_root, component_id))
+                if _managed_executable_is_ready(managed, byte_size=record.byte_size, sha256=record.sha256):
+                    minimum = version
+                    reason = f"verified managed engines from {installed_version} are already installed"
+                    break
+    if pin < minimum:
+        raise ComponentInstallError(
+            f"saved beta pin v{manifest.brigade_version} in {pin_path} refused: {reason}. "
+            f"{_beta_pin_repair_hint(roots, installed, minimum)}"
+        )
 
 
 def _load_setup_manifest(
@@ -1437,8 +1514,7 @@ def setup_native_components(
                 _publish_auto_setup_release_state(roots=roots, release=auto_release)
         except (ComponentInstallError, OSError, ValueError, urllib.error.URLError) as exc:
             try:
-                _restore_managed_executables(snapshots)
-                _restore_managed_executables(state_snapshots)
+                _restore_managed_executables((*snapshots, *state_snapshots))
             except (ComponentInstallError, OSError) as restore_exc:
                 raise ComponentInstallError(f"{exc}; failed to restore prior managed files: {restore_exc}") from exc
             raise

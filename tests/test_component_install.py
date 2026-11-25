@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import ssl
 import subprocess
 import sys
@@ -1400,8 +1401,86 @@ def test_setup_refuses_incompatible_or_downgrading_beta_pin(tmp_path, monkeypatc
     assert setup_native_components(env=env, offline=offline, dry_run=True) == 1
     message = capsys.readouterr().err
     assert "update-state.json" in message and "brigade update --channel beta" in message
-    assert "brigade setup --manifest" in message
+    assert "network access" in message
     assert (state_path.read_bytes() if state_path.exists() else None) == before
+
+
+@pytest.mark.parametrize("cli_version", ["0.33.0rc1", "0.33.0.post1", "0.33.0.dev1", "0.33.0+build", "invalid"])
+@pytest.mark.parametrize("pin, expected", [("0.30.0", 1), ("0.31.0", 0)])
+def test_first_beta_setup_checks_pin_against_cli_release(tmp_path, monkeypatch, capsys, cli_version, pin, expected):
+    pinned = tmp_path / "pinned.json"
+    write_test_manifest(pinned, brigade_version=pin)
+    env, _ = _persist_beta_state(
+        tmp_path,
+        monkeypatch,
+        stable_version=pin,
+        manifest_bytes=pinned.read_bytes(),
+        target_commit=fixture_component_revision("brigade-code-graph"),
+        cli_version=cli_version,
+    )
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == (
+        1 if cli_version == "invalid" else expected
+    )
+    if cli_version == "invalid":
+        assert "cannot parse running Brigade version" in capsys.readouterr().err
+
+
+def test_refused_pin_names_a_usable_cached_manifest(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "space here"
+    workspace.mkdir()
+    pin = write_release_manifest(workspace / "pinned.json", brigade_version="0.30.0", target_commit="a" * 40)
+    env, _ = _persist_beta_state_real(
+        workspace,
+        monkeypatch,
+        stable_version="0.30.0",
+        cli_version="0.33.0",
+        manifest_bytes=pin,
+        target_commit="a" * 40,
+    )
+    roots = resolve_roots(env=env)
+    content = write_release_manifest(workspace / "replacement.json", brigade_version="0.32.0", target_commit="b" * 40)
+    cached_path = Path(component_paths.verified_manifest_path(roots.cache_root, hashlib.sha256(content).hexdigest()))
+    cached_path.write_bytes(content + b" ")
+    assert setup_native_components(env=env, offline=True, dry_run=True) == 1
+    assert "network access" in capsys.readouterr().err
+
+    cached_path.write_bytes(content)
+    assert setup_native_components(env=env, offline=True, dry_run=True) == 1
+    error = capsys.readouterr().err
+    argv = ["brigade", "setup", "--manifest", str(cached_path), "--allow-compatible-stable-manifest", "0.32.0"]
+    command = subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
+    assert f"Use the cached manifest with: {command}" in error
+    assert (
+        setup_native_components(
+            env=env,
+            manifest_path=Path(argv[3]),
+            allow_compatible_stable_manifest=argv[5],
+            dry_run=True,
+        )
+        == 0
+    )
+
+
+def test_restore_tries_all_paths_after_locked_executable(tmp_path, monkeypatch):
+    paths = [tmp_path / f"engine{i}.exe" for i in range(5)]
+    for path in paths:
+        path.write_bytes(b"before")
+    snapshots = _snapshot_managed_executables(paths)
+    for path in paths[1:]:
+        path.write_bytes(b"after")
+    replace = os.replace
+
+    def locked(source, target):
+        assert target != paths[0], "unchanged file should not be replaced"
+        if target in (paths[2], paths[3]):
+            raise PermissionError("file in use")
+        replace(source, target)
+
+    monkeypatch.setattr(component_install.os, "replace", locked)
+    with pytest.raises(ComponentInstallError) as error:
+        _restore_managed_executables(snapshots)
+    assert all(str(path) in str(error.value) for path in paths[2:4])
+    assert [path.read_bytes() for path in paths] == [b"before", b"before", b"after", b"after", b"before"]
 
 
 def test_default_asset_request_reports_http_failure(tmp_path, monkeypatch):

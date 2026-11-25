@@ -278,6 +278,33 @@ def test_update_refuses_redirect_with_original_url_and_status(monkeypatch):
         update_cmd._DefaultHttp().json(url)
 
 
+def test_release_download_follows_relative_redirect_across_multiple_hops(monkeypatch):
+    original = BASE + "component-manifest-v1.json"
+    cdn = "https://release-assets.githubusercontent.com"
+    requests = []
+
+    def response_for(_handler, request):
+        url = request.full_url
+        requests.append(url)
+        assert request.get_header("User-agent") == "brigade-update/1"
+        headers = Message()
+        if url == cdn + "/payload/manifest":
+            response = addinfourl(BytesIO(b"manifest"), headers, url, 200)
+            response.msg = "OK"
+            return response
+        headers["Location"] = {
+            original: cdn + "/transfer/start",
+            cdn + "/transfer/start": "../payload/manifest",
+        }[url]
+        response = addinfourl(BytesIO(), headers, url, 302)
+        response.msg = "Found"
+        return response
+
+    monkeypatch.setattr("urllib.request.HTTPSHandler.https_open", response_for)
+    assert update_cmd._DefaultHttp().bytes(original) == b"manifest"
+    assert requests == [original, cdn + "/transfer/start", cdn + "/payload/manifest"]
+
+
 @pytest.mark.parametrize(
     "final_url",
     (
@@ -974,7 +1001,8 @@ def test_beta_dry_run_prints_exact_pipx_pin_and_mutates_nothing(tmp_path, capsys
     )
     captured = capsys.readouterr().out
     assert f"pipx install --force brigadestack=={BETA_VERSION}" in captured
-    assert str(paths.brigade_executable) in captured
+    assert f"would run setup with the verified manifest for {TAG}" in captured
+    assert "--manifest" not in captured
     assert calls == []
     assert state_path.read_bytes() == before
     assert not paths.cache_root.exists()
@@ -1059,36 +1087,69 @@ def test_update_refuses_channel_takeover_without_switch_flag(tmp_path):
         update_cmd.ensure_channel_ownership(update_cmd.load_update_state(path), "beta", switch_channel=False)
 
 
-@pytest.mark.parametrize("drift", ["healthy", "missing", "older", "digest", "record", "failed"])
-def test_same_immutable_coordinates_check_engines(tmp_path, monkeypatch, capsys, drift):
+@pytest.mark.parametrize("channel", ["stable", "beta"])
+@pytest.mark.parametrize(
+    "drift",
+    [
+        "healthy",
+        "missing",
+        "older",
+        "newer",
+        "newer-damaged",
+        "newer-bundled",
+        "newer-uncached",
+        "digest",
+        "record",
+        "failed",
+        "partial",
+        "dry-run",
+    ],
+)
+def test_same_immutable_coordinates_check_engines(tmp_path, monkeypatch, capsys, drift, channel):
     manifest = _manifest()
     calls = []
     paths = update_cmd.UpdatePaths(tmp_path / "data", tmp_path / "cache", tmp_path / "bin" / "brigade")
-    if drift == "older":
-        older = json.loads(manifest.replace(b"v1.2.3", b"v1.2.2").replace(b'"1.2.3"', b'"1.2.2"'))
-        for component in older["components"].values():
+    newer = drift.startswith("newer")
+    installed_version = "1.2.4" if newer else "1.2.2" if drift == "older" else VERSION
+    if installed_version != VERSION:
+        previous = json.loads(manifest.replace(VERSION.encode(), installed_version.encode()))
+        for component in previous["components"].values():
             for asset in component["assets"].values():
-                payload = asset["asset_name"].encode() + b"-old"
+                payload = asset["asset_name"].encode() + b"-previous"
                 asset.update(byte_size=len(payload), sha256=hashlib.sha256(payload).hexdigest())
+        if drift == "newer-bundled":
+            previous["manifest_revision"] = "development-bundle"
+        previous_bytes = json.dumps(previous).encode()
         entries = _install_update_test_engines(
-            tmp_path, paths, json.dumps(older).encode(), monkeypatch, version="1.2.2", payload_suffix=b"-old"
+            tmp_path, paths, previous_bytes, monkeypatch, version=installed_version, payload_suffix=b"-previous"
         )
+        if drift == "newer-bundled":
+            monkeypatch.setattr(component_install, "uses_bundled_compatibility_manifest", lambda: True)
+            monkeypatch.setattr(component_manifest, "manifest_path", lambda: tmp_path / "fixture-manifest.json")
+        elif newer and drift != "newer-uncached":
+            digest = hashlib.sha256(previous_bytes).hexdigest()
+            cached = Path(component_paths.verified_manifest_path(str(paths.cache_root), digest))
+            cached.parent.mkdir(parents=True, exist_ok=True)
+            cached.write_bytes(previous_bytes)
         monkeypatch.setattr("brigade.__version__", VERSION)
     else:
         entries = _install_update_test_engines(tmp_path, paths, manifest, monkeypatch)
     executable = Path(entries[0].managed_path)
-    if drift in {"missing", "failed"}:
+    if drift in {"missing", "failed", "dry-run"}:
         executable.unlink()
-    elif drift == "digest":
+    elif drift == "partial":
+        executable.unlink()
+        Path(entries[1].managed_path).unlink()
+    elif drift in {"digest", "newer-damaged"}:
         executable.write_bytes(b"x" * entries[0].byte_size)
     state_path = paths.data_root / "brigade" / "update-state.json"
     update_cmd.write_update_state(
         state_path,
         update_cmd.UpdateState(
             1,
-            "stable",
+            channel,
             "brigade update",
-            VERSION,
+            VERSION if channel == "stable" else BETA_VERSION,
             42,
             TAG,
             "a" * 40,
@@ -1100,9 +1161,11 @@ def test_same_immutable_coordinates_check_engines(tmp_path, monkeypatch, capsys,
 
     before_update = state_path.read_bytes()
     installed_path = Path(component_paths.installed_state_path(str(paths.data_root)))
-    if drift == "record":
+    if drift in {"record", "newer-damaged"}:
         mismatched = json.loads(installed_path.read_bytes())
-        mismatched["components"][entries[0].component_id]["sha256"] = "f" * 64
+        mismatched["components"][entries[0].component_id]["sha256"] = hashlib.sha256(
+            executable.read_bytes() if drift == "newer-damaged" else b"corrupt record"
+        ).hexdigest()
         installed_path.write_text(json.dumps(mismatched), encoding="utf-8")
     before_installed = installed_path.read_bytes()
     if drift == "failed":
@@ -1111,33 +1174,64 @@ def test_same_immutable_coordinates_check_engines(tmp_path, monkeypatch, capsys,
             raise component_install.ComponentInstallError("smoke command exited 7")
 
         monkeypatch.setattr(component_install, "run_post_install_smoke", fail_smoke)
+    if drift == "partial":
+        materialize = component_install.materialize_executable
+
+        def fail_materialize(*, cache_path, managed_path):
+            if managed_path == Path(entries[1].managed_path):
+                assert executable.exists()
+                raise PermissionError("second executable locked")
+            materialize(cache_path=cache_path, managed_path=managed_path)
+
+        monkeypatch.setattr(component_install, "materialize_executable", fail_materialize)
 
     def setup_only(argv):
         calls.append(argv)
         assert argv[1:3] == ["setup", "--manifest"]
         return component_install.setup_native_components(
-            manifest_path=Path(argv[3]), opener=lambda url: BytesIO(url.rsplit("/", 1)[-1].encode())
+            manifest_path=Path(argv[3]),
+            allow_compatible_stable_manifest=argv[5] if len(argv) > 4 else None,
+            opener=lambda url: BytesIO(url.rsplit("/", 1)[-1].encode()),
         )
 
-    http = _Http(_release(manifest), manifest)
+    http = (_Http if channel == "stable" else _PypiHttp)(_release(manifest), manifest)
     if drift == "healthy":
         release = update_cmd.resolve_release(http, latest=True)
         update_cmd._cache_manifest(paths, release)
         monkeypatch.setattr(http, "bytes", lambda _: pytest.fail("healthy update downloaded a manifest"))
 
     result = update_cmd.run_update(
-        channel="stable",
+        channel=channel,
+        dry_run=drift == "dry-run",
         paths=paths,
         http=http,
         runner=setup_only,
         now=lambda: "2026-07-20T12:01:00+00:00",
     )
     assert state_path.read_bytes() == before_update
-    if drift == "failed":
+    if drift in {"failed", "partial"}:
         assert result != 0
-        assert "smoke command exited 7" in capsys.readouterr().err
+        reason = "smoke command exited 7" if drift == "failed" else "second executable locked"
+        assert reason in capsys.readouterr().err
+        if drift == "partial":
+            assert not Path(entries[1].managed_path).exists()
         assert installed_path.read_bytes() == before_installed
         assert not executable.exists()
+    elif drift == "dry-run":
+        assert result == 0
+        message = capsys.readouterr().out
+        assert f"would run setup with the verified manifest for {TAG}" in message
+        assert "--manifest" not in message
+    elif newer:
+        assert result == 0
+        output = capsys.readouterr().out.strip().splitlines()
+        assert len(output) == 1
+        action = (
+            "repairing managed engines for" if drift == "newer-damaged" else "preserving newer managed engine release"
+        )
+        assert f"{action} v{installed_version}" in output[0]
+        assert executable.read_bytes() == entries[0].asset_name.encode() + b"-previous"
+        assert json.loads(installed_path.read_bytes())["manifest_revision"] == previous["manifest_revision"]
     else:
         assert result == 0
         assert json.loads(installed_path.read_bytes())["manifest_revision"] == json.loads(manifest)["manifest_revision"]
@@ -1145,7 +1239,7 @@ def test_same_immutable_coordinates_check_engines(tmp_path, monkeypatch, capsys,
         assert json.loads(installed_path.read_bytes())["components"][entries[0].component_id]["sha256"] == (
             hashlib.sha256(entries[0].asset_name.encode()).hexdigest()
         )
-    assert len(calls) == (0 if drift == "healthy" else 1)
+    assert len(calls) == (0 if drift in {"healthy", "newer", "newer-bundled", "newer-uncached", "dry-run"} else 1)
 
 
 def test_dry_run_does_not_write_manifest_cache_or_state(tmp_path):
@@ -1204,8 +1298,9 @@ def test_npm_update_refuses_before_side_effects(tmp_path, monkeypatch, capsys, c
     )
     assert not list(tmp_path.iterdir())
     message = capsys.readouterr().err.lower()
-    assert "npm update --global brigadestack" in message
-    assert "npm update --global @escoffier-labs/brigade" in message
+    assert "npm install <package>@latest" in message
+    assert "npm install --global <package>@latest" in message
+    assert "brigadestack" in message and "@escoffier-labs/brigade" in message
     assert "brigade setup" in message
 
 
