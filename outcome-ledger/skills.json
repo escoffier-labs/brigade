@@ -1,13 +1,13 @@
 {
   "covers": {
-    "cutoff_at": "2026-11-24T17:41:32Z",
-    "main_sha": "126cb1270e868613a4caa8814e44f3f0777af9d5"
+    "cutoff_at": "2026-11-25T04:24:25Z",
+    "main_sha": "675a811142b90f19f7323f2d3322034aff18b6ee"
   },
   "policy": {
     "config_sha256": "0123f241efc5e833980aab81e71f8bea6d64fe8902f8b16c3bc4ea8b2fcc2bb2",
     "scorecard_policy": "scorecard.v1"
   },
-  "prev_ledger_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "prev_ledger_sha256": "9a95077055b44a133a97c04be5075323b9c7fe3f0f89e801f66fe6ec05080d88",
   "schema": "brigade.outcome_ledger.v1",
   "subjects": {
     "skill:note": {
@@ -19,24 +19,24 @@
           "skill_md_sha256": "457078ef56f4143910ba68729198285e204645d66ababc557e17b80496fe4cb1"
         }
       ],
-      "band": "unseen",
+      "band": "candidate",
       "current": {
-        "commit": "126cb1270e868613a4caa8814e44f3f0777af9d5",
+        "commit": "675a811142b90f19f7323f2d3322034aff18b6ee",
         "fingerprint": "394ee1b104916188c8706b6ba719c4b5deafce05b690f87a731096698a30a120"
       },
       "decision": {
-        "action": "hold",
-        "code": "regression_hold",
-        "decided_at": "2026-11-24T17:41:32Z",
-        "reason": "withheld: verified regression present"
+        "action": "install",
+        "code": null,
+        "decided_at": "2026-11-25T04:24:25Z",
+        "reason": "verified helped outnumbers regressions"
       },
       "demoted": [],
-      "last_action_at": null,
+      "last_action_at": "2026-11-25T04:24:25Z",
       "manifest_id": "skill-note",
       "manifest_sha256": "28e3d0939827de26c0cf63a816579b97185399f92ed3b017ffb12f4f4b6af1a0",
       "restore": null,
       "since_commit": "f61f9b67f4aa63d0118ad993cd8ac5e63e92ba62",
-      "status": "candidate",
+      "status": "promoted",
       "subject_path": "src/brigade/templates/skills/note/SKILL.md",
       "trials": [
         {
@@ -45,6 +45,51 @@
           "outcome": "hurt",
           "reason": "missing",
           "sha": "a2bd14a45104e0c1c4d9c19bbadc70291b1fce46"
+        },
+        {
+          "fingerprint": "394ee1b104916188c8706b6ba719c4b5deafce05b690f87a731096698a30a120",
+          "jobs": [
+            {
+              "attempt": 1,
+              "completed_at": "2026-11-25T03:14:28Z",
+              "conclusion": "success",
+              "job_id": 138951038442,
+              "run_id": 45538488657
+            }
+          ],
+          "outcome": "helped",
+          "reason": null,
+          "sha": "bcc56649f7800fa4311792ecc6853ef38d1c91ec"
+        },
+        {
+          "fingerprint": "394ee1b104916188c8706b6ba719c4b5deafce05b690f87a731096698a30a120",
+          "jobs": [
+            {
+              "attempt": 1,
+              "completed_at": "2026-11-25T03:48:45Z",
+              "conclusion": "success",
+              "job_id": 138964025448,
+              "run_id": 45542436194
+            }
+          ],
+          "outcome": "helped",
+          "reason": null,
+          "sha": "61fe9014f11690d53806811d1db1ed1c456649aa"
+        },
+        {
+          "fingerprint": "394ee1b104916188c8706b6ba719c4b5deafce05b690f87a731096698a30a120",
+          "jobs": [
+            {
+              "attempt": 1,
+              "completed_at": "2026-11-25T04:23:29Z",
+              "conclusion": "success",
+              "job_id": 138976974660,
+              "run_id": 45546376649
+            }
+          ],
+          "outcome": "helped",
+          "reason": null,
+          "sha": "675a811142b90f19f7323f2d3322034aff18b6ee"
         }
       ]
     }
