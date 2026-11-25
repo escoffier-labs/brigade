@@ -8,12 +8,15 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from brigade import cli
 from brigade import fleet_client
-from brigade import code_graph_delta
+from brigade import code_graph_delta, component_bins
+from brigade import proc
+from brigade import runguard
 from brigade import localio
 from brigade import receipts_cmd
 from brigade import verify_manifest_git
@@ -1856,13 +1859,15 @@ def _write_brigade_config(
     (brigade / "config.json").write_text(json.dumps(payload, indent=2) + "\n")
 
 
-def _seed_graphtrail_db(tmp_path: Path) -> Path:
+def _seed_code_graph_db(tmp_path: Path) -> Path:
     db_dir = tmp_path / ".brigade" / "code-graph"
     db_dir.mkdir(parents=True, exist_ok=True)
     db_path = db_dir / "code-graph.db"
     with sqlite3.connect(db_path) as con:
         con.execute("create table if not exists symbols (name text)")
         con.execute("insert into symbols values ('stale-baseline')")
+        con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT, value TEXT)")
+        con.execute("INSERT INTO meta VALUES ('synced_at', '1')")
     return db_path
 
 
@@ -2085,6 +2090,7 @@ def test_work_verify_graphtrail_delta_sidecar_digest_cleanup_and_summary(tmp_pat
 def test_work_verify_compact_delta_emits_exportable_code_references(tmp_path, capsys, monkeypatch):
     """Exercise capture_after_and_diff, compaction, receipt storage, and export together."""
     _init_git_repo_with_head(tmp_path)
+    _seed_code_graph_db(tmp_path)
     subprocess.run(
         ["git", "remote", "add", "origin", "https://github.com/escoffier-labs/brigade.git"],
         cwd=tmp_path,
@@ -2285,33 +2291,56 @@ def test_work_verify_graphtrail_delta_malformed_diff_fails_open(tmp_path, capsys
     assert sidecar["ok"] is False
 
 
-def test_work_verify_code_graph_default_timeout_is_recorded(tmp_path, capsys, monkeypatch):
-    _init_git_repo(tmp_path)
-    monkeypatch.setattr(code_graph_delta, "_graphtrail_bin", lambda: "brigade-code-graph")
+@pytest.mark.parametrize("index_state", ["missing", "empty", "slow"])
+def test_work_verify_defers_graph_sync_once_and_recovers_a_dead_launcher(tmp_path, capsys, monkeypatch, index_state):
+    _init_git_repo_with_head(tmp_path)
+    monkeypatch.setattr(component_bins, "resolve", lambda name: name if name == "brigade-code-graph" else None)
+    db = tmp_path / ".brigade/code-graph/code-graph.db"
+    if index_state != "missing":
+        db.parent.mkdir(parents=True)
+        with sqlite3.connect(db) as connection:
+            connection.execute("CREATE TABLE meta (key TEXT, value TEXT)")
+            if index_state == "slow":
+                connection.execute("INSERT INTO meta VALUES ('synced_at', '1')")
 
-    def time_out(binary, db_path, command, *extra, timeout, stage, **kwargs):
-        assert command == "sync"
-        return code_graph_delta._command_result(
-            argv=[binary, "--db", str(db_path), command],
-            returncode=124,
-            stdout="",
-            stderr="sync timed out",
-            timed_out=True,
-            duration_seconds=timeout,
-            timeout=timeout,
-            stage=stage,
+    real_run = subprocess.run
+
+    def sync(argv, *args, **kwargs):
+        if isinstance(argv, list) and argv[:1] == ["brigade-code-graph"]:
+            assert index_state == "slow"
+            assert kwargs["timeout"] == 0.5
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        return real_run(argv, *args, **kwargs)
+
+    launches = []
+    alive = {12345}
+
+    def spawn(argv, **kwargs):
+        launches.append((argv, kwargs))
+        return SimpleNamespace(pid=12345), "detached"
+
+    monkeypatch.setattr(subprocess, "run", sync)
+    monkeypatch.setattr(proc, "spawn_detached", spawn)
+    monkeypatch.setattr(runguard, "_pid_is_active", alive.__contains__)
+
+    for step, expected in enumerate((1, 1, 2)):
+        if expected == 2:
+            alive.clear()
+        assert (
+            work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True, reuse=False) == 0
         )
-
-    monkeypatch.setattr(code_graph_delta, "_run_graphtrail", time_out)
-
-    assert work_cmd.verify_run(target=tmp_path, commands=["python3 -c \"print('ok')\""], json_output=True) == 0
-    receipt = json.loads(capsys.readouterr().out)
-    delta = receipt["code_graph_delta"]
-    assert receipt["commands"][0]["exit_code"] == 0
-    assert delta["status"] == "sync_timed_out"
-    assert delta["graphtrail_timeout_seconds"] == 0.5
-    assert delta["commands"]["before_sync"]["timed_out"] is True
-    assert delta["commands"]["after_sync"] is None
+        receipt = json.loads(capsys.readouterr().out)
+        delta = receipt["code_graph_delta"]
+        assert delta["status"] == "sync_deferred"
+        assert delta["ok"] is False
+        assert "background" in delta["summary"]
+        before = delta["commands"]["before_sync"]
+        if index_state == "slow" and step != 1:
+            assert before["timed_out"] is True
+        else:
+            assert before is None
+        assert receipt["tree_stable"] is True
+        assert len(launches) == expected
 
 
 def test_work_verify_graphtrail_delta_config_timeout_reaches_pre_and_post_sync(tmp_path, capsys, monkeypatch):
@@ -2538,11 +2567,13 @@ def test_work_verify_graphtrail_delta_rejects_invalid_per_invocation_timeout_ove
     assert _count_verify_run_dirs(tmp_path) == 0
 
 
-def test_work_verify_graph_snapshot_timeout_marks_delta_unavailable(tmp_path, capsys, monkeypatch):
+@pytest.mark.parametrize("sync_succeeds", [True, False])
+def test_work_verify_graph_snapshot_timeout_marks_delta_unavailable(tmp_path, capsys, monkeypatch, sync_succeeds):
     _init_git_repo(tmp_path)
-    _seed_graphtrail_db(tmp_path)
+    _seed_code_graph_db(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path, sync_delay_seconds=0.2)
     monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
+    _derace_graphtrail_sync_timing(monkeypatch, graphtrail, time_out_sync_call=None if sync_succeeds else 1)
 
     def timeout_backup(*args, **kwargs):
         raise TimeoutError("timeout after 0.05s")
@@ -2565,13 +2596,18 @@ def test_work_verify_graph_snapshot_timeout_marks_delta_unavailable(tmp_path, ca
     assert receipt["commands"][0]["status"] == "completed"
     assert receipt["commands"][0]["exit_code"] == 0
     assert compact_delta["ok"] is False
-    assert compact_delta["status"] == "sync_timed_out"
-    assert "timed out after 0.05s" in compact_delta["summary"]
+    assert compact_delta["commands"]["before_sync"]["timed_out"] is not sync_succeeds
+    if sync_succeeds:
+        assert compact_delta["status"] == "capture_failed"
+        assert "baseline snapshot timed out" in compact_delta["summary"]
+    else:
+        assert compact_delta["status"] == "sync_timed_out"
+        assert "timed out after 0.05s" in compact_delta["summary"]
 
 
 def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
-    _seed_graphtrail_db(tmp_path)
+    _seed_code_graph_db(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path)
     monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
     real_run = code_graph_delta._run_graphtrail

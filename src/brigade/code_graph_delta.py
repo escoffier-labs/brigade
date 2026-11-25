@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from . import code_references, component_bins, engine_paths
+from . import code_graph_background, code_references, component_bins, engine_paths
 
 SNAPSHOT_NAME = "code-graph-before.db"
 SNAPSHOT_AFTER_NAME = "code-graph-after.db"
@@ -32,7 +32,7 @@ LINE_KEYS = {
 }
 
 
-def capture_before(target: Path, run_dir: Path, *, timeout: float = 10.0) -> dict[str, Any]:
+def capture_before(target: Path, run_dir: Path, *, timeout: float = 10.0, defer_sync: bool = False) -> dict[str, Any]:
     """Sync GraphTrail and snapshot its sqlite DB; return status data, never raise."""
     try:
         target = target.expanduser().resolve()
@@ -44,10 +44,19 @@ def capture_before(target: Path, run_dir: Path, *, timeout: float = 10.0) -> dic
             db_path = engine_paths.code_graph_db(target).path
         except ValueError as exc:
             return _status("unavailable", f"code graph delta unavailable: {exc}", binary=binary)
+        details = {"binary": binary, "db_path": str(db_path), "graphtrail_timeout_seconds": timeout}
+        if defer_sync:
+            background = code_graph_background.status_or_start(target, db_path)
+            if background is None and not code_graph_background.index_ready(db_path):
+                background = code_graph_background.status_or_start(target, db_path, binary)
+            if background is not None:
+                return _deferred(background, None, **details)
         db_existed_before_sync = db_path.is_file()
         sync_stage = "incremental-sync" if db_existed_before_sync else "initial-index"
         sync = _run_graphtrail(binary, db_path, "sync", timeout=timeout, stage=sync_stage, cwd=target)
         if sync.get("timed_out"):
+            if defer_sync and (background := code_graph_background.status_or_start(target, db_path, binary)):
+                return _deferred(background, sync, **details)
             if db_existed_before_sync:
                 snapshot_path = run_dir / SNAPSHOT_NAME
                 try:
@@ -56,65 +65,66 @@ def capture_before(target: Path, run_dir: Path, *, timeout: float = 10.0) -> dic
                     return _status(
                         "sync_timed_out",
                         f"code graph delta unavailable: graphtrail {sync_stage} sync timed out after {timeout:g}s",
-                        binary=binary,
-                        db_path=str(db_path),
                         sync=sync,
-                        graphtrail_timeout_seconds=timeout,
+                        **details,
                     )
                 return {
                     "ok": True,
                     "status": "captured",
                     "summary": "code graph baseline captured from stale database",
-                    "binary": binary,
-                    "db_path": str(db_path),
+                    **details,
                     "before_snapshot_path": str(snapshot_path),
                     "before_snapshot_sha256": _file_sha256(snapshot_path),
                     "stale_graph_used": True,
-                    "graphtrail_timeout_seconds": timeout,
                     "sync": sync,
                 }
             return _status(
                 "sync_timed_out",
                 f"code graph delta unavailable: graphtrail {sync_stage} sync timed out after {timeout:g}s",
-                binary=binary,
-                db_path=str(db_path),
                 sync=sync,
-                graphtrail_timeout_seconds=timeout,
+                **details,
             )
         if sync["returncode"] != 0:
             return _status(
                 "sync_failed",
                 f"code graph delta unavailable: graphtrail sync failed ({sync['returncode']})",
-                binary=binary,
-                db_path=str(db_path),
                 sync=sync,
-                graphtrail_timeout_seconds=timeout,
+                **details,
             )
         if not db_path.is_file():
             return _status(
                 "no_database",
                 "code graph delta unavailable: graphtrail sync did not create a database",
-                binary=binary,
-                db_path=str(db_path),
                 sync=sync,
-                graphtrail_timeout_seconds=timeout,
+                **details,
             )
         snapshot_path = run_dir / SNAPSHOT_NAME
-        _backup_sqlite(db_path, snapshot_path, timeout=timeout)
+        try:
+            _backup_sqlite(db_path, snapshot_path, timeout=timeout)
+        except TimeoutError:
+            return _status("capture_failed", "code graph baseline snapshot timed out", sync=sync, **details)
         return {
             "ok": True,
             "status": "captured",
             "summary": "code graph baseline captured",
-            "binary": binary,
-            "db_path": str(db_path),
+            **details,
             "before_snapshot_path": str(snapshot_path),
             "before_snapshot_sha256": _file_sha256(snapshot_path),
             "stale_graph_used": False,
-            "graphtrail_timeout_seconds": timeout,
             "sync": sync,
         }
     except Exception as exc:
         return _status("capture_failed", f"code graph delta unavailable: {type(exc).__name__}: {exc}")
+
+
+def _deferred(background: str, sync: dict[str, Any] | None, **details: Any) -> dict[str, Any]:
+    reason = "pre-run sync timed out" if sync is not None else "foreground sync skipped"
+    return _status(
+        "sync_deferred",
+        f"code graph delta deferred: {reason}, {background}",
+        sync=sync,
+        **details,
+    )
 
 
 def capture_after_and_diff(
@@ -166,7 +176,13 @@ def capture_after_and_diff(
             return _write_and_compact(run_dir, payload, snapshot_path=snapshot_path)
 
         after_snapshot_path = run_dir / SNAPSHOT_AFTER_NAME
-        _backup_sqlite(db_path, after_snapshot_path, timeout=timeout)
+        try:
+            _backup_sqlite(db_path, after_snapshot_path, timeout=timeout)
+        except TimeoutError:
+            payload = _failure_payload(
+                target, before, "capture_failed", summary="code graph final snapshot timed out", after_sync=sync
+            )
+            return _write_and_compact(run_dir, payload, snapshot_path=snapshot_path)
         after_snapshot_sha256 = _file_sha256(after_snapshot_path)
         diff = _run_graphtrail(
             binary,

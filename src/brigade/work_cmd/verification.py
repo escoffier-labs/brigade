@@ -1570,7 +1570,9 @@ def _run_verify_commands(
         receipt["producer_work_session_id"] = _active_work_session_id(target)
         _stamp_outcome_capture(receipt, capture, capture_kind, capture_meta)
         try:
-            graph_delta_before = code_graph_delta.capture_before(target, run_dir, timeout=code_graph_timeout)
+            graph_delta_before = code_graph_delta.capture_before(
+                target, run_dir, timeout=code_graph_timeout, defer_sync=True
+            )
         except KeyboardInterrupt:
             canceled = True
             rc = verify_runtime._VERIFY_CANCELED_RC
