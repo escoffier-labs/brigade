@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 
-from brigade.engine_deprecation import LegacyOption
 import json
 from pathlib import Path
 
@@ -323,16 +322,6 @@ def register(sub: argparse._SubParsersAction) -> None:
         type=float,
         default=None,
         help="Timeout in seconds for each code graph sync/diff during code graph delta capture.",
-    )
-    # Legacy spelling, hidden from --help, accepted through v0.32 (docs/phase-engine-rename.md).
-    p_work_verify_run.add_argument(
-        "--graphtrail-timeout",
-        action=LegacyOption,
-        replacement="--code-graph-timeout",
-        dest="code_graph_timeout",
-        type=float,
-        default=None,
-        help=argparse.SUPPRESS,
     )
     p_work_verify_run.add_argument(
         "--capture",
@@ -921,15 +910,6 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         metavar="QUERY",
         help="Fetch a Brigade-source evidence bundle from the evidence engine and print it as untrusted context.",
-    )
-    # Legacy spelling, hidden from --help, accepted through v0.32 (docs/phase-engine-rename.md).
-    p_work_import_context.add_argument(
-        "--from-miseledger",
-        action=LegacyOption,
-        replacement="--from-evidence",
-        dest="from_evidence",
-        default=None,
-        help=argparse.SUPPRESS,
     )
     p_work_import_context.add_argument("--limit", type=int, default=5, help="Maximum evidence results to fetch.")
     p_work_import_context.add_argument(

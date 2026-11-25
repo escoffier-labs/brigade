@@ -123,14 +123,6 @@
     }
   },
   {
-    "path": "docs/command-inventory.md",
-    "kind": "frozen",
-    "reason": "Persisted schema or source path, archived URL, or compatibility documentation.",
-    "literals": {
-      "miseledger": 1
-    }
-  },
-  {
     "path": "docs/designs/evidence-eligibility-sanitizer.md",
     "kind": "history",
     "reason": "Historical plan, changelog or captured research; original identities remain unchanged.",
@@ -152,7 +144,7 @@
     "reason": "Persisted schema or source path, archived URL, or compatibility documentation.",
     "literals": {
       "graphtrail": 2,
-      "miseledger": 2
+      "miseledger": 1
     }
   },
   {
@@ -321,8 +313,7 @@
     "kind": "frozen",
     "reason": "Persisted schema or source path, archived URL, or compatibility documentation.",
     "literals": {
-      "graphtrail": 2,
-      "miseledger": 2
+      "miseledger": 1
     }
   },
   {
@@ -389,7 +380,7 @@
     "reason": "Persisted schema or source path, archived URL, or compatibility documentation.",
     "literals": {
       "graphtrail": 2,
-      "miseledger": 14
+      "miseledger": 6
     }
   },
   {
@@ -1282,7 +1273,7 @@
     "kind": "frozen",
     "reason": "Persisted identifiers, archived URLs or source and asset paths in documentation.",
     "literals": {
-      "miseledger": 6
+      "miseledger": 3
     }
   },
   {
@@ -2547,14 +2538,6 @@
     }
   },
   {
-    "path": "plugins/brigade/skills/brigade-work/SKILL.md",
-    "kind": "frozen",
-    "reason": "Persisted schema or source path, archived URL, or compatibility documentation.",
-    "literals": {
-      "miseledger": 2
-    }
-  },
-  {
     "path": "scripts/generate_component_manifest.py",
     "kind": "frozen",
     "reason": "Persisted schema or source path, archived URL, or compatibility documentation.",
@@ -2680,7 +2663,7 @@
     "kind": "frozen",
     "reason": "Persisted schema, receipt or import identity and internal reader names.",
     "literals": {
-      "miseledger": 8
+      "miseledger": 5
     }
   },
   {
@@ -2714,9 +2697,7 @@
     "kind": "frozen",
     "reason": "Persisted schema, receipt or import identity and internal reader names.",
     "literals": {
-      "GraphTrail": 1,
-      "graphtrail": 1,
-      "miseledger": 1
+      "GraphTrail": 1
     }
   },
   {
@@ -2999,14 +2980,6 @@
     }
   },
   {
-    "path": "src/brigade/roadmap_cmd.py",
-    "kind": "frozen",
-    "reason": "Persisted schema, receipt or import identity and internal reader names.",
-    "literals": {
-      "miseledger": 1
-    }
-  },
-  {
     "path": "src/brigade/run_audit.py",
     "kind": "frozen",
     "reason": "Persisted schema, receipt or import identity and internal reader names.",
@@ -3040,14 +3013,6 @@
     "literals": {
       "graphtrail": 36,
       "miseledger": 24
-    }
-  },
-  {
-    "path": "src/brigade/templates/skills/brigade-work/SKILL.md",
-    "kind": "frozen",
-    "reason": "Persisted identifiers, archived URLs or source and asset paths in documentation.",
-    "literals": {
-      "miseledger": 2
     }
   },
   {
@@ -3106,7 +3071,7 @@
     "reason": "Persisted schema, receipt or import identity and internal reader names.",
     "literals": {
       "MiseLedger": 1,
-      "miseledger": 4
+      "miseledger": 3
     }
   },
   {
@@ -3337,14 +3302,6 @@
     "literals": {
       "graphtrail": 4,
       "miseledger": 42
-    }
-  },
-  {
-    "path": "tests/test_config.py",
-    "kind": "fixture",
-    "reason": "Compatibility or persisted-identity fixture and regression coverage.",
-    "literals": {
-      "graphtrail": 5
     }
   },
   {
@@ -3587,7 +3544,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "MISELEDGER": 3,
-      "miseledger": 142
+      "miseledger": 124
     }
   },
   {

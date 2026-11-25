@@ -404,7 +404,7 @@ Evidence log and code map (built in):
   - `brigade evidence status` / `doctor` - advisory health + next commands
   - `brigade evidence crawl <args...>` / `search <args...>` - engine output and exit code pass through
   - `brigade evidence crawl plan` / `export plan` - review-only plans under `.brigade/evidence/plans/`
-  - `brigade receipts export miseledger --new-only --import` - export verify/run receipts into the ledger (command keeps the historical export name for now)
+  - `brigade receipts export evidence --new-only --import` - export verify/run receipts into the ledger
 - Historical note only: StationTrail and SourceHarvest were absorbed into evidence crawl in v0.3.0; their archived repos are migration notes, not active products.
 
 Search and context tools:
