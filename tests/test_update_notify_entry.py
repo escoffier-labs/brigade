@@ -9,16 +9,28 @@ import subprocess
 import sysconfig
 import venv
 import zipfile
+from contextlib import contextmanager
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 
 import pytest
 
-from brigade import update_notify
+from brigade import __version__, telemetry_usage, update_notify
 from brigade.claude_hooks.package import PACKAGE_REF
 
 
+# Inject the test endpoint after the real isolated bootstrap pins the package.
+# The child still executes the installed CLI and its normal refresh handler.
+_LOCAL_REFRESH = (
+    "        argv = list(argv)\n"
+    "        argv[3] = argv[3].replace('r.run_module', "
+    "'import brigade.update_notify as n;n.CHECK_URL=os.environ[\"TEST_VERSION_URL\"];r.run_module', 1)\n"
+)
+
+
 @pytest.fixture
-def notify_entry(tmp_path, monkeypatch):
+def notify_entry(tmp_path, monkeypatch, version_listener):
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     home = tmp_path / "home"
@@ -48,7 +60,8 @@ def notify_entry(tmp_path, monkeypatch):
         "    if refresh:\n"
         "        with open(os.environ['TEST_REFRESH_LAUNCHES'], 'a') as stream:\n"
         "            stream.write(json.dumps({'argv': argv, 'cwd': str(kwargs.get('cwd'))}) + '\\n')\n"
-        "    process = original_popen(argv, *args, **kwargs)\n"
+        + _LOCAL_REFRESH
+        + "    process = original_popen(argv, *args, **kwargs)\n"
         "    if refresh:\n"
         "        process.wait(timeout=15)\n"
         "    return process\n"
@@ -73,11 +86,11 @@ def notify_entry(tmp_path, monkeypatch):
         TEST_WORKSPACE=str(workspace),
         TEST_REFRESH_LAUNCHES=str(launches),
         TEST_NOTIFIER_CALLED=str(notified),
-        # A failed loopback proxy keeps the enabled refresh off the live service.
         HTTPS_PROXY="http://127.0.0.1:1",
         https_proxy="http://127.0.0.1:1",
-        NO_PROXY="",
-        no_proxy="",
+        TEST_VERSION_URL=update_notify.CHECK_URL,
+        NO_PROXY="127.0.0.1",
+        no_proxy="127.0.0.1",
     )
     cache = update_notify.cache_path(env)
 
@@ -102,10 +115,13 @@ def notify_entry(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("installation", ["external", "pip-user"])
-def test_refresh_loads_running_installation_outside_interpreter_sites(tmp_path, monkeypatch, installation):
+def test_refresh_loads_running_installation_outside_interpreter_sites(
+    tmp_path, monkeypatch, installation, version_listener
+):
     """A user-site/PYTHONPATH install must still refresh under isolated Python."""
     runtime = tmp_path / "runtime"
-    venv.EnvBuilder(with_pip=False, system_site_packages=installation == "pip-user").create(runtime)
+    user_site = installation == "pip-user"
+    venv.EnvBuilder(with_pip=user_site, system_site_packages=user_site).create(runtime)
     python = runtime / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     staged = tmp_path / "staged"
     installed = staged
@@ -194,8 +210,9 @@ def test_refresh_loads_running_installation_outside_interpreter_sites(tmp_path, 
         PYTHONUSERBASE=str(tmp_path / "userbase"),
         HTTPS_PROXY="http://127.0.0.1:1",
         https_proxy="http://127.0.0.1:1",
-        NO_PROXY="",
-        no_proxy="",
+        TEST_VERSION_URL=update_notify.CHECK_URL,
+        NO_PROXY="127.0.0.1",
+        no_proxy="127.0.0.1",
     )
     # Import the legitimate running installation, then poison the inherited
     # import path. Wait for the actual child instead of observing only argv.
@@ -213,8 +230,10 @@ def test_refresh_loads_running_installation_outside_interpreter_sites(tmp_path, 
         # Loading this package must not enable unrelated user-site modules.
         f"Path({str(installed / 'platform.py')!r}).write_text({sentinel_source!r})\n"
         "children = []\n"
-        "def spawn(*args, **kwargs):\n"
-        "    process = subprocess.Popen(*args, **kwargs)\n"
+        "def spawn(argv, *args, **kwargs):\n"
+        "    if '--notify-refresh' in argv:\n"
+        + _LOCAL_REFRESH
+        + "    process = subprocess.Popen(argv, *args, **kwargs)\n"
         "    children.append(process)\n"
         "    return process\n"
         "update_notify.subprocess = SimpleNamespace(**vars(subprocess))\n"
@@ -292,3 +311,124 @@ def test_entry_never_executes_workspace_update_module(notify_entry, shadow, cach
         assert cache.exists() == (cache_state == "stale")
         if cache.exists():
             assert json.loads(cache.read_text(encoding="utf-8"))["checked_at"] == 0.0
+
+
+@contextmanager
+def _version_server():
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            size = int(self.headers.get("Content-Length", 0))
+            requests.append((self.path, dict(self.headers.items()), self.rfile.read(size)))
+            self.send_response(server.response_status)
+            if server.location is not None:
+                self.send_header("Location", server.location)
+            self.end_headers()
+            self.wfile.write(server.response_body)
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), Handler) as server:
+        server.response_status = 200
+        server.response_body = b'{"latest": "99.0.0"}'
+        server.location = None
+        thread = Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            yield server, requests
+        finally:
+            server.shutdown()
+            thread.join()
+
+
+@pytest.fixture
+def version_listener(monkeypatch):
+    with _version_server() as (server, requests):
+        monkeypatch.setattr(update_notify, "CHECK_URL", f"http://127.0.0.1:{server.server_port}/v1/version")
+        monkeypatch.setenv("no_proxy", "127.0.0.1")
+        yield server, requests
+
+
+@pytest.mark.parametrize("value", ["no", " No ", "NO"])
+def test_telemetry_no_opts_out(value):
+    assert telemetry_usage.uncounted({"BRIGADE_TELEMETRY": value})
+
+
+def _version_cache_env(tmp_path):
+    return {"HOME": str(tmp_path), "USERPROFILE": str(tmp_path), "LOCALAPPDATA": str(tmp_path)}
+
+
+@pytest.mark.parametrize(
+    "mode,expected",
+    [
+        ({}, "default"),
+        ({"DO_NOT_TRACK": "1"}, "private"),
+        ({"DO_NOT_TRACK": " TrUe "}, "private"),
+        ({"DO_NOT_TRACK": " 0 "}, "default"),
+        ({"DO_NOT_TRACK": " Off "}, "default"),
+        ({"BRIGADE_TELEMETRY": "0"}, "private"),
+        ({"BRIGADE_TELEMETRY": " FALSE "}, "private"),
+        ({"BRIGADE_TELEMETRY": " Off "}, "private"),
+        ({"BRIGADE_TELEMETRY": " No "}, "private"),
+        ({"BRIGADE_TELEMETRY": " TrUe "}, "default"),
+        ({"BRIGADE_NO_UPDATE_CHECK": "1"}, "skip"),
+        ({"BRIGADE_NO_UPDATE_CHECK": " TrUe "}, "skip"),
+        ({"BRIGADE_NO_UPDATE_CHECK": " FaLsE "}, "default"),
+        ({"BRIGADE_NO_UPDATE_CHECK": "   "}, "default"),
+        ({"CI": "true"}, "skip"),
+        ({"CI": " FaLsE "}, "skip"),
+        ({"CI": ""}, "default"),
+    ],
+)
+def test_version_request_on_wire(tmp_path, version_listener, mode, expected):
+    _, requests = version_listener
+    env = {**_version_cache_env(tmp_path), "BRIGADE_INSTALL_CHANNEL": "plugin", **mode}
+    update_notify.run_refresh(env=env, now=42.0)
+    if expected == "skip":
+        assert requests == []
+        assert not update_notify.cache_path(env).exists()
+        return
+
+    ((path, headers, body),) = requests
+    assert path == "/v1/version"
+    assert body == b""
+    assert "Content-Length" not in headers
+    assert "Transfer-Encoding" not in headers
+    if expected == "private":
+        assert headers.pop("User-Agent") == "brigadestack-update-check"
+        assert set(headers) == {"Accept-Encoding", "Host", "Connection"}
+    else:
+        assert headers["User-Agent"] == f"brigadestack/{__version__} ({update_notify.platform.system()})"
+        assert headers["X-Brigade-Channel"] == "plugin"
+    assert json.loads(update_notify.cache_path(env).read_text()) == {"checked_at": 42.0, "latest": "99.0.0"}
+
+
+@pytest.mark.parametrize("status,body", [(403, b""), (202, b'{"latest":"99.0.0"}'), (200, b'{"latest":null}')])
+def test_invalid_version_response_preserves_cache(tmp_path, version_listener, status, body):
+    server, requests = version_listener
+    server.response_status = status
+    server.response_body = body
+    env = _version_cache_env(tmp_path)
+    cache = update_notify.cache_path(env)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    original = {"checked_at": 1.0, "latest": "1.2.3"}
+    cache.write_text(json.dumps(original))
+    update_notify.run_refresh(env=env, now=42.0)
+    assert len(requests) == 1
+    assert json.loads(cache.read_text()) == original
+
+
+@pytest.mark.parametrize("mode", [{}, {"DO_NOT_TRACK": "1"}])
+def test_version_check_does_not_follow_redirect(tmp_path, version_listener, mode):
+    first, requests = version_listener
+    env = {**_version_cache_env(tmp_path), **mode}
+    cache = update_notify.cache_path(env)
+    cache.parent.mkdir(parents=True, exist_ok=True)
+    original = {"checked_at": 1.0, "latest": "1.2.3"}
+    cache.write_text(json.dumps(original))
+    with _version_server() as (second, redirected):
+        first.response_status = 302
+        first.location = f"http://127.0.0.1:{second.server_port}/redirected"
+        update_notify.run_refresh(env=env, now=42.0)
+        assert len(requests) == 1
+        assert redirected == []
+    assert json.loads(cache.read_text()) == original

@@ -132,37 +132,13 @@ that cadence:
 
     A new brigade release is available: X.Y.Z (installed A.B.C). Run "brigade update".
 
-How it learns about new releases: a detached background process may send one
-HTTPS GET to `https://check.brigade.tools/v1/version`. The request has no query
-parameters or body. Its User-Agent carries the Brigade version and OS name,
-with the same bytes as earlier clients. A separate `X-Brigade-Channel` header carries a closed label:
-`pipx`, `pip`, `uvx`, `npm`, `source`, or `plugin`. The current Worker ignores
-that header. Channel recording requires the separate Worker update to ship.
-See [Python CLI telemetry](telemetry.md) for channel detection and
-the complete field list.
-When the User-Agent exactly matches the Brigade CLI format, the Worker records a
-daily version observation: ISO week and UTC day, version, first and last UTC
-timestamps, request count, and an `internal` classification for configured
-operator egress. It derives the source value from a salted SHA-256 hash of the
-connecting address and ISO week. The hash changes weekly, and reports do not
-join sources across weeks.
+A detached background process may send a version request. See
+[Python CLI telemetry](telemetry.md) for request fields, opt-outs, and retention.
 
-Analytics does not store raw IP addresses or a persistent installation ID. It
-also does not store hostnames, usernames, repository or project names, command
-arguments, or account identifiers. These observations are not a count of
-people or installations. A weekly scheduled purge deletes rows older than 90
-days.
-
-The stderr notice is skipped when stderr is not a TTY, when `CI` is set, or
-when the command failed. The background cache refresh can still run with piped
-stderr so `work brief` can surface available updates. It is skipped when `CI`
-or `BRIGADE_NO_UPDATE_CHECK` is set. npm installs now refresh the version cache
-but suppress both the stderr notice and cached work-brief hint.
-
-Set `DO_NOT_TRACK=1` or `BRIGADE_TELEMETRY=0` to keep version retrieval without
-a counted observation. The request then uses a generic `Python-urllib`
-User-Agent and omits the channel header. The Worker records nothing for this
-User-Agent. `BRIGADE_TELEMETRY=off` and `false` also disable counting.
+The stderr notice is skipped when stderr is piped, when `CI` is nonempty, or
+when the command failed. The background refresh can still run with piped stderr
+so `brigade work brief` can show cached updates. npm installs refresh the cache
+and suppress both the stderr notice and cached work-brief hint.
 
 To disable this automatic update check and its cache refresh:
 
