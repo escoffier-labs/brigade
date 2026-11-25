@@ -129,7 +129,7 @@ func busyRetryDefaults(opts BusyRetryOptions) BusyRetryOptions {
 // Crawl import and provenance backfill write the SQLite evidence archive,
 // not the outcome JSONL digest chain. #566's records.jsonl.lock therefore
 // does not serialize these paths; SQLITE_BUSY retry is the coordination
-// with concurrent miseledger writers (receipt capture, handoff-ingest).
+// with concurrent Brigade Evidence writers (receipt capture, handoff-ingest).
 func RetryOnBusy(fn func() error, opts BusyRetryOptions) error {
 	opts = busyRetryDefaults(opts)
 	wait := opts.InitialWait

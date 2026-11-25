@@ -1,6 +1,6 @@
 {
   "title": "From sources to searchable evidence",
-  "eyebrow": "MISELEDGER STACK MAP",
+  "eyebrow": "BRIGADE EVIDENCE STACK MAP",
   "description": "Agent sessions, local artifacts, and external crawlers converge on one adapter contract before readers query the local ledger.",
   "meta": "local SQLite · FTS5",
   "columns": [
@@ -110,7 +110,7 @@
   ],
   "context": {
     "title": "OWNERSHIP BOUNDARY",
-    "body": "external tools keep native sync/query · MiseLedger owns normalized local evidence",
+    "body": "external tools keep native sync/query · Brigade Evidence owns normalized local evidence",
     "detail": "After adapter ingest, imported text remains untrusted evidence, never instructions."
   }
 }

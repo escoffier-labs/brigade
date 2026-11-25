@@ -16,8 +16,9 @@ Rules that apply to every slice:
 
 - Old names live on as compatibility shims or legacy readers for at most two
   releases (v0.31 and v0.32, including their patch releases). They are removed
-  at the v0.33.0 release cut. The one proposed exception is the evidence data
-  directory. See [Open questions](#open-questions).
+  at the v0.33.0 release cut, except for the nine rows listed under the v0.34
+  follow-up. The evidence data directory has its own migration boundary.
+  See [Open questions](#open-questions).
 - Historical receipts, memory cards, and evidence are never rewritten, and old
   evidence is never re-signed to change branding (ROADMAP, "Finish engine
   identity before moving existing data").
@@ -638,8 +639,8 @@ release:
    `ENV_OVERRIDES` and `_LEGACY_RELATIVE`. A legacy-keyed `installed.json`
    is then treated as absent, and doctor tells the user to run `brigade setup`.
    Setup stops creating shims and deletes the shims it created earlier.
-4. Remove `GRAPHTRAIL_DB` and `GRAPHTRAIL_ALLOW_UNSAFE_ROOT` reads.
-5. Stop reading `.graphtrail/graphtrail.db`. Doctor reports INFO "legacy
+4. Done for v0.33. Removed `GRAPHTRAIL_DB` and `GRAPHTRAIL_ALLOW_UNSAFE_ROOT` reads.
+5. Done for v0.33. Automatic resolution skips `.graphtrail/graphtrail.db`. Doctor reports INFO "legacy
    index ignored. Run `brigade code sync`". The old directory is never
    deleted, and the walker keeps skipping it so a stale database is never
    indexed.
@@ -655,15 +656,23 @@ release:
 10. `brigade mcp sync` renames owned `graphtrail` and `miseledger` keys by
     default and prints the tool-permission hint. User-authored entries are
     still left alone.
-11. Remove the stub at `docs/wiring-graphtrail-miseledger.md`.
-12. Delete the standalone engine release tooling that root CI never runs:
-    `engines/evidence-ledger/.github/workflows/release.yml`, its validator and
-    `testdata/workflows/release/*.yml`, `install.sh` and
-    `scripts/bootstrap_local.sh`, plus `engines/code-graph/.github/workflows/*`.
-    First confirm that no root workflow or test invokes them. Rename instead
-    if one does.
-13. Delete every `shim` entry from the retired-name allowlist. The version
-    check from R6 enforces this.
+11. Done for v0.33. Removed the stub at `docs/wiring-graphtrail-miseledger.md`.
+12. In progress. Evidence standalone release tooling was retired. The Code
+    Graph repository contract tests still verify the embedded CI and registry
+    publication workflows. Move the applicable checks before deleting them.
+13. Done for v0.33. Removed expired rows, pinned required literals at their
+    current counts, and assigned the nine approved exceptions a v0.34.0 expiry.
+
+### v0.34 follow-up
+
+1. Verify that the Cargo adapter's separate deprecation window has elapsed.
+   Decide the disposition of the published crate identity and registry
+   metadata before retiring the feature, its CLI options, and its CI entry.
+2. Move the embedded Code Graph workflow contract checks to root CI and the
+   supported release workflow, preserving MSRV and registry publication checks.
+3. Remove live legacy component aliases, resolver fallbacks, and help-banner
+   handling in one cutover. Keep historical release verification and safe
+   cleanup of aliases from existing installs.
 
 ## Installer acceptance
 

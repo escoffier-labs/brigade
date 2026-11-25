@@ -10,7 +10,7 @@
         {
           "id": "main",
           "label": "main",
-          "detail": "graphtrail-mcp.rs",
+          "detail": "brigade-code-graph-mcp.rs",
           "kind": "default"
         },
         {

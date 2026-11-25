@@ -727,7 +727,7 @@ def _smoke_code_graph_mcp(
     return {"server_name": name} if isinstance(name, str) and name else {}
 
 
-def _smoke_miseledger(
+def _smoke_evidence(
     path: Path,
     run: Callable[..., subprocess.CompletedProcess[str]],
 ) -> None:
@@ -735,12 +735,12 @@ def _smoke_miseledger(
     try:
         completed = _invoke_smoke_runner(run, argv)
     except subprocess.TimeoutExpired as exc:
-        raise ComponentInstallError(f"miseledger smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s") from exc
+        raise ComponentInstallError(f"brigade-evidence smoke timed out after {_SMOKE_TIMEOUT_SECONDS}s") from exc
     except OSError as exc:
-        raise ComponentInstallError(f"miseledger smoke failed to run {path}: {exc}") from exc
+        raise ComponentInstallError(f"brigade-evidence smoke failed to run {path}: {exc}") from exc
 
     if completed.returncode != 0:
-        raise ComponentInstallError(f"miseledger smoke failed: {path} version exited {completed.returncode}")
+        raise ComponentInstallError(f"brigade-evidence smoke failed: {path} version exited {completed.returncode}")
 
 
 def _sessionfind_help_is_valid(stdout: str, stderr: str) -> bool:
@@ -821,9 +821,9 @@ _SMOKE_DISPATCH: dict[
 ] = {
     "agent-notify": _smoke_agent_notify,
     "brigade-hub": _smoke_brigade_hub,
-    "graphtrail": _smoke_code_graph,
-    "graphtrail-mcp": _smoke_code_graph_mcp,
-    "miseledger": _smoke_miseledger,
+    "brigade-code-graph": _smoke_code_graph,
+    "brigade-code-graph-mcp": _smoke_code_graph_mcp,
+    "brigade-evidence": _smoke_evidence,
     "sessionfind": _smoke_sessionfind,
 }
 
@@ -844,9 +844,7 @@ def run_post_install_smoke(
 
     observations: dict[str, SmokeObservation] = {}
     for component_id in expected_components:
-        observed = _SMOKE_DISPATCH[
-            next(name for name in component_manifest.family_names(component_id) if name in _SMOKE_DISPATCH)
-        ](paths[component_id], run)
+        observed = _SMOKE_DISPATCH[component_manifest.family_id(component_id)](paths[component_id], run)
         if observed:
             observations[component_id] = observed
     return observations

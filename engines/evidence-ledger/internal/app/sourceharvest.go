@@ -33,7 +33,7 @@ type sourceHarvestSummary struct {
 
 func cmdImportSourceHarvest(args []string, out, errw io.Writer) int {
 	if len(args) < 2 {
-		return fatalf(errw, "usage: miseledger import sourceharvest <jsonl|markdown|files|html|gitlog|json> <sourceharvest-args> [--json] [--dry-run]")
+		return fatalf(errw, "usage: brigade-evidence import sourceharvest <jsonl|markdown|files|html|gitlog|json> <sourceharvest-args> [--json] [--dry-run]")
 	}
 	asJSON, dryRun, passArgs := splitWrapperFlags(args)
 	passArgs = ensureValueFlag(passArgs, "out", "-")
@@ -57,7 +57,7 @@ func cmdImportSourceHarvest(args []string, out, errw io.Writer) int {
 	// Crawl import writes the SQLite evidence archive, not the outcome
 	// JSONL digest chain. #566's records.jsonl.lock does not serialize
 	// this path; SQLITE_BUSY retry plus busy_timeout is the coordination
-	// with concurrent miseledger writers (receipt capture, handoff-ingest).
+	// with concurrent brigade-evidence writers (receipt capture, handoff-ingest).
 	var result ingest.AdapterResult
 	err := ingest.RetryOnBusy(func() error {
 		db, _, openErr := openMigrated()

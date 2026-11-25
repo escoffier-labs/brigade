@@ -80,14 +80,14 @@ func cmdPrunePolicy(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "prune policy: %s", err)
 	}
 	if len(rest) != 0 || (bools["apply"] && bools["dry-run"]) {
-		return fatalf(errw, "usage: miseledger prune policy [--policy default|FILE] [--json] [--dry-run] [--apply --export PATH]")
+		return fatalf(errw, "usage: brigade-evidence prune policy [--policy default|FILE] [--json] [--dry-run] [--apply --export PATH]")
 	}
 	policy, err := loadRetentionPolicy(values["policy"])
 	if err != nil {
 		return fatalf(errw, "prune policy: %s", err)
 	}
 	if bools["apply"] && strings.TrimSpace(values["export"]) == "" {
-		return fatalf(errw, "usage: miseledger prune policy [--policy default|FILE] [--json] [--dry-run] [--apply --export PATH]")
+		return fatalf(errw, "usage: brigade-evidence prune policy [--policy default|FILE] [--json] [--dry-run] [--apply --export PATH]")
 	}
 	db, paths, err := openMigrated()
 	if err != nil {

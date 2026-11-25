@@ -1,7 +1,7 @@
 //! Changed files to statically attributed tests, in one BFS over call edges.
 //!
 //! The caller supplies the changed files (usually `git diff --name-only`);
-//! GraphTrail walks incoming call edges from every symbol in those files and
+//! Brigade Code Graph walks incoming call edges from every symbol in those files and
 //! reports which test files reach them. "Statically attributed" is a lower
 //! bound on real coverage, never "tested": fixtures, dynamic dispatch, and
 //! harness-driven tests are invisible to call edges, and Rust `#[cfg(test)]`
@@ -248,7 +248,7 @@ mod tests {
     fn fixture_paths_are_test_support_but_not_tests() {
         for path in [
             "tests/fixtures/golden/mixed/go/caller.go",
-            "tests/fixtures/golden/mixed/src/bin/graphtrail-mcp.rs",
+            "tests/fixtures/golden/mixed/src/bin/brigade-code-graph-mcp.rs",
             "pkg/testdata/input.go",
             "src/__tests__/fixtures/blob.ts",
         ] {
@@ -282,7 +282,7 @@ mod tests {
             "app/contest.py",
             "src/latest.ts",
             "pkg/attestation.go",
-            "tests/fixtures/golden/mixed/src/bin/graphtrail-mcp.rs",
+            "tests/fixtures/golden/mixed/src/bin/brigade-code-graph-mcp.rs",
             "tests/fixtures/sample.rs",
             "pkg/testdata/input.go",
             "src/__tests__/fixtures/blob.ts",

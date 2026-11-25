@@ -1,6 +1,6 @@
 use crate::factory::build as make;
 use crate::m::f;
-use graphtrail::m::g;
+use brigade_code_graph::m::g;
 
 struct A;
 

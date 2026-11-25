@@ -2510,7 +2510,7 @@ def test_run_post_install_smoke_rejects_miseledger_nonzero_exit(tmp_path):
     managed = _write_managed_smoke_stubs(tmp_path)
     script = smoke_stub_script("brigade-evidence").replace("raise SystemExit(0)", "raise SystemExit(1)")
     managed["brigade-evidence"] = _write_managed_stub(tmp_path, "brigade-evidence", script=script)
-    with pytest.raises(ComponentInstallError, match="miseledger smoke failed.*exited 1"):
+    with pytest.raises(ComponentInstallError, match="brigade-evidence smoke failed.*exited 1"):
         run_post_install_smoke(managed)
 
 

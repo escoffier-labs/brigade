@@ -1221,7 +1221,7 @@ def _loop_stations_payload(target: Path) -> dict[str, Any]:
             "detail": "graphtrail not on PATH (run `brigade setup`; Cargo is one-release compatibility only)",
         }
 
-    ledger_bin = evidence_brief._miseledger_bin()
+    ledger_bin = evidence_brief._evidence_bin()
     if ledger_bin:
         ledger = {
             "ok": True,

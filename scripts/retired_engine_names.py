@@ -12,6 +12,7 @@ from pathlib import Path
 
 ALLOWLIST = Path("tests/fixtures/retired-engine-names-allowlist.json")
 REMOVABLE_KINDS = frozenset({"shim"})
+SHIM_DEADLINES = {"0.33.0": (0, 33, 0), "0.34.0": (0, 34, 0)}
 KINDS = frozenset({"frozen", "shim", "history", "fixture"})
 # Includes camel case, upper case env vars, and hyphen/underscore/space spellings.
 RETIRED = re.compile(rb"graph[ _-]?trail|mise[ _-]?ledger", re.IGNORECASE)
@@ -47,10 +48,12 @@ def violations(root: Path, entries: list[dict], *, release_version: tuple[int, i
             failures.append(f"{name}: invalid or duplicate allowlist entry")
         allowed[name] = entry["literals"]
         if kind in REMOVABLE_KINDS:
-            if entry.get("remove_in") != "0.33.0":
-                failures.append(f"{name}: removable entry requires remove_in 0.33.0")
-            if release_version is not None and release_version >= (0, 33, 0):
-                failures.append(f"{name}: {kind} allowance expired in 0.33.0")
+            deadline = entry.get("remove_in")
+            expiry = SHIM_DEADLINES.get(deadline) if isinstance(deadline, str) else None
+            if expiry is None:
+                failures.append(f"{name}: removable entry requires remove_in 0.33.0 or 0.34.0")
+            elif release_version is not None and release_version >= expiry:
+                failures.append(f"{name}: {kind} allowance expired in {deadline}")
     for name, found in sorted(matches(root).items()):
         limits = allowed.get(name, {})
         for literal, count in sorted(found.items()):

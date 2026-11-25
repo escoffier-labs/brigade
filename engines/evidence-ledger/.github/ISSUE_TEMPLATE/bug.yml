@@ -1,5 +1,5 @@
 name: Bug report
-description: miseledger imported wrong, lost data, or errored
+description: brigade-evidence imported wrong, lost data, or errored
 labels: [bug]
 body:
   - type: markdown
@@ -9,15 +9,15 @@ body:
   - type: input
     id: version
     attributes:
-      label: miseledger version
-      placeholder: "0.2.0 (miseledger version)"
+      label: brigade-evidence version
+      placeholder: "0.2.0 (brigade-evidence version)"
     validations:
       required: true
   - type: input
     id: command
     attributes:
       label: Command
-      placeholder: "miseledger import adapter ..., search, export markdown, ..."
+      placeholder: "brigade-evidence import adapter ..., search, export markdown, ..."
     validations:
       required: true
   - type: textarea

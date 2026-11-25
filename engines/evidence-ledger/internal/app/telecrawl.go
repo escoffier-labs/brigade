@@ -39,7 +39,7 @@ type telecrawlMessage struct {
 
 func cmdCrawlTelecrawl(args []string, out, errw io.Writer) int {
 	if hasBoolFlag(args, "help") || hasBoolFlag(args, "h") {
-		fmt.Fprintln(out, "usage: miseledger crawl telegram [--chat NAME] [--since RFC3339] [--limit N] [--json] [--dry-run]")
+		fmt.Fprintln(out, "usage: brigade-evidence crawl telegram [--chat NAME] [--since RFC3339] [--limit N] [--json] [--dry-run]")
 		return 0
 	}
 	values, bools, rest, err := splitFlags(args,
