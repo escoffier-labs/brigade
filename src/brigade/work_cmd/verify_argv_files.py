@@ -22,7 +22,13 @@ from ..localio import check_git_ignored
 MAX_ARGV_FILE_BYTES = 16 * 1024 * 1024
 
 
-def argv_file_hashes(target: Path, commands: list[str | list[str]]) -> dict[str, str] | None:
+class _ArgvFileTooLarge(Exception):
+    """An argv file exceeds the reuse hashing budget."""
+
+
+def argv_file_hashes(
+    target: Path, commands: list[str | list[str]], *, report_oversized: bool = False
+) -> dict[str, str] | None:
     """Return resolved-path SHA-256 bindings, or None when reuse is unsafe."""
     from . import verification
 
@@ -53,16 +59,26 @@ def argv_file_hashes(target: Path, commands: list[str | list[str]]) -> dict[str,
                     if check_git_ignored(target.resolve(), path.resolve()) != "no":
                         return None
                     continue
-                if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_ARGV_FILE_BYTES:
+                if not stat.S_ISREG(info.st_mode):
                     return None
+                if info.st_size > MAX_ARGV_FILE_BYTES:
+                    raise _ArgvFileTooLarge
                 path = path.resolve()
                 key = str(path)
                 if key not in hashes:
                     with path.open("rb") as stream:
                         data = stream.read(MAX_ARGV_FILE_BYTES + 1)
                     if len(data) > MAX_ARGV_FILE_BYTES:
-                        return None
+                        raise _ArgvFileTooLarge
                     hashes[key] = hashlib.sha256(data).hexdigest()
+    except _ArgvFileTooLarge:
+        if report_oversized:
+            from . import verify_runtime
+
+            verify_runtime._print_verify_console(
+                f"verification reuse skipped (argv_file_too_large): an argv file exceeds the {MAX_ARGV_FILE_BYTES}-byte hash limit"
+            )
+        return None
     except (OSError, ValueError, RuntimeError):
         return None
     return hashes
@@ -95,6 +111,6 @@ def reusable_receipt(
         )
     ):
         return False
-    hashes = argv_file_hashes(target, commands)
+    hashes = argv_file_hashes(target, commands, report_oversized=True)
     # Legacy receipts remain eligible only when no file arguments need binding.
     return hashes is not None and latest.get("argv_file_hashes", {}) == hashes
