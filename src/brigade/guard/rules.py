@@ -4,6 +4,9 @@ import re
 
 from .types import Rule
 
+_WINDOWS_USER_ROOT = r"[A-Z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/)"
+_WINDOWS_INVALID_BOUNDARY = r'(?:[<>"|?*]|:(?=[ \t\r\n]|$))'
+
 # Bound retryable spans shared by the memory scanners. Address local parts
 # permit 256 characters. Token bodies hit at 4097 and provider suffixes at
 # 8193, while a PEM header alone blocks. Guard span expansion masks tails.
@@ -108,24 +111,44 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         category="pii",
         # Match before home-path so /Users inside a drive-qualified path
         # cannot claim a partial span and suppress the complete Windows path.
-        # Quotes bound paths with spaced directory leaves. Without quotes,
-        # spaces need a following separator or filename extension so prose
-        # after the path is not consumed. Forward slashes and raw or escaped
-        # backslashes can be mixed independently at each component boundary.
+        # Quotes and Markdown underscores can wrap the whole path. Otherwise
+        # prefer a spaced leaf with an explicit boundary over a filename-like
+        # prefix such as a dotted directory name. Boundaries include line
+        # endings, tabs, commas, semicolons, closing brackets, Windows-invalid
+        # punctuation, and a space before "#". A colon only counts before
+        # whitespace or end of input, so prose such as "at 10:30" stays intact.
+        # A trailing separator before whitespace bounds the leaf and stays in
+        # the match. Padding stays outside the match. Word and space runs that
+        # cannot share characters with the next token use possessive repeats.
+        # Treat a final dot or a following "--" word as ambiguous. An
+        # alphabetic extension followed by a lowercase word also keeps the
+        # filename boundary, as in "notes.txt now".
+        # Forward slashes and raw or escaped backslashes can be mixed.
+        # For underscore emphasis, invalid punctuation can end the path
+        # before the closing marker. Leave any padding before it outside.
         # As in root-path, the opening quote lives inside the quoted branch and
         # the unquoted branch has no quote lookbehind: a path that opens with
         # one quote and closes with another falls back to the unquoted branch
         # instead of losing the match entirely.
         pattern=(
-            r"(?<![\w.-])(?:"
+            r"(?:"
             r"(?<=(?P<windows_quote>[\"'`]))"
-            r"[A-Z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/)"
-            r"[A-Za-z0-9._-](?:(?!(?P=windows_quote))[^\r\n<>:|?*])*?(?=(?P=windows_quote))"
+            + _WINDOWS_USER_ROOT
+            + r"[A-Za-z0-9._-](?:(?!(?P=windows_quote))[^\r\n<>:\"|?*])*+(?=(?P=windows_quote))"
             r"|"
-            r"[A-Z]:(?:\\{1,2}|/)Users(?:\\{1,2}|/)"
-            r"(?:[A-Za-z0-9._@+-]+(?: +[A-Za-z0-9._@+-]+)*(?:\\{1,2}|/))*"
-            r"(?:[A-Za-z0-9_@+-]+(?:[ .]+[A-Za-z0-9_@+-]+)*?\.[A-Za-z0-9]+"
-            r"(?![\w-]|\.[\w-])|[A-Za-z0-9._@+-]+)"
+            r"(?:(?<=(?<![\w.-])(?P<windows_bold>__))|(?<=(?<![\w.-])_))"
+            + _WINDOWS_USER_ROOT
+            + r"[A-Za-z0-9._-][^\r\n\t<>:\"|?*]*?(?<! )"
+            + rf"(?=_(?(windows_bold)_)(?![\w\\/]|\.[\w-])| *+{_WINDOWS_INVALID_BOUNDARY})"
+            r"|"
+            r"(?<![\w.-])" + _WINDOWS_USER_ROOT + r"(?:[A-Za-z0-9._@+-]++(?: ++[A-Za-z0-9._@+-]++)*(?:\\{1,2}|/))*"
+            r"(?:"
+            r"(?![A-Za-z0-9._@+-]+(?: ++[A-Za-z0-9._@+-]+)*\.[A-Za-z][A-Za-z0-9]*+ ++(?-i:[a-z]))"
+            r"[A-Za-z0-9._@+-]++(?: ++(?!--)[A-Za-z0-9._@+-]++)+(?<!\.)(?:\\{1,2}|/)?"
+            rf"(?:(?<=[\\/])(?=[ \t])|(?= ++#)|(?= *+(?:$|[\r\n\t,;)\]}}]|{_WINDOWS_INVALID_BOUNDARY})))"
+            r"|[A-Za-z0-9_@+-]++(?:[ .]++[A-Za-z0-9_@+-]++)*?\.[A-Za-z0-9]++"
+            r"(?![\w-]|\.[\w-])"
+            r"|[A-Za-z0-9._@+-]+)"
             r")"
         ),
         replacement="<PRIVATE_HOME_PATH>",

@@ -1,0 +1,37 @@
+{
+  "orca_version": "1.4.271",
+  "source": "src/cli/orchestration/workers/worker-launch-handler.ts",
+  "payload": {
+    "id": "rpc-example",
+    "ok": true,
+    "_meta": {
+      "runtimeId": "runtime-example"
+    },
+    "result": {
+      "runId": "run_000000000001",
+      "taskId": "task_000000000002",
+      "dispatchId": "ctx_000000000003",
+      "state": "failed",
+      "launch": {
+        "requested": {
+          "agent": "codex",
+          "model": null,
+          "effort": null
+        },
+        "effective": {
+          "agent": "codex",
+          "model": null,
+          "effort": null
+        }
+      },
+      "effects": [],
+      "residualResources": [
+        "term_example"
+      ],
+      "mutation": {
+        "requestId": "FIXTURE_REQUEST_KEY",
+        "replayed": false
+      }
+    }
+  }
+}

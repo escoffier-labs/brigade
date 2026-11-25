@@ -1,0 +1,1 @@
+- Redact Windows home directories with spaces when a line ending, punctuation, or Markdown emphasis bounds the path.

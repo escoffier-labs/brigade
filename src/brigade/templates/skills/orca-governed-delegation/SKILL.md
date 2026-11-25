@@ -83,6 +83,13 @@ Keep the original enrollment and retry keys for retained work.
   writes a permanent `abandoned-unknown` hold. It frees no slot, `finalize`
   refuses it, and an operator must follow up. Do not use `hold-resolve` to
   settle a worker stop.
+- For a full `failed` worker-start receipt with residual resources, keep the
+  original receipt and its exit code. Capture a fresh `worker-show --json --full`
+  for the same dispatch after release. Supply the receipt with `--native-json`
+  and the snapshot with `--show-json` to `accepted` or `hold-resolve`. A
+  snapshot that proves release and exited liveness settles `start-failed`.
+  Acknowledge the returned result ID to free the slot before `finalize`.
+  If either proof is missing, `start-unknown` still holds the slot.
 - Request cancellation with `brigade orca cancel <run> <task> --target <workspace>`;
   run the printed `orca-ide orchestration worker-stop` argv. If it reports
   `stop_unknown`, rerun that same printed argv with the same `--retry-request`,
