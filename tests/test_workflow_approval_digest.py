@@ -62,7 +62,11 @@ def unescaped_pipe_count(line: str) -> int:
     return sum(char == "|" and (index == 0 or line[index - 1] != "\\") for index, char in enumerate(line))
 
 
-def fake_gh(monkeypatch, *, fail_endpoint: str | None = None):
+def fake_gh(monkeypatch, *, fail_endpoint: str | None = None, include_release: bool = False):
+    release = workflow_guard.RELEASE_BRANCH
+    release_pull = {**PULLS[0], "number": 15, "title": "Release approval", "base": {"ref": release}}
+    release_head = "e" * 40
+
     def run(args, **kwargs):
         assert args[:2] == ["gh", "api"]
         assert kwargs.get("shell", False) is False
@@ -73,23 +77,32 @@ def fake_gh(monkeypatch, *, fail_endpoint: str | None = None):
             payload = {"default_branch": "main"}
         elif endpoint.startswith("repos/example/project/pulls?"):
             assert args[3:] == ["--paginate", "--slurp"]
-            payload = [PULLS]
+            payload = [[release_pull] if include_release else []] if "base=release%2F0.32&" in endpoint else [PULLS]
         elif endpoint.endswith("/files?per_page=100"):
             assert args[3:] == ["--paginate", "--slurp"]
             number = int(endpoint.split("/pulls/")[1].split("/")[0])
-            payload = [[{"filename": FILES[number], "status": "modified"}]]
+            payload = [[{"filename": FILES[11 if number == 15 else number], "status": "modified"}]]
         elif endpoint.endswith("/statuses?per_page=100"):
             assert args[3:] == ["--paginate", "--slurp"]
-            number = next(number for number, sha in HEADS.items() if sha in endpoint)
-            payload = (
-                [[approval_status(number)]] if number == 11 else [[revoked_status(number)]] if number == 14 else [[]]
-            )
+            if release_head in endpoint:
+                status = approval_status(15)
+                status["description"] = f"pull request 15 approved [{workflow_guard.base_scope(release)}:10]"
+                payload = [[revoked_status(15), status]]
+            else:
+                number = next(number for number, sha in HEADS.items() if sha in endpoint)
+                payload = (
+                    [[approval_status(number)]]
+                    if number == 11
+                    else [[revoked_status(number)]]
+                    if number == 14
+                    else [[]]
+                )
         elif "/pulls/" in endpoint:
             number = int(endpoint.rsplit("/", 1)[1])
             payload = {
                 "changed_files": 1,
-                "head": {"sha": HEADS[number]},
-                "base": {"ref": "main", "sha": "f" * 40},
+                "head": {"sha": release_head if number == 15 else HEADS[number]},
+                "base": {"ref": release if number == 15 else "main", "sha": "f" * 40},
             }
         else:
             raise AssertionError(f"Unexpected API endpoint: {endpoint}")
@@ -124,6 +137,17 @@ def test_digest_includes_approved_and_missing_and_omits_unprotected(monkeypatch,
         assert rows[14].count(fragment) == title_cell.count(fragment) == 1
     header = next(line for line in output.splitlines() if line.startswith("| # |"))
     assert unescaped_pipe_count(rows[14]) == unescaped_pipe_count(header)
+
+
+def test_digest_reports_the_release_branch_with_its_own_approval(monkeypatch, capsys):
+    fake_gh(monkeypatch, include_release=True)
+
+    assert workflow_approval_digest.main(["--repo", "example/project"]) == 0
+
+    output = capsys.readouterr().out
+    assert "2 with a success approval status" in output
+    assert "| 11 | `Example 11` | `main` |" in output
+    assert "| 15 | `Release approval` | `release/0.32` |" in output
 
 
 def test_api_failure_exits_two_without_partial_digest(monkeypatch, capsys):

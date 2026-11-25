@@ -13,7 +13,7 @@ The guard protects the following paths.
 - `pyproject.toml`, `.content-guard-baseline.json`, and everything under `verify/`.
 - `scripts/ci_*` and the scripts and data files called out in the
   [guard's path rules](../scripts/workflow_guard.py), including CI selection,
-  Windows runners, release checks, and workflow verification.
+  Windows runners, release checks, workflow verification, and the approval audit.
 - The npm publishing helpers and their inputs under `npm/feasibility/`.
 - The Hub verification helper `registry/skills/verify-brigade/control-brigade.py`.
 - Every `conftest.py`, plus the coverage sidecar guard, shared test support,
@@ -70,7 +70,7 @@ from a separate account.
 
 ## Approval digest
 
-Run `python scripts/workflow_approval_digest.py --repo OWNER/NAME` to print the last seven days of default-branch merges that changed protected paths. Whoever audits approvals should run the script once a week. Use `--days N` to choose another range or `--since ISO-DATE-OR-DATETIME` to choose another cutoff. The digest lists approval status timestamps and label presence, then calls out protected changes without an approval status for audit. API failures stop the command with exit status 2 and no partial digest.
+Run `python scripts/workflow_approval_digest.py --repo OWNER/NAME` to print the last seven days of merges that changed protected paths on the default branch or `release/0.32`. Whoever audits approvals should run the script once a week. Use `--days N` to choose another range or `--since ISO-DATE-OR-DATETIME` to choose another cutoff. The digest lists the base branch, approval status timestamps, and label presence, then calls out protected changes without an approval status for audit. API failures stop the command with exit status 2 and no partial digest.
 
 ## Before making the check required
 

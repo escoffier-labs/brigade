@@ -54,9 +54,9 @@ def parse_since(value: str) -> datetime:
     return parse_timestamp(value)
 
 
-def merged_pull_requests(repo: str, default_branch: str) -> list[dict[str, Any]]:
+def merged_pull_requests(repo: str, base_branch: str) -> list[dict[str, Any]]:
     pulls = workflow_guard.paginated_entries(
-        f"repos/{repo}/pulls?state=closed&base={quote(default_branch, safe='')}&sort=updated&direction=desc"
+        f"repos/{repo}/pulls?state=closed&base={quote(base_branch, safe='')}&sort=updated&direction=desc"
     )
     result = []
     for pull in pulls:
@@ -71,7 +71,7 @@ def merged_pull_requests(repo: str, default_branch: str) -> list[dict[str, Any]]
         )
         if type(number) is not int or not isinstance(title, str) or not isinstance(base, dict):
             raise ValueError("Invalid pull request entry.")
-        if base.get("ref") != default_branch or not isinstance(labels, list):
+        if base.get("ref") != base_branch or not isinstance(labels, list):
             raise ValueError("Invalid pull request entry.")
         if merged_at is not None:
             parse_timestamp(merged_at)
@@ -81,8 +81,10 @@ def merged_pull_requests(repo: str, default_branch: str) -> list[dict[str, Any]]
     return result
 
 
-def approval_record(repo: str, head_sha: str, number: int, base: str) -> tuple[str, str] | None:
-    status = workflow_guard.matching_approval_status(repo, head_sha, number, scope=workflow_guard.base_scope(base))
+def approval_record(repo: str, head_sha: str, number: int, base: str, *, allow_legacy: bool) -> tuple[str, str] | None:
+    status = workflow_guard.matching_approval_status(
+        repo, head_sha, number, scope=workflow_guard.base_scope(base), allow_legacy=allow_legacy
+    )
     if status is None:
         return None
     created_at = status.get("created_at")
@@ -91,15 +93,15 @@ def approval_record(repo: str, head_sha: str, number: int, base: str) -> tuple[s
     return ("yes" if is_success else "no", written_at)
 
 
-def table(rows: list[tuple[int, str, str, str, str, str, str]]) -> str:
+def table(rows: list[tuple[int, str, str, str, str, str, str, str]]) -> str:
     lines = [
-        "| # | Pull request | Merged (UTC) | Protected files | Success approval | Status written (UTC) | Label present |",
-        "| ---: | --- | --- | --- | --- | --- | --- |",
+        "| # | Pull request | Base | Merged (UTC) | Protected files | Success approval | Status written (UTC) | Label present |",
+        "| ---: | --- | --- | --- | --- | --- | --- | --- |",
     ]
-    for number, title, merged_at, files, approval, written_at, has_label in rows:
+    for number, title, base, merged_at, files, approval, written_at, has_label in rows:
         # Code spans display pull request titles literally in the table.
         lines.append(
-            f"| {number} | {code_span(title)} | {merged_at} | {files} | {approval} | {written_at} | {has_label} |"
+            f"| {number} | {code_span(title)} | {code_span(base)} | {merged_at} | {files} | {approval} | {written_at} | {has_label} |"
         )
     return "\n".join(lines)
 
@@ -122,7 +124,8 @@ def main(argv: list[str] | None = None) -> int:
         if not isinstance(repository, dict) or not isinstance(repository.get("default_branch"), str):
             raise ValueError("Invalid repository response.")
         default_branch = repository["default_branch"]
-        pulls = merged_pull_requests(args.repo, default_branch)
+        branches = dict.fromkeys((default_branch, workflow_guard.RELEASE_BRANCH))
+        pulls = [pull for branch in branches for pull in merged_pull_requests(args.repo, branch)]
         status_rows = []
         missing_rows = []
         excluded_before_cutoff = 0
@@ -134,7 +137,8 @@ def main(argv: list[str] | None = None) -> int:
             if not start <= merged_at <= now:
                 continue
             number = pull["number"]
-            paths, head_sha = workflow_guard.read_pull_request(args.repo, number, default_branch)
+            base = pull["base"]["ref"]
+            paths, head_sha = workflow_guard.read_pull_request(args.repo, number, base)
             protected = workflow_guard.protected_paths(paths)
             if not protected:
                 continue
@@ -142,10 +146,11 @@ def main(argv: list[str] | None = None) -> int:
                 excluded_before_cutoff += 1
                 continue
             label_names = {item["name"] for item in pull["labels"]}
-            approval = approval_record(args.repo, head_sha, number, default_branch)
+            approval = approval_record(args.repo, head_sha, number, base, allow_legacy=base == default_branch)
             row = (
                 number,
                 pull["title"],
+                base,
                 merged_at.isoformat().replace("+00:00", "Z"),
                 ", ".join(code_span(path) for path in protected),
                 approval[0] if approval is not None else "no",
@@ -164,7 +169,7 @@ def main(argv: list[str] | None = None) -> int:
     print(
         f"Cutoff: {cutoff}. Excluded {excluded_before_cutoff} merged protected pull request(s) in this date range because they merged at or before the cutoff."
     )
-    success_count = sum(row[4] == "yes" for row in status_rows)
+    success_count = sum(row[5] == "yes" for row in status_rows)
     print(
         f"\n{success_count} with a success approval status; {len(status_rows) - success_count} with a non-success status; "
         f"{len(missing_rows)} with no approval status."

@@ -30,6 +30,7 @@ CLI_ARGS = ["--repo", "example/project", "--pr", "42"]
         "scripts/pr_test_tiers.json",
         "scripts/pr_tier_selection.py",
         "scripts/workflow_guard.py",
+        "scripts/workflow_approval_digest.py",
         "scripts/windows_affected_tests.py",
         "verify/required-check.json",
         "verify/required-tests.json",
@@ -288,7 +289,9 @@ def test_audit_reader_recognizes_scoped_approval_and_skips_other_base(fake_gh):
     ]
     fake_gh([[{"filename": ".github/workflows/ci.yml"}]], statuses=[statuses])
 
-    assert workflow_approval_digest.approval_record("example/project", HEAD, 42, "release/0.32") == (
+    assert workflow_approval_digest.approval_record(
+        "example/project", HEAD, 42, "release/0.32", allow_legacy=False
+    ) == (
         "yes",
         "2026-01-01T00:00:02Z",
     )

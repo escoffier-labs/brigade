@@ -59,6 +59,7 @@ PROTECTED_PATTERNS = (
     "scripts/windows_pytest_diagnostics.py",
     "scripts/windows_sqlite_flush_probe.py",
     "scripts/windows_test_weights.json",
+    "scripts/workflow_approval_digest.py",
     "scripts/workflow_guard.py",
     "src/brigade/__init__.py",
     "src/brigade/guard/memory-rules.json",
