@@ -590,6 +590,88 @@ def test_orca_1_4_269_partial_completion_retained_tab_and_cleanup(coordinator):
     assert coordinator.invoke("ack", run_id, "one", "--result-id", result_id)["replayed"]
 
 
+@pytest.mark.parametrize(
+    "case",
+    [
+        "clipped",
+        "unclipped",
+        "other-clipping",
+        "mixed-clipping",
+        "missing-final-text",
+        "source-identity-change",
+        "source-changed",
+        "page-error",
+        "cursor-loop",
+        "missing-continuation",
+        "too-many-pages",
+    ],
+)
+def test_orca_1_4_271_transcript_pages(coordinator, case):
+    roster = coordinator.workspace / ".brigade" / "roster.toml"
+    roster.write_text(roster.read_text().replace(VERSION, "1.4.271"))
+    run_id = coordinator.open()
+    coordinator.accept(coordinator.start())
+    pages = [_recovery_fixture(f"worker-read-page-{number}") for number in (1, 2)]
+    first, last = (page["result"] for page in pages)
+    if case == "other-clipping":
+        first["clipping"] = ["terminal_payload"]
+    elif case == "mixed-clipping":
+        first["clipping"].append("terminal_payload")
+    elif case == "missing-final-text":
+        first["transcript"]["messages"][-1]["blocks"][0]["text"] = " "
+    elif case == "source-identity-change":
+        last["sourceIdentity"] = "other-example-transcript"
+    elif case == "source-changed":
+        last["fallbackReason"] = "source_changed"
+    elif case == "page-error":
+        pages[1] = {"ok": False, "error": {"code": "read_failed"}}
+    elif case == "cursor-loop":
+        pages.insert(1, pages[0])
+    elif case == "missing-continuation":
+        pages.pop()
+    elif case == "too-many-pages":
+        for index in range(8):
+            page = _recovery_fixture("worker-read-page-1")
+            page["result"]["transcript"]["nextCursor"] = f"example-cursor-{index}"
+            pages.insert(1, page)
+    transcript = _fixture("worker-read") if case == "unclipped" else pages
+    show = _fixture("worker-show-released")
+    done_file = coordinator.payload("worker-done", _fixture("worker-done"))
+    result = coordinator.observe(
+        show,
+        "--worker-done-json",
+        done_file,
+        "--transcript-json",
+        coordinator.payload("transcript", transcript),
+    )
+    if case in ("clipped", "unclipped"):
+        assert result["reason"] == "terminal-evidence-complete" and result["result_id"]
+        if case == "clipped":
+            assert result["transcript_clipped"] is True
+            first_page, last_page = first["transcript"], last["transcript"]
+            last_page["messages"].append(first_page["messages"].pop())
+            first_page["returnedMessageCount"] -= 1
+            last_page["returnedMessageCount"] = 1
+            last["cursor"] = last_page["nextCursor"] = "example-cursor-end"
+            split = coordinator.observe(
+                show,
+                "--worker-done-json",
+                done_file,
+                "--transcript-json",
+                coordinator.payload("transcript", pages),
+            )
+            assert split["result_id"] == result["result_id"]
+            assert split["transcript_clipped"] is True and "Synthetic message" not in json.dumps(split)
+        else:
+            assert "transcript_clipped" not in result
+        coordinator.invoke("ack", run_id, "one", "--result-id", result["result_id"])
+        assert coordinator.status()["capacity"]["live"] == 0
+        assert coordinator.invoke("finalize", run_id)["terminals"] == 1
+    else:
+        assert result["reason"] == "result-transfer-missing" and result["result_id"] is None
+        assert "transcript_clipped" not in result
+
+
 def test_orca_1_4_269_cancel_requires_exact_stop_and_exit(coordinator):
     run_id = coordinator.open()
     coordinator.accept(coordinator.start())

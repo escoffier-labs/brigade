@@ -84,7 +84,7 @@ def observe(
         worker = _worker(task)
         observation = observations.classify_show(worker, payload, worker_done=worker_done, transcript=transcript)
         result = _record_observation(task, observation, payload)
-        return {
+        report = {
             **task.report(_OBSERVE_SCHEMA),
             **observation_diagnostic(observation),
             "status": result.status,
@@ -93,6 +93,9 @@ def observe(
             "transcript_argv": observations.result_argv(worker),
             "observe_argv": observations.observe_argv(worker),
         }
+        if observation.transcript_clipped:
+            report["transcript_clipped"] = True
+        return report
 
 
 def cancel(

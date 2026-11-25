@@ -71,6 +71,7 @@ class NativeObservation:
     terminal_run_id: str | None
     result_transfer_id: str | None
     containment: Containment
+    transcript_clipped: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -79,6 +80,8 @@ class NativeObservation:
             or type(self.reason) is not str
             or self.reason not in REASONS[self.family]
             or (self.status is not None and (type(self.status) is not str or self.status not in STATUS))
+            or type(self.transcript_clipped) is not bool
+            or (self.transcript_clipped and self.family != "terminal-candidate")
             or any(
                 value is not None and not valid_reference(value)
                 for value in (self.terminal_run_id, self.result_transfer_id)
