@@ -48,7 +48,7 @@ def test_rank_verification_candidates_via_mocked_affected(tmp_path, monkeypatch)
     (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "src").mkdir()
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_bytes(b"fake-graphtrail-index")
 
@@ -112,7 +112,7 @@ def test_verify_plan_enriched_suggests_ranked_command(tmp_path, monkeypatch, cap
     (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "src").mkdir()
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_bytes(b"fake-graphtrail-index")
 
@@ -152,7 +152,7 @@ def test_verify_plan_enriched_suggests_ranked_command(tmp_path, monkeypatch, cap
 def test_verify_plan_explicit_command_keeps_worker_choice(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     (tmp_path / "tests").mkdir()
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_bytes(b"fake-index")
     monkeypatch.setattr(verify_ranking.component_bins, "resolve", lambda _name: "/fake/graphtrail")
@@ -220,7 +220,7 @@ def test_rank_verification_candidates_deduplicates_duplicate_paths(tmp_path, mon
     (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "src").mkdir()
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_bytes(b"fake-graphtrail-index")
 
@@ -271,7 +271,7 @@ def test_rank_verification_candidates_npm_keeps_advisory_paths_only(tmp_path, mo
     _init_git_repo(tmp_path)
     (tmp_path / "package.json").write_text('{"name":"demo","scripts":{"test":"node --test"}}')
     (tmp_path / "src").mkdir()
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_bytes(b"fake-graphtrail-index")
 
@@ -299,7 +299,7 @@ def test_verify_plan_npm_lists_candidates_without_a_default(tmp_path, monkeypatc
     _init_git_repo(tmp_path)
     (tmp_path / "package.json").write_text('{"name":"demo","scripts":{"test":"node --test"}}')
     (tmp_path / "src").mkdir()
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_bytes(b"fake-graphtrail-index")
 

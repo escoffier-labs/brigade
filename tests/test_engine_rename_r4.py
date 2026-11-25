@@ -51,19 +51,18 @@ def _evidence_env(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_both_index_layouts_warn_with_paths_and_modification_times(tmp_path):
+@pytest.mark.parametrize("canonical_present", [False, True])
+def test_doctor_reports_ignored_code_graph_index(tmp_path, canonical_present):
     env = _evidence_env(tmp_path)
     canonical, legacy = engine_paths.code_graph_db_paths(tmp_path)
-    _seed_index(legacy, 1_700_000_000)
     assert engine_paths.legacy_findings(tmp_path, env=env) == []
+    _seed_index(legacy, 1_700_000_000)
+    if canonical_present:
+        _seed_index(canonical, 1_800_000_000)
 
-    _seed_index(canonical, 1_800_000_000)
-    [(status, name, detail, scope)] = engine_paths.legacy_findings(tmp_path, env=env)
-    assert (status, name, scope) == ("WARN", "code graph index layout", "target")
-    assert str(canonical) in detail and str(legacy) in detail
-    assert "2027-01-15T08:00:00Z" in detail and "2023-11-14T22:13:20Z" in detail
-    assert "nothing is merged or deleted" in detail
-    assert engine_paths.code_graph_db(tmp_path, env=env).path == canonical
+    assert engine_paths.legacy_findings(tmp_path, env=env) == [
+        ("INFO", "code graph index layout", "legacy index ignored. Run `brigade code sync`", "target")
+    ]
 
 
 @pytest.mark.parametrize("legacy_part", ["data", "config"])
@@ -83,8 +82,6 @@ def test_both_evidence_layouts_warn_and_the_canonical_set_wins(tmp_path, legacy_
 @pytest.mark.parametrize(
     ("legacy", "canonical"),
     [
-        ("GRAPHTRAIL_DB", "BRIGADE_CODE_GRAPH_DB"),
-        ("GRAPHTRAIL_ALLOW_UNSAFE_ROOT", "BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT"),
         ("GRAPHTRAIL_BIN", "BRIGADE_CODE_GRAPH_BIN"),
         ("GRAPHTRAIL_MCP_BIN", "BRIGADE_CODE_GRAPH_MCP_BIN"),
         ("MISELEDGER_BIN", "BRIGADE_EVIDENCE_BIN"),
@@ -128,7 +125,7 @@ def test_doctor_gathers_rename_findings(tmp_path, monkeypatch):
         name: (status, detail) for status, name, detail, _scope in doctor._gather_checks(doctor.build_context(tmp_path))
     }
 
-    assert rows["code graph index layout"][0] == doctor.WARN
+    assert rows["code graph index layout"][0] == doctor.INFO
     status, detail = rows["legacy config key"]
     assert status == doctor.INFO and config.CODE_GRAPH_DELTA_TIMEOUT_KEY in detail
 

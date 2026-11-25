@@ -25,7 +25,7 @@ def _write_real_sidecar(monkeypatch, tmp_path: Path, diff_payload: dict) -> dict
     before = {
         "ok": True,
         "binary": "graphtrail",
-        "db_path": str(tmp_path / ".graphtrail" / "graphtrail.db"),
+        "db_path": str(tmp_path / ".brigade" / "code-graph" / "code-graph.db"),
         "before_snapshot_path": str(snapshot),
     }
 

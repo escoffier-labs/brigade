@@ -8,20 +8,14 @@ use anyhow::{Context, Result};
 use ignore::gitignore::GitignoreBuilder;
 use rusqlite::Connection;
 
-use super::env::read_renamed;
-
 pub const ALLOW_UNSAFE_ROOT_ENV: &str = "BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT";
-pub const LEGACY_ALLOW_UNSAFE_ROOT_ENV: &str = "GRAPHTRAIL_ALLOW_UNSAFE_ROOT";
 
 /// Refuse to sync roots that are never a real project: the filesystem root and the user's home
 /// directory. Outside a git repo the walker has no gitignore to lean on, so a sync there parses
 /// every cache, toolchain, and vendored source tree on the machine into one giant graph nobody
-/// asked for. Set `BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT=1` to bypass (the legacy variable still
-/// works for the rename window, with a warning).
+/// asked for. Set `BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT=1` to bypass.
 pub(crate) fn guard_unsafe_root(root: &Path) -> Result<()> {
-    if read_renamed(ALLOW_UNSAFE_ROOT_ENV, LEGACY_ALLOW_UNSAFE_ROOT_ENV)?
-        .is_some_and(|value| value == "1")
-    {
+    if std::env::var_os(ALLOW_UNSAFE_ROOT_ENV).is_some_and(|value| value == "1") {
         return Ok(());
     }
     let home = std::env::var_os("HOME").map(|home| {

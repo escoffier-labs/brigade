@@ -17,10 +17,7 @@ EVIDENCE = CASES["evidence"]
 def test_fixture_layouts_match_module_constants():
     assert Path(CODE_GRAPH["layouts"]["canonical"]) == engine_paths.CODE_GRAPH_DB
     assert Path(CODE_GRAPH["layouts"]["legacy"]) == engine_paths.LEGACY_CODE_GRAPH_DB
-    assert CODE_GRAPH["env"] == {
-        "canonical": engine_paths.CODE_GRAPH_DB_ENV,
-        "legacy": engine_paths.LEGACY_CODE_GRAPH_DB_ENV,
-    }
+    assert CODE_GRAPH["env"]["canonical"] == engine_paths.CODE_GRAPH_DB_ENV
     layouts = EVIDENCE["layouts"]
     assert Path(layouts["canonical"]["leaf"]) == engine_paths.EVIDENCE_LEAF
     assert layouts["canonical"]["db"] == engine_paths.EVIDENCE_DB_NAME
@@ -41,10 +38,6 @@ def test_code_graph_db_case(tmp_path, case):
     snapshot = sorted(p.relative_to(tmp_path) for p in tmp_path.rglob("*"))
     expect = case["expect"]
 
-    if "error" in expect:
-        with pytest.raises(ValueError, match="conflicting"):
-            engine_paths.code_graph_db(repo, explicit=case.get("explicit"), env=env)
-        return
     resolved = engine_paths.code_graph_db(repo, explicit=case.get("explicit"), env=env)
 
     expected_path = repo / (expect["path"] if "path" in expect else CODE_GRAPH["layouts"][expect["layout"]])
@@ -60,7 +53,7 @@ def test_code_graph_db_keeps_absolute_explicit_path(tmp_path):
 
 
 def test_code_graph_db_ignores_empty_overrides(tmp_path):
-    env = {engine_paths.CODE_GRAPH_DB_ENV: "", engine_paths.LEGACY_CODE_GRAPH_DB_ENV: ""}
+    env = {engine_paths.CODE_GRAPH_DB_ENV: ""}
     resolved = engine_paths.code_graph_db(tmp_path, explicit="", env=env)
     assert resolved.source == "new"
 

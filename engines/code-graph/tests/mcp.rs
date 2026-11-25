@@ -558,7 +558,7 @@ fn tools_call_repos_reports_default_db_and_scanned_roots() {
     let conn = open_db(&repo_db).unwrap();
     init_schema(&conn).unwrap();
     sync_repo(&conn, &repo).unwrap();
-    // A second repository in the canonical layout is found by the same scan.
+    // Only the canonical layout is discovered.
     let canonical_repo = root.path().join("repo-b");
     fs::create_dir(&canonical_repo).unwrap();
     fs::write(canonical_repo.join("b.py"), "def beta():\n    return 1\n").unwrap();
@@ -588,7 +588,7 @@ fn tools_call_repos_reports_default_db_and_scanned_roots() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|repo| repo["db"] == repo_db.to_string_lossy().as_ref())
+            .all(|repo| repo["db"] != repo_db.to_string_lossy().as_ref())
     );
     assert!(
         value["repos"].as_array().unwrap().iter().any(|repo| {
@@ -786,7 +786,7 @@ fn per_call_repo_override_resolves_db_path() {
     let (_dir, default_db) = ro_db();
     let other = tempfile::tempdir().unwrap();
     fs::write(other.path().join("w.py"), "def gadget():\n    return 1\n").unwrap();
-    let conn = open_db(&other.path().join(".graphtrail").join("graphtrail.db")).unwrap();
+    let conn = open_db(&canonical_db(other.path())).unwrap();
     init_schema(&conn).unwrap();
     sync_repo(&conn, other.path()).unwrap();
 
@@ -1175,15 +1175,12 @@ fn canonical_and_legacy_mcp_process_contracts() {
     use std::process::{Command, Stdio};
 
     let (dir, db) = ro_db();
-    let default_dir = dir.path().join(".graphtrail");
-    fs::create_dir(&default_dir).unwrap();
+    let default_db = canonical_db(dir.path());
+    fs::create_dir_all(default_db.parent().unwrap()).unwrap();
     // Use SQLite backup semantics via VACUUM INTO rather than copying a live WAL.
     let conn = open_db(&db).unwrap();
-    conn.execute(
-        "VACUUM INTO ?1",
-        [default_dir.join("graphtrail.db").to_str().unwrap()],
-    )
-    .unwrap();
+    conn.execute("VACUUM INTO ?1", [default_db.to_str().unwrap()])
+        .unwrap();
     drop(conn);
     // Explicit and environment cases must not succeed through the default DB.
     let nondefault_dir = dir.path().join("nondefault");
@@ -1196,7 +1193,7 @@ fn canonical_and_legacy_mcp_process_contracts() {
         "invalid json\n"
     );
     const LEGACY_DB_ENV: &str = "GRAPHTRAIL_DB";
-    // Legacy entry points and variables each print a deprecation notice.
+    // The legacy entry point still prints its deprecation notice.
     for (binary, server_name) in [
         (env!("CARGO_BIN_EXE_graphtrail-mcp"), "graphtrail"),
         (
@@ -1216,14 +1213,13 @@ fn canonical_and_legacy_mcp_process_contracts() {
                 Some("absent.db"),
             ),
             (vec![], "BRIGADE_CODE_GRAPH_DB", db.to_str()),
-            (vec![], LEGACY_DB_ENV, db.to_str()),
-            // No variable: the working directory's legacy index is used in place.
+            // No variable: the working directory's canonical index is used.
             (vec![], "", None),
             // Legacy MCP has no help/version parser: these and a missing --db
             // value are ignored and database selection falls back to the env.
             (
                 vec!["--help".into(), "--version".into(), "--db".into()],
-                LEGACY_DB_ENV,
+                "BRIGADE_CODE_GRAPH_DB",
                 db.to_str(),
             ),
         ] {
@@ -1257,8 +1253,7 @@ fn canonical_and_legacy_mcp_process_contracts() {
             assert_eq!(output.status.code(), Some(0), "{output:?}");
             assert_eq!(
                 String::from_utf8_lossy(&output.stderr).contains("deprecated"),
-                server_name == "graphtrail"
-                    || (env_var == LEGACY_DB_ENV && !args.iter().any(|v| v.starts_with("--db="))),
+                server_name == "graphtrail",
                 "{output:?}"
             );
             let responses: Vec<serde_json::Value> = String::from_utf8(output.stdout)
