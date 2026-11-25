@@ -126,3 +126,60 @@ The collector recorded one recovery intervention and four command errors
 from worker start, acceptance, hold resolution, and finalization. It found
 no mismatch in the enrolled Arm A configuration. Pair matching remains
 unassessed. [Attempt 4 collector record](research/evidence/orca-qualification/attempt-4-pair-01-a/record.json)
+
+## Attempt 5
+
+### Recovery of the attempt 4 claim
+
+The first recovery used Brigade commit
+`85a17d658c0cb48d3daef694273709ad62c57b30`. A fresh Orca snapshot showed
+the failed worker's terminal released and its liveness exited.
+`hold-resolve` returned `start-unknown` with the message
+`the failed Orca worker has no confirmed release and exit`. That build
+compared the residual-resource entries to a terminal handle string. The
+original Orca receipt reported a terminal object and a worktree object.
+Workspace-wide capacity stayed at one and the qualification batch sequence
+remained unstarted.
+
+The restart used Brigade commit `9190c006061bc185879e527e521417f67929668a`,
+which includes the structured residual-resource fix from #2945. Brigade
+accepted the original failed-start receipt and a fresh Orca snapshot.
+`hold-resolve` returned `start-failed` with `worktree_retained = true`.
+After acknowledgement, finalization closed attempt 4's run as failed.
+Workspace-wide `capacity.live` was zero and no tasks held capacity.
+
+### Qualification restart
+
+Orca `1.4.271` was ready and Hub policy revision 14 admitted `sol62`. Both
+routes passed readiness for Codex `gpt-6.2-sol`, medium effort, and three
+separate worktrees at workload revision
+`0c29e690312b88ec99adb266281e476cc3fa5516`. Both prompt-free Codex app-server
+config reads reported `service_tier = "default"`.
+
+After staging and claiming the first task in 1A, Orca again failed before
+agent readiness. Codex reported that
+`--dangerously-bypass-approvals-and-sandbox` was passed more than once. The
+created worktree was clean at the pinned revision. Orca released the
+terminal and a fresh snapshot showed exited liveness. Brigade recovered
+the start as `start-failed` with `worktree_retained = true`, accepted
+acknowledgement, and finalized the run as failed with no held tasks and
+`capacity.live = 0`.
+
+Pair 1A recorded one terminal failure and two unstarted tasks. The failure
+prevented the planned three-worker dispatch, so the qualification stopped
+at 1A. Effective worker tier, phase timings, and token usage were
+unobserved. Peak observed swap was 6.10 GiB. Zero pairs completed.
+[Attempt 5 collector record](research/evidence/orca-qualification/attempt-5-pair-01-a/record.json)
+
+| Batch | Verdict | Verified completion | Zero held capacity at batch close |
+| --- | --- | --- | --- |
+| 1A | Failed at worker startup, then recovered and finalized | Unobserved | Yes |
+| 1B | Unstarted | Unobserved | Unobserved |
+| 2B | Unstarted | Unobserved | Unobserved |
+| 2A | Unstarted | Unobserved | Unobserved |
+| 3A | Unstarted | Unobserved | Unobserved |
+| 3B | Unstarted | Unobserved | Unobserved |
+| 4B | Unstarted | Unobserved | Unobserved |
+| 4A | Unstarted | Unobserved | Unobserved |
+| 5A | Unstarted | Unobserved | Unobserved |
+| 5B | Unstarted | Unobserved | Unobserved |
