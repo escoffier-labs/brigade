@@ -1,0 +1,1 @@
+- Deliberately regress the bundled `note` skill for the rollback soak in #2589. The scheduled restore PR will revert this regression.
