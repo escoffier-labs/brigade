@@ -186,9 +186,9 @@ Use `brigade work verify push-gate report` for counts and timings, optionally
 with `--since YYYY-MM-DD` for an inclusive UTC date filter or `--json`.
 A push whose Git environment cannot find `brigade` leaves no observation.
 
-When GNU coreutils `timeout` is on Git's `PATH`, the hook asks the gate process
-to stop after five seconds and kills it one second later if needed. macOS and
-Git for Windows may lack `timeout`. On those systems the evaluator still
-limits its Git operations, and an outer process deadline is unavailable.
+The gate requires GNU coreutils `timeout` on Git's `PATH`. The hook asks the
+gate process to stop after five seconds and kills it one second later if
+needed. Without `timeout`, which macOS and Git for Windows may lack, the hook
+prints a skip notice and continues to the content guard.
 
 The gate does not defend against `git push --no-verify`.

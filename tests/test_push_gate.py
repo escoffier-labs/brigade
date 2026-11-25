@@ -159,6 +159,7 @@ def _bare_remote(repo):
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX pre-push hook and restricted PATH fixture")
+@pytest.mark.skipif(shutil.which("timeout") is None, reason="requires GNU coreutils timeout on PATH")
 def test_concurrent_push_from_worktrees_and_missing_brigade(push_repo, capsys, monkeypatch):
     _policy(push_repo)
     _bare_remote(push_repo)
@@ -210,12 +211,19 @@ def test_concurrent_push_from_worktrees_and_missing_brigade(push_repo, capsys, m
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX content guard shell hook fixture")
-def test_global_template_preserves_history_guard(push_repo, capsys, monkeypatch):
+@pytest.mark.parametrize(
+    "with_timeout",
+    [
+        pytest.param(True, marks=pytest.mark.skipif(shutil.which("timeout") is None, reason="requires GNU timeout")),
+        False,
+    ],
+)
+def test_global_template_preserves_history_guard(push_repo, capsys, monkeypatch, with_timeout):
     from brigade.work_cmd.push_gate import _guard_bytes, _snippet
 
     _policy(push_repo)
     _bare_remote(push_repo)
-    shared = push_repo.parent / "shared hooks"
+    shared = push_repo.with_name(f"{push_repo.name} shared hooks")
     shared.mkdir()
     global_config = push_repo.parent / "global config"
     _git(push_repo, "config", "--file", str(global_config), "core.hooksPath", str(shared))
@@ -231,7 +239,7 @@ def test_global_template_preserves_history_guard(push_repo, capsys, monkeypatch)
     assert _snippet().decode("ascii") in notice and str(hook) in notice
     assert hook.read_bytes() == old and _doctor(push_repo)[0] == "WARN"
 
-    tools_dir = push_repo.parent / "tools with spaces"
+    tools_dir = push_repo.with_name(f"{push_repo.name} tools with spaces")
     tools_dir.mkdir()
     fake = tools_dir / "brigade"
     real = shlex.quote(str(Path(sys.executable).parent / "brigade"))
@@ -244,7 +252,15 @@ def test_global_template_preserves_history_guard(push_repo, capsys, monkeypatch)
         encoding="utf-8",
     )
     fake.chmod(0o755)
-    monkeypatch.setenv("PATH", str(tools_dir) + os.pathsep + _path_with_brigade())
+    if with_timeout:
+        monkeypatch.setenv("PATH", str(tools_dir) + os.pathsep + _path_with_brigade())
+    else:
+        for command in ("git", "bash", "cat", "awk", "grep"):
+            executable = shutil.which(command)
+            assert executable is not None
+            (tools_dir / command).symlink_to(executable)
+        monkeypatch.setenv("PATH", str(tools_dir))
+        assert shutil.which("timeout") is None
     tip = _commit(push_repo)
     monkeypatch.setenv("TEST_GUARD_EXIT", "1")
     line = f"refs/heads/main {tip} refs/heads/main {'0' * len(tip)}\n"
@@ -266,19 +282,34 @@ def test_global_template_preserves_history_guard(push_repo, capsys, monkeypatch)
     assert _gate(push_repo, "install") == 0
     assert "mode=warn, wired" in capsys.readouterr().out
     assert hook.read_bytes() == current and global_config.read_bytes() == global_before
-    assert _status(push_repo, capsys)["will_run"] and _doctor(push_repo)[0] == "INFO"
+    info = _status(push_repo, capsys)
+    assert info["brigade_on_path"]
+    assert info["timeout_on_path"] is info["will_run"] is with_timeout
+    doctor_check = _doctor(push_repo)
+    assert doctor_check[0] == ("INFO" if with_timeout else "WARN")
     blocked = run_hook()
     assert blocked.returncode == baseline.returncode and blocked.stdout == baseline.stdout
-    assert "BLOCKED" in blocked.stderr and "missing_receipt" in blocked.stderr
-    (row,) = _log_rows(push_repo)
-    assert row["tip"] == tip
+    assert "BLOCKED" in blocked.stderr
+    if with_timeout:
+        assert "missing_receipt" in blocked.stderr
+        (row,) = _log_rows(push_repo)
+        assert row["tip"] == tip
+    else:
+        assert "configured but will not run: timeout missing from PATH" in doctor_check[2]
 
     monkeypatch.setenv("TEST_GUARD_EXIT", "0")
-    _git(push_repo, "push", "origin", "main")
-    assert len(_log_rows(push_repo)) == 2
+    pushed = subprocess.run(
+        ["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True, check=True
+    )
+    assert tip in pushed.stdout.splitlines()
+    if not with_timeout:
+        assert pushed.stderr.count("pre-push: push gate skipped: no timeout command") == 1
     assert _gate(push_repo, "uninstall") == 0
     assert hook.read_bytes() == current and global_config.read_bytes() == global_before
-    assert len(_log_rows(push_repo)) == 2
+    if with_timeout:
+        assert len(_log_rows(push_repo)) == 2
+    else:
+        assert not (push_repo / ".git" / "brigade" / "push-gate.jsonl").exists()
 
 
 def test_doctor_reports_claude_latch(tmp_path):

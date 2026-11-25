@@ -39,7 +39,7 @@ case "$(git config --get brigade.pushGate 2>/dev/null || true)" in
           echo "pre-push: push gate timed out; push continues" >&2
         fi
       else
-        printf '%s' "$STDIN_REFS" | brigade work verify push-gate run || true
+        echo "pre-push: push gate skipped: no timeout command" >&2
       fi
     fi
     ;;

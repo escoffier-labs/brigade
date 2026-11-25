@@ -92,6 +92,7 @@ def status(repo: Repository) -> dict[str, Any]:
     executable = raw is not None and os.access(repo.hook, os.X_OK)
     wired = bool(executable and match and b"brigade work verify push-gate run" in match.group())
     brigade_on_path = which("brigade") is not None
+    timeout_on_path = which("timeout") is not None
     rows = push_gate_log.read(push_gate_log.log_path(repo.common))
     recent = datetime.now(UTC) - timedelta(days=7)
     stamps = [datetime.fromisoformat(row["time"]) for row in rows]
@@ -105,7 +106,8 @@ def status(repo: Repository) -> dict[str, Any]:
         "current": current,
         "wired": wired,
         "brigade_on_path": brigade_on_path,
-        "will_run": mode in {"warn", "enforce"} and wired and brigade_on_path,
+        "timeout_on_path": timeout_on_path,
+        "will_run": mode in {"warn", "enforce"} and wired and brigade_on_path and timeout_on_path,
         "last_push": max(stamps).astimezone(UTC).isoformat() if stamps else None,
         "recent_gate_errors": sum(
             row["result"] == "gate_error" and stamp >= recent for row, stamp in zip(rows, stamps, strict=True)
@@ -121,6 +123,12 @@ def describe(info: dict[str, Any]) -> str:
         mode += " (unrecognized configuration)"
     active = "wired" if info["wired"] else "not wired"
     path_status = "brigade on PATH" if info["brigade_on_path"] else "cannot run: brigade missing from PATH"
+    if info["timeout_on_path"]:
+        path_status += ", timeout on PATH"
+    elif info["mode"] == "warn":
+        path_status += ", configured but will not run: timeout missing from PATH"
+    else:
+        path_status += ", timeout missing from PATH"
     version = f"v{info['hook_version']}" if info["hook_version"] is not None else "none"
     freshness = ", update available" if info["wired"] and not info["current"] else ""
     return (
