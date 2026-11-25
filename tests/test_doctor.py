@@ -300,12 +300,14 @@ def test_doctor_hides_operator_scoped_checks_by_default(tmp_target: Path, capsys
 
 
 def test_workspace_doctor_warns_about_old_engine_without_hashing_it(tmp_target: Path, tmp_path, capsys, monkeypatch):
-    from brigade import component_manifest, localio
+    from brigade import component_install, component_manifest, localio
     from tests.test_component_report import _install_fixture_manifest, _write_old_evidence_install
 
+    install_selection(tmp_target, Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]))
     env = _install_fixture_manifest(tmp_path, monkeypatch)
     engine = _write_old_evidence_install(env, component_manifest.manifest_path())
-    install_selection(tmp_target, Selection(depth="workspace", harnesses=["claude"], owner="claude", includes=[]))
+    roots = component_install.resolve_roots(env=env, system="linux")
+    monkeypatch.setattr(component_install, "resolve_roots", lambda **_kwargs: roots)
     real_sha256 = localio.file_sha256
 
     def skip_engine_hash(path):

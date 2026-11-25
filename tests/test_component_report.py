@@ -529,8 +529,9 @@ def test_old_evidence_engine_integrity_uses_recorded_bytes(tmp_path, monkeypatch
 
 def test_verified_beta_pairing_with_stable_components_stays_quiet(tmp_path, monkeypatch):
     env, release = _prepare_unified_release_setup(tmp_path, monkeypatch)
-    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
     roots = resolve_roots(env=env, system="linux")
+    monkeypatch.setattr(component_install, "resolve_roots", lambda **_kwargs: roots)
+    assert setup_native_components(env=env, opener=FakeOpener(all_fixture_payloads())) == 0
     state_path = Path(component_paths.update_state_path(roots.data_root))
     state = update_cmd.load_update_state(state_path)
     assert state is not None
