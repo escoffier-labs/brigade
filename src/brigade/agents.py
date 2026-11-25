@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Callable, List
 
-from . import proc, receipt_schema
+from . import proc
 from .antigravity_help import (  # noqa: F401  re-exported for callers and tests
     _ANTIGRAVITY_PRINT_TIMEOUT_HELP,
     _ANTIGRAVITY_PRINT_TIMEOUT_CACHE_LIMIT,
@@ -1251,6 +1251,7 @@ def run_agent(
     session_binding_id: str | None = None,
     process_registry: proc.ProcessRegistry | None = None,
     cloud_safe_mode: bool = False,
+    local_batch_output: bool = False,
 ) -> AgentResult:
     child_env: dict[str, str] | None = None
     resolved_overrides: dict[str, str] | None = None
@@ -1475,7 +1476,7 @@ def run_agent(
             requested_model=model,
             reasoning=reasoning,
         )
-    local_batch = cli_ref in {"codex", "claude"} and bool(env and env.get(receipt_schema.BRIGADE_ATTEMPT_ID_ENV))
+    local_batch = local_batch_output and cli_ref in {"codex", "claude"}
     if local_batch and cli_ref == "claude":
         argv[1:1] = ["--output-format", "json"]
     # Both modes emit a JSON envelope, but only read-only constrains the model

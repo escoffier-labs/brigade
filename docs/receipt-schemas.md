@@ -273,7 +273,6 @@ Synthesis is described in [explicit task batches](run-batch.md#synthesis).
 | `timeout` | integer | no | Per-command timeout seconds |
 | `path` | string | yes | Run directory path |
 | `producer_run_id` | string | no | Orchestrator run id from `BRIGADE_RUN_ID` when the producer ran under a Brigade run (#499). Omitted when unset. Legacy receipts without it remain readable |
-| `producer_attempt_id` | string | no | Batch task attempt digest from `BRIGADE_ATTEMPT_ID` when set. The verify receipt digest covers this field. |
 | `commands` | array of object | yes | See command object below |
 | `planned_commands` | array of string | no | Display argv joined |
 | `evidence` | object | no | Workspace evidence snapshot |

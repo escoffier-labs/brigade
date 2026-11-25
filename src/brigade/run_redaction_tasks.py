@@ -36,8 +36,6 @@ STRUCTURAL_FIELDS = frozenset(
 CONTROL_STRUCTURAL_FIELDS = frozenset({"op", "error_class"})
 BUDGET_STRUCTURAL_FIELDS = frozenset(
     {
-        "task_id",
-        "attempt_id",
         "dimension",
         "mode",
         "reason_class",
@@ -47,6 +45,7 @@ BUDGET_STRUCTURAL_FIELDS = frozenset(
         "active_remaining",
     }
 )
+BUDGET_TASK_FIELDS = frozenset({"task_id", "attempt_id"})
 BUDGET_SEAT_FIELDS = frozenset({"active_seats", "outcomes"})
 _DERIVED_FIELDS = frozenset({"spec_digest", "attempt_id", "result_id"})
 
@@ -126,6 +125,22 @@ def prepare_requests(
     }
     selected = set(selected)
     selected_task_ids = {event.payload["task_id"] for event in events if event.sequence in selected_controls}
+    known_attempts = {
+        (event.payload["task_id"], event.payload["attempt_id"])
+        for event in events
+        if event.event_type == "task.attempt-prepared"
+    }
+    for index, event in enumerate(events):
+        payload = event.payload
+        if (
+            event.event_type.startswith("run_budget.")
+            and "attempt_id" in payload
+            and requests[index][1] != event.idempotency_key
+        ):
+            correlation = (payload["task_id"], payload["attempt_id"])
+            if correlation not in known_attempts:
+                raise error_type("budget redaction requires matching task attempt history")
+            selected_task_ids.add(payload["task_id"])
     selected.update(
         event.sequence
         for event in events
@@ -395,11 +410,6 @@ def prepare_requests(
         if event.event_type in {"task.accepted", "task.batch-accepted"}
         for row in _rows(event)
     }
-    known_attempts = {
-        (event.payload["task_id"], event.payload["attempt_id"])
-        for event in events
-        if event.event_type == "task.attempt-prepared"
-    }
     for event in related_controls:
         task_id = event.payload.get("task_id")
         if task_id is None:
@@ -479,6 +489,14 @@ def assert_affected_task_values_removed(
         for field, value in private_scalars(event)
         if field not in STRUCTURAL_FIELDS | CONTROL_STRUCTURAL_FIELDS
     }
+    selected_references.update(
+        event.payload[field]
+        for event in original
+        if start <= event.sequence <= end
+        and event.event_type.startswith("run_budget.")
+        and "attempt_id" in event.payload
+        for field in BUDGET_TASK_FIELDS
+    )
     # Derived task identities can change outside the selected range too.
     # Every retained task/control alias must lose both selected references and
     # identities rebuilt by the task rewrite, irrespective of target task.

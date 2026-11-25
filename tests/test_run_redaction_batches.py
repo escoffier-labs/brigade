@@ -139,7 +139,7 @@ def closed_batches(tmp_path, monkeypatch, request):
             tasks.acknowledge_result(
                 run_dir, workspace=workspace, task_id=handle.spec.task_id, result_id=result.result_id
             )
-        if mode == "budget":
+        if mode in {"budget", "budget-orphan"}:
             handle = handles[0]
             run_lifecycle.record_lifecycle_event(
                 run_dir,
@@ -153,7 +153,7 @@ def closed_batches(tmp_path, monkeypatch, request):
                     "request_id": "dispatch:worker:1",
                     "reason_class": "usage_reconcile",
                     "task_id": handle.spec.task_id,
-                    "attempt_id": handle.attempt_id,
+                    "attempt_id": "f" * 64 if mode == "budget-orphan" else handle.attempt_id,
                 },
                 idempotency_key="budget-usage",
             )
@@ -290,6 +290,45 @@ def test_batch_redaction_remaps_retained_budget_references(closed_batches):
     usage = next(event.payload for event in rewritten if event.event_type == "run_budget.usage_reconciled")
     assert usage["task_id"] == member.handle.spec.task_id != state.handle.spec.task_id
     assert usage["attempt_id"] == member.handle.attempt_id != state.handle.attempt_id
+
+
+@requires_secure_transactions
+@pytest.mark.parametrize(
+    ("closed_batches", "orphan"), [("budget", False), ("budget-orphan", True)], indirect=["closed_batches"]
+)
+def test_budget_only_redaction_requires_and_remaps_task_history(closed_batches, orphan):
+    run_dir = closed_batches
+    events = _events(run_dir)
+    usage = next(event for event in events if event.event_type == "run_budget.usage_reconciled")
+    journal_path = run_dir / "events/lifecycle.jsonl"
+    original = journal_path.read_bytes()
+    kwargs = {
+        "sequence_start": usage.sequence,
+        "sequence_end": usage.sequence,
+        "reason": "credential-exposure",
+        "operator_confirmed": True,
+    }
+
+    if orphan:
+        with pytest.raises(
+            run_redaction.RedactionError, match="budget redaction requires matching task attempt history"
+        ):
+            run_redaction.redact_journal(run_dir, **kwargs)
+        assert journal_path.read_bytes() == original
+        return
+
+    run_redaction.redact_journal(run_dir, **kwargs)
+    journal = journal_path.read_text()
+    assert usage.payload["task_id"] not in journal
+    assert usage.payload["attempt_id"] not in journal
+    rewritten = _events(run_dir)
+    batch = next(event for event in rewritten if event.event_type == "task.batch-accepted")
+    selected, sibling = tasks.read_task_batch(run_dir, request_id=batch.payload["request_id"]).members
+    assert sibling.handle.spec.task_id == "member-0-1"
+    for fact in rewritten:
+        if fact.event_type.startswith("run_budget.") and "attempt_id" in fact.payload:
+            assert fact.payload["task_id"] == selected.handle.spec.task_id
+            assert fact.payload["attempt_id"] == selected.handle.attempt_id
 
 
 @requires_secure_transactions

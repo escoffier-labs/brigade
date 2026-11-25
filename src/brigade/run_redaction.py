@@ -427,7 +427,9 @@ def _redacted_payload(event: run_journal.RunEvent) -> dict[str, Any]:
     for key, value in event.payload.items():
         # Status is a projector input with a closed allowlist. Retaining the
         # allowed status token preserves the observable run state.
-        if key == "status" or (budget and key in run_redaction_tasks.BUDGET_STRUCTURAL_FIELDS):
+        if key == "status" or (
+            budget and key in run_redaction_tasks.BUDGET_STRUCTURAL_FIELDS | run_redaction_tasks.BUDGET_TASK_FIELDS
+        ):
             redacted[key] = value
         elif value is None:
             redacted[key] = None

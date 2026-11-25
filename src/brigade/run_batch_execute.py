@@ -515,23 +515,15 @@ class BatchExecution:
         handle = run_tasks.prepare_attempt(self.run_dir, workspace=self.workspace, task_id=task_id)
         path = self.run_dir / f"batch-result-{hashlib.sha256(task_id.encode()).hexdigest()}.json"
         # Persist the sanitized receipt projection, without raw captures or diagnostics.
-        payload = run_receipts.worker_payload_one(result)
-        binding = self.workspaces.get(task_id)
-        if cancel_containment in _UNCONTAINED:
-            # The stop was not confirmed, so the worker may still be writing
-            # the checkout. Neither verification nor collection has a stable subject.
-            binding = None
-        elif result.remote is None and result.cloud_environment is None and handle.attempt_id is not None:
-            from .work_cmd import verify_attempt
-
-            target = binding.path if binding is not None else self.workspace
-            verified = verify_attempt.task_verification(target, task_id=task_id, attempt_id=handle.attempt_id)
-            if verified is not None:
-                payload["verification"] = verified
-        localio.write_json(path, payload)
+        localio.write_json(path, run_receipts.worker_payload_one(result))
         run_journal._fsync_directory(self.run_dir)
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         artifact_kind, artifact_digest = "receipt", digest
+        binding = self.workspaces.get(task_id)
+        if cancel_containment in _UNCONTAINED:
+            # The stop was not confirmed, so the worker may still be writing
+            # the checkout. Commit nothing and retain the receipt alone.
+            binding = None
         if binding is not None:
             # Collection runs inside the per-task run lock the batch holds from
             # creation through worker exit, so nothing else can be writing the

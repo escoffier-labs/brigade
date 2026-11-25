@@ -1,2 +1,2 @@
-- Explicit batches correlate worker dispatch budget facts, local Codex and Claude sessions, and matching verification receipt digests with the task attempts they cover.
-- Journal redaction preserves budget event classifications and remaps task references when it redacts their associated task.
+- Explicit batches correlate worker dispatch budget facts and local Codex and Claude sessions with the task attempts they cover.
+- Journal redaction preserves budget event classifications and remaps task references when it redacts either a correlated budget fact or the associated task.

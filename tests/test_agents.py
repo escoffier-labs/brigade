@@ -48,13 +48,13 @@ def test_local_batch_agent_returns_provider_session(monkeypatch, harness):
         return agents.proc.Result(0, "done", f"session id: {session}\n")
 
     monkeypatch.setattr(agents.proc, "run", run)
-    result = agents.run_agent(harness, "hi", read_only=True, env={"BRIGADE_ATTEMPT_ID": "a" * 64})
+    result = agents.run_agent(harness, "hi", read_only=True, local_batch_output=True)
     assert result.ok
     assert result.text == "done"
     assert result.session_id == session
 
 
-def test_claude_without_attempt_keeps_text_output(monkeypatch):
+def test_claude_without_batch_output_flag_keeps_text_output(monkeypatch):
     _stub_agent_executable(monkeypatch)
 
     def run(argv, **kwargs):
@@ -86,7 +86,8 @@ def test_claude_batch_error_envelope_fails_even_after_zero_exit(monkeypatch, fie
         "claude",
         "hi",
         read_only=True,
-        env={"BRIGADE_ATTEMPT_ID": "a" * 64, "CLAUDE_TEST_TOKEN_REF": "TEST_CLAUDE_SECRET"},
+        env={"CLAUDE_TEST_TOKEN_REF": "TEST_CLAUDE_SECRET"},
+        local_batch_output=True,
     )
     assert not result.ok
     assert result.failure_kind == error_class
@@ -100,7 +101,7 @@ def test_claude_batch_error_envelope_fails_even_after_zero_exit(monkeypatch, fie
 def test_claude_batch_rejects_invalid_or_secret_session_id(monkeypatch, identifier):
     _stub_agent_executable(monkeypatch)
     monkeypatch.setenv("TEST_CLAUDE_SECRET", identifier)
-    env = {"BRIGADE_ATTEMPT_ID": "a" * 64}
+    env = {}
     if len(identifier) == 36:
         env["CLAUDE_TEST_TOKEN_REF"] = "TEST_CLAUDE_SECRET"
 
@@ -108,7 +109,7 @@ def test_claude_batch_rejects_invalid_or_secret_session_id(monkeypatch, identifi
         return agents.proc.Result(0, json.dumps({"type": "result", "result": "done", "session_id": identifier}), "")
 
     monkeypatch.setattr(agents.proc, "run", run)
-    result = agents.run_agent("claude", "hi", read_only=True, env=env)
+    result = agents.run_agent("claude", "hi", read_only=True, env=env, local_batch_output=True)
     assert result.ok and result.text == "done"
     assert result.session_id is None
     assert identifier not in (result.stdout or "")

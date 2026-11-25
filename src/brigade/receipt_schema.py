@@ -12,7 +12,6 @@ VERIFY_RECEIPT_SCHEMA_VERSION = 2
 # via run/transport (#499). Receipt producers may stamp the value as optional
 # ``producer_run_id``; omit the field when unset for legacy compatibility.
 BRIGADE_RUN_ID_ENV = "BRIGADE_RUN_ID"
-BRIGADE_ATTEMPT_ID_ENV = "BRIGADE_ATTEMPT_ID"
 
 
 def producer_run_id_from_env(environ: Mapping[str, str] | None = None) -> str | None:

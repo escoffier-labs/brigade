@@ -685,7 +685,6 @@ def dispatch(
         return merged
 
     def run_direct_agent(*args: Any, **kwargs: Any) -> agents.AgentResult:
-        worker_attempt_id = kwargs.pop("worker_attempt_id", None)
         runner = agents.run_agent
         parameters = inspect.signature(runner).parameters.values()
         accepts_var_keyword = any(parameter.kind is inspect.Parameter.VAR_KEYWORD for parameter in parameters)
@@ -697,20 +696,20 @@ def dispatch(
         accepts_session_binding = accepts_var_keyword or any(
             parameter.name == "session_binding_id" for parameter in parameters
         )
+        if not (accepts_var_keyword or any(parameter.name == "local_batch_output" for parameter in parameters)):
+            kwargs.pop("local_batch_output", None)
         if not accepts_registry:
             kwargs.pop("process_registry", None)
         if not accepts_cloud_safe_mode:
             kwargs.pop("cloud_safe_mode", None)
         if not accepts_session_binding:
             kwargs.pop("session_binding_id", None)
-        if orchestrator_run_id is not None or worker_attempt_id is not None:
+        if orchestrator_run_id is not None:
             # Real agents.run_agent accepts env=; legacy fixed-signature test
             # doubles do not. Mirror the process_registry gate so BRIGADE_RUN_ID
             # still reaches production workers without crashing the doubles.
             merged_env = _with_orchestrator_run_id(kwargs.get("env"))
             if accepts_env:
-                if worker_attempt_id is not None:
-                    merged_env = {**(merged_env or {}), receipt_schema.BRIGADE_ATTEMPT_ID_ENV: worker_attempt_id}
                 kwargs["env"] = merged_env
             else:
                 kwargs.pop("env", None)
@@ -864,8 +863,8 @@ def dispatch(
             else:
                 seat_process_registry = process_registry.for_seat(selected_agent.name)
             dispatch_kwargs: dict[str, Any] = {"cloud_safe_mode": selected_agent.cloud_safe_mode}
-            if not cli_ref.startswith("codex-cloud:"):
-                dispatch_kwargs["worker_attempt_id"] = assignment.attempt_id
+            if assignment.attempt_id is not None and cli_ref in {"codex", "claude"}:
+                dispatch_kwargs["local_batch_output"] = True
             session_binding_id = (
                 resume_session_id or str(uuid.uuid4())
                 if (
@@ -962,12 +961,6 @@ def dispatch(
                     f"`BRIGADE_APPROVAL_CORRELATION={approval_correlation_marker}`. "
                     "Do not print or return that marker."
                 )
-                if assignment.attempt_id is not None:
-                    approval_prompt += (
-                        f" Also set `{receipt_schema.BRIGADE_ATTEMPT_ID_ENV}={assignment.attempt_id}` "
-                        "on Brigade verification commands in this turn."
-                    )
-                    recording.prompt = approval_prompt
                 try:
                     on_event = event_writer(
                         events_dir,

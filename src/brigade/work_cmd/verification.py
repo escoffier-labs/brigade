@@ -23,6 +23,7 @@ from .. import (
     code_graph_delta,
     localio,
     outcome_attribution,
+    receipt_json,
     receipt_schema,
     receipt_signing,
     runguard,
@@ -36,8 +37,6 @@ from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
 from . import verify_argv_files, verify_ci, verify_gate, verify_ranking, verify_receipt_details, verify_runtime
-from . import verify_attempt
-from .verify_attempt import read_receipt as _verify_read_receipt
 from .closeout_receipt import write_markdown as _write_work_closeout_markdown
 from .verify_scoreability import _print_graph_impact, _print_scoreability_notice, _scoreability_notice
 
@@ -1150,7 +1149,6 @@ def _stamp_verify_causal_receipt(receipt: dict[str, Any]) -> None:
     verify_id = receipt.get("run_id")
     if not isinstance(verify_id, str) or not verify_id:
         return
-    verify_attempt.stamp_producer_attempt(receipt)
     producer = receipt.get("producer_run_id")
     run_id = producer if isinstance(producer, str) and producer else None
     causal_receipt.stamp_causal_receipt(
@@ -1222,8 +1220,28 @@ def _verify_receipt_reference(receipt: dict[str, Any] | None) -> dict[str, Any] 
     }
 
 
+def _verify_read_receipt(path: Path) -> dict[str, Any] | None:
+    receipt = path / "receipt.json" if path.is_dir() else path
+    if not receipt.is_file():
+        return None
+    try:
+        data = receipt_json.read(receipt)
+    except (OSError, ValueError, RecursionError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    data.setdefault("path", str(receipt.parent))
+    return data
+
+
 def _verify_receipts(target: Path) -> list[dict[str, Any]]:
-    return verify_attempt.read_receipts(target, reader=_verify_read_receipt)
+    root = helpers._verify_runs_root(target)
+    if not root.is_dir():
+        return []
+    receipts = [_verify_read_receipt(path) for path in root.iterdir() if path.is_dir()]
+    valid = [item for item in receipts if isinstance(item, dict)]
+    valid.sort(key=lambda item: str(item.get("started_at") or item.get("run_id") or ""), reverse=True)
+    return valid
 
 
 def _resolve_verify_receipt(target: Path, run_id: str) -> tuple[dict[str, Any] | None, str | None]:
