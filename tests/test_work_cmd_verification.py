@@ -1006,7 +1006,7 @@ def test_verify_reused_receipt_records_env_assignments_inside_command(tmp_target
 
     _init_verify_target_with_head(tmp_target)
     monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
-    monkeypatch.setenv("PATH", os.path.dirname(sys.executable) + os.pathsep + os.environ["PATH"])
+    monkeypatch.setenv("PATH", os.path.dirname(sys.executable) + os.pathsep + os.environ.get("PATH", ""))
     program = shlex.quote(os.path.basename(sys.executable))
     command = f'FOO=bar BAZ=qux {program} -c "print(1)"'
 

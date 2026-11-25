@@ -1532,6 +1532,7 @@ def _run_verify_commands(
     capture: str | None = None,
     capture_kind: str = "skill",
     capture_meta: dict[str, Any] | None = None,
+    reuse_skipped: str | None = None,
 ) -> tuple[dict[str, Any], int]:
     started = helpers._now()
     run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-work-verify-{uuid4().hex[:6]}"
@@ -1543,6 +1544,7 @@ def _run_verify_commands(
     try:
         run_dir.mkdir(parents=True, exist_ok=False)
         identity = _capture_verify_identity(target, run_dir)
+        argv_hashes, _ = verify_argv_files.argv_file_hashes(target, commands)
         receipt = {
             "run_id": run_id,
             "target": str(target),
@@ -1553,9 +1555,11 @@ def _run_verify_commands(
             "evidence": _verification_evidence_payload(target),
             "commands": [],
             "planned_commands": _planned_commands_display(commands),
-            "argv_file_hashes": verify_argv_files.argv_file_hashes(target, commands),
+            "argv_file_hashes": argv_hashes,
             "inherited_test_env": verify_receipt_details.inherited_test_env(include_py=True),
         }
+        if reuse_skipped is not None:
+            receipt["reuse_skipped"] = reuse_skipped
         receipt.update(identity)
         state = verify_runtime._ACTIVE_VERIFY_CANCEL.get()
         if state is not None:
@@ -2007,14 +2011,18 @@ def verify_run(
     if blocked_rc is not None:
         return blocked_rc
     receipt = None
+    reuse_skipped = None
     with verify_runtime._verify_cancellation_signals() as cancellation:
         try:
             if reuse and manifest is None:
                 fingerprint = localio.tree_fingerprint(target)
                 latest = _latest_verify_receipt(target)
+                reusable, reuse_skipped = verify_argv_files.reusable_receipt(
+                    target, planned, planned_display, fingerprint, latest
+                )
                 if (
-                    latest is not None
-                    and verify_argv_files.reusable_receipt(target, planned, planned_display, fingerprint, latest)
+                    reusable
+                    and latest is not None
                     and (gating := verify_gate.reuse_gating(target, latest, current_tree=fingerprint)) is not None
                 ):
                     receipt, rc = _write_reused_receipt(
@@ -2029,6 +2037,10 @@ def verify_run(
                         capture_meta=capture_meta,
                     )
             if receipt is None:
+                if reuse_skipped is not None:
+                    verify_runtime._print_verify_console(
+                        f"verification reuse skipped: {reuse_skipped}", file=sys.stderr
+                    )
                 receipt, rc = _run_verify_commands(
                     target,
                     planned,
@@ -2038,6 +2050,7 @@ def verify_run(
                     capture=capture,
                     capture_kind=capture_kind,
                     capture_meta=capture_meta,
+                    reuse_skipped=reuse_skipped,
                 )
         except KeyboardInterrupt:
             cancellation.raised = True
