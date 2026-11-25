@@ -16,7 +16,7 @@ WORKSPACE_DIRNAME = ".brigade"
 LEGACY_WORKSPACE_DIRNAMES = (".solo-mise",)
 CONFIG_REL_PATH = f"{WORKSPACE_DIRNAME}/config.json"
 SUPPORTED_VERSIONS = (1,)
-# Keep optional graph capture within an interactive verify run's latency budget.
+# Default budget for the foreground verify pre-sync.
 DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS = 0.5
 CODE_GRAPH_DELTA_TIMEOUT_KEY = "code_graph_delta_timeout_seconds"
 # Retained for the doctor warning on existing workspace configs.
@@ -93,16 +93,18 @@ def resolve_capture_before_retry(target: Path) -> str:
     return DEFAULT_CAPTURE_BEFORE_RETRY
 
 
-def resolve_code_graph_delta_timeout(target: Path, cli_override: float | None = None) -> float:
+def resolve_code_graph_delta_timeout(
+    target: Path, cli_override: float | None = None, *, default: float = DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS
+) -> float:
     if cli_override is not None:
         try:
             return validate_code_graph_delta_timeout(cli_override)
         except ValueError:
             raise ValueError("--code-graph-timeout must be a positive number") from None
-    cfg = load_config(target)
+    cfg = load_config(target, code_graph_timeout_default=default)
     if cfg is not None:
         return cfg.code_graph_delta_timeout_seconds
-    return DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS
+    return default
 
 
 def legacy_config_keys(target: Path) -> list[tuple[str, str]]:
@@ -241,7 +243,9 @@ def _existing_config_path(target: Path) -> Optional[Path]:
     return None
 
 
-def load_config(target: Path) -> Optional[Config]:
+def load_config(
+    target: Path, *, code_graph_timeout_default: float = DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS
+) -> Optional[Config]:
     path = _existing_config_path(target)
     if path is None:
         return None
@@ -258,9 +262,7 @@ def load_config(target: Path) -> Optional[Config]:
         includes=list(data.get("includes", [])),
     )
     sel.validate()
-    timeout = validate_code_graph_delta_timeout(
-        data.get(CODE_GRAPH_DELTA_TIMEOUT_KEY, DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS)
-    )
+    timeout = validate_code_graph_delta_timeout(data.get(CODE_GRAPH_DELTA_TIMEOUT_KEY, code_graph_timeout_default))
     capture_before_retry = validate_capture_before_retry(data.get("capture_before_retry", DEFAULT_CAPTURE_BEFORE_RETRY))
     verify_runs_keep = validate_verify_runs_keep(data.get("verify_runs_keep", DEFAULT_VERIFY_RUNS_KEEP))
     verify_archive_enabled = validate_verify_archive_enabled(

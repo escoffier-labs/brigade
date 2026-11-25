@@ -7,6 +7,7 @@ import sqlite3
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -14,9 +15,8 @@ import pytest
 
 from brigade import cli
 from brigade import fleet_client
-from brigade import code_graph_delta, component_bins
-from brigade import proc
-from brigade import runguard
+from brigade import code_graph_background, code_graph_delta, component_bins
+from brigade import proc, proc_group
 from brigade import localio
 from brigade import receipts_cmd
 from brigade import verify_manifest_git
@@ -2291,41 +2291,30 @@ def test_work_verify_graphtrail_delta_malformed_diff_fails_open(tmp_path, capsys
     assert sidecar["ok"] is False
 
 
-@pytest.mark.parametrize("index_state", ["missing", "empty", "slow"])
+@pytest.mark.parametrize("index_state", ["missing", "empty"])
 def test_work_verify_defers_graph_sync_once_and_recovers_a_dead_launcher(tmp_path, capsys, monkeypatch, index_state):
     _init_git_repo_with_head(tmp_path)
     monkeypatch.setattr(component_bins, "resolve", lambda name: name if name == "brigade-code-graph" else None)
     db = tmp_path / ".brigade/code-graph/code-graph.db"
-    if index_state != "missing":
+    if index_state == "empty":
         db.parent.mkdir(parents=True)
         with sqlite3.connect(db) as connection:
             connection.execute("CREATE TABLE meta (key TEXT, value TEXT)")
-            if index_state == "slow":
-                connection.execute("INSERT INTO meta VALUES ('synced_at', '1')")
-
-    real_run = subprocess.run
-
-    def sync(argv, *args, **kwargs):
-        if isinstance(argv, list) and argv[:1] == ["brigade-code-graph"]:
-            assert index_state == "slow"
-            assert kwargs["timeout"] == 0.5
-            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
-        return real_run(argv, *args, **kwargs)
 
     launches = []
-    alive = {12345}
+    identity = {12345: 7}
 
     def spawn(argv, **kwargs):
         launches.append((argv, kwargs))
-        return SimpleNamespace(pid=12345), "detached"
+        return SimpleNamespace(pid=12345, wait=lambda: 0), "detached"
 
-    monkeypatch.setattr(subprocess, "run", sync)
     monkeypatch.setattr(proc, "spawn_detached", spawn)
-    monkeypatch.setattr(runguard, "_pid_is_active", alive.__contains__)
+    monkeypatch.setattr(proc_group, "process_start_time", identity.get)
 
     for step, expected in enumerate((1, 1, 2)):
         if expected == 2:
-            alive.clear()
+            # An old reservation for a reused PID does not own the worker.
+            identity[12345] = 9
         assert (
             work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True, reuse=False) == 0
         )
@@ -2333,14 +2322,89 @@ def test_work_verify_defers_graph_sync_once_and_recovers_a_dead_launcher(tmp_pat
         delta = receipt["code_graph_delta"]
         assert delta["status"] == "sync_deferred"
         assert delta["ok"] is False
-        assert "background" in delta["summary"]
-        before = delta["commands"]["before_sync"]
-        if index_state == "slow" and step != 1:
-            assert before["timed_out"] is True
-        else:
-            assert before is None
+        assert delta["background_refresh"]["status"] == ("busy" if step == 1 else "started")
+        assert delta["commands"]["before_sync"] is None
         assert receipt["tree_stable"] is True
         assert len(launches) == expected
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX shebang fake engine fixture")
+def test_work_verify_detached_worker_survives_and_releases_pipes(tmp_path, monkeypatch):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _init_git_repo_with_head(repo)
+    engine = tmp_path / "engine"
+    started, release = tmp_path / "started", tmp_path / "release"
+    engine.write_text(
+        f"#!{sys.executable}\n"
+        "import sqlite3, sys, time\n"
+        "from pathlib import Path\n"
+        f"assert Path(sys.argv[-1]) == Path({str(repo)!r})\n"
+        f"Path({str(started)!r}).touch(exist_ok=False)\n"
+        "limit = time.monotonic() + 45\n"
+        f"while not Path({str(release)!r}).exists():\n"
+        "    if time.monotonic() > limit: raise TimeoutError()\n"
+        "    time.sleep(0.02)\n"
+        "with sqlite3.connect(sys.argv[2]) as db:\n"
+        "    db.execute('CREATE TABLE meta (key TEXT, value TEXT)')\n"
+        "    db.execute(\"INSERT INTO meta VALUES ('synced_at', '1')\")\n"
+        "print('detached worker stdout')\n"
+        "print('detached worker stderr', file=sys.stderr)\n"
+    )
+    engine.chmod(0o755)
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(engine))
+    db = repo / ".brigade/code-graph/code-graph.db"
+    reservation = db.parent / "verify-sync.json"
+    argv = [
+        sys.executable,
+        "-m",
+        "brigade",
+        "work",
+        "verify",
+        "run",
+        "--target",
+        str(repo),
+        "--command",
+        "python -V",
+        "--json",
+        "--no-reuse",
+    ]
+    deadline = time.monotonic() + 40
+
+    def wait_until(predicate):
+        while not predicate():
+            assert time.monotonic() < deadline
+            time.sleep(0.02)
+
+    try:
+        result = subprocess.run(argv, capture_output=True, text=True, check=True, timeout=20)
+        assert json.loads(result.stdout)["code_graph_delta"]["background_refresh"]["status"] == "started"
+        wait_until(started.exists)
+        assert not release.exists() and not reservation.exists()
+        result = subprocess.run(argv, capture_output=True, text=True, check=True, timeout=20)
+        assert json.loads(result.stdout)["code_graph_delta"]["background_refresh"]["status"] == "busy"
+        assert "detached worker stdout" not in result.stdout and "detached worker stderr" not in result.stderr
+    finally:
+        release.touch()
+    wait_until(
+        lambda: code_graph_background.index_ready(db) and code_graph_background.status_or_start(repo, db) is None
+    )
+    assert not reservation.exists()
+
+
+def test_work_verify_records_detached_launch_failure(tmp_path, capsys, monkeypatch):
+    _init_git_repo_with_head(tmp_path)
+    engine = _write_fake_graphtrail(tmp_path)
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(engine))
+
+    def fail(*args, **kwargs):
+        raise proc.DetachedLaunchError("detach refused")
+
+    monkeypatch.setattr(proc, "spawn_detached", fail)
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True) == 0
+    delta = json.loads(capsys.readouterr().out)["code_graph_delta"]
+    assert delta["background_refresh"] == {"status": "launch_failed", "reason": "detach refused"}
+    assert delta["status"] == "ok"
 
 
 def test_work_verify_graphtrail_delta_config_timeout_reaches_pre_and_post_sync(tmp_path, capsys, monkeypatch):
@@ -2605,8 +2669,11 @@ def test_work_verify_graph_snapshot_timeout_marks_delta_unavailable(tmp_path, ca
         assert "timed out after 0.05s" in compact_delta["summary"]
 
 
-def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline(tmp_path, capsys, monkeypatch):
-    _init_git_repo(tmp_path)
+@pytest.mark.parametrize("active_refresh", [False, True])
+def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline(
+    tmp_path, capsys, monkeypatch, active_refresh
+):
+    _init_git_repo_with_head(tmp_path)
     _seed_code_graph_db(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path)
     monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
@@ -2638,7 +2705,14 @@ def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline
             cwd=cwd,
         )
 
-    monkeypatch.setattr(code_graph_delta, "_run_graphtrail", timeout_first_sync)
+    if active_refresh:
+        monkeypatch.setattr(code_graph_background, "status_or_start", lambda *args: {"status": "busy"})
+        monkeypatch.setattr(code_graph_background, "wait_for_refresh", lambda *args: True)
+    else:
+        monkeypatch.setattr(code_graph_delta, "_run_graphtrail", timeout_first_sync)
+        monkeypatch.setattr(
+            proc, "spawn_detached", lambda *args, **kwargs: (SimpleNamespace(pid=12345, wait=lambda: 0), "test")
+        )
 
     assert (
         work_cmd.verify_run(
@@ -2654,10 +2728,18 @@ def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline
 
     assert receipt["commands"][0]["status"] == "completed"
     assert receipt["commands"][0]["exit_code"] == 0
+    assert receipt["code_graph_delta"]["status"] == "ok"
+    assert receipt["code_graph_delta"]["background_refresh"]["status"] == ("busy" if active_refresh else "started")
+    assert receipt["code_graph_delta"]["changed_symbol_count"] > 0
+    assert sidecar["snapshots"]["before"]["timeout_seconds"] == 10.0
     assert receipt["code_graph_delta"]["stale_graph_used"] is True
     assert sidecar["stale_graph_used"] is True
-    assert before_sync["stage"] == "incremental-sync"
-    assert before_sync["timed_out"] is True
+    if active_refresh:
+        assert before_sync is None
+    else:
+        assert before_sync["duration_seconds"] == 0.5
+        assert before_sync["stage"] == "incremental-sync"
+        assert before_sync["timed_out"] is True
 
 
 def test_work_verify_graphtrail_delta_diff_timeout_is_distinct_from_sync_timeout(tmp_path, capsys, monkeypatch):

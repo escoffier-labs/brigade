@@ -9,8 +9,9 @@ import sys
 import time
 from contextlib import closing
 from pathlib import Path
+from threading import Thread
 
-from . import engine_paths, inbox_lock, localio, proc, runguard
+from . import engine_paths, inbox_lock, localio, proc, proc_group
 
 _START_TIMEOUT = 5.0
 _SYNC_TIMEOUT = 120.0
@@ -31,25 +32,47 @@ def index_ready(db: Path) -> bool:
         return False
 
 
-def status_or_start(target: Path, db: Path, binary: str | None = None) -> str | None:
+def _ignored_for_refresh(target: Path, db: Path, lock: Path, reservation: Path) -> bool:
+    paths = {path.resolve().relative_to(target) for path in (lock.parent, lock, reservation)}
+    for path in (db.parent, db):
+        if path.resolve().is_relative_to(target):
+            paths.add(path.resolve().relative_to(target))
+    expected = {os.fsencode(path.as_posix()) for path in paths}
+    result = subprocess.run(
+        ["git", "-C", str(target), "check-ignore", "--stdin", "-z"],
+        input=b"\0".join(sorted(expected)) + b"\0",
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        timeout=1,
+        check=False,
+    )
+    return result.returncode == 0 and set(result.stdout.rstrip(b"\0").split(b"\0")) == expected
+
+
+def _reservation_live(claim: dict) -> bool:
+    pid, created, started = claim.get("pid"), claim.get("created"), claim.get("started")
+    return (
+        type(pid) is int
+        and pid > 0
+        and isinstance(created, (int, float))
+        and 0 <= time.time() - created < _START_TIMEOUT
+        and type(started) is int
+        and proc_group.process_start_time(pid) == started
+    )
+
+
+def status_or_start(target: Path, db: Path, binary: str | None = None) -> dict[str, str] | None:
     """Observe a live refresh or launch one without waiting for its work."""
     lock = target / engine_paths.CODE_GRAPH_DB.parent / "verify-sync.lock"
     reservation = lock.with_suffix(".json")
     if binary is None and not lock.is_file():
         return None
     try:
-        if binary is not None and (
-            any(localio.check_git_ignored(target, path) != "yes" for path in (lock.parent, lock, reservation))
-            or localio.check_git_ignored(target, db.parent) not in ("yes", "outside-target")
-            or localio.check_git_ignored(target, db) not in ("yes", "outside-target")
-        ):
-            return None
+        if binary is not None and not _ignored_for_refresh(target, db, lock, reservation):
+            return {"status": "launch_failed", "reason": "index or lock path is not ignored"}
         with inbox_lock.held_file_lock(lock, deadline_seconds=0):
-            claim = localio.read_json_dict(reservation) or {}
-            pid, deadline = claim.get("pid"), claim.get("deadline")
-            if isinstance(pid, int) and isinstance(deadline, (int, float)):
-                if time.monotonic() < deadline and runguard._pid_is_active(pid):
-                    return "background sync already running"
+            if _reservation_live(localio.read_json_dict(reservation) or {}):
+                return {"status": "busy", "reason": "background sync starting"}
             if binary is None:
                 return None
             # Prevent the engine's first-sync setup from editing .gitignore.
@@ -64,18 +87,34 @@ def status_or_start(target: Path, db: Path, binary: str | None = None) -> str | 
                     str(lock),
                     str(Path(binary).absolute()),
                     str(db.resolve()),
+                    str(target),
                 ],
-                cwd=target,
+                cwd=Path(sys.executable).resolve().parent,
             )
-            localio.write_json(reservation, {"pid": child.pid, "deadline": time.monotonic() + _START_TIMEOUT})
-            return "background sync started"
+            Thread(target=child.wait, daemon=True).start()
+            localio.write_json(
+                reservation,
+                {"pid": child.pid, "created": time.time(), "started": proc_group.process_start_time(child.pid)},
+            )
+            return {"status": "started"}
     except inbox_lock.InboxLockTimeout:
-        return "background sync lock held"
-    except (OSError, proc.DetachedLaunchError):
-        return None
+        return {"status": "busy", "reason": "background sync lock held"}
+    except (OSError, ValueError, proc.DetachedLaunchError, subprocess.TimeoutExpired) as exc:
+        return {"status": "launch_failed", "reason": str(exc)}
 
 
-def _worker(lock_path: str, binary: str, db: str) -> None:
+def wait_for_refresh(target: Path, db: Path, timeout: float) -> bool:
+    """Let a stale-baseline run see the refreshed graph within its post-sync budget."""
+    deadline = time.monotonic() + timeout
+    while (refresh := status_or_start(target, db)) and refresh["status"] == "busy":
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.05, remaining))
+    return True
+
+
+def _worker(lock_path: str, binary: str, db: str, target: str) -> None:
     lock = Path(lock_path)
     reservation = lock.with_suffix(".json")
     try:
@@ -85,6 +124,6 @@ def _worker(lock_path: str, binary: str, db: str) -> None:
             if (localio.read_json_dict(reservation) or {}).get("pid") != os.getpid():
                 return
             reservation.unlink()
-            subprocess.run([binary, "--db", db, "sync"], timeout=_SYNC_TIMEOUT, check=False)
+            subprocess.run([binary, "--db", db, "sync", target], timeout=_SYNC_TIMEOUT, check=False)
     except (OSError, TimeoutError, subprocess.TimeoutExpired):
         return
