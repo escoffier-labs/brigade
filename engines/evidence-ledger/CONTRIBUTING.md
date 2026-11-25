@@ -7,7 +7,7 @@ and never loses or corrupts evidence."
 ## Local setup
 
 ```bash
-go build ./cmd/miseledger
+go build ./cmd/brigade-evidence
 go test ./...
 gofmt -l . && go vet ./...
 ```

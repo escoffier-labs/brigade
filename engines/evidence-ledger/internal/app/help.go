@@ -3,57 +3,16 @@ package app
 import (
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
 )
 
-// Entry point identity (docs/phase-engine-rename.md, "Entry point identity").
-// The basename of argv[0], with ".exe" removed, selects the identity. Only the
-// legacy name selects the legacy identity. Any other name, including a renamed
-// copy, is canonical.
-const (
-	CanonicalProgram = "brigade-evidence"
-	// LegacyProgram is accepted through v0.32 and removed in v0.33.0.
-	LegacyProgram = "miseledger"
-)
+const CanonicalProgram = "brigade-evidence"
+const program = CanonicalProgram
 
-// program is the identity behind the version banner, usage text, MCP
-// serverInfo.name and the doctor MCP check. Main sets it once per process
-// before dispatch. In-process callers of Run get the canonical identity.
-var program = CanonicalProgram
-
-// ProgramName returns the identity of the running entry point.
-func ProgramName() string { return program }
-
-// IdentityFor maps an argv[0] value to its entry point identity.
-func IdentityFor(argv0 string) string {
-	base := filepath.Base(strings.ReplaceAll(argv0, "\\", "/"))
-	if len(base) > 4 && strings.EqualFold(base[len(base)-4:], ".exe") {
-		base = base[:len(base)-4]
-	}
-	if strings.EqualFold(base, LegacyProgram) {
-		return LegacyProgram
-	}
-	return CanonicalProgram
-}
-
-// isServerName reports whether name is either identity's MCP serverInfo.name.
-func isServerName(name string) bool {
-	return name == CanonicalProgram || name == LegacyProgram
-}
-
-// Main is the process entry for both executables. It selects the identity
-// from argv[0] and runs the command. A legacy entry point prints one stderr
-// deprecation notice.
+// Main strips the process name before dispatch.
 func Main(argv []string, out, errw io.Writer) int {
-	argv0 := ""
 	if len(argv) > 0 {
-		argv0 = argv[0]
 		argv = argv[1:]
-	}
-	program = IdentityFor(argv0)
-	if program == LegacyProgram {
-		fmt.Fprintf(errw, "%s is deprecated; use %s; removed in v0.33.0\n", LegacyProgram, CanonicalProgram)
 	}
 	return Run(argv, out, errw)
 }

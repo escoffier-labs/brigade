@@ -3,8 +3,8 @@
 use std::fs;
 use std::path::Path;
 
-use graphtrail::query::{ExportFormat, ExportScope, export_graph};
-use graphtrail::store::{explain_calls, init_schema, open_db, sync_repo};
+use brigade_code_graph::query::{ExportFormat, ExportScope, export_graph};
+use brigade_code_graph::store::{explain_calls, init_schema, open_db, sync_repo};
 use rusqlite::Connection;
 
 /// app.py imports helper from lib.py and calls it; lib.py also calls a name

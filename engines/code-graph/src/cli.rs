@@ -21,98 +21,13 @@ use crate::store::{
     db_path, init_schema, open_db, open_default_read_only, open_read_only, sync_repo_force,
 };
 
-/// Entry point identity (docs/phase-engine-rename.md, "Entry point identity").
-///
-/// Each binary takes its identity from the basename of `argv[0]`, with `.exe` stripped. A legacy
-/// name selects the legacy identity; any other name, including a renamed copy, selects the
-/// canonical one. Identity sets the program name for clap (version banner, usage and help) and the
-/// MCP `serverInfo.name`. A legacy entry point prints one stderr deprecation notice.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Identity {
-    /// Program name for the version banner, usage and help text.
-    pub program: &'static str,
-    /// MCP `serverInfo.name`.
-    pub server_name: &'static str,
-}
-
-pub const CLI_IDENTITY: Identity = Identity {
-    program: "brigade-code-graph",
-    server_name: "brigade-code-graph",
-};
-pub const MCP_IDENTITY: Identity = Identity {
-    program: "brigade-code-graph-mcp",
-    server_name: "brigade-code-graph",
-};
-// Legacy entry points, accepted for the rename window (v0.31, v0.32).
-const LEGACY_CLI_IDENTITY: Identity = Identity {
-    program: "graphtrail",
-    server_name: "graphtrail",
-};
-const LEGACY_MCP_IDENTITY: Identity = Identity {
-    program: "graphtrail-mcp",
-    server_name: "graphtrail",
-};
-
-impl Identity {
-    /// Print the rename notice only for a legacy executable basename.
-    pub fn warn_if_legacy(self) {
-        let replacement = if self == LEGACY_CLI_IDENTITY {
-            Some(CLI_IDENTITY.program)
-        } else if self == LEGACY_MCP_IDENTITY {
-            Some(MCP_IDENTITY.program)
-        } else {
-            None
-        };
-        if let Some(replacement) = replacement {
-            eprintln!(
-                "{} is deprecated; use {}; removed in v0.33.0",
-                self.program, replacement
-            );
-        }
-    }
-
-    /// Identity of the query CLI invoked as `argv0`.
-    pub fn cli(argv0: Option<&std::ffi::OsStr>) -> Self {
-        Self::select(argv0, LEGACY_CLI_IDENTITY, CLI_IDENTITY)
-    }
-
-    /// Identity of the MCP server invoked as `argv0`.
-    pub fn mcp(argv0: Option<&std::ffi::OsStr>) -> Self {
-        Self::select(argv0, LEGACY_MCP_IDENTITY, MCP_IDENTITY)
-    }
-
-    fn select(argv0: Option<&std::ffi::OsStr>, legacy: Self, canonical: Self) -> Self {
-        let invoked = argv0
-            .and_then(|argv0| std::path::Path::new(argv0).file_name())
-            .map(|name| name.to_string_lossy().to_ascii_lowercase());
-        let invoked = invoked
-            .as_deref()
-            .map(|name| name.strip_suffix(".exe").unwrap_or(name));
-        if invoked == Some(legacy.program) {
-            legacy
-        } else {
-            canonical
-        }
-    }
-}
-
-/// Parse the process arguments under the identity of the invoked entry point.
-pub fn parse_invoked() -> Cli {
-    use clap::{CommandFactory, FromArgMatches};
-
-    let args: Vec<std::ffi::OsString> = std::env::args_os().collect();
-    let identity = Identity::cli(args.first().map(std::ffi::OsString::as_os_str));
-    identity.warn_if_legacy();
-    let command = Cli::command()
-        .name(identity.program)
-        .bin_name(identity.program)
-        .display_name(identity.program);
-    let matches = command.get_matches_from(args);
-    Cli::from_arg_matches(&matches).unwrap_or_else(|err| err.exit())
-}
-
 #[derive(Parser)]
-#[command(version, about)]
+#[command(
+    name = "brigade-code-graph",
+    bin_name = "brigade-code-graph",
+    version,
+    about
+)]
 pub struct Cli {
     #[arg(long, global = true, value_name = "PATH")]
     db: Option<PathBuf>,

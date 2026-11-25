@@ -151,31 +151,31 @@ def test_evidence_doctor_exits_nonzero_on_fail(monkeypatch, tmp_path):
 
 
 _ENGINE_ROOT = Path(__file__).resolve().parents[1] / "engines" / "evidence-ledger"
-_BUNDLED_MISELEDGER = _ENGINE_ROOT / "bin" / "miseledger"
+_BUNDLED_EVIDENCE = _ENGINE_ROOT / "bin" / "brigade-evidence"
 _VALID_MEMORY_NAMESPACE = "memory-12345678-1234-4234-a234-123456789abc"
 
 
-def _bundled_miseledger() -> Path:
-    """Build or reuse engines/evidence-ledger/bin/miseledger (in-tree engine)."""
-    if _BUNDLED_MISELEDGER.is_file() and os.access(_BUNDLED_MISELEDGER, os.X_OK):
-        return _BUNDLED_MISELEDGER
+def _bundled_evidence() -> Path:
+    """Build or reuse engines/evidence-ledger/bin/brigade-evidence (in-tree engine)."""
+    if _BUNDLED_EVIDENCE.is_file() and os.access(_BUNDLED_EVIDENCE, os.X_OK):
+        return _BUNDLED_EVIDENCE
     go = shutil.which("go")
     if go is None:
         pytest.skip(
-            "bundled miseledger missing; build with "
-            "`go build -o bin/miseledger ./cmd/miseledger` in engines/evidence-ledger"
+            "bundled Brigade Evidence missing; build with "
+            "`go build -o bin/brigade-evidence ./cmd/brigade-evidence` in engines/evidence-ledger"
         )
-    _BUNDLED_MISELEDGER.parent.mkdir(parents=True, exist_ok=True)
+    _BUNDLED_EVIDENCE.parent.mkdir(parents=True, exist_ok=True)
     built = subprocess.run(
-        [go, "build", "-o", str(_BUNDLED_MISELEDGER), "./cmd/miseledger"],
+        [go, "build", "-o", str(_BUNDLED_EVIDENCE), "./cmd/brigade-evidence"],
         cwd=_ENGINE_ROOT,
         capture_output=True,
         text=True,
         check=False,
     )
     if built.returncode != 0:
-        pytest.fail(f"go build miseledger failed:\n{built.stderr}")
-    return _BUNDLED_MISELEDGER
+        pytest.fail(f"go build Brigade Evidence failed:\n{built.stderr}")
+    return _BUNDLED_EVIDENCE
 
 
 def _isolated_miseledger_env(home: Path) -> dict[str, str]:
@@ -252,7 +252,7 @@ def test_crawl_plan_prints_memory_when_namespace_is_declared(tmp_path):
 
 def test_crawl_plan_printed_commands_exec_on_bundled_engine(tmp_path, monkeypatch):
     """Each printed argv must run on the in-tree engine at engines/evidence-ledger/bin/."""
-    binary = _bundled_miseledger()
+    binary = _bundled_evidence()
     monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(binary))
     monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(binary))
     workspace = tmp_path / "ws"
@@ -265,7 +265,7 @@ def test_crawl_plan_printed_commands_exec_on_bundled_engine(tmp_path, monkeypatc
 
 
 def test_crawl_plan_memory_command_execs_when_namespace_declared(tmp_path, monkeypatch):
-    binary = _bundled_miseledger()
+    binary = _bundled_evidence()
     monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: str(binary))
     workspace = tmp_path / "ws"
     namespace = workspace / "memory" / "NAMESPACE"
@@ -277,38 +277,23 @@ def test_crawl_plan_memory_command_execs_when_namespace_declared(tmp_path, monke
     _exec_printed_commands(payload["commands"], env)
 
 
-def test_both_engine_entry_points_meet_the_version_floor(tmp_path):
-    """Either banner parses, and the preflight floor passes on the real engines."""
-    go = shutil.which("go")
-    if go is None:
-        pytest.skip("go toolchain missing; cannot build the evidence entry points")
-    for name in evidence_runtime.component_manifest.family_names("brigade-evidence"):
-        binary = tmp_path / "bin" / name
-        built = subprocess.run(
-            [go, "build", "-o", str(binary), f"./cmd/{name}"],
-            cwd=_ENGINE_ROOT,
-            capture_output=True,
-            text=True,
-            check=False,
-        )
-        assert built.returncode == 0, built.stderr
-        home = tmp_path / f"home-{name}"
-        env = {**os.environ, "HOME": str(home), "USERPROFILE": str(home)}
-        for variable, leaf in (("XDG_CONFIG_HOME", "config"), ("XDG_DATA_HOME", "data"), ("XDG_CACHE_HOME", "cache")):
-            env[variable] = str(home / leaf)
-        _exec_printed_commands([[str(binary), "init"]], env)
-        banner = subprocess.run([str(binary), "version"], capture_output=True, text=True, env=env, check=False)
-        program, version = banner.stdout.split()
-        assert program == name
-        probe = evidence_runtime.probe_memory_projection(str(binary), env=env)
-        compat = evidence_runtime.check_memory_projection_preflight(probe)
-        assert probe.version == version
-        assert compat.state in {"ok", "warn"}, compat.detail
+def test_native_evidence_entry_point_meets_the_version_floor(tmp_path):
+    """The installed engine's real banner satisfies memory projection preflight."""
+    binary = _bundled_evidence()
+    env = _isolated_miseledger_env(tmp_path / "home")
+    _exec_printed_commands([[str(binary), "init"]], env)
+    banner = subprocess.run([str(binary), "version"], capture_output=True, text=True, env=env, check=True)
+    program, version = banner.stdout.split()
+    assert program == "brigade-evidence"
+    probe = evidence_runtime.probe_memory_projection(str(binary), env=env)
+    compat = evidence_runtime.check_memory_projection_preflight(probe)
+    assert probe.version == version
+    assert compat.state in {"ok", "warn"}, compat.detail
 
 
 def test_issue_1024_mutation_memory_on_clean_workspace_fails_on_bundled_engine(tmp_path):
     """Printing crawl memory on a clean workspace dies; the omit exists for this."""
-    binary = _bundled_miseledger()
+    binary = _bundled_evidence()
     workspace = tmp_path / "ws"
     workspace.mkdir()
     env = _isolated_miseledger_env(tmp_path / "home")

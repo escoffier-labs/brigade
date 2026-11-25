@@ -954,7 +954,7 @@ def _remove_migrated_legacy_binaries(
 
     The setup transaction snapshotted these paths, and installed state names
     them as managed, so they go even when their bytes no longer match. That
-    lets setup repair a corrupted legacy install and lay down the shim.
+    lets setup replace a corrupted legacy install.
     """
     for component_id in legacy_ids:
         managed_path = Path(component_paths.managed_executable_path(data_root, component_id))
@@ -1056,7 +1056,6 @@ def _setup_rollback(
             current=current_state,
             remove_ids=remove_ids,
         )
-        component_shims.create_shims(previous_state, roots.data_root, verify_cached_asset, materialize_executable)
         component_state.write_installed_state(current_state_path, previous_state)
         component_state.write_installed_state(previous_state_path, current_state)
     except (ComponentInstallError, OSError, ValueError) as exc:
@@ -1347,7 +1346,6 @@ def setup_native_components(
                     remove_ids=tuple(cid for cid in obsolete if cid not in migrated),
                 )
                 _remove_migrated_legacy_binaries(data_root=roots.data_root, current=current_state, legacy_ids=migrated)
-            component_shims.create_shims(next_state, roots.data_root, verify_cached_asset, materialize_executable)
             if current_state is not None and component_state.should_rotate_previous(current_state, next_state):
                 component_state.write_installed_state(previous_state_path, current_state)
             component_state.write_installed_state(current_state_path, next_state)

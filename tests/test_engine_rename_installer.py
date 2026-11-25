@@ -141,15 +141,7 @@ def test_fresh_install_and_canonical_storage(acceptance):
     assert initialize(paths["brigade-code-graph-mcp"], env, repo) == "brigade-code-graph"
     assert initialize(paths["brigade-evidence"], env, repo, "mcp") == "brigade-evidence"
     for legacy, canonical in FAMILIES.items():
-        shim = paths[canonical].with_name(legacy)
-        assert os.path.samefile(paths[canonical], shim)
-        if canonical.endswith("-mcp"):
-            assert initialize(shim, env, repo) == legacy.removesuffix("-mcp")
-        else:
-            flag = "version" if canonical == "brigade-evidence" else "--version"
-            result = run([shim, flag], env, repo)
-            assert result.stdout.startswith(legacy + " ")
-            assert result.stderr == f"{legacy} is deprecated; use {canonical}; removed in v0.33.0\n"
+        assert not paths[canonical].with_name(legacy).exists()
 
 
 def test_upgrade_legacy_data_downgrade_and_rollback(acceptance, monkeypatch):

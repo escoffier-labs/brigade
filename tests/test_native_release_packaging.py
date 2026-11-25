@@ -18,9 +18,6 @@ ROOT = Path(__file__).resolve().parents[1]
 PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 BINARIES = (
     "agent-notify",
-    "graphtrail",
-    "graphtrail-mcp",
-    "miseledger",
     "sessionfind",
     "brigade-code-graph",
     "brigade-code-graph-mcp",
@@ -53,12 +50,10 @@ def test_native_builds_compile_and_stage_distinct_targets_for_every_platform():
         args = shlex.split(build)
         assert "--release" in args and "--locked" in args
         assert {args[i + 1] for i, arg in enumerate(args) if arg == "--bin"} == {
-            "graphtrail",
-            "graphtrail-mcp",
             "brigade-code-graph",
             "brigade-code-graph-mcp",
         }
-    for binary in ("graphtrail", "graphtrail-mcp", "brigade-code-graph", "brigade-code-graph-mcp"):
+    for binary in ("brigade-code-graph", "brigade-code-graph-mcp"):
         assert (
             f'cp target/release/{binary} "$GITHUB_WORKSPACE/release-assets/{binary}-${{{{ matrix.platform }}}}"' in rust
         )
@@ -70,7 +65,8 @@ def test_native_builds_compile_and_stage_distinct_targets_for_every_platform():
     assert set(re.findall(r"platform: ([\w-]+)", go)) == set(PLATFORMS)
     assert "CGO_ENABLED: '0'" in go
     assert "GOOS: ${{ matrix.goos }}" in go and "GOARCH: ${{ matrix.goarch }}" in go
-    for binary in ("miseledger", "sessionfind", "brigade-evidence"):
+    assert set(re.findall(r"\./cmd/([\w-]+)", go)) == {"sessionfind", "brigade-evidence"}
+    for binary in ("sessionfind", "brigade-evidence"):
         assert (
             f'go build -trimpath -o "$GITHUB_WORKSPACE/release-assets/{binary}-${{{{ matrix.platform }}}}$suffix" ./cmd/{binary}'
             in go
@@ -111,7 +107,7 @@ def test_assembly_rejects_incomplete_or_duplicate_native_downloads(tmp_path, inv
         path = tmp_path / "downloaded" / "other" / names.pop()
         path.parent.mkdir()
         path.write_bytes(b"duplicate")
-        # Keep count at 42, so only the duplicate-basename guard can reject it.
+        # Keep count at 27, so only the duplicate-basename guard can reject it.
         (tmp_path / "downloaded" / "native" / names.pop()).unlink()
     step = _workflow_step_section(workflow(), "assemble-release", "Generate and validate complete release inventory")
     script = textwrap.dedent(step.split("        run: |\n", 1)[1]).split("python scripts/", 1)[0]
@@ -126,14 +122,14 @@ def test_attestation_covers_every_native_asset_and_primary_manifest():
     subjects = assemble.split("          subject-path: |\n", 1)[1].split("      - uses:", 1)[0]
     paths = [line.strip() for line in subjects.splitlines() if line.strip()]
     expected = native_names() | {"component-manifest-v1.json"}
-    assert len(paths) == 43
+    assert len(paths) == 28
     assert set(paths) == {f"release-assets/{name}" for name in expected}
     for job in ("assemble-release", "release-asset-gate"):
-        assert re.search(r"find release-assets[^\n]+-eq 44", _workflow_job_section(workflow(), job))
+        assert re.search(r"find release-assets[^\n]+-eq 29", _workflow_job_section(workflow(), job))
 
 
 @pytest.mark.parametrize(
-    "mutation", ["none", "missing-alias", "alias-digest", "checksums-digest", "duplicate", "extra"]
+    "mutation", ["none", "missing-engine", "engine-digest", "checksums-digest", "duplicate", "extra"]
 )
 def test_release_resume_validates_full_inventory_digests(tmp_path, mutation):
     assets_dir = tmp_path / "assets"
@@ -144,11 +140,11 @@ def test_release_resume_validates_full_inventory_digests(tmp_path, mutation):
         data = name.encode()
         (assets_dir / name).write_bytes(data)
         assets.append({"name": name, "digest": "sha256:" + hashlib.sha256(data).hexdigest()})
-    alias = "brigade-evidence-windows-amd64.exe"
-    if mutation == "missing-alias":
-        assets = [asset for asset in assets if asset["name"] != alias]
+    engine = "brigade-evidence-windows-amd64.exe"
+    if mutation == "missing-engine":
+        assets = [asset for asset in assets if asset["name"] != engine]
     elif mutation.endswith("-digest"):
-        name = alias if mutation == "alias-digest" else "checksums.txt"
+        name = engine if mutation == "engine-digest" else "checksums.txt"
         next(asset for asset in assets if asset["name"] == name)["digest"] = "sha256:" + "0" * 64
     elif mutation == "duplicate":
         assets.append(assets[0])
@@ -168,9 +164,9 @@ def test_release_resume_validates_full_inventory_digests(tmp_path, mutation):
         text=True,
         env=os.environ,
     )
-    assert (result.returncode == 0) == (mutation in {"none", "missing-alias"}), result.stderr
+    assert (result.returncode == 0) == (mutation in {"none", "missing-engine"}), result.stderr
     if result.returncode == 0:
-        assert missing.read_text().strip() == (alias if mutation == "missing-alias" else "")
+        assert missing.read_text().strip() == (engine if mutation == "missing-engine" else "")
 
 
 def test_release_gate_binds_every_attestation_to_source_commit_and_ref(tmp_path):
@@ -215,7 +211,7 @@ def test_release_gate_binds_every_attestation_to_source_commit_and_ref(tmp_path)
     result = subprocess.run(_workflow_bash_command(script, "-e"), cwd=tmp_path, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     calls = [json.loads(line) for line in log.read_text().splitlines()]
-    assert len(calls) == 43
+    assert len(calls) == len(native_names()) + 1
     assert {Path(args[2]).name for args in calls} == subjects
 
 

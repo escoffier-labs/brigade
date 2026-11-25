@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write;
 use std::path::Path;
 
-use graphtrail::store::{init_schema, open_db, sync_repo};
+use brigade_code_graph::store::{init_schema, open_db, sync_repo};
 use rusqlite::Connection;
 
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]

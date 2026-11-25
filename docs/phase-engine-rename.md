@@ -629,12 +629,11 @@ waits for R2, R3 and R4. R6 is last.
 Removal tasks for v0.33, one pull request per engine plus one for Python and
 release:
 
-1. Delete the `graphtrail` and `graphtrail-mcp` `[[bin]]` targets and
-   `engines/evidence-ledger/cmd/miseledger`. Remove the legacy identity branch,
-   the legacy `serverInfo.name` and the deprecation lines.
-2. Stop building the 15 legacy-named release assets. Remove them from
-   `publish.yml`, both acceptance scripts and the provenance script. Earlier
-   releases keep theirs.
+1. Done for v0.33. Removed the legacy Rust and Go executable targets and the
+   basename-dependent CLI and MCP identities.
+2. Done for v0.33. The release builds and attests 27 native binaries. The 15
+   legacy assets are accepted only when verifying releases from the rename
+   window. Setup and rollback clean up managed aliases from old installs.
 3. Remove the legacy entries from `COMPONENT_FAMILIES` reading paths,
    `ENV_OVERRIDES` and `_LEGACY_RELATIVE`. A legacy-keyed `installed.json`
    is then treated as absent, and doctor tells the user to run `brigade setup`.

@@ -83,9 +83,9 @@ def test_publish_workflow_builds_the_complete_native_matrix_then_attests_and_rel
     for runner in ("ubuntu-latest", "ubuntu-24.04-arm", "macos-15-intel", "macos-15", "windows-latest"):
         assert runner in text
     for subject in (
-        "graphtrail-linux-amd64",
-        "graphtrail-mcp-windows-amd64.exe",
-        "miseledger-darwin-arm64",
+        "release-assets/brigade-code-graph-linux-amd64",
+        "release-assets/brigade-code-graph-mcp-windows-amd64.exe",
+        "release-assets/brigade-evidence-darwin-arm64",
         "sessionfind-linux-arm64",
         "agent-notify-linux-amd64",
         "agent-notify-linux-arm64",
@@ -350,15 +350,15 @@ def _staged_native_files(text: str) -> int:
     return total
 
 
-def test_publish_workflow_assemble_release_counts_42_native_assets_and_44_release_files():
+def test_publish_workflow_assemble_release_counts_27_native_assets_and_29_release_files():
     text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
     assemble = text[text.index("  assemble-release:") : text.index("  create-release:")]
 
-    # 20 code-graph, 15 Go, 5 agent-notify and 2 Linux-only brigade-hub binaries.
-    assert _staged_native_files(text) == 42
-    assert 'test "$(find downloaded -type f | wc -l)" -eq 42' in assemble
+    # 10 code-graph, 10 Go, 5 agent-notify and 2 Linux-only brigade-hub binaries.
+    assert _staged_native_files(text) == 27
+    assert 'test "$(find downloaded -type f | wc -l)" -eq 27' in assemble
     # Plus component-manifest-v1.json and checksums.txt.
-    assert 'test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 44' in assemble
+    assert 'test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 29' in assemble
     assert "pattern: agent-notify-*" in assemble
     # brigade-hub uploads as rust-hub-<platform>, which the rust-* download takes.
     assert "pattern: rust-*" in assemble
@@ -368,11 +368,11 @@ def test_publish_workflow_assemble_release_counts_42_native_assets_and_44_releas
     assert "build-hub-native" in needs_line
 
 
-def test_publish_release_gate_requires_44_release_assets():
+def test_publish_release_gate_requires_29_release_assets():
     text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
     gate = text[text.index("  release-asset-gate:") : text.index("  build-and-publish:")]
-    assert _staged_native_files(text) + 2 == 44
-    assert 'test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 44' in gate
+    assert _staged_native_files(text) + 2 == 29
+    assert 'test "$(find release-assets -maxdepth 1 -type f | wc -l)" -eq 29' in gate
 
 
 def _load_workflow_yaml(path: Path):
@@ -1228,8 +1228,8 @@ Invoke-CanonicalComponentSmoke -Paths @($version, 'fixture-mcp.exe', $version) -
 def test_acceptance_scripts_accept_the_same_checksum_inventories() -> None:
     windows = (ROOT / "scripts/windows-native-acceptance.ps1").read_text()
     posix = (ROOT / "scripts/published-artifact-acceptance.py").read_text()
-    assert "if len(checksums) not in (41, 43):" in posix
-    assert "if ($checksums.Count -notin @(41, 43)) {" in windows
+    assert "expected_counts = (41, 43) if historical else (26, 28)" in posix
+    assert "if ($historical) { @(41, 43) } else { @(26, 28) }" in windows
     assert "$checksums.Count -ne 41" not in windows
 
 

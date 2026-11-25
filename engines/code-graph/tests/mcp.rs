@@ -15,9 +15,9 @@ use std::thread::{self, JoinHandle};
 #[cfg(feature = "codesearch")]
 use std::time::{Duration, Instant};
 
-use graphtrail::mcp::{handle_request, serve};
-use graphtrail::query::build_context_pack;
-use graphtrail::store::{init_schema, open_db, sync_repo};
+use brigade_code_graph::mcp::{handle_request, serve};
+use brigade_code_graph::query::build_context_pack;
+use brigade_code_graph::store::{init_schema, open_db, sync_repo};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -1193,97 +1193,86 @@ fn canonical_and_legacy_mcp_process_contracts() {
         "invalid json\n"
     );
     const LEGACY_DB_ENV: &str = "GRAPHTRAIL_DB";
-    // The legacy entry point still prints its deprecation notice.
-    for (binary, server_name) in [
-        (env!("CARGO_BIN_EXE_graphtrail-mcp"), "graphtrail"),
+    let binary = env!("CARGO_BIN_EXE_brigade-code-graph-mcp");
+    let server_name = "brigade-code-graph";
+    for (args, env_var, env_db) in [
         (
-            env!("CARGO_BIN_EXE_brigade-code-graph-mcp"),
-            "brigade-code-graph",
+            vec!["--db".to_owned(), db.display().to_string()],
+            "BRIGADE_CODE_GRAPH_DB",
+            Some("absent.db"),
+        ),
+        (
+            vec![format!("--db={}", db.display())],
+            LEGACY_DB_ENV,
+            Some("absent.db"),
+        ),
+        (vec![], "BRIGADE_CODE_GRAPH_DB", db.to_str()),
+        // No variable: the working directory's canonical index is used.
+        (vec![], "", None),
+        // The MCP entry point has no help/version parser: these and a missing --db
+        // value are ignored and database selection falls back to the env.
+        (
+            vec!["--help".into(), "--version".into(), "--db".into()],
+            "BRIGADE_CODE_GRAPH_DB",
+            db.to_str(),
         ),
     ] {
-        for (args, env_var, env_db) in [
-            (
-                vec!["--db".to_owned(), db.display().to_string()],
-                "BRIGADE_CODE_GRAPH_DB",
-                Some("absent.db"),
-            ),
-            (
-                vec![format!("--db={}", db.display())],
-                LEGACY_DB_ENV,
-                Some("absent.db"),
-            ),
-            (vec![], "BRIGADE_CODE_GRAPH_DB", db.to_str()),
-            // No variable: the working directory's canonical index is used.
-            (vec![], "", None),
-            // Legacy MCP has no help/version parser: these and a missing --db
-            // value are ignored and database selection falls back to the env.
-            (
-                vec!["--help".into(), "--version".into(), "--db".into()],
-                "BRIGADE_CODE_GRAPH_DB",
-                db.to_str(),
-            ),
-        ] {
-            let mut command = Command::new(binary);
-            command
-                .args(&args)
-                .current_dir(if env_db.is_some() {
-                    nondefault_dir.as_path()
-                } else {
-                    dir.path()
-                })
-                .env("HOME", dir.path())
-                .env_remove("BRIGADE_CODE_GRAPH_DB")
-                .env_remove(LEGACY_DB_ENV);
-            if let Some(path) = env_db {
-                command.env(env_var, path);
-            }
-            let mut child = command
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(input.as_bytes())
-                .unwrap();
-            let output = child.wait_with_output().unwrap();
-            assert_eq!(output.status.code(), Some(0), "{output:?}");
-            assert_eq!(
-                String::from_utf8_lossy(&output.stderr).contains("deprecated"),
-                server_name == "graphtrail",
-                "{output:?}"
-            );
-            let responses: Vec<serde_json::Value> = String::from_utf8(output.stdout)
-                .unwrap()
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
-                .collect();
-            assert_eq!(responses.len(), 4, "{responses:?}");
-            assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
-            assert_eq!(responses[0]["result"]["serverInfo"]["name"], server_name);
-            assert_eq!(responses[1]["id"], 2);
-            assert_eq!(responses[1]["result"]["isError"], false, "{responses:?}");
-            assert!(
-                responses[1]["result"]["content"][0]["text"]
-                    .as_str()
-                    .unwrap()
-                    .contains("helper"),
-                "{responses:?}"
-            );
-            assert_eq!(responses[2]["error"]["code"], -32601);
-            assert_eq!(responses[3]["error"]["code"], -32700);
-        }
-        let output = Command::new(binary)
-            .current_dir(dir.path())
+        let mut command = Command::new(binary);
+        command
+            .args(&args)
+            .current_dir(if env_db.is_some() {
+                nondefault_dir.as_path()
+            } else {
+                dir.path()
+            })
             .env("HOME", dir.path())
             .env_remove("BRIGADE_CODE_GRAPH_DB")
-            .env_remove(LEGACY_DB_ENV)
-            .stdin(Stdio::null())
-            .output()
+            .env_remove(LEGACY_DB_ENV);
+        if let Some(path) = env_db {
+            command.env(env_var, path);
+        }
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
         assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        let responses: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(responses.len(), 4, "{responses:?}");
+        assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
+        assert_eq!(responses[0]["result"]["serverInfo"]["name"], server_name);
+        assert_eq!(responses[1]["id"], 2);
+        assert_eq!(responses[1]["result"]["isError"], false, "{responses:?}");
+        assert!(
+            responses[1]["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("helper"),
+            "{responses:?}"
+        );
+        assert_eq!(responses[2]["error"]["code"], -32601);
+        assert_eq!(responses[3]["error"]["code"], -32700);
     }
+    let output = Command::new(binary)
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .env_remove("BRIGADE_CODE_GRAPH_DB")
+        .env_remove(LEGACY_DB_ENV)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
 }

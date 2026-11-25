@@ -4,7 +4,7 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
-use graphtrail::store::{init_schema, open_db, sync_repo};
+use brigade_code_graph::store::{init_schema, open_db, sync_repo};
 use serde_json::Value;
 
 const TASK: &str = "Update the README install section to mention pipx";
@@ -26,7 +26,7 @@ fn indexed_repo(root: &Path) -> std::path::PathBuf {
 }
 
 fn context(db: &Path, extra: &[&str]) -> String {
-    let output = Command::new(env!("CARGO_BIN_EXE_graphtrail"))
+    let output = Command::new(env!("CARGO_BIN_EXE_brigade-code-graph"))
         .arg("--db")
         .arg(db)
         .args(["context", TASK])

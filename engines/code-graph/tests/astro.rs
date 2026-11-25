@@ -3,9 +3,9 @@
 use std::fs;
 use std::path::Path;
 
-use graphtrail::model::Direction;
-use graphtrail::query::{affected, graph_edges, impact_edges, stats};
-use graphtrail::store::{init_schema, open_db, sync_repo};
+use brigade_code_graph::model::Direction;
+use brigade_code_graph::query::{affected, graph_edges, impact_edges, stats};
+use brigade_code_graph::store::{init_schema, open_db, sync_repo};
 
 fn write(path: impl AsRef<Path>, content: &str) {
     let path = path.as_ref();

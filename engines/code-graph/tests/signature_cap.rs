@@ -5,9 +5,9 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-use graphtrail::extractors::typescript::extract_typescript;
-use graphtrail::query::doctor::doctor;
-use graphtrail::store::{init_schema, open_db, sync_repo};
+use brigade_code_graph::extractors::typescript::extract_typescript;
+use brigade_code_graph::query::doctor::doctor;
+use brigade_code_graph::store::{init_schema, open_db, sync_repo};
 use rusqlite::Connection;
 
 /// Longest stored signature, `…` marker included.

@@ -2629,10 +2629,18 @@ def test_family_upgrade_and_offline_rollback_preserve_actual_identities(tmp_path
         return subprocess.run(argv, **kwargs)
 
     first, second = (new_payload, old_payload) if reverse else (old_payload, new_payload)
-    for payload in (first, second):
-        manifest_path.write_text(json.dumps(payload))
-        assert setup_native_components(env=env, opener=FakeOpener(downloads), runner=fixture_runner) == 0
+    manifest_path.write_text(json.dumps(first))
+    assert setup_native_components(env=env, opener=FakeOpener(downloads), runner=fixture_runner) == 0
     state_path = Path(component_paths.installed_state_path(roots.data_root))
+    installed = component_state.load_installed_state(state_path)
+    for old, canonical in aliases.items():
+        shim = Path(component_paths.managed_executable_path(roots.data_root, old))
+        assert not shim.exists()
+        shim.write_bytes(Path(installed.components[canonical].executable).read_bytes())
+    manifest_path.write_text(json.dumps(second))
+    assert setup_native_components(env=env, opener=FakeOpener(downloads), runner=fixture_runner) == 0
+    for old in aliases:
+        assert not Path(component_paths.managed_executable_path(roots.data_root, old)).exists()
     assert set(component_state.load_installed_state(state_path).components) == installed_ids(second)
     assert (
         setup_native_components(env=env, rollback=True, offline=True, opener=FakeOpener({}), runner=fixture_runner) == 0
@@ -2645,15 +2653,15 @@ def test_family_upgrade_and_offline_rollback_preserve_actual_identities(tmp_path
         assert Path(record.executable).read_bytes() == downloads[record.download_url]
     assert len(smoke_calls) == 3 * len(installed_ids(first))
     assert {Path(argv[0]) for argv in smoke_calls} == fixture_paths
-    for old, canonical in aliases.items():
+    for old in aliases:
         shim = Path(component_paths.managed_executable_path(roots.data_root, old))
-        assert shim.read_bytes() == Path(restored.components[canonical].executable).read_bytes()
+        assert not shim.exists()
 
 
 def test_upgrade_repairs_a_corrupted_legacy_install(tmp_path, monkeypatch):
     # A v0.30 install is legacy-keyed: state names graphtrail and friends, and the
     # managed executables sit at the legacy paths. If one was corrupted in place,
-    # setup must still migrate it to the canonical executable and its shim.
+    # setup must still migrate it to the canonical executable.
     from dataclasses import replace
 
     env, manifest_path = _install_fixture_manifest(tmp_path, monkeypatch)
@@ -2675,7 +2683,6 @@ def test_upgrade_repairs_a_corrupted_legacy_install(tmp_path, monkeypatch):
     for legacy, canonical in component_manifest.COMPONENT_FAMILIES.items():
         record = components.pop(canonical)
         legacy_path = Path(component_paths.managed_executable_path(roots.data_root, legacy))
-        legacy_path.unlink()  # the shim R5 created
         os.replace(record.executable, legacy_path)
         components[legacy] = replace(record, executable=str(legacy_path))
     component_state.write_installed_state(state_path, replace(state, components=components))
@@ -2689,4 +2696,4 @@ def test_upgrade_repairs_a_corrupted_legacy_install(tmp_path, monkeypatch):
     assert legacy not in repaired.components
     record = repaired.components[component_manifest.COMPONENT_FAMILIES[legacy]]
     assert Path(record.executable).read_bytes() == downloads[record.download_url]
-    assert legacy_path.read_bytes() == Path(record.executable).read_bytes()
+    assert not legacy_path.exists()
