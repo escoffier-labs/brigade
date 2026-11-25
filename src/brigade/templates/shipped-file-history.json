@@ -109,6 +109,10 @@
       {
         "sha256": "457078ef56f4143910ba68729198285e204645d66ababc557e17b80496fe4cb1",
         "tag": "v0.5.0"
+      },
+      {
+        "sha256": "d8f0f3df4a53adc10006c4da3fcfe735e4b08e582bf1d6a7a4a3038ada2556da",
+        "tag": null
       }
     ],
     "skill:ultra-work-scout": [
