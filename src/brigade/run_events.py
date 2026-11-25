@@ -174,9 +174,11 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
         {"dimension", "mode", "declared", "used", "remaining", "threshold_pct", "reason_class"}
     ),
     "run_budget.reservation_denied": frozenset(
-        {"dimension", "mode", "declared", "used", "remaining", "request_id", "reason_class"}
+        {"dimension", "mode", "declared", "used", "remaining", "request_id", "reason_class", "task_id", "attempt_id"}
     ),
-    "run_budget.exhausted": frozenset({"dimension", "mode", "declared", "used", "remaining", "reason_class"}),
+    "run_budget.exhausted": frozenset(
+        {"dimension", "mode", "declared", "used", "remaining", "reason_class", "task_id", "attempt_id"}
+    ),
     "run_budget.cancel_requested": frozenset({"request_id", "reason_class", "transport_capability", "dimension"}),
     "run_budget.cancelled": frozenset(
         {
@@ -200,6 +202,8 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
             "used",
             "request_id",
             "reason_class",
+            "task_id",
+            "attempt_id",
         }
     ),
 }

@@ -799,10 +799,12 @@ before the requested fact leaves the task claimed and unknown, so a retry sees
 is durable, which means `unknown` now implies a granted launch permission.
 A prepared attempt with no claim stays `queued` and is still never relaunched.
 
-Transports that expose a documented provider value fill `provider_task_id` on
-the worker result, and the batch records it on the task observation. Today only
-codex-cloud does, through its task ID. Original run and result IDs stay empty
-until a transport documents them.
+The batch records `provider_task_id` on the task observation using the
+codex-cloud task ID or the local Codex or Claude session ID when available.
+Original run and result IDs stay empty until a transport documents them.
+Verification evidence for a task attempt requires the coordinator to run the
+check itself in that task's isolated worktree. Batch execution and integration
+currently publish no verification entry.
 
 JSON output uses `brigade.run_batch_result.v1`, with `run_id`, `request_id`, `run_status`, and a
 `tasks` object keyed by task ID. Each member has `status`, `not_run`, `result_id`,

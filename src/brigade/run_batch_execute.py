@@ -514,7 +514,7 @@ class BatchExecution:
             return
         handle = run_tasks.prepare_attempt(self.run_dir, workspace=self.workspace, task_id=task_id)
         path = self.run_dir / f"batch-result-{hashlib.sha256(task_id.encode()).hexdigest()}.json"
-        # Persist the sanitized receipt projection, never raw captures or diagnostics.
+        # Persist the sanitized receipt projection, without raw captures or diagnostics.
         localio.write_json(path, run_receipts.worker_payload_one(result))
         run_journal._fsync_directory(self.run_dir)
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -522,8 +522,7 @@ class BatchExecution:
         binding = self.workspaces.get(task_id)
         if cancel_containment in _UNCONTAINED:
             # The stop was not confirmed, so the worker may still be writing
-            # the checkout. Commit nothing: the observation rests on the
-            # receipt, and the worktree stays exactly as the worker leaves it.
+            # the checkout. Commit nothing and retain the receipt alone.
             binding = None
         if binding is not None:
             # Collection runs inside the per-task run lock the batch holds from

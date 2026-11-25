@@ -700,11 +700,11 @@ projector. The coordinator applies terminal policy via `run.failed` /
 | Event type | Payload keys | Notes |
 | --- | --- | --- |
 | `run_budget.threshold_reached` | `dimension`, `mode`, `declared`, `used`, `remaining`, `threshold_pct`, `reason_class` | Idempotent per dimension+threshold |
-| `run_budget.reservation_denied` | `dimension`, `mode`, `declared`, `used`, `remaining`, `request_id`, `reason_class` | Emitted before new work starts |
-| `run_budget.exhausted` | `dimension`, `mode`, `declared`, `used`, `remaining`, `reason_class` | Enforceable ceiling reached |
+| `run_budget.reservation_denied` | `dimension`, `mode`, `declared`, `used`, `remaining`, `request_id`, `reason_class`, optional pair `task_id` and `attempt_id` | Emitted before new work starts |
+| `run_budget.exhausted` | `dimension`, `mode`, `declared`, `used`, `remaining`, `reason_class`, optional pair `task_id` and `attempt_id` | Enforceable ceiling reached |
 | `run_budget.cancel_requested` | `request_id`, `reason_class`, `transport_capability`, `dimension` | Cancel intent. Does not project a terminal policy or cancel receipt |
 | `run_budget.cancelled` | `request_id`, `reason_class`, `transport_capability`, `transport_result`, `active_remaining`, `active_seats`, `outcomes`, `dimension` | Cancel receipt. This fact projects the receipt and the matching terminal policy; a failed write leaves the run non-terminal |
-| `run_budget.usage_reconciled` | `dimension`, `mode`, `usage_source`, `estimated_used`, `provider_used`, `used`, `request_id`, `reason_class` | Estimated and provider values stay distinct |
+| `run_budget.usage_reconciled` | `dimension`, `mode`, `usage_source`, `estimated_used`, `provider_used`, `used`, `request_id`, `reason_class`, optional pair `task_id` and `attempt_id` | Estimated and provider values stay distinct |
 
 Enforceable dimensions: `wall_clock_seconds`, `worker_dispatch_count`.
 Observed dimensions (never universal hard gates in this slice):
