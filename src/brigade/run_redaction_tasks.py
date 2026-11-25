@@ -34,7 +34,41 @@ STRUCTURAL_FIELDS = frozenset(
     }
 )
 CONTROL_STRUCTURAL_FIELDS = frozenset({"op", "error_class"})
+BUDGET_STRUCTURAL_FIELDS = frozenset(
+    {
+        "task_id",
+        "attempt_id",
+        "dimension",
+        "mode",
+        "reason_class",
+        "usage_source",
+        "transport_capability",
+        "transport_result",
+        "active_remaining",
+    }
+)
+BUDGET_SEAT_FIELDS = frozenset({"active_seats", "outcomes"})
 _DERIVED_FIELDS = frozenset({"spec_digest", "attempt_id", "result_id"})
+
+
+def redact_budget_seats(payload: dict[str, Any]) -> dict[str, Any]:
+    """Rename seats within one cancellation fact, including matching outcomes."""
+    seats = payload.get("active_seats") or []
+    outcomes = payload.get("outcomes") or []
+    originals = dict.fromkeys([*seats, *(row["seat"] for row in outcomes)])
+    aliases = {}
+    index = 0
+    for seat in originals:
+        alias = f"redacted-seat-{index}"
+        while alias in originals:
+            index += 1
+            alias = f"redacted-seat-{index}"
+        aliases[seat] = alias
+        index += 1
+    return {
+        "active_seats": [aliases[seat] for seat in seats],
+        "outcomes": [{**row, "seat": aliases[row["seat"]]} for row in outcomes],
+    }
 
 
 def private_scalars(event: run_journal.RunEvent) -> list[tuple[str, str]]:
@@ -413,14 +447,12 @@ def prepare_requests(
         old = event.payload
         task_id, attempt_id = old["task_id"], old["attempt_id"]
         payload, key = requests[index]
-        if key != event.idempotency_key:
-            continue
         new_task_id = mapped(task_id, "task_id", task_id)
         new_attempt_id = attempts.get((task_id, attempt_id), attempt_id)
         if (new_task_id, new_attempt_id) != (task_id, attempt_id):
             requests[index] = (
                 {**payload, "task_id": new_task_id, "attempt_id": new_attempt_id},
-                f"redaction:{operation_id}:{event.sequence}",
+                key if key != event.idempotency_key else f"redaction:{operation_id}:{event.sequence}",
             )
 
 

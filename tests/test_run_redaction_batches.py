@@ -157,6 +157,70 @@ def closed_batches(tmp_path, monkeypatch, request):
                 },
                 idempotency_key="budget-usage",
             )
+            budget_events = [
+                (
+                    "threshold_reached",
+                    {
+                        "dimension": "worker_dispatch_count",
+                        "mode": "enforceable",
+                        "reason_class": "threshold",
+                        "threshold_pct": 80,
+                    },
+                ),
+                (
+                    "reservation_denied",
+                    {
+                        "dimension": "worker_dispatch_count",
+                        "mode": "enforceable",
+                        "reason_class": "reservation_denied",
+                        "request_id": "budget-reservation",
+                        "task_id": handle.spec.task_id,
+                        "attempt_id": handle.attempt_id,
+                    },
+                ),
+                (
+                    "exhausted",
+                    {
+                        "dimension": "worker_dispatch_count",
+                        "mode": "enforceable",
+                        "reason_class": "exhausted",
+                        "task_id": handle.spec.task_id,
+                        "attempt_id": handle.attempt_id,
+                    },
+                ),
+                (
+                    "cancel_requested",
+                    {
+                        "request_id": "budget-cancel",
+                        "reason_class": "budget_cancel",
+                        "transport_capability": "mixed",
+                        "dimension": "worker_dispatch_count",
+                    },
+                ),
+                (
+                    "cancelled",
+                    {
+                        "request_id": "budget-cancel",
+                        "reason_class": "budget_cancel",
+                        "transport_capability": "mixed",
+                        "transport_result": "partial",
+                        "active_remaining": 2,
+                        "active_seats": ["seat-one", "seat-two"],
+                        "outcomes": [
+                            {"seat": "seat-one", "transport_capability": "none", "transport_result": "unsupported"}
+                        ],
+                        "dimension": "worker_dispatch_count",
+                    },
+                ),
+            ]
+            for event, payload in budget_events:
+                run_lifecycle.record_lifecycle_event(
+                    run_dir,
+                    workspace=workspace,
+                    event_type=f"run_budget.{event}",
+                    payload=payload,
+                    idempotency_key=f"budget:{event}",
+                )
         aboyeur._write_json(run_dir / "run.json", {**snapshot, "status": "ok"})
     # Targeted controls straddle later task/checkpoint facts, without transport.
     events = _events(run_dir)
@@ -226,6 +290,41 @@ def test_batch_redaction_remaps_retained_budget_references(closed_batches):
     usage = next(event.payload for event in rewritten if event.event_type == "run_budget.usage_reconciled")
     assert usage["task_id"] == member.handle.spec.task_id != state.handle.spec.task_id
     assert usage["attempt_id"] == member.handle.attempt_id != state.handle.attempt_id
+
+
+@requires_secure_transactions
+@pytest.mark.parametrize("closed_batches", ["budget"], indirect=True)
+def test_whole_run_redaction_preserves_closed_budget_payloads(closed_batches):
+    run_dir = closed_batches
+    events = _events(run_dir)
+    run_redaction.redact_journal(
+        run_dir,
+        sequence_start=1,
+        sequence_end=events[-1].sequence,
+        reason="credential-exposure",
+        operator_confirmed=True,
+    )
+    rewritten = _events(run_dir)
+    budget = {e.event_type: e.payload for e in rewritten if e.event_type.startswith("run_budget.")}
+    old_budget = {e.event_type: e.payload for e in events if e.event_type.startswith("run_budget.")}
+    assert len(budget) == 6
+    assert budget.keys() == old_budget.keys()
+    for event_type, original in old_budget.items():
+        for key in ("dimension", "mode", "reason_class", "usage_source", "transport_capability", "transport_result"):
+            if key in original:
+                assert budget[event_type][key] == original[key]
+    first_batch = next(e for e in rewritten if e.event_type == "task.batch-accepted")
+    handle = tasks.read_task_batch(run_dir, request_id=first_batch.payload["request_id"]).members[0].handle
+    for event_type in ("reservation_denied", "exhausted", "usage_reconciled"):
+        row = budget[f"run_budget.{event_type}"]
+        assert row["task_id"] == handle.spec.task_id
+        assert row["attempt_id"] == handle.attempt_id
+    cancel = budget["run_budget.cancelled"]
+    seats = cancel["active_seats"]
+    assert len(seats) == len(set(seats)) == cancel["active_remaining"] == 2
+    assert cancel["outcomes"] == [{"seat": seats[0], "transport_capability": "none", "transport_result": "unsupported"}]
+    journal = (run_dir / "events/lifecycle.jsonl").read_text()
+    assert "seat-one" not in journal and "seat-two" not in journal and "budget-cancel" not in journal
 
 
 @requires_secure_transactions

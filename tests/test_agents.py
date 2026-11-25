@@ -54,6 +54,66 @@ def test_local_batch_agent_returns_provider_session(monkeypatch, harness):
     assert result.session_id == session
 
 
+def test_claude_without_attempt_keeps_text_output(monkeypatch):
+    _stub_agent_executable(monkeypatch)
+
+    def run(argv, **kwargs):
+        assert "--output-format" not in argv
+        return agents.proc.Result(0, "done", "")
+
+    monkeypatch.setattr(agents.proc, "run", run)
+    result = agents.run_agent("claude", "hi", read_only=True)
+    assert result.ok and result.text == "done" and result.session_id is None
+
+
+@pytest.mark.parametrize(
+    ("fields", "error_class"),
+    [
+        ({"subtype": "error_during_execution"}, "error_during_execution"),
+        ({"result": "done", "errors": ["provider_failure"]}, "provider_failure"),
+        ({"subtype": "sample-value", "errors": ["key=sample-value"]}, "claude-error"),
+    ],
+)
+def test_claude_batch_error_envelope_fails_even_after_zero_exit(monkeypatch, fields, error_class):
+    _stub_agent_executable(monkeypatch)
+    monkeypatch.setenv("TEST_CLAUDE_SECRET", "sample-value")
+
+    def run(argv, **kwargs):
+        return agents.proc.Result(0, json.dumps({"type": "result", "is_error": True, **fields}), "")
+
+    monkeypatch.setattr(agents.proc, "run", run)
+    result = agents.run_agent(
+        "claude",
+        "hi",
+        read_only=True,
+        env={"BRIGADE_ATTEMPT_ID": "a" * 64, "CLAUDE_TEST_TOKEN_REF": "TEST_CLAUDE_SECRET"},
+    )
+    assert not result.ok
+    assert result.failure_kind == error_class
+    assert result.detail == error_class
+    assert "sample-value" not in (result.stdout or "")
+
+
+@pytest.mark.parametrize(
+    "identifier", ["key=example-value", "Users/example/repo", "a" * 512, "00000000-0000-4000-8000-000000000001"]
+)
+def test_claude_batch_rejects_invalid_or_secret_session_id(monkeypatch, identifier):
+    _stub_agent_executable(monkeypatch)
+    monkeypatch.setenv("TEST_CLAUDE_SECRET", identifier)
+    env = {"BRIGADE_ATTEMPT_ID": "a" * 64}
+    if len(identifier) == 36:
+        env["CLAUDE_TEST_TOKEN_REF"] = "TEST_CLAUDE_SECRET"
+
+    def run(argv, **kwargs):
+        return agents.proc.Result(0, json.dumps({"type": "result", "result": "done", "session_id": identifier}), "")
+
+    monkeypatch.setattr(agents.proc, "run", run)
+    result = agents.run_agent("claude", "hi", read_only=True, env=env)
+    assert result.ok and result.text == "done"
+    assert result.session_id is None
+    assert identifier not in (result.stdout or "")
+
+
 def test_build_argv_for_known_clis():
     # A claude write run with no explicit sandbox must fail safely rather than
     # silently grant full access (or stall on a permission prompt).

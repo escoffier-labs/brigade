@@ -522,10 +522,10 @@ class BatchExecution:
             # the checkout. Neither verification nor collection has a stable subject.
             binding = None
         elif result.remote is None and result.cloud_environment is None and handle.attempt_id is not None:
-            from .work_cmd import verification
+            from .work_cmd import verify_attempt
 
             target = binding.path if binding is not None else self.workspace
-            verified = verification.task_verification(target, task_id=task_id, attempt_id=handle.attempt_id)
+            verified = verify_attempt.task_verification(target, task_id=task_id, attempt_id=handle.attempt_id)
             if verified is not None:
                 payload["verification"] = verified
         localio.write_json(path, payload)

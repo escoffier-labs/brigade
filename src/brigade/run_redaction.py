@@ -422,13 +422,17 @@ def _redacted_payload(event: run_journal.RunEvent) -> dict[str, Any]:
         return dict(event.payload)
 
     redacted: dict[str, Any] = {}
+    budget = event.event_type.startswith("run_budget.")
+    budget_seats = run_redaction_tasks.redact_budget_seats(dict(event.payload)) if budget else {}
     for key, value in event.payload.items():
         # Status is a projector input with a closed allowlist. Retaining the
         # allowed status token preserves the observable run state.
-        if key == "status":
+        if key == "status" or (budget and key in run_redaction_tasks.BUDGET_STRUCTURAL_FIELDS):
             redacted[key] = value
         elif value is None:
             redacted[key] = None
+        elif key in budget_seats:
+            redacted[key] = budget_seats[key]
         elif isinstance(value, str):
             redacted[key] = REDACTED_VALUE
         elif isinstance(value, int) and not isinstance(value, bool):
@@ -1982,6 +1986,13 @@ def _assert_affected_values_removed(
                 key == "status"
                 or value is None
                 or (prior.event_type in run_events._TASK_EVENT_TYPES and key in run_redaction_tasks.STRUCTURAL_FIELDS)
+                or (
+                    prior.event_type.startswith("run_budget.")
+                    and (
+                        key in run_redaction_tasks.BUDGET_STRUCTURAL_FIELDS
+                        or (key in run_redaction_tasks.BUDGET_SEAT_FIELDS and value == [])
+                    )
+                )
                 or (
                     prior.event_type in {"control.requested", "control.observed", "control.failed"}
                     and "task_id" in prior.payload

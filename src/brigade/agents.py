@@ -37,6 +37,7 @@ from .antigravity_help import (  # noqa: F401  re-exported for callers and tests
     _clear_antigravity_print_timeout_cache,
     _warn_antigravity_plan_mode_unsupported,
 )
+from .local_batch_output import parse_local_batch_result as _local_batch_result
 from .result_integrity import validate_final_output
 
 _OLLAMA_PREFIX = "ollama:"
@@ -1235,24 +1236,6 @@ def codex_stdin_hang_detail(raw: str, *, seat: str | None = None, transport: str
     )
 
 
-def _local_batch_result(cli_ref: str, text: str, stderr: str) -> tuple[str, str | None]:
-    if cli_ref == "codex":
-        # In text mode Codex exec prints the thread ID in its stderr preamble.
-        match = re.search(r"^session id: ([0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12})[ \t]*$", stderr, re.MULTILINE)
-        return text, match[1] if match else None
-    if cli_ref == "claude":
-        try:
-            payload = json.loads(text)
-        except (ValueError, RecursionError):
-            return text, None
-        if isinstance(payload, dict) and payload.get("type") == "result":
-            answer, identifier = payload.get("result"), payload.get("session_id")
-            return answer.strip() if isinstance(answer, str) else "", identifier if isinstance(
-                identifier, str
-            ) else None
-    return text, None
-
-
 def run_agent(
     cli_ref: str,
     prompt: str,
@@ -1541,11 +1524,31 @@ def run_agent(
     def scrub_detail(detail: str) -> str:
         return _scrub_env_override_values(detail, resolved_overrides, resolved_secret_targets)
 
-    safe_stdout = _scrub_env_override_values(result.stdout, resolved_overrides, resolved_secret_targets)
-    safe_stderr = _scrub_env_override_values(result.stderr, resolved_overrides, resolved_secret_targets)
+    text = result.stdout.strip()
+    session_id = None
+    batch_error = None
+    if local_batch:
+        text, session_id, batch_error = _local_batch_result(cli_ref, text, result.stderr, scrub_detail)
+    safe_stdout = scrub_detail(text if local_batch and cli_ref == "claude" else result.stdout)
+    safe_stderr = scrub_detail(result.stderr)
+    if batch_error is not None:
+        return AgentResult(
+            text="",
+            ok=False,
+            detail=batch_error,
+            failure_phase="harness",
+            failure_kind=batch_error,
+            stdout=safe_stdout,
+            stderr=safe_stderr,
+            exit_code=result.code,
+            timed_out=result.code == 124,
+            requested_model=model,
+            reasoning=reasoning,
+            session_id=session_id,
+        )
 
     if getattr(result, "stream_limit_exceeded", False):
-        safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides, resolved_secret_targets)
+        safe_text = safe_stdout.strip()
         overflow_detail = f"combined output exceeded {proc.MAX_STREAM_BYTES} stream byte limit"
         failure_detail = scrub_detail(safe_stderr.strip() or overflow_detail)[:200]
         return AgentResult(
@@ -1572,7 +1575,7 @@ def run_agent(
     truncated_ok_exit = result.output_limit_exceeded and result.code == 0
 
     if result.output_limit_exceeded and not truncated_ok_exit:
-        safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides, resolved_secret_targets)
+        safe_text = safe_stdout.strip()
         overflow_detail = f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte capture limit; output truncated"
         failure_detail = scrub_detail(safe_stderr.strip() or overflow_detail)[:200]
         return AgentResult(
@@ -1592,7 +1595,7 @@ def run_agent(
         )
 
     if getattr(result, "incomplete_process_group", False):
-        safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides, resolved_secret_targets)
+        safe_text = safe_stdout.strip()
         incomplete_detail = "process group kept the output pipes open after child exit; terminated as incomplete"
         failure_detail = scrub_detail(safe_stderr.strip() or incomplete_detail)[:200]
         return AgentResult(
@@ -1610,7 +1613,7 @@ def run_agent(
         )
 
     if result.decode_failed:
-        safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides, resolved_secret_targets)
+        safe_text = safe_stdout.strip()
         failure_detail = scrub_detail(safe_stderr.strip() or result.decode_failure_detail)[:200]
         return AgentResult(
             text=safe_text,
@@ -1626,12 +1629,8 @@ def run_agent(
             reasoning=reasoning,
         )
 
-    text = result.stdout.strip()
     structured_error = ""
     structured_diagnostic = ""
-    session_id = None
-    if local_batch:
-        text, session_id = _local_batch_result(cli_ref, text, result.stderr)
     grok_request_id = None
     grok_stop_reason = None
     if grok_envelope:

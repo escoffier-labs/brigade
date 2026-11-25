@@ -23,7 +23,6 @@ from .. import (
     code_graph_delta,
     localio,
     outcome_attribution,
-    receipt_json,
     receipt_schema,
     receipt_signing,
     runguard,
@@ -37,6 +36,8 @@ from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
 from . import verify_argv_files, verify_ci, verify_gate, verify_ranking, verify_receipt_details, verify_runtime
+from . import verify_attempt
+from .verify_attempt import read_receipt as _verify_read_receipt
 from .closeout_receipt import write_markdown as _write_work_closeout_markdown
 from .verify_scoreability import _print_graph_impact, _print_scoreability_notice, _scoreability_notice
 
@@ -1149,10 +1150,7 @@ def _stamp_verify_causal_receipt(receipt: dict[str, Any]) -> None:
     verify_id = receipt.get("run_id")
     if not isinstance(verify_id, str) or not verify_id:
         return
-    # Batch dispatch supplies the attempt digest, which binds the run and task.
-    attempt_id = os.environ.get(receipt_schema.BRIGADE_ATTEMPT_ID_ENV)
-    if attempt_id is not None and re.fullmatch(r"[0-9a-f]{64}", attempt_id):
-        receipt["producer_attempt_id"] = attempt_id
+    verify_attempt.stamp_producer_attempt(receipt)
     producer = receipt.get("producer_run_id")
     run_id = producer if isinstance(producer, str) and producer else None
     causal_receipt.stamp_causal_receipt(
@@ -1224,56 +1222,8 @@ def _verify_receipt_reference(receipt: dict[str, Any] | None) -> dict[str, Any] 
     }
 
 
-def _verify_read_receipt(path: Path) -> dict[str, Any] | None:
-    receipt = path / "receipt.json" if path.is_dir() else path
-    if not receipt.is_file():
-        return None
-    try:
-        data = receipt_json.read(receipt)
-    except (OSError, ValueError, RecursionError):
-        return None
-    if not isinstance(data, dict):
-        return None
-    data.setdefault("path", str(receipt.parent))
-    return data
-
-
 def _verify_receipts(target: Path) -> list[dict[str, Any]]:
-    root = helpers._verify_runs_root(target)
-    if not root.is_dir():
-        return []
-    receipts = [_verify_read_receipt(path) for path in root.iterdir() if path.is_dir()]
-    valid = [item for item in receipts if isinstance(item, dict)]
-    valid.sort(key=lambda item: str(item.get("started_at") or item.get("run_id") or ""), reverse=True)
-    return valid
-
-
-def task_verification(target: Path, *, task_id: str, attempt_id: str) -> dict[str, str] | None:
-    """Project one sealed verifier receipt for this attempt and exact checkout tree."""
-    tree: str | None = None
-    for receipt in _verify_receipts(target):
-        status = receipt.get("status")
-        if (
-            receipt.get("producer_attempt_id") != attempt_id
-            or receipt.get("target") != str(target)
-            or status not in ("completed", "failed", "rejected")
-            or (
-                receipt.get("tree_stable") is not True
-                and not (status == "completed" and isinstance(receipt.get("reused_from"), str))
-            )
-        ):
-            continue
-        if tree is None:
-            tree = localio.tree_fingerprint(target)
-            if tree is None:
-                return None
-        if receipt.get("tree_fingerprint") != tree or receipt.get("tree_fingerprint_after") != tree:
-            continue
-        digests = receipt.get("digests")
-        digest = digests.get("receipt_sha256") if isinstance(digests, dict) else None
-        if digest == localio.canonical_json_digest(receipt, exclude_keys={"digests"}):
-            return {"task_id": task_id, "attempt_id": attempt_id, "receipt_digest": digest, "status": status}
-    return None
+    return verify_attempt.read_receipts(target, reader=_verify_read_receipt)
 
 
 def _resolve_verify_receipt(target: Path, run_id: str) -> tuple[dict[str, Any] | None, str | None]:
