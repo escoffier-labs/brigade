@@ -22,7 +22,8 @@ from tests.test_run_transport_recovery import _invalid_final, _recovery_roster
     os.name != "posix",
     reason="Safe redaction transactions require POSIX dir_fd and flock. Tracking #1894 (cassette hardening)",
 )
-def test_partial_redaction_tombstones_every_purged_cassette_reference(tmp_path):
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_partial_redaction_tombstones_every_purged_cassette_reference(tmp_path, monkeypatch, interrupted):
     run, snapshot, _ = _authority_run(tmp_path)
     refs = [
         _record(run, task=task, result=agents.AgentResult(text="exposed-cassette-value", ok=True))
@@ -31,21 +32,44 @@ def test_partial_redaction_tombstones_every_purged_cassette_reference(tmp_path):
     _finish_recording(run, snapshot)
     before = run_journal.read_journal(run / "events" / "lifecycle.jsonl").events
     first = next(e for e in before if e.event_type == run_cassette.EVENT_TYPE)
-    run_redaction.redact_journal(
-        run,
+    request = dict(
         sequence_start=first.sequence,
         sequence_end=first.sequence,
         reason="credential-exposure",
         operator_confirmed=True,
     )
+    if interrupted:
+
+        def fail_record_write(*args, **kwargs):
+            raise OSError("record write interrupted")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(run_redaction, "_write_redaction_record", fail_record_write)
+            with pytest.raises(run_redaction.RedactionError, match="redaction record write failed"):
+                run_redaction.redact_journal(run, **request)
+
+    report = run_redaction.redact_journal(run, **request)
     assert not list((run / "events" / "cassettes").iterdir())
     journal = run_journal.read_journal(run / "events" / "lifecycle.jsonl")
     assert not journal.chain_errors
     references = [e.payload for e in journal.events if e.event_type == run_cassette.EVENT_TYPE]
     assert references == [run_cassette.REDACTED_REFERENCE] * 2
     assert all(ref["sha256"] not in str(journal.events) for ref in refs)
-    assert journal.events[-1].event_type == "run.redaction.recorded"
+    anchor = journal.events[-1]
+    assert anchor.event_type == "run.redaction.recorded"
+    last = max(e.sequence for e in before if e.event_type == run_cassette.EVENT_TYPE)
+    record = json.loads(report.record_path.read_bytes())
+    for metadata in (record, anchor.payload):
+        assert metadata["affected_first_sequence"] == first.sequence
+        assert metadata["affected_last_sequence"] == last
     assert run_audit.audit_run(run).result == "match"
+
+    run_redaction.cleanup_redaction_quarantine(run, operation_id=report.operation_id, operator_confirmed=True)
+    cleaned = json.loads(report.record_path.read_bytes())
+    anchor = run_journal.read_journal(run / "events" / "lifecycle.jsonl").events[-1]
+    for metadata in (cleaned, anchor.payload):
+        assert metadata["affected_first_sequence"] == first.sequence
+        assert metadata["affected_last_sequence"] == last
 
 
 @pytest.mark.parametrize("component", ["run", "runs-root", "workspace"])

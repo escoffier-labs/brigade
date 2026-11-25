@@ -36,14 +36,15 @@ from brigade import (
     run_events,
     run_journal,
     run_projector,
+    run_redaction_record,
     run_redaction_rewrite,
     run_redaction_tasks,
     run_shadow,
     runguard,
 )
 
-REDACTION_SCHEMA = "brigade.run_redaction.v1"
-REDACTION_SCHEMA_VERSION = 1
+from brigade.run_redaction_record import REDACTION_SCHEMA, REDACTION_SCHEMA_VERSION
+
 MAX_RUN_JSON_BYTES = 1024 * 1024
 REDACTED_VALUE = "[REDACTED]"
 REASON_CODES = frozenset(
@@ -1106,47 +1107,6 @@ def _write_state(
     )
 
 
-def _record_bytes(
-    *,
-    operation_id: str,
-    run_id: str,
-    sequence_start: int,
-    sequence_end: int,
-    reason: str,
-    rewritten_sha256: str | None,
-    quarantine_retained: bool,
-    parent_operation_id: str | None,
-    parent_record_sha256: str | None = None,
-    rewritten_digest_retired_by: str | None = None,
-) -> bytes:
-    if (rewritten_sha256 is None) == (rewritten_digest_retired_by is None):
-        raise RedactionError("redaction record digest is invalid")
-    if (parent_operation_id is None) != (parent_record_sha256 is None):
-        raise RedactionError("redaction record parent reference is invalid")
-    if parent_record_sha256 is not None and not re.fullmatch(r"[0-9a-f]{64}", parent_record_sha256):
-        raise RedactionError("redaction record parent reference is invalid")
-    payload = {
-        "schema": REDACTION_SCHEMA,
-        "schema_version": REDACTION_SCHEMA_VERSION,
-        "operation_id": operation_id,
-        "run_id": run_id,
-        "sequence_start": sequence_start,
-        "sequence_end": sequence_end,
-        "reason_code": reason,
-        "parent_operation_id": parent_operation_id,
-        "chain_verified": True,
-        "projection_verified": True,
-        "quarantine_retained": quarantine_retained,
-    }
-    if parent_record_sha256 is not None:
-        payload["parent_record_sha256"] = parent_record_sha256
-    if rewritten_sha256 is not None:
-        payload["rewritten_journal_sha256"] = rewritten_sha256
-    if rewritten_digest_retired_by is not None:
-        payload["rewritten_digest_retired_by"] = rewritten_digest_retired_by
-    return (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-
-
 def _write_redaction_record(
     record_path: Path,
     *,
@@ -1160,10 +1120,12 @@ def _write_redaction_record(
     parent_operation_id: str | None = None,
     parent_record_sha256: str | None = None,
     rewritten_digest_retired_by: str | None = None,
+    affected_range: tuple[int, int] | None = None,
 ) -> None:
     _atomic_write(
         record_path,
-        _record_bytes(
+        run_redaction_record.record_bytes(
+            error_type=RedactionError,
             operation_id=operation_id,
             run_id=run_id,
             sequence_start=sequence_start,
@@ -1174,6 +1136,7 @@ def _write_redaction_record(
             parent_operation_id=parent_operation_id,
             parent_record_sha256=parent_record_sha256,
             rewritten_digest_retired_by=rewritten_digest_retired_by,
+            affected_range=affected_range,
         ),
         mode=_FILE_MODE,
         category="redaction record",
@@ -1280,6 +1243,7 @@ def _parse_lineage_record(raw_record: bytes, *, operation_id: str, run_id: str) 
         or not isinstance(record.get("quarantine_retained"), bool)
     ):
         raise RedactionError("redaction lineage record verification failed")
+    run_redaction_record.affected_range(record, error_type=RedactionError)
     return record
 
 
@@ -1345,9 +1309,10 @@ def _validate_chained_anchors(
         expected_digest = record_digests.get(operation_id)
         if expected_digest is None:
             raise RedactionError("redaction chained anchor verification failed")
+        first, last = _record_affected_range(record)
         if (
-            payload.get("affected_first_sequence") != record.get("sequence_start")
-            or payload.get("affected_last_sequence") != record.get("sequence_end")
+            payload.get("affected_first_sequence") != first
+            or payload.get("affected_last_sequence") != last
             or payload.get("reason_class") != record.get("reason_code")
         ):
             raise RedactionError("redaction chained anchor verification failed")
@@ -1384,11 +1349,19 @@ def _validate_chained_anchors(
             raise RedactionError("redaction chained anchor verification failed")
 
 
+def _record_affected_range(record: Mapping[str, Any]) -> tuple[int, int]:
+    return run_redaction_record.affected_range(record, error_type=RedactionError) or (
+        record["sequence_start"],
+        record["sequence_end"],
+    )
+
+
 def _redaction_anchor_payload(record: Mapping[str, Any], *, record_sha256: str) -> dict[str, Any]:
+    first, last = _record_affected_range(record)
     return {
         "operation_id": record["operation_id"],
-        "affected_first_sequence": record["sequence_start"],
-        "affected_last_sequence": record["sequence_end"],
+        "affected_first_sequence": first,
+        "affected_last_sequence": last,
         "reason_class": record["reason_code"],
         "record_sha256": record_sha256,
     }
@@ -1502,7 +1475,8 @@ def _preretirement_parent_record_digest(
     state-side rewritten digest.
     """
     return _digest(
-        _record_bytes(
+        run_redaction_record.record_bytes(
+            error_type=RedactionError,
             operation_id=operation_id,
             run_id=run_id,
             sequence_start=record["sequence_start"],
@@ -1513,6 +1487,7 @@ def _preretirement_parent_record_digest(
             parent_operation_id=record.get("parent_operation_id"),
             parent_record_sha256=record.get("parent_record_sha256"),
             rewritten_digest_retired_by=None,
+            affected_range=run_redaction_record.affected_range(record, error_type=RedactionError),
         )
     )
 
@@ -1816,6 +1791,7 @@ def _realign_child_parent_record_digest(
         parent_operation_id=parent_operation_id,
         parent_record_sha256=parent_record_digest,
         rewritten_digest_retired_by=child_record.get("rewritten_digest_retired_by"),
+        affected_range=run_redaction_record.affected_range(child_record, error_type=RedactionError),
     )
     child_operation_dir = child_record_path.parent
     child_fd = _open_directory_handle(child_operation_dir, category="redaction operation")
@@ -1873,6 +1849,7 @@ def _retire_rewritten_digest_aliases(
             parent_operation_id=record.get("parent_operation_id"),
             parent_record_sha256=record.get("parent_record_sha256"),
             rewritten_digest_retired_by=retired_by_operation_id,
+            affected_range=run_redaction_record.affected_range(record, error_type=RedactionError),
         )
     # Align the retiring child's parent_record_sha256 before the parent state
     # write so a state-side crash still leaves a digest-consistent split.
@@ -2245,9 +2222,8 @@ def redact_journal(
     with _PROCESS_LOCK:
         with (
             _exclusive_redaction_lock(resolved_run_dir) as (snapshot, workspace),
-            run_journal.journal_mutation(resolved_run_dir / "events" / "lifecycle.jsonl"),
+            run_cassette.store.publication_scope(resolved_run_dir) as journal_path,
         ):
-            journal_path = resolved_run_dir / "events" / "lifecycle.jsonl"
             events = _verified_events(journal_path, category="journal")
             if end > len(events):
                 raise RedactionError("invalid sequence range")
@@ -2358,6 +2334,7 @@ def redact_journal(
                                 quarantine_retained=True,
                                 parent_operation_id=parent_operation_id,
                                 parent_record_sha256=_parent_record_reference(events, parent_operation_id),
+                                affected_range=run_cassette.expanded_redaction_range(events, start, end, operation_id),
                             )
                         except (OSError, RedactionError) as exc:
                             raise RedactionError("redaction record write failed") from exc
@@ -2500,6 +2477,7 @@ def redact_journal(
                     quarantine_retained=True,
                     parent_operation_id=parent_operation_id,
                     parent_record_sha256=parent_record_sha256,
+                    affected_range=run_cassette.expanded_redaction_range(rewritten_events, start, end, operation_id),
                 )
             except (OSError, RedactionError) as exc:
                 raise RedactionError("redaction record write failed") from exc
@@ -2674,6 +2652,7 @@ def cleanup_redaction_quarantine(
                 parent_operation_id=parent_operation_id,
                 parent_record_sha256=parent_record_sha256,
                 rewritten_digest_retired_by=rewritten_digest_retired_by,
+                affected_range=run_redaction_record.affected_range(record, error_type=RedactionError),
             )
             _write_state(
                 state_path,
@@ -2743,6 +2722,7 @@ def cleanup_redaction_quarantine(
                 parent_operation_id=parent_operation_id,
                 parent_record_sha256=parent_record_sha256,
                 rewritten_digest_retired_by=rewritten_digest_retired_by,
+                affected_range=run_redaction_record.affected_range(record, error_type=RedactionError),
             )
             if isinstance(rewritten_digest_retired_by, str):
                 # Cleaning a retired parent rewrites its record digest; keep the
