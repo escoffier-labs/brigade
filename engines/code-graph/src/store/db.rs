@@ -12,29 +12,24 @@ use std::{
 use anyhow::{Context, Result};
 use rusqlite::{Connection, OpenFlags};
 
-use super::env;
-
 static CREATED_DB_DIRS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 /// Canonical index location relative to the repository root.
 pub const INDEX_DIR: [&str; 2] = [".brigade", "code-graph"];
 pub const INDEX_DB_NAME: &str = "code-graph.db";
-/// Legacy index location, read and written in place for the rename window (v0.31, v0.32).
+/// Former index location, retained for detection and explicit paths.
 pub const LEGACY_INDEX_DIR: &str = ".graphtrail";
 pub const LEGACY_INDEX_DB_NAME: &str = "graphtrail.db";
 pub const DB_ENV: &str = "BRIGADE_CODE_GRAPH_DB";
-pub const LEGACY_DB_ENV: &str = "GRAPHTRAIL_DB";
 
 /// Where a resolved index location came from (docs/phase-engine-rename.md, "Resolution rule").
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DbSource {
-    /// `--db`, then the canonical variable, then the legacy one.
+    /// `--db`, then the canonical variable.
     Explicit,
     /// The canonical index exists.
     Canonical,
-    /// Only the legacy index exists; it is read and written in place.
-    Legacy,
-    /// Neither exists; the canonical index will be created.
+    /// The canonical index will be created.
     New,
 }
 
@@ -42,7 +37,7 @@ pub enum DbSource {
 pub struct ResolvedDb {
     pub path: PathBuf,
     pub source: DbSource,
-    /// True whenever the legacy index exists, so doctor can report both.
+    /// True whenever the legacy index exists, even when resolution ignores it.
     pub legacy_present: bool,
 }
 
@@ -58,7 +53,7 @@ pub fn legacy_index_dir(root: &Path) -> PathBuf {
     root.join(LEGACY_INDEX_DIR)
 }
 
-/// Resolve the index of the repository at `root` from what exists on disk (rules 2 to 4).
+/// Resolve the index of the repository at `root` at the canonical location.
 /// Explicit overrides are the caller's business; per-call MCP `repo` selectors use this directly.
 pub fn resolve_repo_db(root: &Path) -> ResolvedDb {
     let canonical = index_dir(root).join(INDEX_DB_NAME);
@@ -68,12 +63,6 @@ pub fn resolve_repo_db(root: &Path) -> ResolvedDb {
         ResolvedDb {
             path: canonical,
             source: DbSource::Canonical,
-            legacy_present,
-        }
-    } else if legacy_present {
-        ResolvedDb {
-            path: legacy,
-            source: DbSource::Legacy,
             legacy_present,
         }
     } else {
@@ -93,11 +82,11 @@ pub fn resolve_db_with(
     lookup: impl Fn(&str) -> Option<OsString>,
 ) -> Result<ResolvedDb> {
     let repo = resolve_repo_db(root);
-    let explicit = match explicit {
-        Some(path) => Some(path),
-        None => env::read_renamed_with(DB_ENV, LEGACY_DB_ENV, lookup)?
-            .map(|found| PathBuf::from(found.value)),
-    };
+    let explicit = explicit.or_else(|| {
+        lookup(DB_ENV)
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+    });
     Ok(match explicit {
         Some(path) => ResolvedDb {
             path,
@@ -108,14 +97,9 @@ pub fn resolve_db_with(
     })
 }
 
-/// Resolve the index for `root` from `--db`, the environment, then the disk layout. Warns once on
-/// stderr when the legacy variable is in effect and refuses conflicting variables.
+/// Resolve the index for `root` from `--db`, the canonical variable, or the canonical path.
 pub fn resolve_db(explicit: Option<PathBuf>, root: &Path) -> Result<ResolvedDb> {
-    let explicit = match explicit {
-        Some(path) => Some(path),
-        None => env::read_renamed(DB_ENV, LEGACY_DB_ENV)?.map(PathBuf::from),
-    };
-    resolve_db_with(explicit, root, |_| None)
+    resolve_db_with(explicit, root, |name| std::env::var_os(name))
 }
 
 /// Resolve the db path for `root` (see [`resolve_db`]).
@@ -248,7 +232,6 @@ mod tests {
             legacy_index_dir(Path::new("")).join(LEGACY_INDEX_DB_NAME)
         );
         assert_eq!(block["env"]["canonical"], DB_ENV);
-        assert_eq!(block["env"]["legacy"], LEGACY_DB_ENV);
 
         let cases = block["cases"].as_array().unwrap();
         assert!(!cases.is_empty());
@@ -274,16 +257,10 @@ mod tests {
                 .map(PathBuf::from);
             let resolved = resolve_db_with(explicit, root, |name| vars.get(name).cloned());
             let expect = &case["expect"];
-            if expect.get("error").is_some() {
-                let err = resolved.expect_err(name);
-                assert!(err.to_string().contains("conflicting"), "{name}: {err}");
-                continue;
-            }
             let resolved = resolved.unwrap_or_else(|err| panic!("{name}: {err}"));
             let source = match expect["source"].as_str().unwrap() {
                 "explicit" => DbSource::Explicit,
                 "canonical" => DbSource::Canonical,
-                "legacy" => DbSource::Legacy,
                 "new" => DbSource::New,
                 other => panic!("{name}: unknown source {other}"),
             };

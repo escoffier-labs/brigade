@@ -119,9 +119,9 @@ old spelling stays forever and is pinned by a test.
 | Release assets | `graphtrail-<platform>` and others | `brigade-code-graph-<platform>` and others | Dual-publish (already built) | v0.31, v0.32 | v0.33 stops building them |
 | Published releases up to v0.32 | asset names, checksums, attestations | unchanged | Frozen (never re-published or re-signed) | forever | never |
 | Binary env overrides | `GRAPHTRAIL_BIN`, `GRAPHTRAIL_MCP_BIN`, `MISELEDGER_BIN` | `BRIGADE_CODE_GRAPH_BIN`, `BRIGADE_CODE_GRAPH_MCP_BIN`, `BRIGADE_EVIDENCE_BIN` | Dual-read, doctor INFO on legacy use (stderr notice from R5) | v0.31, v0.32 | v0.33 |
-| Engine env vars | `GRAPHTRAIL_DB`, `GRAPHTRAIL_ALLOW_UNSAFE_ROOT` | `BRIGADE_CODE_GRAPH_DB`, `BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT` | Dual-read, doctor INFO on legacy use (stderr notice from R5) | v0.31, v0.32 | v0.33 |
+| Engine env vars | `GRAPHTRAIL_DB`, `GRAPHTRAIL_ALLOW_UNSAFE_ROOT` | `BRIGADE_CODE_GRAPH_DB`, `BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT` | Dual-read during the rename window, with doctor INFO and an R5 stderr notice | v0.31, v0.32 | Done for v0.33. Only the canonical variables are read. |
 | Legacy install fallbacks | `.cargo/bin/graphtrail*`, `.local/bin/miseledger` under the home directory | none | Dual-accept (resolver fallback) | v0.31, v0.32 | v0.33 |
-| Code graph index | `<repo>/.graphtrail/graphtrail.db` | `<repo>/.brigade/code-graph/code-graph.db` | Legacy read in place | v0.31, v0.32 | v0.33 (index is rebuildable) |
+| Code graph index | `<repo>/.graphtrail/graphtrail.db` | `<repo>/.brigade/code-graph/code-graph.db` | Legacy read in place during the rename window | v0.31, v0.32 | Done for v0.33. The old index is kept and ignored by default. |
 | Evidence data, config, cache dirs | `<data>/miseledger/`, `<config>/miseledger/`, `<cache>/miseledger/` | `<data>/brigade/evidence/`, `<config>/brigade/evidence/`, `<cache>/brigade/evidence/` | Legacy read in place | v0.31, v0.32, then see open question 1 | gated on data migration |
 | Verify-run snapshot files | `graphtrail-before.db`, `graphtrail-after.db` | `code-graph-before.db`, `code-graph-after.db` | Migrate (transient, deleted after each run) | none | v0.31 |
 | Receipt export cursor | `.brigade/work/miseledger-export-cursor.json` | unchanged | Frozen (dedup state, renaming re-exports history) | forever | never |
@@ -212,7 +212,14 @@ Slice R0 adds the pins before any rename work starts:
 
 ### Resolution rule
 
-The Python helper and both engines implement one rule:
+For v0.33, tasks 4 and 5 are complete. Code Graph resolves the index from
+`--db`, then the canonical environment variable, then the canonical repository
+path. The old environment variables are ignored. The former index stays on
+disk and is ignored during automatic resolution. Doctor suggests running
+`brigade code sync` when only the former index exists. The notice clears when
+the rebuild creates the canonical index.
+
+During v0.31 and v0.32, the Python helper and both engines used this rule:
 
 1. An explicit location wins: `--db`, then the canonical environment variable,
    then the legacy one. Canonical and legacy variables that are both set to
@@ -222,12 +229,11 @@ The Python helper and both engines implement one rule:
    does not. Writes go to the legacy location too. Nothing is copied or moved.
 4. Otherwise, the canonical location is created.
 
-When both exist, the canonical location wins. It is what v0.33 will read, so
-choosing it now avoids a second silent switch at removal time. `brigade
-doctor` reports WARN with both paths and their modification times. Nothing is
+During the rename window, when both existed, the canonical location won.
+`brigade doctor` reported WARN with both paths and their modification times. Nothing is
 merged or deleted. For evidence, the database, MAC key and config resolve as
-one directory, never one file from each. While the legacy directory exists,
-writers never create the canonical directory, so both can exist only after a
+one directory, never one file from each. While only the legacy Evidence directory exists,
+Evidence writers use it in place, so both can exist only after a
 manual copy or a downgrade and upgrade cycle (see
 [Installer acceptance](#installer-acceptance)).
 

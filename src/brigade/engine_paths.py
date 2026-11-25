@@ -1,22 +1,11 @@
 """Resolve engine storage locations across the canonical and legacy layouts.
 
-One rule for the code graph index and the evidence directory set
-(docs/phase-engine-rename.md, "Storage locations"):
+Code Graph uses the explicit path, the canonical environment override, or the
+canonical repository index. The old index is detected for doctor only.
 
-1. An explicit location wins: ``--db``, then the canonical environment
-   variable, then the legacy one. Canonical and legacy variables set to
-   different values are refused.
-2. The canonical location wins when it exists.
-3. The legacy location is used in place when it exists and the canonical one
-   does not. Writes go there too. Nothing is copied or moved.
-4. Otherwise the canonical location is new and will be created by the writer.
-
-``legacy_present`` stays true whenever the legacy location exists, so doctor
-can warn when both exist. The evidence database, MAC key, config and cache
-resolve as one directory set, never one file from each layout.
-
-The legacy names below are compatibility constants for the rename window and
-live only in this module.
+Evidence still resolves its database, MAC key, config and cache as a single
+directory set. The canonical set wins when present, then the existing legacy
+set, then the canonical location for a new install.
 """
 
 from __future__ import annotations
@@ -28,15 +17,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Literal
 
-from brigade import engine_deprecation
-
 Source = Literal["explicit", "canonical", "legacy", "new"]
 
 CODE_GRAPH_DB = Path(".brigade") / "code-graph" / "code-graph.db"
 CODE_GRAPH_DB_ENV = "BRIGADE_CODE_GRAPH_DB"
-# Legacy compatibility constants (v0.31 and v0.32 only).
+# Former index location, retained for doctor reporting and explicit paths.
 LEGACY_CODE_GRAPH_DB = Path(".graphtrail") / "graphtrail.db"
-LEGACY_CODE_GRAPH_DB_ENV = "GRAPHTRAIL_DB"
 
 EVIDENCE_LEAF = Path("brigade") / "evidence"
 EVIDENCE_DB_NAME = "evidence.db"
@@ -47,7 +33,6 @@ LEGACY_EVIDENCE_DB_NAME = "miseledger.db"
 EVIDENCE_MAC_KEY_NAME = "evidence-bundle-mac.key"
 EVIDENCE_CONFIG_NAME = "config.toml"
 CODE_GRAPH_ALLOW_UNSAFE_ROOT_ENV = "BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT"
-LEGACY_CODE_GRAPH_ALLOW_UNSAFE_ROOT_ENV = "GRAPHTRAIL_ALLOW_UNSAFE_ROOT"
 LEGACY_REMOVAL_RELEASE = "v0.33.0"
 
 # A doctor row: (status, name, detail, scope). Status and scope use the doctor
@@ -87,14 +72,7 @@ def code_graph_db_paths(target: Path) -> tuple[Path, Path]:
 def _explicit_db(explicit: str | os.PathLike[str] | None, environment: Mapping[str, str]) -> str | None:
     if explicit is not None and str(explicit):
         return str(explicit)
-    engine_deprecation.environment(LEGACY_CODE_GRAPH_DB_ENV, CODE_GRAPH_DB_ENV, environment)
-    canonical = environment.get(CODE_GRAPH_DB_ENV) or None
-    legacy = environment.get(LEGACY_CODE_GRAPH_DB_ENV) or None
-    if canonical and legacy and canonical != legacy:
-        raise ValueError(
-            f"conflicting code graph database overrides: {CODE_GRAPH_DB_ENV} and {LEGACY_CODE_GRAPH_DB_ENV}"
-        )
-    return canonical or legacy
+    return environment.get(CODE_GRAPH_DB_ENV) or None
 
 
 def code_graph_db(
@@ -105,8 +83,7 @@ def code_graph_db(
 ) -> ResolvedLocation:
     """Resolve the code graph index for ``target``.
 
-    A relative explicit path is taken relative to ``target``. Raises
-    ``ValueError`` when the canonical and legacy variables disagree.
+    A relative explicit path is taken relative to ``target``.
     """
     environment = os.environ if env is None else env
     canonical, legacy = code_graph_db_paths(target)
@@ -117,9 +94,7 @@ def code_graph_db(
         return ResolvedLocation(path if path.is_absolute() else target / path, "explicit", legacy_present)
     if canonical.is_file():
         return ResolvedLocation(canonical, "canonical", legacy_present)
-    if legacy_present:
-        return ResolvedLocation(legacy, "legacy", True)
-    return ResolvedLocation(canonical, "new", False)
+    return ResolvedLocation(canonical, "new", legacy_present)
 
 
 def code_graph_repo_root(db: Path) -> Path | None:
@@ -201,42 +176,21 @@ def _modified(path: Path) -> str:
     return f"modified {stamp.strftime('%Y-%m-%dT%H:%M:%SZ')}"
 
 
-def _legacy_variables() -> Iterator[tuple[str, str, bool]]:
-    """Yield ``(legacy, canonical, empty_is_unset)`` for every renamed variable.
-
-    The engines treat an empty value as unset. ``component_bins`` treats a set
-    but empty executable override as a value, so it can conflict.
-    """
+def _legacy_variables() -> Iterator[tuple[str, str]]:
+    """Yield the legacy and canonical executable override pairs."""
     from . import component_bins, component_manifest
 
-    yield LEGACY_CODE_GRAPH_DB_ENV, CODE_GRAPH_DB_ENV, True
-    yield LEGACY_CODE_GRAPH_ALLOW_UNSAFE_ROOT_ENV, CODE_GRAPH_ALLOW_UNSAFE_ROOT_ENV, True
     for legacy, canonical in component_manifest.COMPONENT_FAMILIES.items():
-        yield component_bins.ENV_OVERRIDES[legacy], component_bins.ENV_OVERRIDES[canonical], False
+        yield component_bins.ENV_OVERRIDES[legacy], component_bins.ENV_OVERRIDES[canonical]
 
 
 def legacy_findings(target: Path, *, env: Mapping[str, str] | None = None) -> list[Finding]:
-    """Doctor rows for legacy engine names still in effect.
-
-    Both layouts present is a WARN with both paths and their modification
-    times; the canonical one is used and nothing is merged or deleted. A legacy
-    environment variable is INFO in v0.31. Conflicting old and new values are a
-    WARN because every reader refuses them. Nothing here prints to stderr: the
-    deprecation lines for legacy names land in R5 (docs/phase-engine-rename.md).
-    """
+    """Report the ignored Code Graph index and remaining engine compatibility."""
     environment = os.environ if env is None else env
     findings: list[Finding] = []
     canonical, legacy = code_graph_db_paths(target)
-    if canonical.is_file() and legacy.is_file():
-        findings.append(
-            (
-                "WARN",
-                "code graph index layout",
-                f"both {canonical} ({_modified(canonical)}) and {legacy} ({_modified(legacy)}) exist; "
-                "the canonical index is used and nothing is merged or deleted",
-                "target",
-            )
-        )
+    if not canonical.is_file() and legacy.is_file():
+        findings.append(("INFO", "code graph index layout", "legacy index ignored. Run `brigade code sync`", "target"))
     try:
         roots = _evidence_roots(environment)
     except ValueError:
@@ -255,13 +209,11 @@ def legacy_findings(target: Path, *, env: Mapping[str, str] | None = None) -> li
                     "operator",
                 )
             )
-    for old, new, empty_is_unset in _legacy_variables():
+    for old, new in _legacy_variables():
         old_value = environment.get(old)
-        if old_value is None or (empty_is_unset and not old_value):
+        if old_value is None:
             continue
         new_value = environment.get(new)
-        if empty_is_unset and not new_value:
-            new_value = None
         if new_value is not None and new_value != old_value:
             findings.append(
                 (

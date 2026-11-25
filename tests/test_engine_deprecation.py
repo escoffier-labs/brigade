@@ -37,13 +37,6 @@ def test_canonical_environment_is_silent(tmp_path, capsys):
     assert capsys.readouterr().err == ""
 
 
-def test_database_environment_notice_is_deduplicated(tmp_path, capsys):
-    env = {engine_paths.LEGACY_CODE_GRAPH_DB_ENV: "legacy.db"}
-    for _ in range(2):
-        assert engine_paths.code_graph_db(tmp_path, env=env).path == tmp_path / "legacy.db"
-    assert capsys.readouterr().err.count("deprecated") == 1
-
-
 def test_legacy_config_notice_even_when_canonical_value_wins(tmp_path, capsys):
     config.write_config(
         tmp_path,

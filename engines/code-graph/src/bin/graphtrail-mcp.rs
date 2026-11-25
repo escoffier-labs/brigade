@@ -3,9 +3,9 @@
 //! a `refresh_error` note. A timed-out worker may finish concurrently with the query.
 //!
 //! The default database comes from `--db <path>`, `--db=<path>`, the `BRIGADE_CODE_GRAPH_DB` env
-//! var (the legacy variable still works with a warning), or the working directory's index, as
-//! resolved by `store::resolve_db`. Individual tool calls may override it with a `repo`/`db`
-//! argument, so one server can answer for any indexed repo. The database is opened lazily per
+//! var, or the working directory's canonical index, as resolved by `store::resolve_db`.
+//! The retired variable is ignored and the old index stays on disk outside default resolution.
+//! Individual tool calls may override the database with a `repo`/`db` argument. It is opened lazily per
 //! call, so the server starts even if the default db does not exist yet.
 //!
 //! The entry point name (`argv[0]`) selects the identity reported as `serverInfo.name`.

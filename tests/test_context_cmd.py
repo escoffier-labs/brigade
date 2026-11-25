@@ -12,7 +12,7 @@ from brigade import context_cmd, proc
 
 
 def _make_db(target: Path) -> Path:
-    db = target / ".graphtrail" / "graphtrail.db"
+    db = target / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True, exist_ok=True)
     db.write_text("")  # presence is enough; proc.run is mocked in these tests
     return db

@@ -167,6 +167,8 @@ def test_upgrade_legacy_data_downgrade_and_rollback(acceptance, monkeypatch):
     run([*old_cli, "setup", "--manifest", old / "component-manifest-v1.json", "--offline"], old_env, repo)
     legacy_graph, legacy_evidence = tuple(FAMILIES)[0], tuple(FAMILIES)[2]
     run([old / f"{legacy_graph}-linux-amd64", "sync"], env, repo)
+    legacy_index = repo / engine_paths.LEGACY_CODE_GRAPH_DB
+    legacy_index_bytes = legacy_index.read_bytes()
     evidence = old / f"{legacy_evidence}-linux-amd64"
     run([evidence, "init"], env, repo)
     fixture = ROOT / "engines/evidence-ledger/testdata/adapters/discrawl.fixture.jsonl"
@@ -261,7 +263,10 @@ def test_upgrade_legacy_data_downgrade_and_rollback(acceptance, monkeypatch):
     review(paths["brigade-evidence"])
     assert not (repo / engine_paths.CODE_GRAPH_DB).exists()
     assert engine_paths.evidence_dirs(env=env).source == "legacy"
+    run([paths["brigade-code-graph"], "sync"], env, repo)
+    assert (repo / engine_paths.CODE_GRAPH_DB).is_file()
     run([paths["brigade-code-graph"], "stats", "--json"], env, repo)
+    assert legacy_index.read_bytes() == legacy_index_bytes
     shown = json.loads(run([paths["brigade-evidence"], "evidence", "show", bundle_id, "--json"], env, repo).stdout)
     assert shown["id"] == bundle_id
     # Show regenerates observation times, while all signed and identity fields stay stable.

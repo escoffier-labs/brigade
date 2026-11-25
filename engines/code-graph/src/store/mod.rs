@@ -1,7 +1,6 @@
 //! Storage layer: schema, connection lifecycle, and the sync write path.
 
 pub mod db;
-pub mod env;
 mod explain;
 pub mod lock;
 pub mod meta;

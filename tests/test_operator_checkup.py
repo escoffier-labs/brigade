@@ -70,7 +70,7 @@ def test_operator_checkup_loop_reports_graph_ledger_and_brief_hit_rate(monkeypat
     _patch_all_doctors(monkeypatch, skills_rc=0)
     monkeypatch.setattr("brigade.context_cmd._graphtrail_bin", lambda: "/usr/bin/graphtrail")
     monkeypatch.setattr("brigade.evidence_brief._miseledger_bin", lambda: "/usr/bin/miseledger")
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_text("ok")
     run_dir = tmp_path / ".brigade" / "runs" / "2026-07-09T00-00-00Z"

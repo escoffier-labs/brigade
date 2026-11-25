@@ -91,7 +91,7 @@ NO_CONTEXT_JSON = {
 
 
 def _graph_db(tmp_path):
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_text("")
     return db

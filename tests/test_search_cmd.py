@@ -21,7 +21,7 @@ def test_search_status_reports_uninstalled(monkeypatch, tmp_path):
 
 
 def test_search_status_ok_with_graphtrail(monkeypatch, tmp_path):
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_text("x")
 

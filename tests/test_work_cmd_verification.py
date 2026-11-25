@@ -1855,9 +1855,9 @@ def _write_brigade_config(
 
 
 def _seed_graphtrail_db(tmp_path: Path) -> Path:
-    db_dir = tmp_path / ".graphtrail"
+    db_dir = tmp_path / ".brigade" / "code-graph"
     db_dir.mkdir(parents=True, exist_ok=True)
-    db_path = db_dir / "graphtrail.db"
+    db_path = db_dir / "code-graph.db"
     with sqlite3.connect(db_path) as con:
         con.execute("create table if not exists symbols (name text)")
         con.execute("insert into symbols values ('stale-baseline')")
@@ -1923,7 +1923,7 @@ import time
 from pathlib import Path
 
 args = sys.argv[1:]
-db = Path(args[args.index("--db") + 1]) if "--db" in args else Path(".graphtrail/graphtrail.db")
+db = Path(args[args.index("--db") + 1]) if "--db" in args else Path(".brigade/code-graph/code-graph.db")
 command = args[args.index(str(db)) + 1] if str(db) in args and args.index(str(db)) + 1 < len(args) else ""
 mode = os.environ.get("FAKE_GRAPHTRAIL_MODE", "ok")
 sync_delay_seconds = float(os.environ.get("FAKE_GRAPHTRAIL_SYNC_SECONDS", "0"))

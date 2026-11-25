@@ -734,7 +734,7 @@ def test_campaign_parallel_safe_reports_member_graph_degrade_keeps_file_waves(tm
     lib = _member_repo(workspace, "lib")
     app = _member_repo(workspace, "app")
     _clock(monkeypatch, minute=45)
-    db = lib / ".graphtrail" / "graphtrail.db"
+    db = lib / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_bytes(b"fake-graphtrail-index")
     monkeypatch.setattr(partition_mod.component_bins, "resolve", lambda _name: "/fake/graphtrail")

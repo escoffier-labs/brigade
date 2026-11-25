@@ -916,22 +916,11 @@
   },
   {
     "path": "engines/code-graph/src/store/db.rs",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Former index path retained for detection and explicit paths.",
     "literals": {
-      "GRAPHTRAIL": 1,
       "graphtrail": 2
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/code-graph/src/store/repo_policy.rs",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "GRAPHTRAIL": 1
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "engines/code-graph/src/store/resolve.rs",
@@ -944,12 +933,11 @@
   },
   {
     "path": "engines/code-graph/src/store/walk.rs",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "The walker excludes the old index directory after retirement.",
     "literals": {
       "graphtrail": 1
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "engines/code-graph/src/watch.rs",
@@ -981,11 +969,11 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "GRAPHTRAIL": 8,
+      "GRAPHTRAIL": 6,
       "GraphTrail": 4,
       "MISELEDGER": 8,
       "MiseLedger": 2,
-      "graphtrail": 15,
+      "graphtrail": 13,
       "miseledger": 16
     }
   },
@@ -1092,7 +1080,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "GRAPHTRAIL": 1,
-      "graphtrail": 18
+      "graphtrail": 14
     }
   },
   {
@@ -2844,14 +2832,12 @@
   },
   {
     "path": "src/brigade/engine_paths.py",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Former index path for doctor reporting and explicit paths, plus legacy Evidence storage retained pending migration.",
     "literals": {
-      "GRAPHTRAIL": 2,
       "graphtrail": 2,
       "miseledger": 2
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "src/brigade/evidence_brief.py",
@@ -3201,7 +3187,7 @@
     "literals": {
       "GraphTrail": 11,
       "MiseLedger": 4,
-      "graphtrail": 60,
+      "graphtrail": 38,
       "miseledger": 43
     }
   },
@@ -3253,7 +3239,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "GraphTrail": 4,
-      "graphtrail": 22
+      "graphtrail": 14
     }
   },
   {
@@ -3261,7 +3247,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "graphtrail": 17
+      "graphtrail": 13
     }
   },
   {
@@ -3270,7 +3256,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "GraphTrail": 1,
-      "graphtrail": 8
+      "graphtrail": 6
     }
   },
   {
@@ -3366,8 +3352,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "GraphTrail": 1,
-      "graphtrail": 2
+      "GraphTrail": 1
     }
   },
   {
@@ -3375,7 +3360,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "graphtrail": 8
+      "graphtrail": 6
     }
   },
   {
@@ -3399,7 +3384,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "GRAPHTRAIL": 4,
+      "GRAPHTRAIL": 2,
       "MISELEDGER": 1,
       "graphtrail": 5,
       "miseledger": 4
@@ -3558,7 +3543,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "graphtrail": 7,
+      "graphtrail": 5,
       "miseledger": 9
     }
   },
@@ -3680,7 +3665,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "GraphTrail": 1,
-      "graphtrail": 13
+      "graphtrail": 11
     }
   },
   {
@@ -3704,7 +3689,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "graphtrail": 5
+      "graphtrail": 3
     }
   },
   {
@@ -3720,7 +3705,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "graphtrail": 37
+      "graphtrail": 27
     }
   },
   {
@@ -3746,7 +3731,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "GraphTrail": 1,
-      "graphtrail": 14
+      "graphtrail": 8
     }
   },
   {
@@ -3755,7 +3740,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "GraphTrail": 5,
-      "graphtrail": 10
+      "graphtrail": 8
     }
   },
   {
@@ -3764,7 +3749,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "GRAPHTRAIL": 18,
-      "graphtrail": 134,
+      "graphtrail": 130,
       "miseledger": 18
     }
   },
@@ -3774,7 +3759,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "GraphTrail": 2,
-      "graphtrail": 33
+      "graphtrail": 21
     }
   },
   {

@@ -864,44 +864,26 @@ fn engine_in(root: &Path, args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
-/// A repository indexed before the rename answers queries with no reindex, and later syncs keep
-/// writing the legacy index in place.
+/// A repository indexed before the rename gets a fresh canonical index on sync.
 #[test]
-fn legacy_only_repository_is_read_and_written_in_place() {
+fn legacy_only_repository_rebuilds_in_the_canonical_location() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    fs::create_dir(root.join(".git")).unwrap();
-    fs::write(root.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
     let legacy_db = build_db(root);
-    let gitignore_before = fs::read_to_string(root.join(".gitignore")).ok();
+    let legacy_bytes = fs::read(&legacy_db).unwrap();
+
+    let callers = engine_in(root, &["callers", "helper"]);
+    assert_ne!(callers.status.code(), Some(0), "{callers:?}");
+    assert!(!root.join(".brigade").exists());
+
+    let sync = engine_in(root, &["sync", "."]);
+    assert_eq!(sync.status.code(), Some(0), "{sync:?}");
+    assert!(root.join(".brigade/code-graph/code-graph.db").is_file());
+    assert_eq!(fs::read(&legacy_db).unwrap(), legacy_bytes);
 
     let callers = engine_in(root, &["callers", "helper"]);
     assert_eq!(callers.status.code(), Some(0), "{callers:?}");
-    assert!(
-        String::from_utf8_lossy(&callers.stdout).contains("run"),
-        "{callers:?}"
-    );
-
-    fs::write(root.join("extra.py"), "def extra():\n    return helper()\n").unwrap();
-    let sync = engine_in(root, &["sync", "."]);
-    assert_eq!(sync.status.code(), Some(0), "{sync:?}");
-    // Windows prints the relative path with backslashes.
-    let stdout = String::from_utf8_lossy(&sync.stdout).replace('\\', "/");
-    assert!(
-        stdout.contains("db=./.graphtrail/graphtrail.db"),
-        "{stdout}"
-    );
-    assert!(!root.join(".brigade").exists());
-    assert_eq!(
-        fs::read_to_string(root.join(".gitignore")).ok(),
-        gitignore_before
-    );
-
-    let conn = rusqlite::Connection::open(&legacy_db).unwrap();
-    let files: i64 = conn
-        .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(files, 2);
+    assert!(String::from_utf8_lossy(&callers.stdout).contains("run"));
 }
 
 /// A fresh repository gets the canonical index and its ignore entry.
@@ -966,7 +948,7 @@ fn canonical_index_wins_when_both_exist() {
 }
 
 #[test]
-fn database_variables_dual_read_silently_and_refuse_conflicts() {
+fn database_resolution_ignores_the_retired_variable() {
     let dir = tempfile::tempdir().unwrap();
     let db = build_db(dir.path());
     let other = tempfile::tempdir().unwrap();
@@ -988,38 +970,17 @@ fn database_variables_dual_read_silently_and_refuse_conflicts() {
     assert_eq!(canonical.status.code(), Some(0), "{canonical:?}");
     assert!(canonical.stderr.is_empty(), "{canonical:?}");
 
-    // A legacy variable works and prints one deprecation notice.
     let legacy = stats(&[("GRAPHTRAIL_DB", db)]);
-    assert_eq!(legacy.status.code(), Some(0), "{legacy:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&legacy.stderr).lines().count(),
-        1,
-        "{legacy:?}"
-    );
-    assert!(String::from_utf8_lossy(&legacy.stderr).contains("deprecated"));
-    let value: serde_json::Value = serde_json::from_slice(&legacy.stdout).unwrap();
-    assert_eq!(value["symbols"], 2, "{value}");
+    assert_ne!(legacy.status.code(), Some(0), "{legacy:?}");
 
-    let same = stats(&[("BRIGADE_CODE_GRAPH_DB", db), ("GRAPHTRAIL_DB", db)]);
-    assert_eq!(same.status.code(), Some(0), "{same:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&same.stderr).lines().count(),
-        1,
-        "{same:?}"
-    );
-
-    let conflict = stats(&[("BRIGADE_CODE_GRAPH_DB", db), ("GRAPHTRAIL_DB", "other.db")]);
-    assert_ne!(conflict.status.code(), Some(0), "{conflict:?}");
-    assert!(conflict.stdout.is_empty(), "{conflict:?}");
-    assert!(
-        String::from_utf8_lossy(&conflict.stderr).contains("conflicting values"),
-        "{conflict:?}"
-    );
+    let both = stats(&[("BRIGADE_CODE_GRAPH_DB", db), ("GRAPHTRAIL_DB", "other.db")]);
+    assert_eq!(both.status.code(), Some(0), "{both:?}");
+    assert!(both.stderr.is_empty(), "{both:?}");
     assert!(!other.path().join("other.db").exists());
 }
 
 #[test]
-fn unsafe_root_variables_dual_read_silently_and_refuse_conflicts() {
+fn unsafe_root_guard_ignores_the_retired_variable() {
     let home = tempfile::tempdir().unwrap();
     write_app(home.path());
     let sync = |vars: &[(&str, &str)]| {
@@ -1050,23 +1011,7 @@ fn unsafe_root_variables_dual_read_silently_and_refuse_conflicts() {
     assert_eq!(canonical.status.code(), Some(0), "{canonical:?}");
     assert!(canonical.stderr.is_empty(), "{canonical:?}");
 
-    // A legacy variable works and prints one deprecation notice.
     let legacy = sync(&[("GRAPHTRAIL_ALLOW_UNSAFE_ROOT", "1")]);
-    assert_eq!(legacy.status.code(), Some(0), "{legacy:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&legacy.stderr).lines().count(),
-        1,
-        "{legacy:?}"
-    );
-    assert!(String::from_utf8_lossy(&legacy.stderr).contains("deprecated"));
-
-    let conflict = sync(&[
-        ("BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT", "1"),
-        ("GRAPHTRAIL_ALLOW_UNSAFE_ROOT", "0"),
-    ]);
-    assert_ne!(conflict.status.code(), Some(0), "{conflict:?}");
-    assert!(
-        String::from_utf8_lossy(&conflict.stderr).contains("conflicting values"),
-        "{conflict:?}"
-    );
+    assert_ne!(legacy.status.code(), Some(0), "{legacy:?}");
+    assert!(String::from_utf8_lossy(&legacy.stderr).contains("root is the home directory"));
 }
