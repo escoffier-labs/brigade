@@ -16,6 +16,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -29,10 +30,13 @@ _EXECUTABLE_MODE = 0o755
 _SMOKE_COMPONENT_IDS = component_manifest.DEFAULT_COMPONENT_IDS
 _SMOKE_TIMEOUT_SECONDS = 30.0
 _DOWNLOAD_TIMEOUT_SECONDS = 30.0
+DOWNLOAD_USER_AGENT = "brigade-update/1"
 _WINDOWS_HTTPS_PRIME_TIMEOUT_SECONDS = 30.0
 _WINDOWS_HTTPS_PRIME_URL_ENV = "BRIGADE_HTTPS_PRIME_URL"
 _WINDOWS_HTTPS_PRIME_COMMAND = (
-    "Invoke-WebRequest -Uri $env:BRIGADE_HTTPS_PRIME_URL -Method Head -UseBasicParsing | Out-Null"
+    "try { Invoke-WebRequest -Uri $env:BRIGADE_HTTPS_PRIME_URL -Method Head "
+    f"-UserAgent '{DOWNLOAD_USER_AGENT}' -UseBasicParsing -ErrorAction Stop | Out-Null }} "
+    "catch { if ($_.Exception.Response) { [Console]::Error.WriteLine([int]$_.Exception.Response.StatusCode) }; exit 1 }"
 )
 _JSONRPC_INIT_REQUEST = json.dumps(
     {
@@ -453,13 +457,16 @@ def _validate_expected(*, byte_size: int, sha256: str) -> None:
         raise ComponentInstallError(f"sha256 must be 64 lowercase hex characters, got {sha256!r}")
 
 
-def _require_https_final_url(response: Any) -> None:
+def _require_https_final_url(response: Any, *, original: str) -> None:
     geturl = getattr(response, "geturl", None)
     if geturl is None:
         return
     final_url = geturl()
     if urlparse(final_url).scheme.lower() != "https":
-        raise ComponentInstallError(f"download redirect downgraded to non-https URL: {final_url}")
+        status = getattr(response, "code", None)
+        raise ComponentInstallError(
+            f"{original} HTTP {status if status is not None else 'redirect'}: download redirected to a non-HTTPS URL"
+        )
 
 
 def _write_bounded_download(handle: Any, response: Any, *, byte_size: int) -> None:
@@ -532,11 +539,55 @@ def _prime_windows_https_roots(url: str, *, timeout: float) -> bool:
         )
     except (OSError, subprocess.TimeoutExpired):
         return False
+    if completed.returncode != 0:
+        status = (completed.stderr or b"").strip()
+        if len(status) == 3 and status.isdigit():
+            raise ComponentInstallError(
+                f"{url} HTTP {status.decode('ascii')}: Windows HTTPS certificate refresh failed"
+            )
     return completed.returncode == 0
 
 
+def open_download_request(
+    request: urllib.request.Request, *, timeout: float, check_redirect: Callable[[str, int], None]
+) -> Any:
+    """Check each redirect before making the next request."""
+
+    class CheckedRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(
+            self, req: urllib.request.Request, fp: Any, code: int, msg: str, headers: Any, newurl: str
+        ) -> urllib.request.Request | None:
+            check_redirect(newurl, code)
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    return urllib.request.build_opener(CheckedRedirect()).open(request, timeout=timeout)
+
+
+def describe_http_error(url: str, exc: urllib.error.HTTPError) -> str:
+    headers = exc.headers
+    if urlparse(url).hostname == "api.github.com" and (
+        exc.code == 429
+        or (
+            exc.code == 403
+            and headers is not None
+            and (headers.get("X-RateLimit-Remaining") == "0" or "Retry-After" in headers)
+        )
+    ):
+        cause = "GitHub API rate limit exceeded"
+    elif 300 <= exc.code < 400:
+        cause = "redirect refused"
+    else:
+        cause = " ".join(str(exc.reason or "request failed").split())
+    return f"{url} HTTP {exc.code}: {cause}"
+
+
 def _default_urlopen(url: str) -> Any:
-    return urllib.request.urlopen(url, timeout=_DOWNLOAD_TIMEOUT_SECONDS)
+    def check_redirect(destination: str, status: int) -> None:
+        if urlparse(destination).scheme.lower() != "https":
+            raise ComponentInstallError(f"{url} HTTP {status}: download redirected to a non-HTTPS URL")
+
+    request = urllib.request.Request(url, headers={"User-Agent": DOWNLOAD_USER_AGENT})
+    return open_download_request(request, timeout=_DOWNLOAD_TIMEOUT_SECONDS, check_redirect=check_redirect)
 
 
 def _urlopen_default_with_windows_cert_retry(url: str) -> Any:
@@ -593,15 +644,18 @@ def fetch_asset_to_cache(
     try:
         with os.fdopen(fd, "wb") as handle:
             with open_url(asset.download_url) as response:
-                _require_https_final_url(response)
+                _require_https_final_url(response, original=asset.download_url)
                 _write_bounded_download(handle, response, byte_size=asset.byte_size)
             handle.flush()
             os.fsync(handle.fileno())
         verify_cached_asset(tmp_path, byte_size=asset.byte_size, sha256=asset.sha256)
         os.replace(tmp_path, cache_path)
-    except BaseException:
+    except urllib.error.HTTPError as exc:
+        raise ComponentInstallError(describe_http_error(asset.download_url, exc)) from exc
+    except (urllib.error.URLError, TimeoutError, HTTPException) as exc:
+        raise urllib.error.URLError(f"{asset.download_url}: {getattr(exc, 'reason', exc)}") from exc
+    finally:
         tmp_path.unlink(missing_ok=True)
-        raise
     return cache_path
 
 
@@ -1066,6 +1120,41 @@ def _setup_rollback(
     return 0
 
 
+def _check_saved_beta_pin(roots: SetupRoots, manifest: component_manifest.ComponentManifest) -> None:
+    from brigade import update_notify
+
+    pin = update_notify.parse_version(manifest.brigade_version)
+    running = update_notify.parse_version(brigade.__version__.split(".dev", 1)[0])
+    # v0.31.0 first shipped the explicit completion status required by the receipt importer.
+    importer_floor = (0, 31, 0)
+    if pin is None:
+        raise ComponentInstallError(f"invalid beta engine release version: {manifest.brigade_version}")
+    if running is not None and running >= importer_floor > pin:
+        reason = "the receipt importer requires engines from v0.31.0 or newer"
+    else:
+        installed = component_state.load_installed_state(Path(component_paths.installed_state_path(roots.data_root)))
+        if installed is None:
+            return
+        tag = installed.manifest_revision.partition("+")[0]
+        version = update_notify.parse_version(tag.removeprefix("v"))
+        if version is None or version <= pin:
+            return
+        for component_id, record in installed.components.items():
+            managed = Path(component_paths.managed_executable_path(roots.data_root, component_id))
+            if _managed_executable_is_ready(managed, byte_size=record.byte_size, sha256=record.sha256):
+                break
+        else:
+            return
+        reason = f"verified managed engines from {tag} are already installed"
+
+    pin_path = component_paths.update_state_path(roots.data_root)
+    raise ComponentInstallError(
+        f"saved beta pin v{manifest.brigade_version} in {pin_path} refused: {reason}. "
+        "Refresh the pin with `brigade update --channel beta`, or install a verified compatible release with "
+        "`brigade setup --manifest <verified-manifest> --allow-compatible-stable-manifest <version>`."
+    )
+
+
 def _load_setup_manifest(
     *,
     manifest_path: Path | None,
@@ -1121,6 +1210,13 @@ def _load_setup_manifest(
         # to exact-release resolution and repair it; offline stable and all
         # beta paths stay fail-closed.
         cached_manifest = load_verified_exact_release_manifest(roots, online_stable_cache_repair=not offline)
+        if cached_manifest is not None:
+            state = update_cmd.load_update_state(Path(component_paths.update_state_path(roots.data_root)))
+            if state is not None and state.channel == "beta":
+                cached_manifest_obj, _cached_path = cached_manifest
+                _check_saved_beta_pin(roots, cached_manifest_obj)
+                return cached_manifest_obj, None, cached_manifest_obj.brigade_version
+
         if offline:
             # Offline setup must reuse any verified cache: the exact-release
             # stable cache (state.component_tag == v{brigade.__version__}) or
@@ -1136,17 +1232,7 @@ def _load_setup_manifest(
                 return cached_manifest_obj, None, auto_compatible
             raise ComponentInstallError("offline setup requires a verified exact-release manifest cache")
 
-        # Online setup reuses the cache only for a persisted beta handoff,
-        # whose stable manifest tag predates the running Brigade version and
-        # would otherwise re-resolve an unreleased v{brigade.__version__} tag.
-        # Stable state retains exact current-version behavior: it re-resolves
-        # the exact current release as before.
-        if cached_manifest is not None:
-            state = update_cmd.load_update_state(Path(component_paths.update_state_path(roots.data_root)))
-            if state is not None and state.channel == "beta":
-                cached_manifest_obj, _cached_path = cached_manifest
-                return cached_manifest_obj, None, cached_manifest_obj.brigade_version
-
+        # Online stable setup still resolves the running CLI's exact release.
         release = update_cmd.resolve_release(update_cmd._DefaultHttp(), latest=False, tag=f"v{brigade.__version__}")
         update_cmd._cache_manifest(
             update_cmd.UpdatePaths(Path(roots.data_root), Path(roots.cache_root), Path("unused")), release

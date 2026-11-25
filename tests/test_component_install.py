@@ -1363,6 +1363,72 @@ def test_setup_online_reuses_persisted_beta_stable_manifest_when_cli_advances(tm
     assert set(installed.components) == set(component_manifest.DEFAULT_COMPONENT_IDS)
 
 
+@pytest.mark.parametrize("offline", [False, True])
+@pytest.mark.parametrize("pin", ["0.30.0", "0.31.0"])
+def test_setup_refuses_incompatible_or_downgrading_beta_pin(tmp_path, monkeypatch, capsys, offline, pin):
+    pinned_manifest = tmp_path / "pinned.json"
+    write_test_manifest(pinned_manifest, brigade_version=pin)
+    env, _ = _persist_beta_state(
+        tmp_path,
+        monkeypatch,
+        stable_version=pin,
+        manifest_bytes=pinned_manifest.read_bytes(),
+        target_commit=fixture_component_revision("brigade-code-graph"),
+        cli_version="0.33.0.dev20261125",
+    )
+    roots = resolve_roots(env=env)
+    state_path = Path(component_paths.installed_state_path(roots.data_root))
+    if pin == "0.31.0":
+        current = tmp_path / "current.json"
+        write_test_manifest(current, brigade_version="0.32.0")
+        payload = json.loads(current.read_bytes())
+        payload["manifest_revision"] = "v0.32.0+" + "a" * 40
+        current.write_text(json.dumps(payload), encoding="utf-8")
+        assert (
+            setup_native_components(
+                env=env,
+                manifest_path=current,
+                allow_compatible_stable_manifest="0.32.0",
+                opener=FakeOpener(all_fixture_payloads()),
+            )
+            == 0
+        )
+        before = state_path.read_bytes()
+    else:
+        before = None
+
+    assert setup_native_components(env=env, offline=offline, dry_run=True) == 1
+    message = capsys.readouterr().err
+    assert "update-state.json" in message and "brigade update --channel beta" in message
+    assert "brigade setup --manifest" in message
+    assert (state_path.read_bytes() if state_path.exists() else None) == before
+
+
+def test_default_asset_request_reports_http_failure(tmp_path, monkeypatch):
+    asset = manifest_asset_fixture("brigade-code-graph", platform="linux-amd64")
+
+    def blocked(_opener, request, *, timeout):
+        assert request.full_url == asset.download_url
+        assert request.get_header("User-agent") == "brigade-update/1"
+        raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", None, None)
+
+    monkeypatch.setattr("urllib.request.OpenerDirector.open", blocked)
+    with pytest.raises(ComponentInstallError, match="HTTP 403.*Forbidden") as raised:
+        fetch_asset_to_cache(asset, cache_path=tmp_path / "asset", offline=False)
+    assert asset.download_url in str(raised.value)
+
+
+def test_windows_https_prime_reports_http_failure(monkeypatch):
+    url = "https://example.invalid/asset"
+    monkeypatch.setattr(
+        component_install.subprocess,
+        "run",
+        lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1, stderr=b"403\n"),
+    )
+    with pytest.raises(ComponentInstallError, match=f"{url} HTTP 403.*certificate refresh"):
+        _prime_windows_https_roots(url, timeout=1)
+
+
 def test_setup_offline_reuses_persisted_beta_stable_manifest_when_cli_advances(tmp_path, monkeypatch):
     bundled = tmp_path / "templates" / "components" / "manifest-v1.json"
     bundled.parent.mkdir(parents=True, exist_ok=True)

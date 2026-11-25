@@ -6,12 +6,15 @@ import hashlib
 import json
 import os
 import urllib.error
+from email.message import Message
+from io import BytesIO
 from pathlib import Path
+from urllib.response import addinfourl
 from unittest.mock import patch
 
 import pytest
 
-from brigade import component_manifest, update_cmd
+from brigade import component_install, component_manifest, component_paths, update_cmd
 
 
 TAG = "v1.2.3"
@@ -235,8 +238,44 @@ class _Response:
 )
 def test_default_http_accepts_https_github_release_cdn_redirect(final_url):
     url = BASE + "component-manifest-v1.json"
-    with patch("urllib.request.urlopen", return_value=_Response(b"manifest", final_url)):
+    with patch("urllib.request.OpenerDirector.open", return_value=_Response(b"manifest", final_url)) as opener:
         assert update_cmd._DefaultHttp().bytes(url) == b"manifest"
+    assert opener.call_args.args[0].get_header("User-agent") == "brigade-update/1"
+
+
+def test_beta_update_reports_rate_limited_github_request(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    headers = Message()
+    headers["X-RateLimit-Remaining"] = "0"
+    paths = update_cmd.UpdatePaths(tmp_path / "data", tmp_path / "cache", tmp_path / "brigade")
+    url = f"https://api.github.com/repos/{update_cmd.REPOSITORY}/releases/latest"
+
+    def blocked(request, *, timeout):
+        assert request.get_header("User-agent") == "brigade-update/1"
+        raise urllib.error.HTTPError(request.full_url, 403, "Forbidden", headers, None)
+
+    with patch("urllib.request.OpenerDirector.open", side_effect=blocked):
+        assert update_cmd.run_update(channel="beta", dry_run=True, paths=paths) == 1
+    message = capsys.readouterr().err
+    assert url in message and "HTTP 403" in message and "rate limit" in message
+
+
+def test_update_refuses_redirect_with_original_url_and_status(monkeypatch):
+    url = f"https://api.github.com/repos/{update_cmd.REPOSITORY}/releases/latest"
+    headers = Message()
+    headers["Location"] = "https://example.invalid/unexpected"
+
+    def redirect(_handler, request):
+        assert request.full_url == url
+        assert request.get_header("User-agent") == "brigade-update/1"
+        response = addinfourl(BytesIO(), headers, url, 302)
+        response.msg = "Found"
+        return response
+
+    monkeypatch.setattr("urllib.request.HTTPSHandler.https_open", redirect)
+    with pytest.raises(update_cmd.UpdateError, match=f"{url} HTTP 302.*redirected outside"):
+        update_cmd._DefaultHttp().json(url)
 
 
 @pytest.mark.parametrize(
@@ -248,7 +287,7 @@ def test_default_http_accepts_https_github_release_cdn_redirect(final_url):
 )
 def test_default_http_rejects_untrusted_or_non_https_asset_redirect(final_url):
     url = BASE + "component-manifest-v1.json"
-    with patch("urllib.request.urlopen", return_value=_Response(b"manifest", final_url)):
+    with patch("urllib.request.OpenerDirector.open", return_value=_Response(b"manifest", final_url)):
         with pytest.raises(update_cmd.UpdateError, match="release asset redirected"):
             update_cmd._DefaultHttp().bytes(url)
 
@@ -256,7 +295,7 @@ def test_default_http_rejects_untrusted_or_non_https_asset_redirect(final_url):
 def test_default_http_rejects_api_redirect_outside_exact_api_path():
     url = "https://api.github.com/repos/escoffier-labs/brigade/releases/latest"
     with patch(
-        "urllib.request.urlopen",
+        "urllib.request.OpenerDirector.open",
         return_value=_Response(b"{}", "https://api.github.com/repos/escoffier-labs/brigade/releases/tags/v1.2.3"),
     ):
         with pytest.raises(update_cmd.UpdateError, match="GitHub API request redirected"):
@@ -265,8 +304,8 @@ def test_default_http_rejects_api_redirect_outside_exact_api_path():
 
 def test_default_http_uses_github_token_for_github_api_requests(monkeypatch):
     url = "https://api.github.com/repos/escoffier-labs/brigade/releases/latest"
-    monkeypatch.setenv("GITHUB_TOKEN", "github-token-example")
-    monkeypatch.setenv("GH_TOKEN", "gh-token-example")
+    monkeypatch.setenv("GITHUB_TOKEN", "test-gh")
+    monkeypatch.setenv("GH_TOKEN", "test-alt")
     requests = []
 
     def urlopen(request, *, timeout):
@@ -274,28 +313,28 @@ def test_default_http_uses_github_token_for_github_api_requests(monkeypatch):
         assert timeout == 30
         return _Response(b"{}", url)
 
-    with patch("urllib.request.urlopen", side_effect=urlopen):
+    with patch("urllib.request.OpenerDirector.open", side_effect=urlopen):
         assert update_cmd._DefaultHttp().json(url) == {}
 
-    assert requests[0].get_header("Authorization") == "Bearer github-token-example"
+    assert requests[0].get_header("Authorization") == "Bearer test-gh"
 
 
 def test_default_http_uses_gh_token_when_github_token_is_absent(monkeypatch):
     url = "https://api.github.com/repos/escoffier-labs/brigade/releases/latest"
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
-    monkeypatch.setenv("GH_TOKEN", "gh-token-example")
+    monkeypatch.setenv("GH_TOKEN", "test-alt")
 
-    with patch("urllib.request.urlopen", return_value=_Response(b"{}", url)) as urlopen:
+    with patch("urllib.request.OpenerDirector.open", return_value=_Response(b"{}", url)) as urlopen:
         assert update_cmd._DefaultHttp().json(url) == {}
 
     request = urlopen.call_args.args[0]
-    assert request.get_header("Authorization") == "Bearer gh-token-example"
+    assert request.get_header("Authorization") == "Bearer test-alt"
 
 
 @pytest.mark.parametrize("status", (401, 403))
 def test_default_http_retries_github_api_without_rejected_token(monkeypatch, status):
     url = "https://api.github.com/repos/escoffier-labs/brigade/releases/latest"
-    secret = "rejected-token-example"
+    secret = "test-rejected"
     monkeypatch.setenv("GITHUB_TOKEN", secret)
     requests = []
 
@@ -306,7 +345,7 @@ def test_default_http_retries_github_api_without_rejected_token(monkeypatch, sta
             raise urllib.error.HTTPError(url, status, "Bad credentials", {}, None)
         return _Response(b"{}", url)
 
-    with patch("urllib.request.urlopen", side_effect=urlopen):
+    with patch("urllib.request.OpenerDirector.open", side_effect=urlopen):
         assert update_cmd._DefaultHttp().json(url) == {}
 
     assert requests[0].get_header("Authorization") == f"Bearer {secret}"
@@ -315,11 +354,11 @@ def test_default_http_retries_github_api_without_rejected_token(monkeypatch, sta
 
 def test_default_http_rejected_token_is_absent_from_final_error(monkeypatch):
     url = "https://api.github.com/repos/escoffier-labs/brigade/releases/latest"
-    secret = "rejected-token-example"
+    secret = "test-rejected"
     monkeypatch.setenv("GITHUB_TOKEN", secret)
 
     with patch(
-        "urllib.request.urlopen",
+        "urllib.request.OpenerDirector.open",
         side_effect=urllib.error.HTTPError(url, 401, "Bad credentials", {}, None),
     ):
         with pytest.raises(update_cmd.UpdateError) as caught:
@@ -328,15 +367,18 @@ def test_default_http_rejected_token_is_absent_from_final_error(monkeypatch):
     assert secret not in str(caught.value)
 
 
-def test_default_http_never_sends_github_token_to_non_api_requests(monkeypatch):
-    monkeypatch.setenv("GITHUB_TOKEN", "github-token-example")
-    url = BASE + "component-manifest-v1.json"
+@pytest.mark.parametrize("asset", [True, False])
+def test_default_http_never_sends_github_token_to_non_api_requests(monkeypatch, asset):
+    monkeypatch.setenv("GITHUB_TOKEN", "test-gh")
+    url = BASE + "component-manifest-v1.json" if asset else update_cmd.PYPI_PROJECT_JSON_URL
 
-    with patch("urllib.request.urlopen", return_value=_Response(b"manifest", url)) as urlopen:
-        assert update_cmd._DefaultHttp().bytes(url) == b"manifest"
+    with patch("urllib.request.OpenerDirector.open", return_value=_Response(b"{}", url)) as urlopen:
+        http = update_cmd._DefaultHttp()
+        assert (http.bytes(url) if asset else http.json(url)) == (b"{}" if asset else {})
 
     request = urlopen.call_args.args[0]
     assert request.get_header("Authorization") is None
+    assert request.get_header("User-agent") == "brigade-update/1"
 
 
 def test_cache_manifest_preserves_verified_crlf_bytes_without_text_round_trip(tmp_path, monkeypatch):
@@ -771,9 +813,32 @@ def test_release_manifest_compatibility_mode_rejects_missing_published_component
         update_cmd.validate_release_manifest_bytes(release, allow_compatible_stable_manifest=True)
 
 
-def test_beta_same_coordinates_are_a_noop(tmp_path):
+def _install_update_test_engines(tmp_path, paths, manifest_bytes, monkeypatch, *, version=VERSION, payload_suffix=b""):
+    monkeypatch.setattr("brigade.__version__", version)
+    monkeypatch.setattr(component_manifest, "platform_key", lambda: "linux-amd64")
+    monkeypatch.setattr(component_install, "run_post_install_smoke", lambda *args, **kwargs: None)
+    roots = component_install.SetupRoots(str(paths.data_root), str(paths.cache_root), {})
+    monkeypatch.setattr(component_install, "resolve_roots", lambda **kwargs: roots)
+    manifest_path = tmp_path / "fixture-manifest.json"
+    manifest_path.write_bytes(manifest_bytes)
+    manifest = component_manifest.load(manifest_path)
+    entries = [
+        entry
+        for entry in component_install.build_setup_plan(manifest, platform="linux-amd64", roots=roots)
+        if entry.action == "verify-cache"
+    ]
+    for entry in entries:
+        cache = Path(entry.cache_path)
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_bytes(entry.asset_name.encode() + payload_suffix)
+    assert component_install.setup_native_components(manifest_path=manifest_path, offline=True) == 0
+    return entries
+
+
+def test_beta_same_coordinates_are_a_noop(tmp_path, monkeypatch):
     manifest = _manifest()
     paths = update_cmd.UpdatePaths(tmp_path / "data", tmp_path / "cache", tmp_path / "bin" / "brigade")
+    _install_update_test_engines(tmp_path, paths, manifest, monkeypatch)
     update_cmd.write_update_state(
         paths.data_root / "brigade" / "update-state.json",
         update_cmd.UpdateState(
@@ -994,10 +1059,28 @@ def test_update_refuses_channel_takeover_without_switch_flag(tmp_path):
         update_cmd.ensure_channel_ownership(update_cmd.load_update_state(path), "beta", switch_channel=False)
 
 
-def test_same_immutable_coordinates_are_a_noop(tmp_path):
+@pytest.mark.parametrize("drift", ["healthy", "missing", "older", "digest", "record", "failed"])
+def test_same_immutable_coordinates_check_engines(tmp_path, monkeypatch, capsys, drift):
     manifest = _manifest()
     calls = []
     paths = update_cmd.UpdatePaths(tmp_path / "data", tmp_path / "cache", tmp_path / "bin" / "brigade")
+    if drift == "older":
+        older = json.loads(manifest.replace(b"v1.2.3", b"v1.2.2").replace(b'"1.2.3"', b'"1.2.2"'))
+        for component in older["components"].values():
+            for asset in component["assets"].values():
+                payload = asset["asset_name"].encode() + b"-old"
+                asset.update(byte_size=len(payload), sha256=hashlib.sha256(payload).hexdigest())
+        entries = _install_update_test_engines(
+            tmp_path, paths, json.dumps(older).encode(), monkeypatch, version="1.2.2", payload_suffix=b"-old"
+        )
+        monkeypatch.setattr("brigade.__version__", VERSION)
+    else:
+        entries = _install_update_test_engines(tmp_path, paths, manifest, monkeypatch)
+    executable = Path(entries[0].managed_path)
+    if drift in {"missing", "failed"}:
+        executable.unlink()
+    elif drift == "digest":
+        executable.write_bytes(b"x" * entries[0].byte_size)
     state_path = paths.data_root / "brigade" / "update-state.json"
     update_cmd.write_update_state(
         state_path,
@@ -1015,17 +1098,54 @@ def test_same_immutable_coordinates_are_a_noop(tmp_path):
         ),
     )
 
-    assert (
-        update_cmd.run_update(
-            channel="stable",
-            paths=paths,
-            http=_Http(_release(manifest), manifest),
-            runner=calls.append,
-            now=lambda: "2026-07-20T12:01:00+00:00",
+    before_update = state_path.read_bytes()
+    installed_path = Path(component_paths.installed_state_path(str(paths.data_root)))
+    if drift == "record":
+        mismatched = json.loads(installed_path.read_bytes())
+        mismatched["components"][entries[0].component_id]["sha256"] = "f" * 64
+        installed_path.write_text(json.dumps(mismatched), encoding="utf-8")
+    before_installed = installed_path.read_bytes()
+    if drift == "failed":
+
+        def fail_smoke(*args, **kwargs):
+            raise component_install.ComponentInstallError("smoke command exited 7")
+
+        monkeypatch.setattr(component_install, "run_post_install_smoke", fail_smoke)
+
+    def setup_only(argv):
+        calls.append(argv)
+        assert argv[1:3] == ["setup", "--manifest"]
+        return component_install.setup_native_components(
+            manifest_path=Path(argv[3]), opener=lambda url: BytesIO(url.rsplit("/", 1)[-1].encode())
         )
-        == 0
+
+    http = _Http(_release(manifest), manifest)
+    if drift == "healthy":
+        release = update_cmd.resolve_release(http, latest=True)
+        update_cmd._cache_manifest(paths, release)
+        monkeypatch.setattr(http, "bytes", lambda _: pytest.fail("healthy update downloaded a manifest"))
+
+    result = update_cmd.run_update(
+        channel="stable",
+        paths=paths,
+        http=http,
+        runner=setup_only,
+        now=lambda: "2026-07-20T12:01:00+00:00",
     )
-    assert calls == []
+    assert state_path.read_bytes() == before_update
+    if drift == "failed":
+        assert result != 0
+        assert "smoke command exited 7" in capsys.readouterr().err
+        assert installed_path.read_bytes() == before_installed
+        assert not executable.exists()
+    else:
+        assert result == 0
+        assert json.loads(installed_path.read_bytes())["manifest_revision"] == json.loads(manifest)["manifest_revision"]
+        assert executable.read_bytes() == entries[0].asset_name.encode()
+        assert json.loads(installed_path.read_bytes())["components"][entries[0].component_id]["sha256"] == (
+            hashlib.sha256(entries[0].asset_name.encode()).hexdigest()
+        )
+    assert len(calls) == (0 if drift == "healthy" else 1)
 
 
 def test_dry_run_does_not_write_manifest_cache_or_state(tmp_path):
@@ -1084,7 +1204,9 @@ def test_npm_update_refuses_before_side_effects(tmp_path, monkeypatch, capsys, c
     )
     assert not list(tmp_path.iterdir())
     message = capsys.readouterr().err.lower()
-    assert "npm" in message and "npm install" in message and "npx" in message
+    assert "npm update --global brigadestack" in message
+    assert "npm update --global @escoffier-labs/brigade" in message
+    assert "brigade setup" in message
 
 
 def test_distribution_identity_is_process_local_and_ignores_environment(monkeypatch):
@@ -1234,7 +1356,7 @@ def test_redirect_to_an_unrelated_repository_is_still_refused(final_url):
     # A redirect to the pinned repository ID is covered separately: it is the only
     # redirect treated as a rename signal, and only for the known slugs and suffix.
     url = f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest"
-    with patch("urllib.request.urlopen", return_value=_Response(b"{}", final_url)):
+    with patch("urllib.request.OpenerDirector.open", return_value=_Response(b"{}", final_url)):
         with pytest.raises(update_cmd.UpdateError, match="GitHub API request redirected"):
             update_cmd._DefaultHttp().json(url)
 
@@ -1246,7 +1368,7 @@ def test_default_http_http_status_failure_is_not_a_rename_signal(status):
     def urlopen(request, *, timeout):
         raise urllib.error.HTTPError(url, status, "failure", None, None)
 
-    with patch("urllib.request.urlopen", side_effect=urlopen):
+    with patch("urllib.request.OpenerDirector.open", side_effect=urlopen):
         with pytest.raises(update_cmd.UpdateError) as raised:
             update_cmd._DefaultHttp().json(url)
 
@@ -1256,7 +1378,7 @@ def test_default_http_http_status_failure_is_not_a_rename_signal(status):
 def test_default_http_url_error_and_timeout_are_not_rename_signals():
     url = f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest"
     for error in (urllib.error.URLError("connection refused"), TimeoutError("timed out")):
-        with patch("urllib.request.urlopen", side_effect=error):
+        with patch("urllib.request.OpenerDirector.open", side_effect=error):
             with pytest.raises((update_cmd.UpdateError, OSError)) as raised:
                 update_cmd._DefaultHttp().json(url)
         assert not isinstance(raised.value, update_cmd.RepositoryRenamedError)
@@ -1264,7 +1386,7 @@ def test_default_http_url_error_and_timeout_are_not_rename_signals():
 
 def test_default_http_invalid_json_is_not_a_rename_signal():
     url = f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest"
-    with patch("urllib.request.urlopen", return_value=_Response(b"not json", url)):
+    with patch("urllib.request.OpenerDirector.open", return_value=_Response(b"not json", url)):
         with pytest.raises(update_cmd.UpdateError, match="invalid JSON") as raised:
             update_cmd._DefaultHttp().json(url)
     assert type(raised.value) is update_cmd.UpdateError
@@ -1274,7 +1396,7 @@ def test_default_http_invalid_json_is_not_a_rename_signal():
 def test_default_http_reports_a_verified_rename_redirect_as_the_typed_signal(slug):
     url = f"https://api.github.com/repos/{slug}/releases/latest"
     final_url = "https://api.github.com/repositories/1238165856/releases/latest"
-    with patch("urllib.request.urlopen", return_value=_Response(b"{}", final_url)):
+    with patch("urllib.request.OpenerDirector.open", return_value=_Response(b"{}", final_url)):
         with pytest.raises(update_cmd.RepositoryRenamedError, match="repository was renamed"):
             update_cmd._DefaultHttp().json(url)
 
@@ -1292,7 +1414,7 @@ def test_default_http_reports_a_verified_rename_redirect_as_the_typed_signal(slu
 )
 def test_default_http_keeps_every_other_redirect_as_a_plain_refusal(final_url):
     url = f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest"
-    with patch("urllib.request.urlopen", return_value=_Response(b"{}", final_url)):
+    with patch("urllib.request.OpenerDirector.open", return_value=_Response(b"{}", final_url)):
         with pytest.raises(update_cmd.UpdateError, match="redirected outside its exact expected URL") as raised:
             update_cmd._DefaultHttp().json(url)
     assert type(raised.value) is update_cmd.UpdateError
@@ -1301,7 +1423,7 @@ def test_default_http_keeps_every_other_redirect_as_a_plain_refusal(final_url):
 def test_redirect_between_the_two_slugs_is_refused_by_the_exact_url_rule():
     url = f"https://api.github.com/repos/{CURRENT_SLUG}/releases/latest"
     final_url = f"https://api.github.com/repos/{RENAMED_SLUG}/releases/latest"
-    with patch("urllib.request.urlopen", return_value=_Response(b"{}", final_url)):
+    with patch("urllib.request.OpenerDirector.open", return_value=_Response(b"{}", final_url)):
         with pytest.raises(update_cmd.UpdateError, match="GitHub API request redirected"):
             update_cmd._DefaultHttp().json(url)
 

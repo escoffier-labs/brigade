@@ -110,6 +110,17 @@ When the external development timer is migrated, replace its direct pipx script 
 
 ## Switching npm packages
 
+`brigade update` is for pipx installations. To update a global npm install and
+repair its managed engines, run:
+
+```sh
+npm update --global brigadestack
+brigade setup
+```
+
+If you installed `@escoffier-labs/brigade`, use
+`npm update --global @escoffier-labs/brigade` followed by the same `brigade setup`.
+
 `brigadestack` and `@escoffier-labs/brigade` both link a global `brigade` command, so install only one of them. npm stops with `EEXIST` on the second install, which is what `npm install --global brigadestack` does while `@escoffier-labs/brigade` owns the command. `npm update --global @escoffier-labs/brigade` keeps working: the package is a compatibility package that depends on exactly `brigadestack` at the same version. To move to the new name, uninstall the old package first:
 
 ```sh
@@ -122,6 +133,28 @@ To go back, run `npm uninstall --global brigadestack`, then `npm install --globa
 ## Compatibility window
 
 `brigade setup` normally resolves the running CLI's exact `vX.Y.Z` release manifest, never `latest`. Before the first unified release is available, only an absent exact release or manifest can select the bundled standalone manifest. Digest failures, malformed release metadata, manifest parse failures, and component download failures never fall back. `brigade setup --manifest-source standalone` is the explicit one-unified-release compatibility path. Offline setup uses a verified exact-manifest cache when present or that explicit standalone compatibility path.
+
+### Repairing engines with the updater
+
+`brigade update` checks the managed engine records and executable bytes even
+when the saved update coordinates match the selected release. A healthy install
+reuses the verified manifest cache and downloads no engine or CLI assets. A
+missing executable, a different installed manifest revision, or a size or digest
+mismatch triggers setup with the verified manifest without reinstalling the CLI.
+If setup fails, the command exits non-zero and preserves the pre-repair installed
+and update state. HTTP and redirect errors identify the URL and status.
+
+Automatic setup reuses a beta pin from `update-state.json` only when its engine
+release is compatible with the running CLI's receipt importer and does not
+downgrade verified installed engines. Since v0.31.0 the importer requires
+engines from v0.31.0 or later. If setup refuses the pin, refresh it with
+`brigade update --channel beta`. To repair engines without changing the pin or
+CLI, run the following with an independently verified release manifest and its
+version:
+
+```sh
+brigade setup --manifest <verified-manifest> --allow-compatible-stable-manifest <version>
+```
 
 ## Update notifications
 

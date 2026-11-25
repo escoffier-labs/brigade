@@ -14,11 +14,12 @@ import urllib.request
 from collections.abc import Callable
 from contextlib import nullcontext
 from dataclasses import dataclass
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
-from brigade import component_manifest, component_paths, distribution, localio
+from brigade import component_install, component_manifest, component_paths, component_state, distribution, localio
 
 REPOSITORY = "escoffier-labs/brigade"
 RENAMED_REPOSITORY = "escoffier-labs/brigadestack"
@@ -122,7 +123,7 @@ class ResolvedRelease:
 
 def _plain_redirect_error(message: str) -> Callable[[str], UpdateError]:
     """Build the refusal for a final URL outside the exact expected URL."""
-    return lambda final: UpdateError(f"{message}: {final}")
+    return lambda _final: UpdateError(message)
 
 
 class _DefaultHttp:
@@ -138,22 +139,29 @@ class _DefaultHttp:
     ) -> bytes:
         tokens: tuple[str | None, ...] = (github_token, None) if github_token else (None,)
         for index, token in enumerate(tokens):
-            headers = {"Accept": accept, "User-Agent": "brigade-update/1"}
+            headers = {"Accept": accept, "User-Agent": component_install.DOWNLOAD_USER_AGENT}
             if token is not None:
                 headers["Authorization"] = f"Bearer {token}"
             request = urllib.request.Request(url, headers=headers)
+
+            def check_redirect(final: str, status: int | None) -> None:
+                if final_url_is_allowed(final):
+                    return
+                error = redirect_error_for(final)
+                raise type(error)(f"{url} HTTP {status if status is not None else 'redirect'}: {error}")
+
             try:
-                with urllib.request.urlopen(request, timeout=30) as response:
-                    final = response.geturl()
-                    if not final_url_is_allowed(final):
-                        raise redirect_error_for(final)
+                with component_install.open_download_request(
+                    request, timeout=30, check_redirect=check_redirect
+                ) as response:
+                    check_redirect(response.geturl(), getattr(response, "code", None))
                     return response.read()
             except urllib.error.HTTPError as exc:
                 if token is not None and exc.code in {401, 403} and index + 1 < len(tokens):
                     continue
-                raise UpdateError(f"{request_error}: {url} HTTP {exc.code}") from exc
-            except urllib.error.URLError as exc:
-                raise UpdateError(f"{request_error}: {url}") from exc
+                raise UpdateError(f"{request_error}: {component_install.describe_http_error(url, exc)}") from exc
+            except (OSError, HTTPException) as exc:
+                raise UpdateError(f"{request_error}: {url}: {getattr(exc, 'reason', exc)}") from exc
         raise AssertionError("HTTP request attempts unexpectedly exhausted")
 
     def json(self, url: str) -> Any:
@@ -168,7 +176,7 @@ class _DefaultHttp:
             def github_redirect_error_for(final: str) -> UpdateError:
                 if _is_verified_rename_redirect(url, final):
                     return RepositoryRenamedError(f"GitHub reports the repository was renamed: {url} -> {final}")
-                return UpdateError(f"GitHub API request redirected outside its exact expected URL: {final}")
+                return UpdateError("GitHub API request redirected outside its exact expected URL")
 
             redirect_error_for = github_redirect_error_for
             request_error = "GitHub request failed"
@@ -581,7 +589,9 @@ def _lookup_release(http: UpdateHttp, suffix: str) -> tuple[Any, str]:
     raise rename_error
 
 
-def resolve_release(http: UpdateHttp, *, latest: bool, tag: str | None = None) -> ResolvedRelease:
+def resolve_release(
+    http: UpdateHttp, *, latest: bool, tag: str | None = None, cache_root: Path | None = None
+) -> ResolvedRelease:
     if latest == (tag is not None):
         raise ValueError("choose exactly one release lookup mode")
     suffix = "latest" if latest else f"tags/{tag}"
@@ -607,10 +617,20 @@ def resolve_release(http: UpdateHttp, *, latest: bool, tag: str | None = None) -
         raise UpdateError("component manifest asset URL is not the exact Brigade release URL")
     if not isinstance(size, int) or isinstance(size, bool) or size <= 0 or match is None:
         raise UpdateError("component manifest asset is missing a valid size or SHA-256 release digest")
+    sha256 = match.group(1)
+    if cache_root is not None:
+        cached = Path(component_paths.verified_manifest_path(str(cache_root), sha256))
+        try:
+            content = cached.read_bytes()
+        except FileNotFoundError:
+            pass
+        else:
+            if len(content) == size and hashlib.sha256(content).hexdigest() == sha256:
+                return ResolvedRelease(release_id, release_tag, version, target_commit, url, size, sha256, content)
     content = http.bytes(url)
-    if len(content) != size or hashlib.sha256(content).hexdigest() != match.group(1):
+    if len(content) != size or hashlib.sha256(content).hexdigest() != sha256:
         raise UpdateError("component manifest asset size or SHA-256 verification failed")
-    return ResolvedRelease(release_id, release_tag, version, target_commit, url, size, match.group(1), content)
+    return ResolvedRelease(release_id, release_tag, version, target_commit, url, size, sha256, content)
 
 
 def _validate_manifest_coordinates(
@@ -796,6 +816,34 @@ def _same_coordinates(left: UpdateState, right: UpdateState) -> bool:
     )
 
 
+def _installed_engines_match(paths: UpdatePaths, manifest: component_manifest.ComponentManifest) -> bool:
+    roots = component_install.SetupRoots(str(paths.data_root), str(paths.cache_root), {})
+    installed = component_state.load_installed_state(Path(component_paths.installed_state_path(roots.data_root)))
+    platform = component_manifest.platform_key()
+    if installed is None or installed.manifest_revision != manifest.manifest_revision or installed.platform != platform:
+        return False
+    plan = component_install.build_setup_plan(
+        manifest, platform=platform, roots=roots, opt_in=component_install._setup_opt_in((), installed)
+    )
+    assets = {entry.component_id: entry for entry in plan if entry.action == "verify-cache"}
+    if installed.components.keys() != assets.keys():
+        return False
+    for component_id, entry in assets.items():
+        record = installed.components[component_id]
+        if (
+            record.component_revision != entry.component_revision
+            or record.asset_name != entry.asset_name
+            or record.byte_size != entry.byte_size
+            or record.sha256 != entry.sha256
+            or record.executable != entry.managed_path
+            or not component_install._managed_executable_is_ready(
+                Path(entry.managed_path), byte_size=entry.byte_size, sha256=entry.sha256
+            )
+        ):
+            return False
+    return True
+
+
 def installed_pypi_project() -> str:
     """Name of the PyPI distribution this installation was made from.
 
@@ -854,7 +902,8 @@ def run_update(
     if distribution.is_npm():
         print(
             "brigade update: this installation is managed by npm. "
-            "Install a different exact version with npm install or npx.",
+            "Run `npm update --global brigadestack` (or `npm update --global @escoffier-labs/brigade` "
+            "if you installed that package), then run `brigade setup` to repair the managed engines.",
             file=sys.stderr,
         )
         return 1
@@ -873,7 +922,7 @@ def run_update(
             if state_path.exists() and current is None:
                 raise UpdateError(f"invalid update state: {state_path}")
             ensure_channel_ownership(current, channel, switch_channel=switch_channel)
-            release = resolve_release(selected_http, latest=True)
+            release = resolve_release(selected_http, latest=True, cache_root=selected_paths.cache_root)
             manifest = validate_release_manifest_bytes(
                 release,
                 allow_compatible_stable_manifest=channel == "beta",
@@ -894,8 +943,23 @@ def run_update(
                 release.manifest_sha256,
                 now(),
             )
+            cached_manifest_path = Path(
+                component_paths.verified_manifest_path(str(selected_paths.cache_root), release.manifest_sha256)
+            )
+            setup_command = [str(selected_paths.brigade_executable), "setup", "--manifest", str(cached_manifest_path)]
+            if compatible_manifest_version is not None:
+                setup_command.extend(["--allow-compatible-stable-manifest", compatible_manifest_version])
             if current is not None and _same_coordinates(current, next_state):
-                print(f"brigade update: {channel} already owns {coordinate}; no changes")
+                if _installed_engines_match(selected_paths, manifest):
+                    print(f"brigade update: {channel} already owns {coordinate}; no changes")
+                    return 0
+                if dry_run:
+                    print(" ".join(setup_command))
+                    return 0
+                print(f"brigade update: repairing managed engines for {release.tag}", flush=True)
+                _cache_manifest(selected_paths, release)
+                if _returncode(selected_runner(setup_command)) != 0:
+                    raise UpdateError(f"engine repair failed: {' '.join(setup_command)}")
                 return 0
             # Stable and beta both force-reinstall the one user-global pipx app
             # with an exact package pin. Beta never uses a mutable Git main SHA.
@@ -914,9 +978,6 @@ def run_update(
             # running interpreter, so there the user removes the old app after exit.
             retire_legacy = installed_project == LEGACY_PYPI_PROJECT
             retire_after_exit = retire_legacy and _pipx_copies_apps()
-            cached_manifest_path = Path(
-                component_paths.verified_manifest_path(str(selected_paths.cache_root), release.manifest_sha256)
-            )
             # A migration runs setup from the brigadestack environment itself, not from whichever
             # `brigade` link the pipx bin directory holds after the old app's removal.
             venvs = _resolve_pipx_venvs(selected_paths, selected_capture) if retire_legacy else None
@@ -925,9 +986,7 @@ def run_update(
                 if venvs is not None
                 else selected_paths.brigade_executable
             )
-            setup_command = [str(setup_executable), "setup", "--manifest", str(cached_manifest_path)]
-            if compatible_manifest_version is not None:
-                setup_command.extend(["--allow-compatible-stable-manifest", compatible_manifest_version])
+            setup_command[0] = str(setup_executable)
             install_command = [selected_paths.pipx_executable, "install", "--force", pipx_spec]
             retire_command = [selected_paths.pipx_executable, "uninstall", LEGACY_PYPI_PROJECT]
             retire_now = retire_legacy and not retire_after_exit
@@ -992,7 +1051,7 @@ def run_update(
                     "then run brigade update again"
                 )
             write_update_state(state_path, next_state)
-    except (UpdateError, OSError, UnicodeDecodeError, ValueError) as exc:
+    except (UpdateError, component_install.ComponentInstallError, OSError, UnicodeDecodeError, ValueError) as exc:
         print(f"brigade update: {exc}", file=sys.stderr)
         return 1
     return 0
