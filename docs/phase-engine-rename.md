@@ -644,7 +644,10 @@ release:
    index ignored. Run `brigade code sync`". The old directory is never
    deleted, and the walker keeps skipping it so a stale database is never
    indexed.
-6. Evidence legacy directories: as decided under open question 1.
+6. Done for v0.33. Keep detecting and opening the legacy evidence layout
+   in place until a data migration with recovery proof ships (option a under
+   open question 1). The canonical layout still takes precedence when both
+   exist. The database, MAC key, config and cache resolve as one layout.
 7. Done for v0.33. Removed the CLI aliases (`receipts export miseledger`, `--from-miseledger`,
    `--graphtrail-timeout`) and the `graphtrail_delta_timeout_seconds` read. Doctor
    warns about the unknown key and points to `code_graph_delta_timeout_seconds`.
