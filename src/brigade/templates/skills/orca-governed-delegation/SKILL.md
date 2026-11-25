@@ -90,6 +90,9 @@ Keep the original enrollment and retry keys for retained work.
   snapshot that proves release and exited liveness settles `start-failed`.
   Acknowledge the returned result ID to free the slot before `finalize`.
   If either proof is missing, `start-unknown` still holds the slot.
+  Report a retained worktree to the operator when the refusal response or
+  task row in `brigade orca status --json` shows `worktree_retained: true`.
+  Status keeps the flag after acknowledgement.
 - Request cancellation with `brigade orca cancel <run> <task> --target <workspace>`;
   run the printed `orca-ide orchestration worker-stop` argv. If it reports
   `stop_unknown`, rerun that same printed argv with the same `--retry-request`,

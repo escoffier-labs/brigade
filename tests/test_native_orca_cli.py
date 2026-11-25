@@ -152,9 +152,14 @@ def test_orca_1_4_269_recovers_only_the_original_worker_after_a_restart(coordina
         ("dispatch", "hostScope", {"kind": "remote"}, "remote-mismatch"),
         ("terminalResource", "terminalHandle", "term_other", "start-unknown"),
         ("terminalResource", "terminalHandle", None, "start-unknown"),
+        ("terminalResource", "worktreeId", "worktree_other", "start-unknown"),
+        ("terminalResource", "worktreeId", None, "start-unknown"),
         ("result", "terminalResource", None, "start-unknown"),
-        ("receipt", "residualResources", ["term_example", "term_other"], "start-unknown"),
-        ("receipt", "residualResources", ["term_example", None], "start-unknown"),
+        ("residual", None, {"kind": "terminal", "id": "term_other"}, "start-unknown"),
+        ("residual", None, {"kind": "helper", "id": "term_example"}, "start-unknown"),
+        ("residual", None, {"kind": "terminal"}, "start-unknown"),
+        ("residual", None, {"kind": "worktree", "id": 42}, "start-unknown"),
+        ("residual", None, "term_example", "start-unknown"),
         ("exit_code", None, 0, "start-unknown"),
     ],
 )
@@ -172,8 +177,8 @@ def test_orca_1_4_271_recovers_failed_start_only_after_release_and_exit(coordina
     exit_code = 1
     if row == "exit_code":
         exit_code = value
-    elif row == "receipt":
-        receipt["result"][field] = value
+    elif row == "residual":
+        receipt["result"]["residualResources"].append(value)
     elif row is not None:
         target = show["result"] if row == "result" else show["result"][row]
         if value is None:
@@ -200,9 +205,11 @@ def test_orca_1_4_271_recovers_failed_start_only_after_release_and_exit(coordina
         return
 
     assert (result["mode"], result["reason"], result["status"]) == ("start-refusal", "start-failed", "failed")
+    assert result["worktree_retained"] is True
     assert not coordinator.status()["tasks"][0]["correlated"]
     replay = coordinator.invoke(*args)
     assert replay["replayed"] and replay["result_id"] == result["result_id"]
+    assert replay["worktree_retained"] is True
     coordinator.invoke("ack", run_id, "one", "--result-id", result["result_id"])
     assert coordinator.status()["capacity"]["live"] == 0
     final = coordinator.invoke("finalize", run_id)
@@ -212,6 +219,52 @@ def test_orca_1_4_271_recovers_failed_start_only_after_release_and_exit(coordina
 def _recovery_fixture(name):
     path = Path(__file__).parent / "fixtures" / "native_orca" / f"{name}-1.4.271.json"
     return json.loads(path.read_text())["payload"]
+
+
+@pytest.mark.parametrize("kind", ["worktree", "terminal", "empty", "empty-with-recovery"])
+def test_failed_start_retained_worktree_in_status_after_ack(coordinator, kind):
+    run_id = coordinator.open()
+    ready = coordinator.start()
+    receipt = _recovery_fixture("start-failed-residual")
+    receipt["result"]["mutation"] = ready["result"]["mutation"]
+    receipt["result"]["residualResources"] = [
+        entry for entry in receipt["result"]["residualResources"] if entry["kind"] == kind
+    ]
+    show = _recovery_fixture("worker-show-released-exited")
+    if kind == "empty":
+        del receipt["result"]["recovery"]
+        show["result"]["dispatch"]["status"] = "circuit_broken"
+    result = coordinator.invoke(
+        "hold-resolve",
+        run_id,
+        "one",
+        "--native-json",
+        coordinator.payload("start", receipt),
+        "--exit-code",
+        1,
+        "--show-json",
+        coordinator.payload("show", show),
+        error="start-unknown" if kind == "empty-with-recovery" else None,
+    )
+    if kind == "empty-with-recovery":
+        assert "worktree_retained" not in coordinator.status()["tasks"][0]
+        return
+    assert result["reason"] == "start-failed"
+    retained = kind == "worktree"
+    assert result.get("worktree_retained", False) is retained
+    coordinator.invoke("ack", run_id, "one", "--result-id", result["result_id"])
+    status = coordinator.status()
+    assert status["capacity"]["live"] == 0
+    assert status["tasks"][0]["acked"]
+    assert status["tasks"][0]["worktree_retained"] is retained
+    fact = native_child_journal.latest(_events(coordinator.workspace, run_id), "task.native-capacity", "one")
+    assert fact is not None and set(fact) == {"task_id", "attempt_id", "reason", "worktree_retained"}
+    assert fact["worktree_retained"] is retained
+    if retained:
+        rc = cli.main(["orca", "status", run_id, "--target", str(coordinator.workspace)])
+        out, err = coordinator.capsys.readouterr()
+        assert rc == 0 and not err
+        assert "(worktree retained)" in out
 
 
 @pytest.mark.parametrize("verb", ["accepted", "hold-resolve"])

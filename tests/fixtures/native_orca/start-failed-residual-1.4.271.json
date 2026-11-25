@@ -26,8 +26,22 @@
       },
       "effects": [],
       "residualResources": [
-        "term_example"
+        {
+          "kind": "worktree",
+          "action": "created_child",
+          "id": "worktree_example",
+          "name": "example-checkout"
+        },
+        {
+          "kind": "terminal",
+          "role": "agent",
+          "action": "created",
+          "id": "term_example",
+          "tabId": "tab_example",
+          "leafId": "leaf_example"
+        }
       ],
+      "recovery": "Inspect the retained worktree and terminal.",
       "mutation": {
         "requestId": "FIXTURE_REQUEST_KEY",
         "replayed": false

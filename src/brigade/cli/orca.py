@@ -152,8 +152,9 @@ def _describe(report: dict[str, Any]) -> None:
         reason = task["capacity_reason"]
         refusal = task.get("start_refusal")
         disposition = f" ({refusal})" if refusal is not None else ""
+        worktree_note = " (worktree retained)" if task.get("worktree_retained") is True else ""
         capacity_note = f" (holds capacity: {reason})" if reason is not None else ""
-        print(f"  {task['task_id']} {task['state']}{disposition}{capacity_note}")
+        print(f"  {task['task_id']} {task['state']}{disposition}{worktree_note}{capacity_note}")
 
 
 def dispatch(args: Any) -> int:

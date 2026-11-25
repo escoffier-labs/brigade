@@ -107,6 +107,11 @@ snapshot proves resource release and exited liveness. Acknowledge the
 returned result ID with `ack` to free the slot before `finalize`. If release
 or exit is unverified, the claim stays `start-unknown` and holds capacity.
 
+When the refusal response or task row in `brigade orca status --json` shows
+`worktree_retained: true`, report the retained worktree to the operator. Status
+keeps that flag after acknowledgement. Acknowledge the failed result as usual
+to free the worker slot.
+
 If `open` refuses a task as `orca-unsupported`, send it through
 `brigade run batch`. Report every receipt to Brigade, refusals included. Use
 `brigade orca status <run> --json --target <workspace>` to inspect state and

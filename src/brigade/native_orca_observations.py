@@ -289,8 +289,8 @@ def resource_state(worker: WorkerReference, payload: object, *, retained_status:
     return "worker-not-released"
 
 
-def failed_start_released(worker: WorkerReference, payload: object, residuals: list[object]) -> bool:
-    """Require a released resource for every residual handle in the failed receipt."""
+def failed_start_released(worker: WorkerReference, payload: object, residuals: list[object]) -> set[str]:
+    """Return matched residual kinds when the worker's release and exit are proven."""
     reply, refusal = _show(worker, payload)
     if refusal is not None and refusal.reason in ("remote-mismatch", "circuit-broken"):
         raise NativeChildError(refusal.reason, "Orca refused the failed-start worker snapshot")
@@ -306,16 +306,27 @@ def failed_start_released(worker: WorkerReference, payload: object, residuals: l
     )
     if any(actual is not None and actual != expected for actual, expected in identities):
         raise NativeChildError("native-mismatch", "the Orca worker-show does not match the start receipt")
-    # A full worker-show exposes one terminal resource for the dispatch.
+    if refusal is not None or resource_state(worker, payload, retained_status="failed") != "released":
+        return set()
+
+    # The released terminal's row also identifies the worktree it ran in.
     handle = resource.get("terminalHandle")
-    return (
-        refusal is None
-        and isinstance(handle, str)
-        and bool(handle)
-        and bool(residuals)
-        and all(residual == handle for residual in residuals)
-        and resource_state(worker, payload, retained_status="failed") == "released"
-    )
+    if not isinstance(handle, str) or not handle:
+        return set()
+    resource_ids = {"terminal": handle, "worktree": resource.get("worktreeId")}
+    matched: set[str] = set()
+    for entry in residuals:
+        residual = _fields(entry)
+        kind, residual_id = residual.get("kind"), residual.get("id")
+        if (
+            not isinstance(kind, str)
+            or not isinstance(residual_id, str)
+            or not residual_id
+            or resource_ids.get(kind) != residual_id
+        ):
+            return set()
+        matched.add(kind)
+    return matched
 
 
 def parse_stop(
