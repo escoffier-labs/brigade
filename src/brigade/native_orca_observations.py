@@ -181,7 +181,9 @@ def _transcript_digest(worker: WorkerReference, payload: object, worker_state: s
     if not 1 <= len(pages) <= _MAX_TRANSCRIPT_PAGES:
         return None
     messages: list[object] = []
+    message_ids: set[str] = set()
     cursors: set[str] = set()
+    previous_cursor: str | None = None
     source_identity: str | None = None
     clipped = False
     for index, envelope in enumerate(pages, 1):
@@ -192,6 +194,7 @@ def _transcript_digest(worker: WorkerReference, payload: object, worker_state: s
         more = index < len(pages)
         complete = reply.get("contentComplete")
         clipping = reply.get("clipping")
+        cursor = page.get("nextCursor")
         if (
             _fields(envelope).get("error") is not None
             or reply.get("dispatchId") != worker.dispatch_id
@@ -203,6 +206,9 @@ def _transcript_digest(worker: WorkerReference, payload: object, worker_state: s
             or not source
             or (source_identity is not None and source_identity != source)
             or not isinstance(page_messages, list)
+            or "cursor" not in reply
+            or "nextCursor" not in page
+            or reply["cursor"] != cursor
             or page.get("limited") is not more
             or type(complete) is not bool
             or (not more and not complete)
@@ -210,15 +216,25 @@ def _transcript_digest(worker: WorkerReference, payload: object, worker_state: s
             or page.get("returnedMessageCount") != len(page_messages)
         ):
             return None
-        if clipping == ["transcript_payload"] and "fallbackReason" in reply:
+        if clipping == ["transcript_payload"]:
             clipped = True
         elif clipping not in (None, []):
             return None
         if more:
-            cursor = page.get("nextCursor")
             if not isinstance(cursor, str) or not cursor or cursor in cursors:
                 return None
             cursors.add(cursor)
+            previous_cursor = cursor
+        # Orca echoes the current page's next cursor, not the request cursor.
+        # An empty final page repeats it, but the replies cannot prove a gap
+        # did not occur before a non-empty final page.
+        elif not page_messages and previous_cursor is not None and cursor != previous_cursor:
+            return None
+        for message in page_messages:
+            message_id = _fields(message).get("id")
+            if not isinstance(message_id, str) or not message_id or message_id in message_ids:
+                return None
+            message_ids.add(message_id)
         source_identity = source
         messages.extend(page_messages)
     if not messages or (clipped and not _ends_in_assistant_text(messages[-1])):

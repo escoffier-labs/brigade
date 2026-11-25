@@ -54,12 +54,18 @@ class TaskObservation:
     artifact_digest: str | None = None
     containment: str = "unknown"
     wait_timed_out: bool = False
+    transcript_clipped: bool = False
 
     def __post_init__(self) -> None:
         if (
             self.status not in journal.STATES
             or self.containment not in journal.CONTAINMENT
             or not isinstance(self.wait_timed_out, bool)
+            or type(self.transcript_clipped) is not bool
+            or (
+                self.transcript_clipped
+                and (self.status not in ("completed", "failed") or self.artifact_kind != "receipt")
+            )
         ):
             raise TaskJournalError("invalid task observation")
         for value in (self.provider_task_id, self.original_run_id, self.provider_result_id):
@@ -213,6 +219,7 @@ class TaskResult:
     # blocks a launch that has not happened yet and never rewrites a result.
     cancel_requested: bool = False
     cancel_reason: str | None = None
+    transcript_clipped: bool = False
 
     @property
     def cancel_too_late(self) -> bool:
@@ -291,6 +298,7 @@ def _observation_payload(result: TaskResult) -> dict[str, Any]:
     return {
         "task_id": result.handle.spec.task_id,
         "attempt_id": result.handle.attempt_id,
+        **({"transcript_clipped": True} if result.transcript_clipped else {}),
         **{
             field: getattr(result, field)
             for field in (
@@ -334,6 +342,7 @@ def _observe(current: TaskResult, observation: TaskObservation) -> TaskResult:
         artifact_kind=kind,
         artifact_digest=artifact,
         containment=observation.containment,
+        transcript_clipped=current.transcript_clipped or observation.transcript_clipped,
         **refs,
     )
     result = replace(result, result_id=_result_id(result) if terminal else None)

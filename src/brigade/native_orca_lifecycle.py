@@ -69,6 +69,7 @@ def _record_observation(task: ClaimedTask, observation: NativeObservation, show:
                     artifact_kind="receipt" if terminal else None,
                     artifact_digest=observation.result_transfer_id if terminal else None,
                     containment=observation.containment,
+                    transcript_clipped=observation.transcript_clipped,
                 ),
                 expected_version=result.version,
             )
@@ -93,7 +94,7 @@ def observe(
             "transcript_argv": observations.result_argv(worker),
             "observe_argv": observations.observe_argv(worker),
         }
-        if observation.transcript_clipped:
+        if result.transcript_clipped:
             report["transcript_clipped"] = True
         return report
 

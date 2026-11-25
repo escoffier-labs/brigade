@@ -309,6 +309,7 @@ EVENT_TYPES.update(
                 "artifact_kind",
                 "artifact_digest",
                 "containment",
+                "transcript_clipped",
             }
         ),
         "task.acknowledged": frozenset({"task_id", "result_id"}),
@@ -446,23 +447,27 @@ def canonical_bytes(obj: Any) -> bytes:
     """Canonical UTF-8 JSON: sorted keys, compact separators, no ASCII escaping.
 
     Rejects floats, oversized integers, and non-JSON-native types before
-    serializing. Only the native start-failure worktree flag may be a boolean.
+    serializing. The native worktree and clipped transcript flags may be booleans.
     Any residual ``json.dumps`` conversion failure (type
     errors, circular references, recursion/overflow) is wrapped in a bounded
     CanonicalizationError rather than escaping as a raw exception.
     """
     try:
         validation_obj = obj
-        if isinstance(obj, dict) and obj.get("event_type") == "task.native-capacity":
-            payload = obj.get("payload")
-            if (
-                isinstance(payload, dict)
-                and payload.get("reason") == "start-failed"
-                and type(payload.get("worktree_retained")) is bool
+        if isinstance(obj, dict) and isinstance(payload := obj.get("payload"), dict):
+            field = None
+            if obj.get("event_type") == "task.native-capacity" and payload.get("reason") == "start-failed":
+                field = "worktree_retained"
+            elif (
+                obj.get("event_type") == "task.observed"
+                and payload.get("status") in ("completed", "failed")
+                and payload.get("artifact_kind") == "receipt"
             ):
+                field = "transcript_clipped"
+            if field is not None and type(payload.get(field)) is bool:
                 # Exempt only this field from the boolean ban. Serialize and
                 # hash the original JSON boolean in the request and envelope.
-                validation_obj = {**obj, "payload": {**payload, "worktree_retained": 0}}
+                validation_obj = {**obj, "payload": {**payload, field: 0}}
         _validate_canonical_node(validation_obj)
         return json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     except CanonicalizationError:
@@ -679,6 +684,9 @@ def _validate_payload(event_type: str, payload: Any) -> None:
     for key, value in payload.items():
         if event_type == "task.batch-accepted" and key == "members":
             # The dedicated closed row validator above checks this field.
+            continue
+        if event_type == "task.observed" and key == "transcript_clipped":
+            # The closed task shape above validates the optional receipt flag.
             continue
         if event_type == "task.native-capacity" and key == "worktree_retained":
             if payload.get("reason") != "start-failed" or type(value) is not bool:

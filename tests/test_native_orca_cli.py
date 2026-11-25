@@ -1,6 +1,7 @@
 """Caller-mediated CLI scenarios against the Orca 1.4.269 contract."""
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -590,6 +591,11 @@ def test_orca_1_4_269_partial_completion_retained_tab_and_cleanup(coordinator):
     assert coordinator.invoke("ack", run_id, "one", "--result-id", result_id)["replayed"]
 
 
+def _set_transcript_page(reply, messages, cursor):
+    reply["transcript"].update(messages=messages, returnedMessageCount=len(messages), nextCursor=cursor)
+    reply["cursor"] = cursor
+
+
 @pytest.mark.parametrize(
     "case",
     [
@@ -602,8 +608,14 @@ def test_orca_1_4_269_partial_completion_retained_tab_and_cleanup(coordinator):
         "source-changed",
         "page-error",
         "cursor-loop",
+        "duplicate-page",
+        "cursor-mismatch",
+        "empty-final-cursor-mismatch",
         "missing-continuation",
-        "too-many-pages",
+        "three-pages",
+        "eight-pages",
+        "nine-pages",
+        "missing-fallback-reason",
     ],
 )
 def test_orca_1_4_271_transcript_pages(coordinator, case):
@@ -626,14 +638,35 @@ def test_orca_1_4_271_transcript_pages(coordinator, case):
     elif case == "page-error":
         pages[1] = {"ok": False, "error": {"code": "read_failed"}}
     elif case == "cursor-loop":
-        pages.insert(1, pages[0])
+        middle = deepcopy(pages[0])
+        _set_transcript_page(middle["result"], [], first["cursor"])
+        pages.insert(1, middle)
+    elif case == "duplicate-page":
+        middle = deepcopy(pages[0])
+        _set_transcript_page(middle["result"], middle["result"]["transcript"]["messages"], "example-cursor-2")
+        pages.insert(1, middle)
+        _set_transcript_page(last, [], middle["result"]["cursor"])
+    elif case == "cursor-mismatch":
+        first["cursor"] = "other-example-cursor"
+    elif case == "empty-final-cursor-mismatch":
+        _set_transcript_page(last, [], "other-example-cursor")
     elif case == "missing-continuation":
         pages.pop()
-    elif case == "too-many-pages":
-        for index in range(8):
-            page = _recovery_fixture("worker-read-page-1")
-            page["result"]["transcript"]["nextCursor"] = f"example-cursor-{index}"
-            pages.insert(1, page)
+    elif case == "missing-fallback-reason":
+        del first["fallbackReason"]
+    elif case in ("three-pages", "eight-pages", "nine-pages"):
+        messages = first["transcript"]["messages"][:]
+        if case == "three-pages":
+            groups, final_messages = [messages[:2], messages[2:4]], messages[4:]
+        else:
+            groups, final_messages = [[message] for message in messages], []
+            if case == "nine-pages":
+                groups.insert(1, [{**messages[0], "id": "extra-example-message"}])
+        pages = [deepcopy(pages[0]) for _ in groups] + [pages[-1]]
+        for index, (page, group) in enumerate(zip(pages[:-1], groups, strict=True), 1):
+            _set_transcript_page(page["result"], group, f"example-cursor-{index}")
+        final_cursor = "example-cursor-end" if final_messages else pages[-2]["result"]["cursor"]
+        _set_transcript_page(last, final_messages, final_cursor)
     transcript = _fixture("worker-read") if case == "unclipped" else pages
     show = _fixture("worker-show-released")
     done_file = coordinator.payload("worker-done", _fixture("worker-done"))
@@ -644,15 +677,16 @@ def test_orca_1_4_271_transcript_pages(coordinator, case):
         "--transcript-json",
         coordinator.payload("transcript", transcript),
     )
-    if case in ("clipped", "unclipped"):
+    if case in ("clipped", "unclipped", "three-pages", "eight-pages", "missing-fallback-reason"):
         assert result["reason"] == "terminal-evidence-complete" and result["result_id"]
-        if case == "clipped":
+        if case == "unclipped":
+            assert "transcript_clipped" not in result
+        else:
             assert result["transcript_clipped"] is True
-            first_page, last_page = first["transcript"], last["transcript"]
-            last_page["messages"].append(first_page["messages"].pop())
-            first_page["returnedMessageCount"] -= 1
-            last_page["returnedMessageCount"] = 1
-            last["cursor"] = last_page["nextCursor"] = "example-cursor-end"
+        if case == "clipped":
+            messages = first["transcript"]["messages"]
+            _set_transcript_page(first, messages[:-1], first["cursor"])
+            _set_transcript_page(last, messages[-1:], "example-cursor-end")
             split = coordinator.observe(
                 show,
                 "--worker-done-json",
@@ -662,8 +696,12 @@ def test_orca_1_4_271_transcript_pages(coordinator, case):
             )
             assert split["result_id"] == result["result_id"]
             assert split["transcript_clipped"] is True and "Synthetic message" not in json.dumps(split)
-        else:
-            assert "transcript_clipped" not in result
+            later = coordinator.observe(show)
+            assert later["result_id"] == result["result_id"] and later["transcript_clipped"] is True
+            journal_file = _run_dir(coordinator.workspace, run_id) / "events" / "lifecycle.jsonl"
+            journal_text = journal_file.read_text()
+            assert '"transcript_clipped":true' in journal_text
+            assert "Synthetic message" not in journal_text and "Synthetic tool output." not in journal_text
         coordinator.invoke("ack", run_id, "one", "--result-id", result["result_id"])
         assert coordinator.status()["capacity"]["live"] == 0
         assert coordinator.invoke("finalize", run_id)["terminals"] == 1
