@@ -1,0 +1,1 @@
+- Deliberately regress the bundled `note` skill to prove scheduled rollback for #2590. The scheduled restore PR will revert this regression.
