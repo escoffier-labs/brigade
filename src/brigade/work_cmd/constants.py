@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import ntpath
 import re
+from pathlib import PurePosixPath
 
 
 OK = "ok"
@@ -216,7 +218,33 @@ IMPORT_ARCHIVE_STALE_HOURS = 168
 SCANNER_REQUIRED_IDS = ("chat-memory-sweep", "memory-refresh", "handoff-ingest")
 
 
-SCANNER_HIGH_RISK_COMMANDS = {"bash", "sh", "zsh", "fish", "powershell", "pwsh", "ssh", "scp", "rsync"}
+SCANNER_HIGH_RISK_COMMANDS = {
+    "bash",
+    "busybox",
+    "cmd",
+    "dash",
+    "fish",
+    "ksh",
+    "powershell",
+    "pwsh",
+    "rsync",
+    "scp",
+    "sh",
+    "ssh",
+    "zsh",
+}
+
+# Use the standard Windows PATHEXT suffixes for consistent policy matching on every host.
+_POLICY_EXECUTABLE_SUFFIXES = {".com", ".exe", ".bat", ".cmd", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".msc"}
+
+
+def normalize_policy_executable(argv0: str) -> str:
+    basename = PurePosixPath(argv0.replace("\\", "/")).name
+    _, basename = ntpath.splitdrive(basename)
+    # Reduce platform-equivalent spellings of a name to one policy name.
+    name = basename.partition(":")[0].rstrip(". ").casefold()
+    stem, dot, suffix = name.rpartition(".")
+    return stem if dot + suffix in _POLICY_EXECUTABLE_SUFFIXES else name
 
 
 SCANNER_SHELL_META_RE = re.compile(r"[;&|`<>]|\$\(")
