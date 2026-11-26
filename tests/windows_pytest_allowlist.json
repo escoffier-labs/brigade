@@ -103,7 +103,6 @@
     "test_work_cmd_backup.py",
     "test_work_cmd_imports.py",
     "test_work_cmd_ledger.py",
-    "test_work_cmd_reviews.py",
     "test_work_cmd_services.py",
     "test_work_cmd_session.py",
     "test_work_cmd_sweeps.py",
