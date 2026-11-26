@@ -55,6 +55,7 @@ pub(crate) fn clear_parse_census_pending(tx: &Connection) -> Result<()> {
 }
 
 pub fn init_schema(conn: &Connection) -> Result<()> {
+    super::db::checkpoint_on_close(conn, false)?;
     let _lock = super::db::lock_connection(conn)?;
     let tx = conn.unchecked_transaction()?;
     checked_schema_version(&tx)?;
@@ -158,7 +159,7 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     tx.execute_batch(MODULE_ASSIGNMENTS_TABLE)?;
     ensure_import_columns(&tx)?;
     tx.commit()?;
-    Ok(())
+    super::db::checkpoint_on_close(conn, true)
 }
 
 /// Apply write-path schema upgrades needed before sync can insert current rows,
@@ -310,15 +311,24 @@ pub(crate) fn checked_schema_version(conn: &Connection) -> Result<Option<u32>> {
     if !meta_exists {
         return Ok(None);
     }
-    let marker = crate::store::meta::read(conn, "schema_version")?;
-    let version = marker
-        .as_deref()
-        .and_then(|value| value.parse::<u32>().ok());
+    let Some(marker) = crate::store::meta::read(conn, "schema_version")? else {
+        return Ok(None);
+    };
     ensure!(
-        version.is_none_or(|version| version <= SCHEMA_VERSION),
-        "database schema is newer than this engine (supports schema {SCHEMA_VERSION})"
+        !marker.is_empty() && marker.bytes().all(|byte| byte.is_ascii_digit()),
+        "invalid database schema marker: expected a non-negative decimal integer"
     );
-    Ok(version)
+    let newer = || {
+        anyhow::anyhow!(
+            "database schema is newer than this engine (supports schema {SCHEMA_VERSION})"
+        )
+    };
+    // An all-digit value that cannot fit in u32 is necessarily newer.
+    let version = marker.parse::<u32>().map_err(|_| newer())?;
+    if version > SCHEMA_VERSION {
+        return Err(newer());
+    }
+    Ok(Some(version))
 }
 
 fn ensure_import_columns(conn: &Connection) -> Result<()> {

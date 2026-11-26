@@ -12,7 +12,7 @@ use rusqlite::Connection;
 
 use crate::extractors::index_file;
 use crate::model::{IgnoredSummary, PendingChanges};
-use crate::store::db::{lock_connection, now_ts};
+use crate::store::db::{checkpoint_on_close, lock_connection, now_ts};
 use crate::store::persist::{
     EntryFreshness, entry_freshness, load_db_files, purge_file_graph, stale_plan, table_counts,
     write_file_graph,
@@ -51,6 +51,7 @@ pub fn sync_repo(conn: &Connection, root: &Path) -> Result<SyncSummary> {
 pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<SyncSummary> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     guard_unsafe_root(&root)?;
+    checkpoint_on_close(conn, false)?;
     let _lock = lock_connection(conn)?;
     // The first sync that created an index directory adds it to `.gitignore`; check both layouts
     // so neither creation record lingers.
@@ -106,6 +107,7 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
         crate::store::meta::write_sync_meta(&tx)?;
         write_branch_meta(&tx, &root)?;
         tx.commit()?;
+        checkpoint_on_close(conn, true)?;
 
         return summarize(conn, true, 0);
     }
@@ -144,6 +146,7 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
     crate::store::meta::write_sync_meta(&tx)?;
     write_branch_meta(&tx, &root)?;
     tx.commit()?;
+    checkpoint_on_close(conn, true)?;
 
     summarize(conn, false, deleted.len())
 }

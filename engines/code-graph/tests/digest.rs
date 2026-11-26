@@ -1,9 +1,10 @@
 use std::fs;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::time::{Duration, SystemTime};
 
-use brigade_code_graph::query::digest::graph_digest;
+use brigade_code_graph::query::{diff_graphs, digest::graph_digest};
 use brigade_code_graph::store::{SCHEMA_VERSION, init_schema, meta, open_db, sync_repo};
 use rusqlite::{Connection, MAIN_DB, config::DbConfig};
 use serde_json::{Value, json};
@@ -76,13 +77,11 @@ fn digest_reads_committed_state_during_a_writer_and_changes_after_commit() {
     tx.execute("UPDATE symbols SET body_hash = 'pending'", [])
         .unwrap();
     let lock = brigade_code_graph::store::lock::SyncLock::acquire(&db).unwrap();
-    let bytes = fs::read(&db).unwrap();
-    let mtime = fs::metadata(&db).unwrap().modified().unwrap();
-    // This process cannot finish successfully unless it reads through the lock
-    // and sees the committed WAL snapshot before the writer commits.
+    let wal = db.with_extension("db-wal");
+    let before_files = [file_state(&db), file_state(&wal)];
+    // A read-only digest succeeds while the advisory sync lock is held.
     assert_eq!(digest(&db, dir.path()), before);
-    assert_eq!(fs::read(&db).unwrap(), bytes);
-    assert_eq!(fs::metadata(&db).unwrap().modified().unwrap(), mtime);
+    assert_eq!([file_state(&db), file_state(&wal)], before_files);
     drop(lock);
 
     tx.commit().unwrap();
@@ -149,56 +148,145 @@ fn digest_reports_inaccessible_wal_sidecars() {
     assert_failure(output, "SQLite WAL sidecars");
 }
 
-#[test]
-fn newer_schema_is_rejected_at_read_and_write_entry_points() {
-    use brigade_code_graph::mcp::handle_request;
-    let dir = tempfile::tempdir().unwrap();
-    let db = dir.path().join("graph.db");
-    let conn = index(&db, dir.path());
-    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
-        .unwrap();
-    meta::upsert(&conn, "schema_version", &(SCHEMA_VERSION + 1).to_string()).unwrap();
-    conn.execute("DROP TABLE module_assignments", []).unwrap();
-    let message = "database schema is newer than this engine";
-    assert!(
-        init_schema(&conn)
-            .unwrap_err()
-            .to_string()
-            .contains(message)
-    );
-    drop(conn);
-    // The newer schema exists only in the WAL. Refusal must not checkpoint it.
-    let wal = db.with_extension("db-wal");
-    let bytes = fs::read(&db).unwrap();
-    let wal_bytes = fs::read(&wal).unwrap();
-    let mtime = fs::metadata(&db).unwrap().modified().unwrap();
-    assert!(!wal_bytes.is_empty());
-    let mut options = vec![
-        vec!["init"],
-        vec!["sync"],
+fn file_state(path: &Path) -> (Vec<u8>, SystemTime) {
+    (
+        fs::read(path).unwrap(),
+        fs::metadata(path).unwrap().modified().unwrap(),
+    )
+}
+
+fn graph_commands(db: &Path) -> Vec<Vec<&str>> {
+    use clap::CommandFactory;
+    let path = db.to_str().unwrap();
+    let mut commands = vec![
+        vec!["affected", "app.py"],
+        vec!["callees", "target"],
+        vec!["callers", "target"],
+        vec!["context", "target"],
+        vec!["cycles"],
+        vec!["dead-code"],
         vec!["digest", "--json"],
+        vec!["diff", "--before", path, "--after", path],
+        vec!["doctor"],
+        vec!["explain", "caller", "target"],
+        vec!["export"],
+        vec!["impact", "target"],
+        vec!["init"],
+        vec!["neighbors", "app.py"],
+        vec!["outline", "app.py"],
+        vec!["search", "target"],
         vec!["stats"],
+        vec!["sync"],
     ];
+    let mut non_graph = vec!["evaluate", "help"];
     if cfg!(feature = "watch") {
-        options.push(vec!["watch"]);
+        commands.push(vec!["watch"]);
     }
-    for args in options {
-        assert_failure(command(&db, dir.path(), &args).output().unwrap(), message);
+    if cfg!(feature = "codesearch") {
+        commands.push(vec!["blend", "target"]);
     }
-    for refresh in [false, true] {
-        let response = handle_request(
-            &db,
-            &json!({
+    if cfg!(feature = "miseledger") {
+        non_graph.push("links"); // Reads the evidence database instead.
+    }
+    let cli = brigade_code_graph::cli::Cli::command();
+    let expected: std::collections::BTreeSet<_> = cli
+        .get_subcommands()
+        .map(clap::Command::get_name)
+        .filter(|name| !non_graph.contains(name))
+        .collect();
+    assert_eq!(
+        commands
+            .iter()
+            .map(|argv| argv[0])
+            .collect::<std::collections::BTreeSet<_>>(),
+        expected
+    );
+    commands
+}
+
+#[test]
+fn invalid_or_newer_schema_is_rejected_at_every_graph_entry_point() {
+    use brigade_code_graph::mcp::handle_request;
+    for (marker, message) in [
+        (
+            (SCHEMA_VERSION + 1).to_string(),
+            "database schema is newer than this engine",
+        ),
+        ("10.0".into(), "invalid database schema marker"),
+        ("v10".into(), "invalid database schema marker"),
+        (
+            "4294967296".into(),
+            "database schema is newer than this engine",
+        ),
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("graph.db");
+        let conn = index(&db, dir.path());
+        conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+            .unwrap();
+        meta::upsert(&conn, "schema_version", &marker).unwrap();
+        conn.execute("DROP TABLE module_assignments", []).unwrap();
+        assert!(
+            init_schema(&conn)
+                .unwrap_err()
+                .to_string()
+                .contains(message)
+        );
+        drop(conn);
+
+        // The changed marker lives in the WAL. No refusal may checkpoint it.
+        let wal = db.with_extension("db-wal");
+        let before = [file_state(&db), file_state(&wal)];
+        assert!(!before[1].0.is_empty());
+        for args in graph_commands(&db) {
+            assert_failure(command(&db, dir.path(), &args).output().unwrap(), message);
+            assert_eq!(
+                [file_state(&db), file_state(&wal)],
+                before,
+                "{args:?}, {marker}"
+            );
+        }
+        for refresh in [false, true] {
+            let response = handle_request(&db, &json!({
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": {"name": "search", "arguments": {"query": "target", "refresh": refresh}},
-            }),
-        )
-        .unwrap();
-        assert!(response.to_string().contains(message), "{response}");
+            })).unwrap();
+            assert!(response.to_string().contains(message), "{response}");
+            assert_eq!([file_state(&db), file_state(&wal)], before);
+        }
     }
-    assert_eq!(fs::read(&db).unwrap(), bytes);
-    assert_eq!(fs::read(&wal).unwrap(), wal_bytes);
-    assert_eq!(fs::metadata(&db).unwrap().modified().unwrap(), mtime);
+}
+
+#[test]
+fn refusal_after_open_preserves_a_newer_database_and_wal_on_close() {
+    for initialize in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("graph.db");
+        drop(index(&db, dir.path()));
+        let opened = open_db(&db).unwrap();
+        let writer = Connection::open(&db).unwrap();
+        writer
+            .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+            .unwrap();
+        meta::upsert(&writer, "schema_version", &(SCHEMA_VERSION + 1).to_string()).unwrap();
+        drop(writer);
+
+        let wal = db.with_extension("db-wal");
+        let before = [file_state(&db), file_state(&wal)];
+        assert!(!before[1].0.is_empty());
+        let error = if initialize {
+            init_schema(&opened).unwrap_err()
+        } else {
+            sync_repo(&opened, dir.path()).unwrap_err()
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("database schema is newer than this engine")
+        );
+        drop(opened);
+        assert_eq!([file_state(&db), file_state(&wal)], before);
+    }
 }
 
 #[test]
@@ -210,6 +298,8 @@ fn writable_open_obeys_the_sync_lock_before_changing_journal_mode() {
     let bytes = fs::read(&db).unwrap();
     let lock = brigade_code_graph::store::lock::SyncLock::acquire(&db).unwrap();
     assert!(open_db(&db).unwrap_err().to_string().contains("lock"));
+    let output = command(&db, dir.path(), &["init"]).output().unwrap();
+    assert_failure(output, "another writer holds this database");
     assert_eq!(fs::read(&db).unwrap(), bytes);
     drop(lock);
     assert!(open_db(&db).is_ok());
@@ -235,9 +325,21 @@ fn digest_distinguishes_fields_the_diff_can_observe() {
         let db = dir.path().join("graph.db");
         let conn = index(&db, dir.path());
         let before = graph_digest(&conn).unwrap();
+        let snapshot = dir.path().join("before.db");
+        conn.execute("VACUUM INTO ?1", [snapshot.to_str().unwrap()])
+            .unwrap();
         conn.pragma_update(None, "foreign_keys", false).unwrap();
         assert!(conn.execute(sql, []).unwrap() > 0, "{sql}");
         assert_ne!(graph_digest(&conn).unwrap(), before, "{sql}");
+        let changes = diff_graphs(&Connection::open(snapshot).unwrap(), &conn).unwrap();
+        assert!(
+            serde_json::to_value(changes).unwrap()["summary"]
+                .as_object()
+                .unwrap()
+                .values()
+                .any(|count| count != 0),
+            "{sql}"
+        );
     }
 }
 
@@ -274,4 +376,85 @@ fn digest_distinguishes_storage_classes_and_orders_nullable_keys() {
     insert(0.2);
     insert(0.1);
     assert_eq!(graph_digest(&conn).unwrap(), before);
+}
+
+#[test]
+fn digest_is_stable_across_an_unchanged_sync() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = index(&dir.path().join("graph.db"), dir.path());
+    let before = graph_digest(&conn).unwrap();
+    std::thread::sleep(Duration::from_millis(1100));
+
+    assert!(sync_repo(&conn, dir.path()).unwrap().unchanged);
+    assert_eq!(graph_digest(&conn).unwrap(), before);
+}
+
+#[test]
+fn forced_sync_can_change_the_digest_with_an_empty_diff() {
+    let dir = tempfile::tempdir().unwrap();
+    let conn = index(&dir.path().join("graph.db"), dir.path());
+    let before = graph_digest(&conn).unwrap();
+    let snapshot = dir.path().join("before.db");
+    conn.execute("VACUUM INTO ?1", [snapshot.to_str().unwrap()])
+        .unwrap();
+    std::thread::sleep(Duration::from_millis(1100));
+
+    brigade_code_graph::store::sync_repo_force(&conn, dir.path(), true).unwrap();
+    assert_ne!(graph_digest(&conn).unwrap(), before);
+    let diff = diff_graphs(&Connection::open(snapshot).unwrap(), &conn).unwrap();
+    let diff = serde_json::to_value(diff).unwrap();
+    assert!(
+        diff["summary"]
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|count| count == 0)
+    );
+}
+
+#[test]
+fn digest_reports_hot_rollback_journal_without_modifying_it() {
+    const CHILD_DB: &str = "BRIGADE_TEST_ROLLBACK_CHILD_DB";
+    if let Some(path) = std::env::var_os(CHILD_DB) {
+        let writer = Connection::open(PathBuf::from(path)).unwrap();
+        writer
+            .execute_batch(
+                "PRAGMA journal_mode=DELETE;
+             PRAGMA synchronous=FULL;
+             PRAGMA cache_size=1;
+             BEGIN IMMEDIATE;
+             UPDATE files SET content_hash=hex(zeroblob(131072));",
+            )
+            .unwrap();
+        // Leave the transaction for SQLite's recovery on the next open.
+        std::process::exit(0);
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("graph.db");
+    drop(index(&db, dir.path()));
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "digest_reports_hot_rollback_journal_without_modifying_it",
+        ])
+        .env(CHILD_DB, &db)
+        .output()
+        .unwrap();
+    assert!(child.status.success(), "{child:?}");
+
+    let journal = db.with_extension("db-journal");
+    let expected = [file_state(&db), file_state(&journal)];
+    assert_ne!(
+        expected[1].0[0], 0,
+        "journal header must be initialized for recovery"
+    );
+    let output = command(&db, dir.path(), &["digest", "--json"])
+        .output()
+        .unwrap();
+    assert!(
+        !String::from_utf8_lossy(&output.stderr).contains("WAL sidecars"),
+        "{output:?}"
+    );
+    assert_failure(output, "rollback journal requires recovery");
+    assert_eq!([file_state(&db), file_state(&journal)], expected);
 }

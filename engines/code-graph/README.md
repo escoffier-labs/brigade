@@ -120,9 +120,15 @@ The digest reads all declared columns in `files`, `symbols`, `edges`,
 `conditional_symbols`, and `skipped_files` in one read transaction. It hashes
 table and column names and typed, length-prefixed values in primary-key order,
 with full-value tie breaking for nullable keys. Integer and text values have
-different tags, and NULL differs from empty strings and BLOBs. Sync provenance
-and maintenance metadata, the full-text index and its shadow tables, physical
-rowids, schema objects, and SQLite ID-allocation bookkeeping are excluded.
+different tags, and NULL differs from empty strings and BLOBs. Format 2 binds
+the format and database schema versions into the hash. The `meta` table, the
+full-text index and its shadow tables, physical rowids, schema objects, and
+SQLite ID-allocation bookkeeping are excluded. The hash includes per-row
+timestamps such as `files.indexed_at`, `files.modified_at`, and
+`skipped_files.skipped_at`.
+
+An unchanged sync leaves the digest unchanged. A forced sync or file reindex
+that refreshes row timestamps changes the digest even when the diff is empty.
 
 The command uses an existing database and does not synchronize or take the
 engine's sync lock. It reports an error for unsupported schemas or unreadable

@@ -242,8 +242,8 @@ pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Init { root } => {
             let db_path = db_path(cli.db, &root)?;
-            let conn = open_db(&db_path)?;
-            init_schema(&conn)?;
+            let conn = open_db(&db_path).map_err(init_writer_error)?;
+            init_schema(&conn).map_err(init_writer_error)?;
             println!("initialized {}", db_path.display());
         }
         Command::Sync { root, force } => {
@@ -709,6 +709,16 @@ pub fn run(cli: Cli) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn init_writer_error(error: anyhow::Error) -> anyhow::Error {
+    let message = error.to_string();
+    if let Some(detail) = message.strip_prefix("another sync is already running for this database")
+    {
+        anyhow::anyhow!("another writer holds this database{detail}")
+    } else {
+        error
+    }
 }
 
 fn default_query_db_path(explicit: Option<PathBuf>) -> Result<PathBuf> {

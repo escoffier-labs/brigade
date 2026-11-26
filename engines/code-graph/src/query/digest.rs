@@ -7,7 +7,7 @@ use sha2::{Digest, Sha256};
 
 use crate::store::schema::{SCHEMA_VERSION, checked_schema_version};
 
-const FORMAT_VERSION: u32 = 1;
+const FORMAT_VERSION: u32 = 2;
 const CONTENT_TABLES: &[&str] = &[
     "conditional_symbols",
     "edges",
@@ -35,7 +35,7 @@ pub fn graph_digest(conn: &Connection) -> Result<GraphDigest> {
     );
 
     let mut hash = Sha256::new();
-    let mut buffer = b"code-graph-content-v1\0".to_vec();
+    let mut buffer = digest_prefix(FORMAT_VERSION, SCHEMA_VERSION);
     for table in CONTENT_TABLES {
         hash_table(&snapshot, table, &mut hash, &mut buffer)
             .with_context(|| format!("cannot digest graph table {table}"))?;
@@ -47,6 +47,14 @@ pub fn graph_digest(conn: &Connection) -> Result<GraphDigest> {
         schema_version: SCHEMA_VERSION,
         sha256: format!("{:x}", hash.finalize()),
     })
+}
+
+fn digest_prefix(format: u32, schema: u32) -> Vec<u8> {
+    let mut prefix = Vec::new();
+    field(&mut prefix, b'D', b"code-graph-content");
+    field(&mut prefix, b'V', &format.to_be_bytes());
+    field(&mut prefix, b'V', &schema.to_be_bytes());
+    prefix
 }
 
 fn hash_table(
@@ -241,4 +249,21 @@ fn validate_diff_row(row: &rusqlite::Row<'_>, columns: &DiffColumns) -> Result<(
         DiffColumns::Other => {}
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn digest_encoding_binds_both_versions() {
+        let hash = |format, schema| {
+            let mut bytes = digest_prefix(format, schema);
+            field(&mut bytes, b'S', b"same content");
+            Sha256::digest(bytes)
+        };
+        let baseline = hash(FORMAT_VERSION, SCHEMA_VERSION);
+        assert_ne!(baseline, hash(FORMAT_VERSION + 1, SCHEMA_VERSION));
+        assert_ne!(baseline, hash(FORMAT_VERSION, SCHEMA_VERSION + 1));
+    }
 }

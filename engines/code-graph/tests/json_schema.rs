@@ -294,10 +294,10 @@ fn graph_digest_json_and_text_shapes() {
     );
     assert_eq!(
         json,
-        serde_json::json!({"format_version": 1, "schema_version": SCHEMA_VERSION, "sha256": sha256})
+        serde_json::json!({"format_version": 2, "schema_version": SCHEMA_VERSION, "sha256": sha256})
     );
     assert_eq!(
         String::from_utf8(run(&[])).unwrap(),
-        format!("format_version: 1\nschema_version: {SCHEMA_VERSION}\nsha256: {sha256}\n")
+        format!("format_version: 2\nschema_version: {SCHEMA_VERSION}\nsha256: {sha256}\n")
     );
 }

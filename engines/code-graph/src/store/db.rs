@@ -1,6 +1,7 @@
 //! Database lifecycle: path resolution, connection opening, and time helpers.
 
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -167,14 +168,20 @@ pub fn open_db(path: &Path) -> Result<Connection> {
     // Revalidate on the actual writable handle. Even if a writer that
     // does not use our advisory lock races the probe, a rejected handle
     // must not checkpoint that database on close.
-    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)?;
+    checkpoint_on_close(&conn, false)?;
     {
         let snapshot = conn.unchecked_transaction()?;
         checked_schema_version(&snapshot)?;
     }
-    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, false)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     Ok(conn)
+}
+
+// Do not let an open or rejected writer checkpoint on drop. A successful
+// initialization or sync restores normal close behavior under the sync lock.
+pub(super) fn checkpoint_on_close(conn: &Connection, enabled: bool) -> Result<()> {
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, !enabled)?;
+    Ok(())
 }
 
 pub(super) fn lock_connection(conn: &Connection) -> Result<Option<SyncLock>> {
@@ -219,19 +226,48 @@ pub fn open_read_only(path: &Path) -> Result<Connection> {
     .with_context(|| format!("failed to open {} read-only", path.display()))?;
     {
         let snapshot = conn.unchecked_transaction()?;
-        checked_schema_version(&snapshot).map_err(|error| {
-            match error
-                .downcast_ref::<rusqlite::Error>()
-                .and_then(rusqlite::Error::sqlite_error_code)
-            {
-                Some(rusqlite::ErrorCode::ReadOnly | rusqlite::ErrorCode::CannotOpen) => {
-                    error.context("cannot read database: SQLite WAL sidecars must be accessible")
-                }
-                _ => error,
-            }
-        })?;
+        checked_schema_version(&snapshot).map_err(|error| read_probe_error(path, error))?;
     }
     Ok(conn)
+}
+
+fn read_probe_error(path: &Path, error: anyhow::Error) -> anyhow::Error {
+    let Some(sqlite) = error
+        .downcast_ref::<rusqlite::Error>()
+        .and_then(rusqlite::Error::sqlite_error)
+    else {
+        return error;
+    };
+    match sqlite.extended_code {
+        rusqlite::ffi::SQLITE_READONLY_ROLLBACK => {
+            error.context("cannot read database: SQLite rollback journal requires recovery")
+        }
+        rusqlite::ffi::SQLITE_READONLY_RECOVERY => {
+            error.context("cannot read database: SQLite WAL requires recovery")
+        }
+        rusqlite::ffi::SQLITE_READONLY_CANTINIT | rusqlite::ffi::SQLITE_READONLY_CANTLOCK => {
+            error.context("cannot read database: SQLite WAL sidecars must be accessible")
+        }
+        _ if matches!(
+            sqlite.code,
+            rusqlite::ErrorCode::ReadOnly | rusqlite::ErrorCode::CannotOpen
+        ) && has_wal_header(path) =>
+        {
+            error.context("cannot read WAL database: check access to the SQLite WAL sidecars")
+        }
+        _ => error,
+    }
+}
+
+fn has_wal_header(path: &Path) -> bool {
+    // PRAGMA journal_mode can fail on the same inaccessible snapshot. On
+    // error only, read the SQLite header's write/read format versions.
+    let mut header = [0; 20];
+    fs::File::open(path)
+        .and_then(|mut file| file.read_exact(&mut header))
+        .is_ok()
+        && &header[..16] == b"SQLite format 3\0"
+        && header[18..20] == [2, 2]
 }
 
 pub fn now_ts() -> i64 {

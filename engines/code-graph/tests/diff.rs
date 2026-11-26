@@ -480,6 +480,10 @@ if __name__ == \"__main__\":
 }
 
 fn duplicate_graph(order: &[usize], changed: bool) -> rusqlite::Connection {
+    generated_graph(order, 0, changed)
+}
+
+fn generated_graph(order: &[usize], variant: usize, changed: bool) -> rusqlite::Connection {
     let conn = rusqlite::Connection::open_in_memory().unwrap();
     init_schema(&conn).unwrap();
     meta::upsert(&conn, "schema_version", &SCHEMA_VERSION.to_string()).unwrap();
@@ -490,8 +494,20 @@ fn duplicate_graph(order: &[usize], changed: bool) -> rusqlite::Connection {
     )
     .unwrap();
     for &idx in order {
-        let hash = [Some("a"), None, Some("b"), Some("a"), None, Some("c")][idx];
-        let signature = if changed && idx == 2 { "fn(x)" } else { "fn()" };
+        let hashes = [Some("a"), None, Some("b"), Some("a"), None, Some("c")];
+        let hash = hashes[(idx + variant) % hashes.len()];
+        let signature = if changed && idx == 2 {
+            "fn(x)"
+        } else if variant > 0 && (idx + variant) % 2 == 0 {
+            "fn(y)"
+        } else {
+            "fn()"
+        };
+        let span = if variant == 0 {
+            1
+        } else {
+            1 + (idx + variant) % 3
+        };
         conn.execute(
             "INSERT INTO symbols(id,kind,name,qualified_name,file_path,start_line,end_line,
                                  signature,content_hash,body_hash)
@@ -499,7 +515,7 @@ fn duplicate_graph(order: &[usize], changed: bool) -> rusqlite::Connection {
             rusqlite::params![
                 format!("symbol-{idx}"),
                 (idx + 1) as i64,
-                (idx + 2) as i64,
+                (idx + 1 + span) as i64,
                 signature,
                 hash
             ],
@@ -571,20 +587,34 @@ fn equal_digest_implies_empty_diff_for_varied_insertion_orders() {
     let mut seed = 883u32;
     for count in 1..=6 {
         let mut order: Vec<_> = (0..count).collect();
-        for changed in [false, true] {
-            let before = duplicate_graph(&order, changed);
+        for variant in 0..4 {
+            let before = generated_graph(&order, variant, false);
             let expected = graph_digest(&before).unwrap();
             for _ in 0..8 {
                 for i in (1..order.len()).rev() {
                     seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
                     order.swap(i, seed as usize % (i + 1));
                 }
-                let after = duplicate_graph(&order, changed);
+                let after = generated_graph(&order, variant, false);
                 assert_eq!(expected, graph_digest(&after).unwrap());
                 let result = diff_graphs(&before, &after).unwrap();
                 assert!(result.added_nodes.is_empty() && result.removed_nodes.is_empty());
                 assert!(result.changed_nodes.is_empty(), "{result:?}");
                 assert!(result.added_edges.is_empty() && result.removed_edges.is_empty());
+
+                after
+                    .execute(
+                        "UPDATE symbols SET signature='fn(changed)' WHERE id='symbol-0'",
+                        [],
+                    )
+                    .unwrap();
+                assert_ne!(expected, graph_digest(&after).unwrap());
+                assert!(
+                    !diff_graphs(&before, &after)
+                        .unwrap()
+                        .changed_nodes
+                        .is_empty()
+                );
             }
         }
     }
