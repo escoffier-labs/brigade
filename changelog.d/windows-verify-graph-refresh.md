@@ -1,0 +1,1 @@
+- On Windows, verification and agent runs use committed code graph snapshots. Syncs can finish after the caller's wait expires, and `brigade code doctor` reports overdue refreshes and possible stale locks.

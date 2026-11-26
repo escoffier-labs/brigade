@@ -7,6 +7,7 @@ boundary.
 
 from __future__ import annotations
 
+import argparse
 import math
 import os
 import re
@@ -14,8 +15,7 @@ import sys
 from collections.abc import Sequence
 from pathlib import Path
 
-from . import context_cmd, proc
-
+from . import code_graph_background, context_cmd, engine_paths, proc
 
 # `brigade search` executable aliases remain supported through at least this
 # compatibility window. Keep these public constants so release tooling and
@@ -90,6 +90,43 @@ def _rebrand(text: str) -> str:
     return _ENGINE_USAGE_LINE.sub(r"\1Usage: brigade code", _ENGINE_DEPRECATION_LINE.sub("", text))
 
 
+def _warn_engine_lock(cwd: Path | None, forwarded: Sequence[str]) -> None:
+    parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False, exit_on_error=False)
+    parser.add_argument("root", nargs="?", default=".", type=Path)
+    parser.add_argument("--db")
+    parser.add_argument("--json", action="store_true")
+    try:
+        args, unknown = parser.parse_known_args(forwarded)
+    except argparse.ArgumentError:
+        return
+    if unknown:
+        return
+    base = cwd or Path.cwd()
+    explicit = args.db or os.environ.get(engine_paths.CODE_GRAPH_DB_ENV)
+    try:
+        repo = (base / args.root).resolve()
+        db = engine_paths.code_graph_db(base if explicit else repo, explicit=explicit).path.resolve()
+        lock = code_graph_background.engine_lock_path(db)
+        lock_present = lock.is_file()
+    except (OSError, RuntimeError, ValueError):
+        return
+    refresh = code_graph_background.status_or_start(repo, db)
+    if refresh and (pid := refresh.get("engine_pid")) is not None:
+        print(
+            f"warning: code graph refresh is still running after {refresh['elapsed_seconds']}s (engine PID {pid}). "
+            "Confirm the PID belongs to the code-graph engine before ending it. Then check for a leftover lock.",
+            file=sys.stderr,
+        )
+    if lock_present:
+        display_path = "".join(char for char in str(lock) if char.isprintable())
+        print(
+            f"warning: a stale engine lock may block updates: {display_path}. "
+            "Confirm no code-graph engine process is running, then delete the file. "
+            "The engine can reclaim it after one hour.",
+            file=sys.stderr,
+        )
+
+
 def run(verb: str, arguments: Sequence[str]) -> int:
     """Run one code graph engine command and relay its output and exit status."""
 
@@ -127,7 +164,9 @@ def run(verb: str, arguments: Sequence[str]) -> int:
         return 127
 
     argv = [binary, verb, *forwarded]
-    if cwd is None:
+    if verb == "sync" and not code_graph_background.may_run_killable_foreground_sync():
+        result = code_graph_background.run_windows_sync(argv, timeout=timeout, cwd=cwd)
+    elif cwd is None:
         result = proc.run(argv, timeout=timeout)
     else:
         result = proc.run(argv, timeout=timeout, cwd=cwd)
@@ -135,4 +174,6 @@ def run(verb: str, arguments: Sequence[str]) -> int:
         print(_rebrand(result.stdout), end="")
     if result.stderr:
         print(_rebrand(result.stderr), end="", file=sys.stderr)
+    if verb == "doctor" and not code_graph_background.may_run_killable_foreground_sync():
+        _warn_engine_lock(cwd, forwarded)
     return result.code
