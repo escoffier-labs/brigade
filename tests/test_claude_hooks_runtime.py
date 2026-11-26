@@ -3797,34 +3797,33 @@ def test_recognizer_budget_exhaustion_returns_false(monkeypatch):
 
 @pytest.mark.parametrize("event", ["PreToolUse", "PostToolUse"])
 def test_long_runner_command_through_pre_and_post_tool_use(target, monkeypatch, event):
-    from brigade.claude_hooks import command_tokens
+    from brigade import observed_checks
 
-    measured = set()
-    charge = command_tokens.RecognitionBudget.charge
-
-    def measured_charge(self, steps):
-        measured.add(self)
-        return charge(self, steps)
-
-    monkeypatch.setattr(command_tokens.RecognitionBudget, "charge", measured_charge)
-    segments = ["npx --unfamiliar " + "! " * 1360 + "echo" for _ in range(22)]
+    monkeypatch.setattr(observed_checks, "_capture_clock", lambda: 0.0)
+    budgets = _measure_event_budget(monkeypatch)
+    steps = []
     lead = "pytest" if event == "PreToolUse" else "true"
-    command = " && ".join([lead, *segments])
-    payload = _payload(target, event, tool_name="Bash", tool_input={"command": command})
-    started = time.perf_counter()
-    result = runtime.handle_payload(event, payload)
-    elapsed = time.perf_counter() - started
-    assert len(measured) == 1
-    (budget,) = measured
-    assert 0 < budget.steps < 2_000_000
-    assert not budget.exhausted
-    if event == "PreToolUse":
-        assert elapsed < 3
-        output = result["hookSpecificOutput"]
-        assert output["permissionDecision"] == "deny"
-        assert "Route verification through Brigade" in output["permissionDecisionReason"]
-    else:
-        assert result is None
+    for count in (11, 22):
+        segments = ["npx --unfamiliar " + "! " * 1360 + "echo"] * count
+        command = " && ".join([lead, *segments])
+        payload = _payload(
+            target, event, session_id=f"runner-{count}", tool_name="Bash", tool_input={"command": command}
+        )
+        started = time.perf_counter()
+        result = runtime.handle_payload(event, payload)
+        elapsed = time.perf_counter() - started
+        if count == 22:
+            assert elapsed < _HOOK_TIME_BACKSTOP_SECONDS
+        budget = _assert_hook_steps(command, budgets)
+        steps.append(budget.steps)
+        assert not budget.stopped
+        if event == "PreToolUse":
+            output = result["hookSpecificOutput"]
+            assert output["permissionDecision"] == "deny"
+            assert "Route verification through Brigade" in output["permissionDecisionReason"]
+        else:
+            assert result is None
+    _assert_hook_scaling(*steps)
 
 
 _STRESS_PREFIXES = {
@@ -4025,32 +4024,55 @@ def test_recognizer_seeded_comparison_with_main():
     assert digest == expected[os.name]
 
 
-def _bounded_hook_commands():
-    repeated = {shape: _recognition_stress(shape, 60_000) for shape in _STRESS_PREFIXES}
-    command = "echo done"
-    verification = "pytest"
+def _bounded_hook_commands(divisor):
+    repeated = {shape: _recognition_stress(shape, 60_000 // divisor) for shape in _STRESS_PREFIXES}
+    padding = "x" * (2048 // divisor)
+    command = f"echo {padding}"
+    verification = f"pytest {padding}"
     for _ in range(5):
         command = shlex.join(["bash", "-lc", command])
         verification = shlex.join(["bash", "-lc", verification])
     return {
         **{shape: (command, False) for shape, command in repeated.items()},
-        "dollar-spans": ("echo " + "$(true)" * 500, False),
-        "backtick-spans": ("echo " + "`true` " * 700, False),
-        "long-spans": ("echo " + "$(true)" * 8000, False),
-        "nested-substitutions": ("echo $(echo $(echo $(echo $(echo done))))", False),
+        "dollar-spans": ("echo " + "$(true)" * (500 // divisor), False),
+        "backtick-spans": ("echo " + "`true` " * (700 // divisor), False),
+        "long-spans": ("echo " + "$(true)" * (8000 // divisor), False),
+        "nested-substitutions": (f"echo $(echo $(echo $(echo $(echo {padding}))))", False),
         "nested-shell": (command, False),
         "nested-verification": (verification, True),
-        "heredoc-body": ("cat <<EOF\n" + "x" * 59_980 + "\nEOF\n", False),
-        "git-message": ("git commit -m '" + "x" * 59_980 + "'", False),
-        "and-chain": (("true && " * 8124) + "true", False),
-        "semicolon-chain": (("true; " * 10832) + "true", False),
-        "pipe-chain": (("true | " * 9284) + "true", False),
-        "stdin-limit": ("echo " + "x" * 261_995, True),
-        **{f"cd-{n}": (("cd a && " * n) + "pytest", True) for n in (200, 400, 1000, 8000)},
+        "heredoc-body": ("cat <<EOF\n" + "x" * (59_980 // divisor) + "\nEOF\n", False),
+        "git-message": ("git commit -m '" + "x" * (59_980 // divisor) + "'", False),
+        "and-chain": (("true && " * (8124 // divisor)) + "true", False),
+        "semicolon-chain": (("true; " * (10832 // divisor)) + "true", False),
+        "pipe-chain": (("true | " * (9284 // divisor)) + "true", False),
+        "stdin-limit": ("echo " + "x" * (261_995 // divisor), True),
+        **{f"cd-{n}": (("cd a && " * (n // divisor)) + "pytest", True) for n in (200, 400, 1000, 8000)},
     }
 
 
-_BOUNDED_HOOK_COMMANDS = _bounded_hook_commands()
+_BOUNDED_HOOK_COMMANDS = _bounded_hook_commands(1)
+_SHORT_HOOK_COMMANDS = _bounded_hook_commands(2)
+_HOOK_TIME_BACKSTOP_SECONDS = 9
+
+
+def _hook_commands_at_both_sizes(shape):
+    return _SHORT_HOOK_COMMANDS[shape], _BOUNDED_HOOK_COMMANDS[shape]
+
+
+def _assert_hook_steps(command, budgets, *, shape=None):
+    assert len(budgets) == 1
+    budget = budgets.pop()
+    # Five fixed shell layers rescan their payloads while unquoting them.
+    per_character = 100 if shape in {"nested-shell", "nested-verification"} else 40
+    ceiling = 65_536 + per_character * len(command)
+    assert 0 < budget.steps <= ceiling, (budget.steps, ceiling, budget.phase_steps)
+    return budget
+
+
+def _assert_hook_scaling(short_steps, full_steps):
+    # Allow 12.5% above doubling for token and path boundaries. Repeating a
+    # full suffix scan would approach 4x, even with the fixed setup costs.
+    assert 4 * full_steps <= 9 * short_steps, (short_steps, full_steps)
 
 
 def _measure_event_budget(monkeypatch):
@@ -4070,21 +4092,28 @@ def _measure_event_budget(monkeypatch):
 @pytest.mark.parametrize("shape", _BOUNDED_HOOK_COMMANDS)
 @pytest.mark.parametrize("event", ["PreToolUse", "PostToolUse", "PostToolUseFailure"])
 def test_claude_bash_event_work_bound(target, monkeypatch, shape, event):
+    from brigade import observed_checks
     from brigade.claude_hooks import command_tokens
 
+    monkeypatch.setattr(observed_checks, "_capture_clock", lambda: 0.0)
     budgets = _measure_event_budget(monkeypatch)
-    command, deny = _BOUNDED_HOOK_COMMANDS[shape]
-    started = time.perf_counter()
-    result = runtime.handle_payload(event, _payload(target, event, tool_name="Bash", tool_input={"command": command}))
-    elapsed = time.perf_counter() - started
-    assert elapsed < 3
-    assert len(budgets) == 1
-    assert all(budget.steps <= 4 * command_tokens.MAX_RECOGNITION_STEPS for budget in budgets)
-    if event == "PreToolUse":
-        output = (result or {}).get("hookSpecificOutput", {})
-        assert (output.get("permissionDecision") == "deny") is deny
-        if len(command) <= command_tokens.MAX_COMMAND_CHARS:
-            assert "classification limit" not in output.get("permissionDecisionReason", "")
+    steps = []
+    for index, (command, deny) in enumerate(_hook_commands_at_both_sizes(shape)):
+        payload = _payload(
+            target, event, session_id=f"event-{index}", tool_name="Bash", tool_input={"command": command}
+        )
+        started = time.perf_counter()
+        result = runtime.handle_payload(event, payload)
+        elapsed = time.perf_counter() - started
+        if index == 1:
+            assert elapsed < _HOOK_TIME_BACKSTOP_SECONDS
+        steps.append(_assert_hook_steps(command, budgets, shape=shape).steps)
+        if event == "PreToolUse":
+            output = (result or {}).get("hookSpecificOutput", {})
+            assert (output.get("permissionDecision") == "deny") is deny
+            if len(command) <= command_tokens.MAX_COMMAND_CHARS:
+                assert "classification limit" not in output.get("permissionDecisionReason", "")
+    _assert_hook_scaling(*steps)
 
 
 @pytest.mark.parametrize("form", ["copy", "list", "islice", "iterate", "slice"])
