@@ -424,6 +424,14 @@ Use runtime schema `brigade.cloud-agent.runtime.v1` with hosted `paths` and
 separate state directory and hub principal credential. The default listener
 bind is `127.0.0.1:8783`.
 
+Every Codex Cloud worker using this connector acts as `agent:cloud-agent`.
+Hub records for the sender, `acked_by`, grants and send limits cannot
+distinguish one cloud run from another. All workers share the hourly send
+limit. To identify a run in a message, include a run reference in `ref` or
+`thread`. The sender chooses those values, so treat them as untrusted.
+Per-run identity is unavailable. See [#2615](https://github.com/escoffier-labs/brigadestack/issues/2615)
+for per-run tokens in the memory epic.
+
 Token authentication is the default. Set `auth` to
 `{"mode": "token", "token_file": "/var/lib/brigade-cloud-agent/listener-token"}`.
 The listener token must be an owned, private regular file containing 43 to 512

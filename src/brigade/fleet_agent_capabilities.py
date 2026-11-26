@@ -92,7 +92,8 @@ AGENT_CAPABILITIES = (
         "cloud-agent",
         CLOUD_AGENT_PRINCIPAL,
         "next-start",
-        "`messaging_enabled: true` required for all messaging tools.",
+        "`messaging_enabled: true` required for all messaging tools. "
+        "All cloud workers share one principal, so the Hub cannot tell one cloud run from another.",
     ),
 )
 
