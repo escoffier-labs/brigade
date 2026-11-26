@@ -66,14 +66,14 @@ def test_hub_image_is_non_root_and_has_a_single_writable_state_directory():
     assert 'org.opencontainers.image.version="${BRIGADE_VERSION}"' in text
     pin = (
         "--build-arg BRIGADE_REF=e6009f6969dc6e45db2ab93790aa3e407c791409 \\\n"
-        "  --build-arg BRIGADE_SHA256=68014a8e99c61f5e547d8bf223a5f3ad7ea31f60355a4c30356bffd78e15c168 \\\n"
+        "  --build-arg BRIGADE_SHA256=e85f87a49e1ec92e780a250bee08747efb4c592ac1311733085241761c60f0c3 \\\n"
         "  --build-arg BRIGADE_VERSION=0.28.0 \\\n"
     )
     assert pin in (ROOT / "docs" / "runbooks" / "fleet-hub-containers.md").read_text(encoding="utf-8")
     smoke = (ROOT / "tests" / "fleet_hub_container_smoke.py").read_text(encoding="utf-8")
     for name in ("BRIGADE_REF", "BRIGADE_SHA256", "BRIGADE_VERSION"):
         assert f'f"{name}={{{name}}}",' in smoke
-    assert 'BRIGADE_SHA256 = "68014a8e99c61f5e547d8bf223a5f3ad7ea31f60355a4c30356bffd78e15c168"' in smoke
+    assert 'BRIGADE_SHA256 = "e85f87a49e1ec92e780a250bee08747efb4c592ac1311733085241761c60f0c3"' in smoke
     assert "setuptools==75.8.0 wheel==0.45.1" in text
     assert "--no-build-isolation /tmp/brigade.tar.gz" in text
     assert 'org.opencontainers.image.revision="${BRIGADE_REF}"' in text
