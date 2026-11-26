@@ -1,13 +1,13 @@
 {
   "covers": {
-    "cutoff_at": "2026-11-25T04:24:25Z",
-    "main_sha": "675a811142b90f19f7323f2d3322034aff18b6ee"
+    "cutoff_at": "2026-11-25T20:18:10Z",
+    "main_sha": "6171295e58c13f855de541ee75d81582aa5572c8"
   },
   "policy": {
     "config_sha256": "0123f241efc5e833980aab81e71f8bea6d64fe8902f8b16c3bc4ea8b2fcc2bb2",
     "scorecard_policy": "scorecard.v1"
   },
-  "prev_ledger_sha256": "9a95077055b44a133a97c04be5075323b9c7fe3f0f89e801f66fe6ec05080d88",
+  "prev_ledger_sha256": "f95d8ff046ca61200d69c164a3385da3c1864279a352035aee2eae80aaa25a6d",
   "schema": "brigade.outcome_ledger.v1",
   "subjects": {
     "skill:note": {
@@ -19,24 +19,29 @@
           "skill_md_sha256": "457078ef56f4143910ba68729198285e204645d66ababc557e17b80496fe4cb1"
         }
       ],
-      "band": "candidate",
+      "band": "unseen",
       "current": {
-        "commit": "675a811142b90f19f7323f2d3322034aff18b6ee",
-        "fingerprint": "394ee1b104916188c8706b6ba719c4b5deafce05b690f87a731096698a30a120"
+        "commit": "6171295e58c13f855de541ee75d81582aa5572c8",
+        "fingerprint": "a3f39d2590a384715e0e83ca97474fe2750c511994b7ec156809dbd78b2aca5f"
       },
       "decision": {
-        "action": "install",
-        "code": null,
-        "decided_at": "2026-11-25T04:24:25Z",
-        "reason": "verified helped outnumbers regressions"
+        "action": "rollback",
+        "code": "regression_restore",
+        "decided_at": "2026-11-25T20:18:10Z",
+        "reason": "verified regression on text that was never approved"
       },
       "demoted": [],
-      "last_action_at": "2026-11-25T04:24:25Z",
+      "last_action_at": "2026-11-25T20:18:10Z",
       "manifest_id": "skill-note",
       "manifest_sha256": "28e3d0939827de26c0cf63a816579b97185399f92ed3b017ffb12f4f4b6af1a0",
-      "restore": null,
+      "restore": {
+        "from_commit": "6171295e58c13f855de541ee75d81582aa5572c8",
+        "from_fingerprint": "a3f39d2590a384715e0e83ca97474fe2750c511994b7ec156809dbd78b2aca5f",
+        "to_commit": "682a0ce07a397e058697c40122d94c4ce02f7db8",
+        "to_fingerprint": "394ee1b104916188c8706b6ba719c4b5deafce05b690f87a731096698a30a120"
+      },
       "since_commit": "f61f9b67f4aa63d0118ad993cd8ac5e63e92ba62",
-      "status": "promoted",
+      "status": "candidate",
       "subject_path": "src/brigade/templates/skills/note/SKILL.md",
       "trials": [
         {
@@ -90,6 +95,21 @@
           "outcome": "helped",
           "reason": null,
           "sha": "675a811142b90f19f7323f2d3322034aff18b6ee"
+        },
+        {
+          "fingerprint": "a3f39d2590a384715e0e83ca97474fe2750c511994b7ec156809dbd78b2aca5f",
+          "jobs": [
+            {
+              "attempt": 1,
+              "completed_at": "2026-11-25T20:17:40Z",
+              "conclusion": "failure",
+              "job_id": 139484771235,
+              "run_id": 45693440177
+            }
+          ],
+          "outcome": "hurt",
+          "reason": "failure",
+          "sha": "6171295e58c13f855de541ee75d81582aa5572c8"
         }
       ]
     }
