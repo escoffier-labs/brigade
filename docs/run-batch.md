@@ -306,18 +306,33 @@ tree, including an ignored `.venv`, stay in the worker's original checkout.
 The selective argv must name a tool in the coordinator's trusted environment
 or the base's regular `scripts/verify-focused` launcher. The launcher and its
 tracked script helpers must match the base. The runner uses the coordinator's
-Python and tools with a fresh home, a separate temporary directory, and a
-restricted environment. Install any required tools and dependencies in the
-coordinator environment. A verifier that requires an editable install tied to
-its working directory can fail in a disposable checkout.
+Python and tools through Linux bubblewrap. It requires working user, mount,
+PID, and network namespaces. The sandbox mounts the toolchain read-only and
+allows writes to the candidate checkout and private temp directory. It has a
+fresh home. The coordinator's run directories, store, and credentials stay
+outside the sandbox. The PID namespace contains subprocesses through timeout
+and cleanup, including children that start a new session.
+
+Install the runner and its dependencies in the coordinator environment.
+Python gets the candidate's `src/` directory, when present, and checkout root
+at the start of its import path. The coordinator checks top-level import
+origins in the sandbox before the runner starts. In the base's
+`verify/required-tests.json`, set `"import_packages": ["example_package"]`
+for namespace packages, single-file modules, or projects where the import name
+differs from the distribution name. The coordinator otherwise infers regular
+packages from the base tree's `src/`, or root packages when the base has a
+`pyproject.toml`. Set an empty array when the verifier has no Python package
+to check. Pytest plugin autoload is disabled in the sandbox. Configure any
+required plugins in the trusted runner.
 
 The infrastructure check covers `scripts/`, `verify/`, the configured
 planner files, `conftest.py`, `pyproject.toml`, pytest and tool configuration,
 and Python startup files such as `sitecustomize.py`, `usercustomize.py`, and
-`.pth` files. A recorded failure reflects the coordinator's check. A recorded
-pass means the base-trusted runner passed on the recorded candidate tree.
-Tests and application code come from that candidate. Review the diff before
-accepting or integrating it.
+`.pth` files. A recorded failure reflects the coordinator's check. A
+completed verification includes `trust: "candidate-authored-tests"`. Consumers
+may use it as evidence that the base-trusted runner passed on the recorded
+candidate tree and its worker-authored tests. Review the diff before accepting
+or integrating it.
 
 Verification holds the task's existing run lock and finishes before artifact
 collection. The coordinator compares the Git tree and HEAD on both sides of
@@ -346,6 +361,9 @@ A task with a result sidecar and no eligible run records a
 - `plan-unavailable` when required-test planning fails.
 - `verify-infra-modified` when the candidate changes verification infrastructure.
 - `verifier-unavailable` when the coordinator cannot prepare or start the verifier.
+- `sandbox-unavailable` when the Linux sandbox cannot be established.
+- `candidate-symlink-escape` when the candidate contains an absolute link or a link that resolves outside the checkout.
+- `candidate-import-mismatch` when the sandbox cannot resolve an expected import inside the candidate checkout.
 
 An omitted or false `verify` leaves both fields absent.
 

@@ -1,1 +1,1 @@
-- Set `"verify": true` on an explicit batch to run base-trusted required checks on a disposable copy of each eligible candidate tree and record the coordinator's receipt digest with the attempt.
+- Set `"verify": true` on an explicit batch to run base-trusted checks on eligible candidate trees in a Linux sandbox and record the receipt with the attempt. Passing results label the tests as candidate-authored.

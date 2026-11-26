@@ -149,14 +149,18 @@ def command(
 
 
 def materialize(source: Path, target: Path, env: dict[str, str], base: str, head: str, tree: str) -> None:
-    """Populate a private repository. Share immutable Git objects, keeping its config and refs local."""
+    """Populate a private repository with its own objects, config, and refs."""
     objects = git(source, env, "rev-parse", "--path-format=absolute", "--git-path", "objects").rstrip(b"\n")
     if not os.path.isabs(objects) or b"\n" in objects or b"\r" in objects:
         raise ValueError("invalid source object directory")
     target.mkdir()
     git(target, env, "init", "--quiet", "--template=", "--object-format=sha1")
-    (target / ".git/objects/info/alternates").write_bytes(objects + b"\n")
+    alternates = target / ".git/objects/info/alternates"
+    alternates.write_bytes(objects + b"\n")
     git(target, env, "update-ref", "HEAD", head)
     git(target, env, "update-ref", "refs/remotes/origin/main", base)
     git(target, env, "read-tree", tree)
     git(target, env, "checkout-index", "--all")
+    # Retain both commit history for the pinned runner and staged candidate blobs.
+    git(target, env, "repack", "-a", "-d")
+    alternates.unlink()

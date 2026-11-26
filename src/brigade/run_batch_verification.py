@@ -8,8 +8,11 @@ from enum import StrEnum
 from pathlib import Path
 from time import monotonic
 
-from . import run_batch_verify_tree, run_batch_workspace
+from . import run_batch_verify_sandbox, run_batch_verify_tree, run_batch_workspace
 from .work_cmd import verification, verify_required, verify_runtime
+
+_VERIFY_TIMEOUT = 900
+_PASS_TRUST = "candidate-authored-tests"
 
 
 class Skip(StrEnum):
@@ -26,6 +29,9 @@ class Skip(StrEnum):
     PLAN_UNAVAILABLE = "plan-unavailable"
     VERIFY_INFRA_MODIFIED = "verify-infra-modified"
     VERIFIER_UNAVAILABLE = "verifier-unavailable"
+    SANDBOX_UNAVAILABLE = "sandbox-unavailable"
+    CANDIDATE_SYMLINK_ESCAPE = "candidate-symlink-escape"
+    CANDIDATE_IMPORT_MISMATCH = "candidate-import-mismatch"
 
 
 def _skip(reason: Skip) -> dict[str, object]:
@@ -50,20 +56,32 @@ def _run_snapshot(
     identity: tuple[str, str],
     argv: list[str],
     runner: str | None,
+    imports: list[str],
     env: dict[str, str],
 ) -> dict[str, object]:
     tree, head = identity
     run_batch_verify_tree.materialize(source, target, env, base, head, tree)
+    if run_batch_verify_sandbox.has_escaping_symlinks(target.resolve()):
+        return _skip(Skip.CANDIDATE_SYMLINK_ESCAPE)
     if _fingerprint(target, env) != identity:
         return _skip(Skip.TREE_UNAVAILABLE)
     if _fingerprint(source, env) != identity:
         return _skip(Skip.TREE_CHANGED)
     command = run_batch_verify_tree.command(source, target, base, argv, runner, env)
+    binary = run_batch_verify_sandbox.bwrap()
+    sandbox = run_batch_verify_sandbox.prepare(binary, target, env) if binary is not None else None
+    if sandbox is None:
+        return _skip(Skip.SANDBOX_UNAVAILABLE)
+    probe = sandbox.check_imports(imports)
+    if probe in (41, 42):
+        return _skip(Skip.CANDIDATE_IMPORT_MISMATCH)
+    if probe != 0:
+        return _skip(Skip.SANDBOX_UNAVAILABLE)
     with verify_runtime._verify_cancellation_signals():
         receipt, rc = verification._run_verify_commands(
             target,
-            [command],
-            900,
+            [sandbox.command(command)],
+            _VERIFY_TIMEOUT,
             code_graph_timeout=0,
             batch_receipt=verify_runtime.BatchReceipt(run_dir / "batch-verification", attempt_id, env),
         )
@@ -85,6 +103,7 @@ def _run_snapshot(
             and _fingerprint(source, env) == identity
         ):
             summary["status"] = "completed"
+            summary["trust"] = _PASS_TRUST
     return {"verification": summary}
 
 
@@ -110,6 +129,7 @@ def verify(binding: run_batch_workspace.Binding, workspace: Path, run_dir: Path,
         runner = run_batch_verify_tree.repository_runner(config["run_argv"][0])
         if run_batch_verify_tree.infrastructure_changed(source, git_env, base, tree, config["planner_files"], runner):
             return _skip(Skip.VERIFY_INFRA_MODIFIED)
+        imports = run_batch_verify_sandbox.expected_imports(source, base, config.get("import_packages"))
         plan, _, _ = verify_required.plan_snapshot(source, base, tree, deadline=deadline)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
         return _skip(Skip.PLAN_UNAVAILABLE)
@@ -132,6 +152,7 @@ def verify(binding: run_batch_workspace.Binding, workspace: Path, run_dir: Path,
                 (tree, head),
                 plan["run_argv"],
                 runner,
+                imports,
                 env,
             )
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):

@@ -1,6 +1,7 @@
 """Coordinator-owned verification through the guarded batch CLI."""
 
 import json
+import secrets
 import shutil
 import subprocess
 import sys
@@ -79,6 +80,7 @@ def _assert_binding(run_dir, payload, verification, *, status):
         "attempt_id": state.handle.attempt_id,
         "receipt_sha256": digest,
         "status": status,
+        **({"trust": "candidate-authored-tests"} if status == "completed" else {}),
     }
     assert receipt["tree_fingerprint"] == receipt["tree_fingerprint_after"]
     assert receipt["tree_fingerprint"]
@@ -86,14 +88,14 @@ def _assert_binding(run_dir, payload, verification, *, status):
     return receipt
 
 
-def test_isolated_task_records_coordinator_verification(setup, configured_repo, capsys, monkeypatch):
+def test_isolated_task_records_coordinator_verification(setup, linux_sandbox, configured_repo, capsys, monkeypatch):
     monkeypatch.setenv("BRIGADE_ATTEMPT_ID", "unrelated-caller-value")
     _, run_dir, payload = _run_batch(setup, capsys, verify=True)
     receipt = _assert_binding(run_dir, payload, payload["verification"], status="completed")
     assert receipt["commands"][0]["stdout_summary"] == "coordinator check ran"
 
 
-def test_isolated_task_ignores_planted_receipt(setup, configured_repo, capsys, monkeypatch):
+def test_isolated_task_ignores_planted_receipt(setup, linux_sandbox, configured_repo, capsys, monkeypatch):
     fake_digest = None
 
     def model(agent, prompt, **kwargs):
@@ -138,7 +140,7 @@ def test_cloud_result_skips_verification(setup, configured_repo, capsys, monkeyp
     assert not (run_dir / "batch-verification").exists()
 
 
-def test_failed_verifier_records_failure_and_batch_finishes(setup, configured_repo, capsys, monkeypatch):
+def test_failed_verifier_records_failure_and_batch_finishes(setup, linux_sandbox, configured_repo, capsys, monkeypatch):
     checkout = None
 
     def model(agent, prompt, **kwargs):
@@ -157,7 +159,9 @@ def test_failed_verifier_records_failure_and_batch_finishes(setup, configured_re
     assert not Path(receipt["target"]).exists()
 
 
-def test_verifier_that_changes_worktree_cannot_report_success(setup, configured_repo, capsys, monkeypatch):
+def test_verifier_that_changes_worktree_cannot_report_success(
+    setup, linux_sandbox, configured_repo, capsys, monkeypatch
+):
     def model(agent, prompt, **kwargs):
         (Path(kwargs["cwd"]) / "selected.py").write_text(
             "from pathlib import Path\nPath('verifier-write.txt').write_text('changed')\n",
@@ -183,7 +187,7 @@ def test_legacy_spec_replays_with_explicit_false_without_verification(setup, con
     assert len(setup[1]) == 1
 
 
-def test_existing_export_projection_omits_local_verification(setup, configured_repo, capsys, tmp_path):
+def test_existing_export_projection_omits_local_verification(setup, linux_sandbox, configured_repo, capsys, tmp_path):
     result, run_dir, _ = _run_batch(setup, capsys, verify=True)
     result_ref = result["tasks"]["a"]["result_ref"]
     staged = tmp_path / "staged"
@@ -224,7 +228,7 @@ def script_runner(setup, configured_repo):
     _commit(root, "use repository runner")
 
 
-def test_ignored_worker_interpreter_does_not_run(setup, script_runner, capsys, monkeypatch):
+def test_ignored_worker_interpreter_does_not_run(setup, linux_sandbox, script_runner, capsys, monkeypatch):
     def model(agent, prompt, **kwargs):
         checkout = Path(kwargs["cwd"])
         interpreter = checkout / ".venv/bin/python"
@@ -266,7 +270,7 @@ def test_verification_infrastructure_change_is_skipped(setup, script_runner, cap
     assert not (run_dir / "batch-verification").exists()
 
 
-def test_git_identity_ignores_inherited_git_environment(setup, configured_repo, capsys, monkeypatch):
+def test_git_identity_ignores_inherited_git_environment(setup, linux_sandbox, configured_repo, capsys, monkeypatch):
     run = verification._run_verify_commands
 
     def run_with_ambient_env(*args, **kwargs):
@@ -283,7 +287,7 @@ def test_git_identity_ignores_inherited_git_environment(setup, configured_repo, 
     assert not Path(receipt["target"]).exists()
 
 
-def test_trusted_repository_runner_completes_and_cleans_snapshot(setup, script_runner, capsys):
+def test_trusted_repository_runner_completes_and_cleans_snapshot(setup, linux_sandbox, script_runner, capsys):
     _, run_dir, payload = _run_batch(setup, capsys, verify=True)
     receipt = _assert_binding(run_dir, payload, payload["verification"], status="completed")
     assert receipt["commands"][0]["stdout_summary"] == "coordinator check ran"
@@ -299,3 +303,150 @@ def test_unavailable_candidate_tree_has_closed_skip_reason(setup, configured_rep
     assert payload["verification_skipped"] == "tree-unavailable"
     assert "verification" not in payload
     assert not (run_dir / "batch-verification").exists()
+
+
+def test_sandbox_unavailable_skips_batch_verification(setup, configured_repo, capsys, monkeypatch):
+    # Simulate a platform without unprivileged Linux namespaces.
+    from brigade import run_batch_verify_sandbox
+
+    monkeypatch.setattr(run_batch_verify_sandbox, "bwrap", lambda: None)
+    _, run_dir, payload = _run_batch(setup, capsys, verify=True)
+    assert payload["verification_skipped"] == "sandbox-unavailable"
+    assert not (run_dir / "batch-verification").exists()
+
+
+@pytest.mark.parametrize("destination", ["/somewhere", "../outside"])
+@pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlinks")
+def test_candidate_symlink_escape_skips_batch_verification(setup, configured_repo, capsys, monkeypatch, destination):
+    def model(agent, prompt, **kwargs):
+        (Path(kwargs["cwd"]) / "outside.py").symlink_to(destination)
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", model)
+    _, run_dir, payload = _run_batch(setup, capsys, verify=True)
+    assert payload["verification_skipped"] == "candidate-symlink-escape"
+    assert not (run_dir / "batch-verification").exists()
+
+
+@pytest.fixture
+def linux_sandbox():
+    from brigade import run_batch_verify_sandbox
+
+    if run_batch_verify_sandbox.bwrap() is None:
+        pytest.skip("Linux bubblewrap namespaces are unavailable")
+
+
+def test_sandbox_hides_coordinator_files_and_network(setup, configured_repo, linux_sandbox, capsys, monkeypatch):
+    root, _ = setup
+    home = root / "home"
+    home.mkdir(exist_ok=True)
+    secret = home / "private-fixture.txt"
+    secret.write_text("fixture", encoding="utf-8")
+    coordinator_config = Path.home() / ".config"
+
+    def model(agent, prompt, **kwargs):
+        run = next((root / ".brigade" / "runs").glob("batch-*"))
+        (Path(kwargs["cwd"]) / "selected.py").write_text(
+            "import os, pathlib, socket\n"
+            f"assert not pathlib.Path({str(secret)!r}).exists()\n"
+            f"assert not pathlib.Path({str(run)!r}).exists()\n"
+            f"assert not pathlib.Path({str(home)!r}).exists()\n"
+            f"assert not pathlib.Path({str(coordinator_config)!r}).exists()\n"
+            "assert pathlib.Path.home().is_dir()\n"
+            "assert 'BRIGADE_HOME' not in os.environ\n"
+            "assert socket.if_nameindex() == [(1, 'lo')]\n"
+            "with socket.socket() as peer:\n"
+            "    peer.settimeout(0.5)\n"
+            "    try:\n"
+            "        peer.connect(('192.0.2.1', 80))\n"
+            "    except OSError:\n"
+            "        pass\n"
+            "    else:\n"
+            "        raise AssertionError('unexpected network route')\n",
+            encoding="utf-8",
+        )
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", model)
+    _, run_dir, payload = _run_batch(setup, capsys, verify=True)
+    _assert_binding(run_dir, payload, payload["verification"], status="completed")
+
+
+def _configure_python_package(root, package, *, pytest_runner=False):
+    config = root / "verify/required-tests.json"
+    data = json.loads(config.read_text())
+    data["import_packages"] = [package]
+    if pytest_runner:
+        data["run_argv"] = ["pytest", "{tests}"]
+    config.write_text(json.dumps(data))
+    source = root / "src" / package
+    source.mkdir(parents=True)
+    (source / "__init__.py").write_text("VALUE = 'candidate'\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+    _commit(root, "configure candidate imports")
+
+
+@pytest.mark.parametrize("package", ["pytest", "sys"])
+def test_candidate_import_probe_rejects_outside_package(
+    setup, configured_repo, linux_sandbox, capsys, monkeypatch, package
+):
+    _configure_python_package(setup[0], package)
+
+    def model(agent, prompt, **kwargs):
+        # The coordinator interpreter also has an installed or built-in copy.
+        (Path(kwargs["cwd"]) / "src" / package / "__init__.py").unlink()
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", model)
+    _, run_dir, payload = _run_batch(setup, capsys, verify=True)
+    assert payload["verification_skipped"] == "candidate-import-mismatch"
+    assert not (run_dir / "batch-verification").exists()
+
+
+def test_pytest_imports_candidate_src_layout(setup, configured_repo, linux_sandbox, capsys, monkeypatch):
+    _configure_python_package(setup[0], "fixture_project", pytest_runner=True)
+
+    def model(agent, prompt, **kwargs):
+        (Path(kwargs["cwd"]) / "selected.py").write_text(
+            "import fixture_project\n\ndef test_value():\n    assert fixture_project.VALUE == 'candidate'\n",
+            encoding="utf-8",
+        )
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", model)
+    _, run_dir, payload = _run_batch(setup, capsys, verify=True)
+    receipt = _assert_binding(run_dir, payload, payload["verification"], status="completed")
+    assert not Path(receipt["target"]).exists()
+
+
+def test_sandbox_timeout_kills_detached_child_and_cleans_checkout(
+    setup, configured_repo, linux_sandbox, capsys, monkeypatch
+):
+    from brigade import run_batch_verification
+
+    monkeypatch.setattr(run_batch_verification, "_VERIFY_TIMEOUT", 5)
+    marker = "brigade-batch-timeout-fixture-" + secrets.token_hex(8)
+
+    def model(agent, prompt, **kwargs):
+        (Path(kwargs["cwd"]) / "selected.py").write_text(
+            "import subprocess, sys, time\n"
+            f"subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(30)', {marker!r}], "
+            "start_new_session=True)\n"
+            "print('detached child started', flush=True)\n"
+            "time.sleep(30)\n",
+            encoding="utf-8",
+        )
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", model)
+    _, run_dir, payload = _run_batch(setup, capsys, verify=True)
+    receipt = _receipt(run_dir)
+    assert payload["verification"]["status"] == "failed"
+    assert receipt["commands"][0]["status"] == "timed_out"
+    assert "detached child started" in receipt["commands"][0]["stdout_summary"]
+    assert not Path(receipt["target"]).parent.exists()
+    for cmdline in Path("/proc").glob("[0-9]*/cmdline"):
+        try:
+            assert marker.encode() not in cmdline.read_bytes().split(b"\0")
+        except OSError:
+            continue
