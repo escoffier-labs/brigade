@@ -487,16 +487,22 @@ def test_project_vault_refuses_a_folder_swap_between_note_writes(
     outside = tmp_path / "outside"
     outside.mkdir()
     apply_mutation = kernel._apply_mutation
+    swapped: list[str] = []
 
     def apply_then_swap(spec: kernel.MutationSpec) -> None:
         apply_mutation(spec)
-        if spec.destination == cards / "Alpha.md":
-            cards.rename(moved_cards)
-            cards.symlink_to(outside, target_is_directory=True)
+        if spec.destination.name != "Alpha.md":
+            return
+        swapped.append(spec.destination.as_posix())
+        cards.rename(moved_cards)
+        cards.symlink_to(outside, target_is_directory=True)
 
     monkeypatch.setattr(kernel, "_apply_mutation", apply_then_swap)
     payload = obsidian_vault._project_payload(target=tmp_path, vault=vault)
 
+    assert swapped == [(cards / "Alpha.md").as_posix()], (
+        f"folder-swap hook fired for {swapped or 'no destination'}, expected the Alpha note write"
+    )
     # Rollback also refuses the swapped parent, so the first note needs recovery.
     assert payload["receipt"]["terminal_state"] == "recovery-required"
     assert payload["receipt"]["recovery_command"]
