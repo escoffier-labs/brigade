@@ -15,6 +15,7 @@ import pytest
 
 from brigade import (
     cli,
+    code_graph_background,
     code_references,
     completions,
     component_manifest,
@@ -66,6 +67,7 @@ def _patch_graphtrail(monkeypatch, *, run_calls: list | None = None):
         return proc.Result(exit_code, stdout, "")
 
     monkeypatch.setattr(context_cmd, "_graphtrail_bin", lambda: "/fake/graphtrail")
+    monkeypatch.setattr(code_graph_background, "may_run_killable_foreground_sync", lambda: True)
     monkeypatch.setattr(proc, "run", fake_run)
 
 
