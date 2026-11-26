@@ -62,7 +62,7 @@ def paired_memory(dot_private_dir, monkeypatch):
     dot_private_dir.mkdir(mode=0o700)
     fake = FakeHub()
     monkeypatch.setattr(hubc, "urllib_transport", fake)
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": HUB_URL})
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: {"hub_url": HUB_URL})
     target = workspace(dot_private_dir.parent / "workspace", read_scopes=("fleet",))
     _put(fake, "fleet", "public-card", "release notes")
     _put(fake, "principal:other", "private-card", "release private notes")
@@ -164,7 +164,7 @@ def test_cloud_agent_inbox_parity(dot_private_dir, monkeypatch, message_hub):  #
 
     dot_private_dir.mkdir(mode=0o700)
     base, node_token, _, db = message_hub
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": base})
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: {"hub_url": base})
     profiles = (runtime_profile(CLOUD_AGENT, False, messaging_enabled=True),)
     outcomes = []
     for profile in profiles:

@@ -102,7 +102,7 @@ def load_fleet_config() -> dict[str, str]:
 def hub_configured() -> bool:
     """True when a hub URL is configured. Config read failures fail closed."""
     try:
-        return bool(load_fleet_config().get("hub_url"))
+        return bool(_client.load_fleet_settings(include_node=False, include_admin=False).get("hub_url"))
     except Exception:
         return True
 
@@ -140,6 +140,8 @@ def listener_identity(token: str | None) -> Iterator[None]:
 
 def _op(action: str, *, timeout: float = GROKBOT_TIMEOUT_SECONDS, **fields: Any) -> GrokbotHubDecision:
     """Keep the transport deadline local; job ``timeout_seconds`` remains a hub field."""
+    from .fleet_home_guard import FleetTokenFileError, report_token_file_refusal
+
     if isinstance(timeout, bool) or not isinstance(timeout, (int, float)):
         return GrokbotHubDecision(False, "invalid-request")
     try:
@@ -170,6 +172,9 @@ def _op(action: str, *, timeout: float = GROKBOT_TIMEOUT_SECONDS, **fields: Any)
             lambda: _post_grokbot_blocking(hub, token, body, timeout=timeout),
             timeout=timeout,
         )
+    except FleetTokenFileError as exc:
+        refusal = report_token_file_refusal(f"fleet grokbot {action}", exc)
+        return GrokbotHubDecision(False, refusal.reason, detail=refusal.detail)
     except Exception:
         return GrokbotHubDecision(False, "hub-unavailable")
     payload = payload if isinstance(payload, dict) else {}

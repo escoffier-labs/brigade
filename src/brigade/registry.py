@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Optional, Tuple
 
 from . import doctor as _doctor
+from .fleet_token_doctor import checks as fleet_token_checks
 from .station import Station
 
 CORE = Station(
@@ -37,7 +38,7 @@ TOKENS = Station(
     name="tokens",
     summary="Token Glace output compaction and optional usage export",
     aliases=(),
-    doctor=_doctor.tokens_station_checks,
+    doctor=fleet_token_checks,
     tools=("token-glace", "usage-tracker"),
 )
 SEARCH = Station(

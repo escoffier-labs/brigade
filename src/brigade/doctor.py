@@ -873,10 +873,6 @@ def skills_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     return [(OK, "skills: built-in templates", "portable Brigade skills available")]
 
 
-def tokens_station_checks(ctx: DoctorContext) -> List[CheckResult]:
-    return []
-
-
 def search_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     # The managed code-search tools carry this station's signal. The station
     # itself owns no per-workspace files and does not start local services.
