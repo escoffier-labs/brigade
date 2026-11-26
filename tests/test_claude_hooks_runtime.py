@@ -3858,19 +3858,6 @@ def test_recognizer_visits_each_position_once_per_shell_depth(shape, monkeypatch
 
     from brigade.claude_hooks import command_tokens
 
-    class StorageWithoutCopies(list):
-        def __getitem__(self, index):
-            assert not isinstance(index, slice), "recognition copied a backing token span"
-            return super().__getitem__(index)
-
-    init = command_tokens.TokenView.__init__
-
-    def checked_init(view, words, budget, start=0, *, storage=None, tail=None):
-        if storage is None:
-            words = StorageWithoutCopies(words)
-        init(view, words, budget, start, storage=storage, tail=tail)
-
-    monkeypatch.setattr(command_tokens.TokenView, "__init__", checked_init)
     calls = Counter()
     scan = runtime._scan_position
 
@@ -3925,7 +3912,7 @@ def test_recognizer_windows_env_lexer_matches_shlex(monkeypatch):
 
 
 @pytest.mark.parametrize("mode", ["strict", "observe", "off"])
-@pytest.mark.parametrize("limit", ["length", "nesting", "work"])
+@pytest.mark.parametrize("limit", ["length", "work"])
 def test_undecided_recognition_enforces_only_strict(target, monkeypatch, mode, limit):
     from brigade.claude_hooks import command_tokens
 
@@ -3933,10 +3920,6 @@ def test_undecided_recognition_enforces_only_strict(target, monkeypatch, mode, l
     if limit == "length":
         command = "pytest " + "a" * 70_000
         assert len(command) > 65536
-    elif limit == "nesting":
-        command = "echo done"
-        for _ in range(5):
-            command = shlex.join(["bash", "-lc", command])
     else:
         command = "echo done"
         monkeypatch.setattr(command_tokens, "MAX_RECOGNITION_STEPS", 1)
@@ -3949,7 +3932,9 @@ def test_undecided_recognition_enforces_only_strict(target, monkeypatch, mode, l
         assert result is None
     else:
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-        assert "too long or too deeply nested" in result["hookSpecificOutput"]["permissionDecisionReason"]
+        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
+        assert ("65,536-character" if limit == "length" else "1-step") in reason
+        assert "move long content into a file" in reason
 
 
 def test_recognizer_finds_verifier_after_long_control_prefix():
@@ -4014,12 +3999,17 @@ def _recognition_compat_commands():
         yield command
 
 
-def _recognition_compat_digest(classify, first_verifier):
+def _recognition_compat_digest(classify, first_verifier, *, deep_shells=False):
     from hashlib import sha256
 
     digest = sha256()
-    for command in _recognition_compat_commands():
+    for index, command in enumerate(_recognition_compat_commands()):
         row = [classify(command), first_verifier(command)]
+        if deep_shells and index == 1235:
+            # The one deliberate difference is a verifier inside shell
+            # text that the former nesting cutoff did not visit.
+            assert row[0] is True
+            row[0] = False
         digest.update(json.dumps(row).encode("ascii") + b"\n")
     return digest.hexdigest()
 
@@ -4031,4 +4021,115 @@ def test_recognizer_seeded_comparison_with_main():
         "nt": "d5326ad3e19c6f5628346c74ad3c0f9574a605d0f30e9cab60339dab99cb7816",
         "posix": "3f01860a9cb3764363fa5c0e7a0e7322070243f22b3d83cd134423e96911ae78",
     }
-    assert _recognition_compat_digest(runtime.is_raw_verification, runtime._first_verifier_command) == expected[os.name]
+    digest = _recognition_compat_digest(runtime.is_raw_verification, runtime._first_verifier_command, deep_shells=True)
+    assert digest == expected[os.name]
+
+
+def _bounded_hook_commands():
+    repeated = {shape: _recognition_stress(shape, 60_000) for shape in _STRESS_PREFIXES}
+    command = "echo done"
+    verification = "pytest"
+    for _ in range(5):
+        command = shlex.join(["bash", "-lc", command])
+        verification = shlex.join(["bash", "-lc", verification])
+    return {
+        **{shape: (command, False) for shape, command in repeated.items()},
+        "dollar-spans": ("echo " + "$(true)" * 500, False),
+        "backtick-spans": ("echo " + "`true` " * 700, False),
+        "long-spans": ("echo " + "$(true)" * 8000, False),
+        "nested-substitutions": ("echo $(echo $(echo $(echo $(echo done))))", False),
+        "nested-shell": (command, False),
+        "nested-verification": (verification, True),
+        "heredoc-body": ("cat <<EOF\n" + "x" * 59_980 + "\nEOF\n", False),
+        "git-message": ("git commit -m '" + "x" * 59_980 + "'", False),
+        "and-chain": (("true && " * 8124) + "true", False),
+        "semicolon-chain": (("true; " * 10832) + "true", False),
+        "pipe-chain": (("true | " * 9284) + "true", False),
+        "stdin-limit": ("echo " + "x" * 261_995, True),
+        **{f"cd-{n}": (("cd a && " * n) + "pytest", True) for n in (200, 400, 1000, 8000)},
+    }
+
+
+_BOUNDED_HOOK_COMMANDS = _bounded_hook_commands()
+
+
+def _measure_event_budget(monkeypatch):
+    from brigade.claude_hooks import command_tokens
+
+    budgets = []
+    initialize = command_tokens.RecognitionBudget.__init__
+
+    def record(budget):
+        initialize(budget)
+        budgets.append(budget)
+
+    monkeypatch.setattr(command_tokens.RecognitionBudget, "__init__", record)
+    return budgets
+
+
+@pytest.mark.parametrize("shape", _BOUNDED_HOOK_COMMANDS)
+@pytest.mark.parametrize("event", ["PreToolUse", "PostToolUse", "PostToolUseFailure"])
+def test_claude_bash_event_work_bound(target, monkeypatch, shape, event):
+    from brigade.claude_hooks import command_tokens
+
+    budgets = _measure_event_budget(monkeypatch)
+    command, deny = _BOUNDED_HOOK_COMMANDS[shape]
+    started = time.perf_counter()
+    result = runtime.handle_payload(event, _payload(target, event, tool_name="Bash", tool_input={"command": command}))
+    elapsed = time.perf_counter() - started
+    assert elapsed < 3
+    assert len(budgets) == 1
+    assert all(budget.steps <= 4 * command_tokens.MAX_RECOGNITION_STEPS for budget in budgets)
+    if event == "PreToolUse":
+        output = (result or {}).get("hookSpecificOutput", {})
+        assert (output.get("permissionDecision") == "deny") is deny
+        if len(command) <= command_tokens.MAX_COMMAND_CHARS:
+            assert "classification limit" not in output.get("permissionDecisionReason", "")
+
+
+@pytest.mark.parametrize("form", ["copy", "list", "islice", "iterate", "slice"])
+def test_token_views_cannot_copy_or_iterate_around_the_meter(monkeypatch, form):
+    from itertools import islice
+
+    from brigade.claude_hooks import command_tokens
+
+    budget = command_tokens.RecognitionBudget()
+    view = command_tokens.TokenView(["word"] * 64, budget)
+    tail = view.drop(1)
+    assert view.position[0] is tail.position[0]
+    assert not hasattr(tail, "_tokens")
+    monkeypatch.setattr(command_tokens, "MAX_RECOGNITION_STEPS", budget.steps + 2)
+    if form == "copy":
+        assert not hasattr(tail, "copy")
+    elif form == "slice":
+        with pytest.raises(ValueError):
+            _ = tail[:10]
+    else:
+        with pytest.raises(command_tokens.RecognitionLimit):
+            if form == "list":
+                list(tail)
+            elif form == "islice":
+                list(islice(tail, 7))
+            else:
+                next(iter(tail))
+
+
+def test_incomplete_attribution_keeps_write_evidence(target):
+    command = "cd a && " * 500 + "true"
+    event = "PostToolUse"
+    runtime.handle_payload(event, _payload(target, event, tool_name="Bash", tool_input={"command": command}))
+    state = runtime.read_session_state(target, "session-1")
+    assert state and state["write_observed"] and state["last_verification_write_at"]
+
+
+@pytest.mark.parametrize("mode", ["observe", "off"])
+def test_claude_unclassified_capture(target, monkeypatch, mode):
+    from brigade import observed_checks
+
+    monkeypatch.setattr(runtime.work_mode, "resolve_mode", lambda _target: mode)
+    command = "echo " + "x" * 70_000
+    event = "PostToolUse"
+    result = runtime.handle_payload(event, _payload(target, event, tool_name="Bash", tool_input={"command": command}))
+    assert result is None
+    (record,) = observed_checks.read_checks(target)[0]
+    assert (record.tool, record.status, record.exit_code) == ("unclassified", "unknown", None)

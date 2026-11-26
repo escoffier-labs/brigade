@@ -88,13 +88,20 @@ def _on_event(
         return
     tool_input = payload.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str) or len(command) > 65536 or not rt.is_raw_verification(command):
+    verdict = rt._recognize(command)
+    if not isinstance(command, str) or verdict is rt.Recognition.NO:
         return
+    unclassified = verdict is rt.Recognition.UNDECIDED
     status, code = claude_status(event, payload)
     duration = payload.get("duration_ms")
     duration = duration if type(duration) is int and duration >= 0 else None
-    for governed, mode in verification_mode.governing_modes(command, payload.get("cwd"), target):
-        if mode == "observe":
+    modes = (
+        [(target, work_mode.resolve_mode(target))]
+        if unclassified
+        else verification_mode.governing_modes(command, payload.get("cwd"), target)
+    )
+    for governed, mode in modes:
+        if mode == "observe" or (unclassified and mode == "off"):
             # The pin and home policy apply to every destination, as they do for write tracking.
             if governed != target and rt.effective_hook_target({"cwd": str(governed)}, pin=pin) != governed:
                 continue
@@ -112,6 +119,7 @@ def _on_event(
                     identity=identity,
                     fingerprint_tree=False,
                     session_fingerprint=session_id,
+                    unclassified=unclassified,
                 ),
             )
 

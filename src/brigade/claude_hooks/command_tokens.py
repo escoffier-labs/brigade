@@ -4,14 +4,20 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from contextvars import ContextVar
 from enum import Enum, auto
 from pathlib import Path
 from typing import TypeVar, overload
 
+from ..wiring import expand_user_path, resolve_wired_target
+
 # Allow several passes over a maximum-length command, including nested
 # shell text. Repeated wrapper scans share this same allowance.
 MAX_RECOGNITION_STEPS = 2_097_152
+MAX_COMMAND_CHARS = 65_536
+MAX_PATH_WORK = 65_536
+MAX_OBSERVED_ROOTS = 32
 
 
 class RecognitionLimit(Exception):
@@ -27,8 +33,15 @@ class Recognition(Enum):
 class RecognitionBudget:
     def __init__(self) -> None:
         self.steps = 0
-        self.incomplete = False
-        self.exhausted = False
+        self.phase_steps: dict[str, int] = {}
+        self.stopped: set[str] = set()
+        self.phase = "classification"
+        self.attribution_incomplete = False
+        self.verdicts: dict[str, Recognition] = {}
+        self.paths: dict[tuple[Path, str, bool], Path] = {}
+        self.wired: dict[tuple[str, str | None], Path | None] = {}
+        self.path_work = 0
+        self.shell_pending: list[str] = []
         self.target: Path | None = None
         self.tokens: dict[tuple[str, str], list[str]] = {}
         self.segments: dict[str, tuple[list[str], list[list[str]], list[str]]] = {}
@@ -41,11 +54,32 @@ class RecognitionBudget:
         self.skips: dict[tuple[object, TokenPosition], TokenView] = {}
         self.expansions: dict[TokenPosition, TokenView] = {}
 
+    @property
+    def exhausted(self) -> bool:
+        return self.phase in self.stopped
+
     def charge(self, steps: int) -> None:
-        if self.exhausted or self.steps + steps > MAX_RECOGNITION_STEPS:
-            self.exhausted = True
+        used = self.phase_steps.get(self.phase, 0)
+        if self.exhausted or used + steps > MAX_RECOGNITION_STEPS:
+            self.stopped.add(self.phase)
             raise RecognitionLimit
+        self.phase_steps[self.phase] = used + steps
         self.steps += steps
+
+    def charge_path(self, units: int) -> None:
+        if self.path_work + units > MAX_PATH_WORK:
+            self.attribution_incomplete = True
+            raise RecognitionLimit
+        self.charge(units)
+        self.path_work += units
+
+    @contextmanager
+    def in_phase(self, phase: str) -> Iterator[None]:
+        previous, self.phase = self.phase, phase
+        try:
+            yield
+        finally:
+            self.phase = previous
 
     def release(self) -> None:
         self.skips.clear()
@@ -58,9 +92,16 @@ class RecognitionBudget:
         self.scopes.clear()
         self.candidates.clear()
         self.verifier_targets.clear()
+        self.verdicts.clear()
+        self.paths.clear()
+        self.wired.clear()
 
 
 EVENT_BUDGET: ContextVar[RecognitionBudget | None] = ContextVar("claude_command_budget", default=None)
+
+
+def command_step_limit() -> int:
+    return MAX_RECOGNITION_STEPS
 
 
 def charge_event(steps: int) -> None:
@@ -69,7 +110,71 @@ def charge_event(steps: int) -> None:
         budget.charge(steps)
 
 
+@contextmanager
+def command_event() -> Iterator[RecognitionBudget]:
+    active = EVENT_BUDGET.get()
+    if active is not None:
+        yield active
+        return
+    budget = RecognitionBudget()
+    context = EVENT_BUDGET.set(budget)
+    try:
+        yield budget
+    finally:
+        EVENT_BUDGET.reset(context)
+        budget.release()
+
+
+def event_wired_target(cwd: object, *, harness: str | None = "claude") -> Path | None:
+    budget = EVENT_BUDGET.get()
+    if budget is None or not isinstance(cwd, str):
+        return resolve_wired_target(cwd, harness=harness)
+    key = cwd, harness
+    if key not in budget.wired:
+        # The resolver may visit every ancestor, with a path lookup at each.
+        budget.charge_path(32 + len(cwd) * (1 + len(Path(cwd).parts)))
+        budget.wired[key] = resolve_wired_target(cwd, harness=harness)
+    return budget.wired[key]
+
+
+def resolve_command_path(raw: str, cwd: Path, *, expand_vars: bool = True) -> Path:
+    budget = EVENT_BUDGET.get()
+    key = cwd, raw, expand_vars
+    if budget is not None and key in budget.paths:
+        return budget.paths[key]
+    expanded = expand_user_path(Path(os.path.expandvars(raw) if expand_vars else raw))
+    if budget is not None:
+        budget.charge_path(16 + len(raw) + len(str(cwd)) + len(str(expanded)))
+    if not expanded.is_absolute() and len(expanded.parts) == 1 and expanded.name not in {"..", "."}:
+        candidate = cwd / expanded
+        try:
+            # cwd is already resolved by the hook or the previous cd. A plain
+            # child needs only its own symlink check.
+            result = candidate.resolve(strict=False) if budget is None or candidate.is_symlink() else candidate
+        except OSError:
+            result = candidate
+    else:
+        result = (cwd / expanded).resolve(strict=False)
+    if budget is not None:
+        budget.paths[key] = result
+    return result
+
+
 TokenPosition = tuple[object, int]
+
+
+def _metered_reader(words: list[str], budget: RecognitionBudget) -> Callable[[int], str]:
+    budget.charge(len(words))
+    # The backing sequence stays inside this closure, so callers have no
+    # independent iterator or copy operation for the stored suffix.
+    stored = tuple(words)
+
+    def read(index: int) -> str:
+        token = stored[index]
+        budget.charge(1 + len(token))
+        return token
+
+    return read
 
 
 class TokenView:
@@ -81,15 +186,16 @@ class TokenView:
         budget: RecognitionBudget,
         start: int = 0,
         *,
-        storage: object | None = None,
+        reader: Callable[[int], str] | None = None,
+        width: int | None = None,
         tail: TokenView | None = None,
     ) -> None:
-        self._tokens = tokens
         self._start = start
-        self._storage = object() if storage is None else storage
+        self._storage = _metered_reader(tokens, budget) if reader is None else reader
+        self._width = len(tokens) if width is None else width
         self._tail = tail
         self.budget = budget
-        self._length = len(tokens) - start + (0 if tail is None else len(tail))
+        self._length = self._width - start + (0 if tail is None else len(tail))
 
     @property
     def position(self) -> TokenPosition:
@@ -101,12 +207,12 @@ class TokenView:
     def drop(self, count: int) -> TokenView:
         self.budget.charge(1)
         current = self
-        while count >= len(current._tokens) - current._start and current._tail is not None:
+        while count >= current._width - current._start and current._tail is not None:
             self.budget.charge(1)
-            count -= len(current._tokens) - current._start
+            count -= current._width - current._start
             current = current._tail
-        start = min(current._start + count, len(current._tokens))
-        return TokenView(current._tokens, self.budget, start, storage=current._storage, tail=current._tail)
+        start = min(current._start + count, current._width)
+        return TokenView([], self.budget, start, reader=current._storage, width=current._width, tail=current._tail)
 
     @overload
     def __getitem__(self, index: int) -> str: ...
@@ -122,9 +228,7 @@ class TokenView:
         current = self if index == 0 else self.drop(index)
         if not 0 <= index < len(self):
             raise IndexError(index)
-        token = current._tokens[current._start]
-        self.budget.charge(1 + len(token))
-        return token
+        return current._storage(current._start)
 
     def __iter__(self) -> Iterator[str]:
         current = self
@@ -165,28 +269,45 @@ class TokenView:
 TokenTail = TypeVar("TokenTail", list[str], TokenView)
 
 
-def split_posix(command: str, *, whitespace: str = " \t\r\n", punctuation: str = "") -> list[str]:
+def split_posix(
+    command: str,
+    *,
+    whitespace: str = " \t\r\n",
+    punctuation: str = "",
+    comments: bool = False,
+    ends: list[int] | None = None,
+) -> list[str]:
     """Split with shlex's POSIX whitespace and punctuation rules in linear time."""
     tokens: list[str] = []
+
+    def emit(value: str, stop: int) -> None:
+        tokens.append(value)
+        if ends is not None:
+            ends.append(min(stop + 1, len(command)))
+
     index = 0
     while index < len(command):
         char = command[index]
         if char in whitespace:
             index += 1
             continue
+        if comments and char == "#":
+            newline = command.find("\n", index)
+            index = len(command) if newline < 0 else newline + 1
+            continue
         if char in punctuation:
             start = index
             index += 1
             while index < len(command) and command[index] in punctuation:
                 index += 1
-            tokens.append(command[start:index])
+            emit(command[start:index], index)
             continue
 
         word: list[str] = []
         quote = ""
         while index < len(command):
             char = command[index]
-            if not quote and (char in whitespace or char in punctuation):
+            if not quote and (char in whitespace or char in punctuation or (comments and char == "#")):
                 break
             if char == "\\" and quote != "'":
                 index += 1
@@ -208,7 +329,7 @@ def split_posix(command: str, *, whitespace: str = " \t\r\n", punctuation: str =
             index += 1
         if quote:
             raise ValueError("No closing quotation")
-        tokens.append("".join(word))
+        emit("".join(word), index)
     return tokens
 
 

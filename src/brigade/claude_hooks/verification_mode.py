@@ -14,8 +14,8 @@ from __future__ import annotations
 from pathlib import Path
 
 from .. import work_mode
-from ..wiring import resolve_wired_target
 from .command_tokens import EVENT_BUDGET, RecognitionBudget, RecognitionLimit, charge_event
+from .command_tokens import event_wired_target as resolve_wired_target
 from .write_attribution import _literal_path, _rt
 
 _KEYWORDS = {"!", "{", "(", "if", "then", "elif", "else", "do", "while", "until", "time"}
@@ -196,7 +196,8 @@ def governing_modes(
         charge_event(1)
         wired = resolve_wired_target(str(path), harness=harness) if path is not None else None
         target = wired if wired is not None else root
-        modes[target] = work_mode.resolve_mode(target)
+        if target not in modes:
+            modes[target] = work_mode.resolve_mode(target)
     return list(modes.items())
 
 
@@ -204,5 +205,8 @@ def verification_enforced(command: object, cwd: object, root: Path) -> bool:
     """Enforce when any verifier belongs to a strict target."""
     if not isinstance(command, str) or not command.strip():
         return True
-    modes = governing_modes(command, cwd, root)
+    try:
+        modes = governing_modes(command, cwd, root)
+    except RecognitionLimit:
+        return work_mode.is_strict(root)
     return any(mode == work_mode.MODE_STRICT for _, mode in modes) if modes else work_mode.is_strict(root)

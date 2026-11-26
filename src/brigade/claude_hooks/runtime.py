@@ -23,7 +23,6 @@ from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Generator, Iterator, 
 from .. import handoff_worktrees, localio, work_mode
 from ..component_paths import cache_root
 from ..isolated_exec import module_argv, trusted_cwd
-from ..wiring import expand_user_path, resolve_wired_target
 from . import (
     anchored_io,
     check_events,
@@ -42,12 +41,17 @@ from . import (
 )
 from .command_tokens import (
     EVENT_BUDGET,
+    MAX_COMMAND_CHARS,
     Recognition,
     RecognitionBudget,
     RecognitionLimit,
     TokenTail,
     TokenView,
     charge_event,
+    command_event,
+    command_step_limit,
+    event_wired_target as resolve_wired_target,
+    resolve_command_path as _resolve_command_path,
     split_posix,
     _is_env_assignment,
     _package_runner_script as _package_runner_script,
@@ -406,13 +410,6 @@ def _strip_heredoc_bodies(command: str) -> str:
     return stripped
 
 
-def _resolve_command_path(raw: str, cwd: Path) -> Path:
-    expanded = expand_user_path(Path(os.path.expandvars(raw)))
-    if not expanded.is_absolute():
-        return (cwd / expanded).resolve(strict=False)
-    return expanded.resolve(strict=False)
-
-
 def _strip_command_prefixes(tokens: list[str], *, keywords: frozenset[str] | set[str] = frozenset()) -> list[str]:
     index = _command_prefix_end(tokens, 0)
     while index < len(tokens) and tokens[index] in keywords:
@@ -537,11 +534,15 @@ def _scan_verifier_target(
         return None
     if depth < 4:
         for position, nested in _nested_shell_command_spans(stripped_command):
-            budget.charge(position)
-            nested_cwd = _effective_cwd_at_position(stripped_command, cwd, position)
-            found = _verifier_target_from_command(nested, nested_cwd, depth=depth + 1, budget=budget)
+            found = _verifier_target_from_command(nested, cwd, depth=depth + 1, budget=budget)
             if found is not None:
-                return found
+                budget.charge(position)
+                nested_cwd = _effective_cwd_at_position(stripped_command, cwd, position)
+                return (
+                    found
+                    if nested_cwd == cwd
+                    else _verifier_target_from_command(nested, nested_cwd, depth=depth + 1, budget=budget)
+                )
     effective = cwd
     for separator, segment in groups:
         if separator in _PIPELINE_SEPARATORS:
@@ -615,14 +616,17 @@ def _as_tool_input(value: object) -> dict[str, Any]:
 
 def wired_target_from_payload(payload: dict[str, Any], *, attribute_writes: bool = True) -> Path | None:
     try:
-        cwd = expand_user_path(Path(str(payload.get("cwd") or "."))).resolve(strict=False)
+        cwd = _resolve_command_path(str(payload.get("cwd") or "."), Path.cwd(), expand_vars=False)
     except (OSError, RuntimeError):
         return resolve_wired_target(payload.get("cwd"))
     has_cwd = bool(payload.get("cwd"))
     tool_name = str(payload.get("tool_name") or "")
     tool_input = _as_tool_input(payload.get("tool_input"))
     if tool_name == "Bash":
+        budget = EVENT_BUDGET.get()
         command = str(tool_input.get("command") or "")
+        if budget is not None and (budget.attribution_incomplete or len(command) > MAX_COMMAND_CHARS):
+            return _bash_fallback_target(payload, None)
         for written_target, confident in (
             write_attribution.bash_scopes(command, cwd).items() if attribute_writes else ()
         ):
@@ -893,18 +897,15 @@ def _scan_shell_path_tokens(command: str) -> list[str]:
     Inspect that consumed source so ``2>`` is a descriptor, while ``2 >``
     and ``'2'>`` keep the numeric file operand.
     """
-    stream = StringIO(command)
-    lexer = _shell_lexer(stream)
-    tokens: list[str] = []
+    ends: list[int] = []
+    tokens = split_posix(command, whitespace=" \t\r", punctuation=";&|<>\n", ends=ends)
     offset = 0
-    for token in lexer:
-        end = stream.tell()
-        consumed = command[offset:end]
+    kept: list[str] = []
+    for token, end in zip(tokens, ends, strict=True):
+        if not (token.isascii() and token.isdecimal() and command[offset:end].lstrip() in (token + "<", token + ">")):
+            kept.append(token)
         offset = end
-        if token.isascii() and token.isdecimal() and re.fullmatch(rf"\s*{token}[<>]", consumed):
-            continue
-        tokens.append(token)
-    return tokens
+    return kept
 
 
 def _read_parenthesized(command: str, start: int) -> tuple[str, int] | None:
@@ -1077,6 +1078,7 @@ def _is_brigade_run_tokens(tokens: list[str]) -> bool:
 def _is_brigade_run(command: object) -> bool:
     if not isinstance(command, str) or not command.strip():
         return False
+    charge_event(len(command))
     try:
         tokens = _shell_tokens(command)
     except ValueError:
@@ -1172,22 +1174,28 @@ def _classify_segment(segment: list[str], depth: int, budget: RecognitionBudget)
     cached = budget.segment_results.get(key)
     if cached is not None:
         return cached[1]
+    pending = len(budget.shell_pending)
     result = _scan_verifier(TokenView(segment, budget), depth=depth)
-    budget.segment_results[key] = segment, result
+    if pending == len(budget.shell_pending):
+        budget.segment_results[key] = segment, result
     return result
 
 
 def _segment_is_verifier(segment: list[str]) -> bool:
     active = EVENT_BUDGET.get()
-    if active is not None:
-        return _classify_segment(segment, 0, active)
-    budget = RecognitionBudget()
-    try:
-        return _classify_segment(segment, 0, budget)
-    except RecognitionLimit:
-        return False
-    finally:
-        budget.release()
+    with command_event() as budget:
+        try:
+            if _classify_segment(segment, 0, budget):
+                return True
+            return bool(budget.shell_pending) and _is_raw_verification_text(
+                budget.shell_pending.pop(), depth=0, budget=budget
+            )
+        except RecognitionLimit:
+            if active is not None:
+                raise
+            return False
+        finally:
+            budget.shell_pending.clear()
 
 
 _ScanKind = Literal["command", "tail", "run", "package"]
@@ -1265,7 +1273,7 @@ def _scan_position(segment: TokenView, *, depth: int) -> _ScanGenerator:
             return False
         head = tokens[0]
         command = Path(head).name
-    next_depth = min(depth + 1, 4)
+    next_depth = depth
     if command in {"pytest", "py.test", "nose2", "tox", "nox", "vitest", "jest", "mocha", "rspec", "phpunit", "ctest"}:
         return True
     if command.startswith("python"):
@@ -1287,10 +1295,8 @@ def _scan_position(segment: TokenView, *, depth: int) -> _ScanGenerator:
     if command in _SHELL_WRAPPERS:
         shell_payload = _shell_wrapper_payload(tokens)
         if shell_payload is not None:
-            if depth >= 4:
-                tokens.budget.incomplete = True
-                return False
-            return _is_raw_verification_text(shell_payload, depth=next_depth, budget=tokens.budget)
+            tokens.budget.shell_pending.append(shell_payload)
+            return False
     if command == "go":
         return len(tokens) > 1 and Path(tokens[1]).name in {"test", "vet"}
     if command == "cargo":
@@ -1317,46 +1323,52 @@ def _scan_position(segment: TokenView, *, depth: int) -> _ScanGenerator:
 
 
 def _is_raw_verification_text(command: str, *, depth: int, budget: RecognitionBudget) -> bool:
-    # Outside a hook event, prepay the linear text and grouping passes.
-    # Event callers meter those passes individually and reuse their results.
-    if EVENT_BUDGET.get() is None:
-        budget.charge(1 + 5 * len(command))
-    command = _strip_heredoc_bodies(command)
+    pending = budget.shell_pending
+    pending.append(command)
+    seen: set[str] = set()
     try:
-        tokens, segments, _ = _segmented_command(command)
-    except ValueError:
+        while pending:
+            text = pending.pop()
+            if text in seen:
+                continue
+            seen.add(text)
+            if EVENT_BUDGET.get() is None:
+                budget.charge(1 + 5 * len(text))
+            text = _strip_heredoc_bodies(text)
+            try:
+                tokens, segments, _ = _segmented_command(text)
+            except ValueError:
+                continue
+            if EVENT_BUDGET.get() is None:
+                budget.charge(len(tokens))
+            if any(_classify_segment(segment, depth, budget) for segment in segments):
+                return True
+            pending.extend(_nested_shell_commands(text))
         return False
-    if EVENT_BUDGET.get() is None:
-        budget.charge(len(tokens))
-    if any(_classify_segment(segment, depth, budget) for segment in segments):
-        return True
-    nested_commands = _nested_shell_commands(command)
-    if depth >= 4:
-        budget.incomplete |= bool(nested_commands)
-        return False
-    return any(_is_raw_verification_text(nested, depth=depth + 1, budget=budget) for nested in nested_commands)
+    finally:
+        pending.clear()
 
 
 def _recognize(command: object, budget: RecognitionBudget | None = None) -> Recognition:
     if not isinstance(command, str):
         return Recognition.NO
-    if len(command) > 65_536:
+    if len(command) > MAX_COMMAND_CHARS:
         return Recognition.UNDECIDED
     if not command.strip():
         return Recognition.NO
     active = EVENT_BUDGET.get()
     budget = budget if budget is not None else (active if active is not None else RecognitionBudget())
-    if budget.exhausted:
-        return Recognition.UNDECIDED
-    try:
-        if _is_raw_verification_text(command, depth=0, budget=budget):
-            return Recognition.YES
-    except RecognitionLimit:
-        return Recognition.UNDECIDED
-    finally:
-        if active is None:
-            budget.release()
-    return Recognition.UNDECIDED if budget.incomplete else Recognition.NO
+    with budget.in_phase("classification"):
+        if command not in budget.verdicts:
+            try:
+                yes = _is_raw_verification_text(command, depth=0, budget=budget)
+                budget.verdicts[command] = Recognition.YES if yes else Recognition.NO
+            except RecognitionLimit:
+                budget.verdicts[command] = Recognition.UNDECIDED
+        verdict = budget.verdicts[command]
+    if active is None:
+        budget.release()
+    return verdict
 
 
 def is_raw_verification(command: object) -> bool:
@@ -1420,6 +1432,7 @@ def _first_verifier_command(command: str) -> str:
 def _is_routed_verify(command: object) -> bool:
     if not isinstance(command, str) or not command.strip():
         return False
+    charge_event(len(command))
     try:
         return _is_brigade_verify(_strip_env(_shell_tokens(command)))
     except ValueError:
@@ -1429,6 +1442,7 @@ def _is_routed_verify(command: object) -> bool:
 def _is_confident_bash_write(command: object) -> bool:
     if not isinstance(command, str) or not command.strip():
         return False
+    charge_event(len(command))
     try:
         tokens = _shell_tokens(command)
     except ValueError:
@@ -1461,6 +1475,7 @@ def _is_confident_bash_write(command: object) -> bool:
 def _bash_write_targets_handoffs(target: Path, command: object) -> bool:
     if not isinstance(command, str) or not command.strip():
         return False
+    charge_event(len(command))
     try:
         tokens = _shell_path_tokens(command)
     except ValueError:
@@ -2069,33 +2084,56 @@ def _handle_user_prompt_submit(payload: dict[str, Any], *, pin: Path | None = No
 def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = None) -> dict[str, Any] | None:
     if payload.get("tool_name") != "Bash" or event not in {"PreToolUse", "PostToolUse", "PostToolUseFailure"}:
         return _handle_payload(event, payload, pin=pin)
-    budget = RecognitionBudget()
-    context = EVENT_BUDGET.set(budget)
+    with command_event() as budget:
+        command = _as_tool_input(payload.get("tool_input")).get("command")
+        verdict = _recognize(command)
+        with budget.in_phase("attribution"):
+            try:
+                return _handle_payload(event, payload, pin=pin)
+            except RecognitionLimit:
+                target = budget.target or _bash_fallback_target(payload, pin)
+                if event != "PreToolUse" or not payload.get("session_id"):
+                    return None
+                if verdict is Recognition.YES and target is not None and work_mode.is_strict(target):
+                    return _bash_permission(
+                        "Split the command or run the verification through `brigade work verify run`."
+                    )
+                return _undecided_pretooluse(target, command) if verdict is Recognition.UNDECIDED else None
+
+
+def _bash_fallback_target(payload: dict[str, Any], pin: Path | None) -> Path | None:
+    budget = EVENT_BUDGET.get()
+    cwd = payload.get("cwd")
+    context = EVENT_BUDGET.set(None)
     try:
-        return _handle_payload(event, payload, pin=pin)
-    except RecognitionLimit:
-        if event != "PreToolUse" or not payload.get("session_id"):
-            return None
-        target = budget.target or effective_hook_target({"cwd": payload.get("cwd")}, pin=pin)
-        return _undecided_pretooluse(target)
+        if budget is not None and isinstance(cwd, str) and (cwd, "claude") not in budget.wired:
+            budget.wired[cwd, "claude"] = resolve_wired_target(cwd)
+        return effective_hook_target({"cwd": cwd}, pin=pin)
     finally:
         EVENT_BUDGET.reset(context)
-        budget.release()
 
 
-def _undecided_pretooluse(target: Path | None) -> dict[str, Any] | None:
-    if target is None or not work_mode.is_strict(target):
-        return None
+def _bash_permission(reason: str) -> dict[str, Any]:
     return {
         "hookSpecificOutput": {
             "hookEventName": "PreToolUse",
             "permissionDecision": "deny",
-            "permissionDecisionReason": (
-                "This command is too long or too deeply nested to classify. "
-                "Run the check through `brigade work verify run` or split up the command."
-            ),
+            "permissionDecisionReason": reason,
         }
     }
+
+
+def _undecided_pretooluse(target: Path | None, command: object) -> dict[str, Any] | None:
+    if target is None or not work_mode.is_strict(target):
+        return None
+    limit = (
+        f"{MAX_COMMAND_CHARS:,}-character"
+        if isinstance(command, str) and len(command) > MAX_COMMAND_CHARS
+        else f"{command_step_limit():,}-step"
+    )
+    return _bash_permission(
+        f"This command exceeds the {limit} classification limit. Split it or move long content into a file."
+    )
 
 
 def _handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None) -> dict[str, Any] | None:
@@ -2103,8 +2141,13 @@ def _handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None) ->
     hub_recall.start_event(_hook_timeout_seconds())  # recall gets only what the brief leaves (S24)
     pin = pin if pin is not None else _hook_pin_from_env()
     result = write_attribution.handle_event(event, payload, pin=pin)
+    budget = EVENT_BUDGET.get()
     try:
-        check_events.after_handling(event, payload, pin=pin)
+        if budget is None:
+            check_events.after_handling(event, payload, pin=pin)
+        else:
+            with budget.in_phase("observation"):
+                check_events.after_handling(event, payload, pin=pin)
         # Live Fleet Hub inbox delivery rides on prompt and tool events of wired sessions.
         # It only gets what the event left of the hook budget, so a slow brief still
         # returns its claim path to the parent before the outer timeout kills the worker.
@@ -2238,7 +2281,7 @@ def _handle_event(
         if recognition is Recognition.NO:
             return None
         if recognition is Recognition.UNDECIDED:
-            return _undecided_pretooluse(target)
+            return _undecided_pretooluse(target, command)
         if not verification_mode.verification_enforced(command, payload.get("cwd"), target):
             return None
         state["verify_denied_count"] = int(state.get("verify_denied_count") or 0) + 1
@@ -2248,7 +2291,11 @@ def _handle_event(
             capture_artifact_id = None
         # The replacement runs the verifier with cwd=target, so it names the
         # verifier's checkout, not a worktree a later segment writes to.
-        verify_target = effective_hook_target(payload, pin=pin, attribute_writes=False) or target
+        verify_target = (
+            target
+            if budget is not None and budget.attribution_incomplete
+            else (effective_hook_target(payload, pin=pin, attribute_writes=False) or target)
+        )
         if _has_unsupported_verifier_structure(str(command)):
             from .. import outcome_attribution
 
@@ -2299,11 +2346,14 @@ def _handle_event(
                     target, session_id, state, log_target=target, patch_fields=("read_files",)
                 )
             return None
+        budget = EVENT_BUDGET.get()
+        incomplete = budget is not None and budget.attribution_incomplete
         wrote = tool_name in _WRITE_TOOLS or (
-            tool_name == "Bash" and write_attribution.touches_worktree(target, command, cwd=payload.get("cwd"))
+            tool_name == "Bash"
+            and (incomplete or write_attribution.touches_worktree(target, command, cwd=payload.get("cwd")))
         )
         capture_artifact_id = None
-        if tool_name == "Bash" and (_is_routed_verify(command) or _is_brigade_run(command)):
+        if tool_name == "Bash" and not incomplete and (_is_routed_verify(command) or _is_brigade_run(command)):
             capture_artifact_id = _parse_capture_flag(command) if _is_routed_verify(command) else None
             # Brigade's own metadata must not re-arm closeout, but an explicit
             # source write elsewhere in the same Bash call still belongs to
@@ -2330,7 +2380,9 @@ def _handle_event(
             state["last_write_at"] = written_at
             state["last_attributed_write_at"] = written_at
             handoff_write = (tool_name in _WRITE_TOOLS and _is_handoff_tool_write(target, post_tool_input)) or (
-                tool_name == "Bash" and _bash_write_targets_handoffs(target, post_tool_input.get("command"))
+                tool_name == "Bash"
+                and not incomplete
+                and _bash_write_targets_handoffs(target, post_tool_input.get("command"))
             )
             if not handoff_write:
                 state["last_verification_write_at"] = written_at
@@ -2352,6 +2404,11 @@ def _handle_event(
         return None
 
     if event == "PostToolUseFailure":
+        budget = EVENT_BUDGET.get()
+        if budget is not None and budget.attribution_incomplete:
+            state.update(write_observed=True, last_verification_write_at=localio.utc_now_iso())
+            _write_session_state_preserving_latch(target, session_id, state, log_target=target)
+            return None
         return check_events.failure_followup(payload, target, session_id, state)
 
     if event == "Stop":

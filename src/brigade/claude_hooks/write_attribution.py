@@ -5,7 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from ..wiring import resolve_wired_target
+from .command_tokens import (
+    EVENT_BUDGET,
+    MAX_COMMAND_CHARS,
+    MAX_OBSERVED_ROOTS,
+    RecognitionLimit,
+    event_wired_target as resolve_wired_target,
+)
 
 
 def _rt() -> Any:
@@ -161,6 +167,8 @@ def _scan_bash_scopes(command: str, cwd: Path, *, depth: int) -> dict[Path, bool
     def add(path: Path, confident: bool = False) -> None:
         target = resolve_wired_target(str(path))
         if target is not None:
+            if EVENT_BUDGET.get() is not None and len(scopes) >= MAX_OBSERVED_ROOTS and target not in scopes:
+                raise RecognitionLimit
             scopes[target] = scopes.get(target, False) or confident
 
     def destination(raw: str, effective: Path) -> None:
@@ -233,23 +241,37 @@ def _scan_bash_scopes(command: str, cwd: Path, *, depth: int) -> dict[Path, bool
 
 
 def touches_worktree(target: Path, command: object, *, cwd: object = None) -> bool:
-    effective = Path(cwd) if isinstance(cwd, str) and cwd else target
+    effective = (
+        _rt()._resolve_command_path(cwd, Path.cwd(), expand_vars=False) if isinstance(cwd, str) and cwd else target
+    )
     return bash_scopes(command, effective).get(target.resolve(), False)
 
 
 def handle_event(event: str, payload: dict[str, Any], *, pin: Path | None) -> dict[str, Any] | None:
     rt = _rt()
-    primary = rt.effective_hook_target(payload, pin=pin)
-    if (
-        primary is None
-        or event not in {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
-        or payload.get("tool_name") != "Bash"
-    ):
+    budget = EVENT_BUDGET.get()
+    if budget is None:
         return rt._handle_event(event, payload, pin=pin)
     command = rt._as_tool_input(payload.get("tool_input")).get("command")
     raw_cwd = payload.get("cwd")
-    cwd = Path(raw_cwd) if isinstance(raw_cwd, str) and raw_cwd else primary
-    scopes = bash_scopes(command, cwd)
+    try:
+        if isinstance(command, str) and len(command) > MAX_COMMAND_CHARS:
+            raise RecognitionLimit
+        primary = rt.effective_hook_target(payload, pin=pin)
+        if primary is None:
+            return None
+        cwd = (
+            rt._resolve_command_path(raw_cwd, Path.cwd(), expand_vars=False)
+            if isinstance(raw_cwd, str) and raw_cwd
+            else primary
+        )
+        scopes = bash_scopes(command, cwd)
+    except RecognitionLimit:
+        budget.attribution_incomplete = True
+        primary = rt._bash_fallback_target(payload, pin)
+        if primary is None:
+            return None
+        scopes = {}
     targets = [primary, *scopes]
     result = None
     for target in dict.fromkeys(targets):
@@ -262,7 +284,8 @@ def handle_event(event: str, payload: dict[str, Any], *, pin: Path | None) -> di
             state = rt.read_session_state(target, str(payload.get("session_id") or ""))
             if not state or not state.get("pending_bash_fingerprint"):
                 continue
-        current = rt._handle_event(event, payload, pin=pin, target_override=target)
+        with budget.in_phase("followup"):
+            current = rt._handle_event(event, payload, pin=pin, target_override=target)
         if current is not None:
             result = current
             if current.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":

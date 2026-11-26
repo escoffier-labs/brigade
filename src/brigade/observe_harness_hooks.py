@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 from . import agent_identity, observed_checks, work_mode
 from .claude_hooks import runtime, verification_mode
-from .wiring import resolve_wired_target
+from .claude_hooks.command_tokens import command_event, event_wired_target as resolve_wired_target
 
 CODEX_HOOK_CONTEXT = "codex-observe"
 CODEX_HOOK_COMMAND = "brigade work presence-hook --harness codex --stdin --context codex-observe"
@@ -26,10 +26,10 @@ def codex_identity(payload: Mapping[str, Any]) -> agent_identity.AgentIdentity:
 
 
 def _allowed(target: Path, harness: str, pin: Path | None) -> bool:
-    target = target.resolve()
+    target = runtime._resolve_command_path(str(target), Path.cwd(), expand_vars=False)
     if runtime.is_operator_home(target):
         return False
-    if pin is not None and target != pin.expanduser().resolve():
+    if pin is not None and target != runtime._resolve_command_path(str(pin), Path.cwd(), expand_vars=False):
         return False
     return resolve_wired_target(str(target), harness=harness) == target
 
@@ -70,12 +70,19 @@ def _capture(harness: str, payload: dict[str, Any], target: Path | None, pin: Pa
             return
         tool_input = payload.get("tool_input")
         command = tool_input.get("command") if isinstance(tool_input, dict) else None
-        if not isinstance(command, str) or len(command) > 65536 or not runtime.is_raw_verification(command):
+        verdict = runtime._recognize(command)
+        if not isinstance(command, str) or verdict is runtime.Recognition.NO:
             return
+        unclassified = verdict is runtime.Recognition.UNDECIDED
         identity = codex_identity(payload)
-        for governed, mode in verification_mode.governing_modes(command, cwd, target, harness=harness):
+        modes = (
+            [(target, work_mode.resolve_mode(target))]
+            if unclassified
+            else verification_mode.governing_modes(command, cwd, target, harness=harness)
+        )
+        for governed, mode in modes:
             observed_checks.check_capture_deadline()
-            if mode != "observe" or not _allowed(governed, harness, pin):
+            if (mode != "observe" and not (unclassified and mode == "off")) or not _allowed(governed, harness, pin):
                 continue
             observed_checks.append_check(
                 governed,
@@ -88,6 +95,7 @@ def _capture(harness: str, payload: dict[str, Any], target: Path | None, pin: Pa
                     session_fingerprint=session,
                     fingerprint_tree=False,
                     duration_ms=None,
+                    unclassified=unclassified,
                 ),
             )
     finally:
@@ -100,7 +108,8 @@ def after_handling(
     try:
         with observed_checks.capture_budget(0.25):
             if isinstance(payload, dict):
-                _capture(harness, payload, target, pin)
+                with command_event() as budget, budget.in_phase("observation"):
+                    _capture(harness, payload, target, pin)
     except Exception:
         pass
 

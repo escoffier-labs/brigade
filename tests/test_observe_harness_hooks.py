@@ -11,6 +11,7 @@ import pytest
 from brigade import fleet_session_presence as presence, observed_checks
 from tests._home import set_home
 from tests._posix import requires_dirfd
+from tests.test_claude_hooks_runtime import _BOUNDED_HOOK_COMMANDS, _measure_event_budget
 from tests.test_work_mode import _wired, _set_mode
 
 
@@ -96,7 +97,6 @@ def test_no_process_or_snapshot(target, monkeypatch, harness):
         [],
         {"tool_input": []},
         {"session_id": []},
-        {"tool_input": {"command": "x" * 70000}},
     ],
 )
 def test_malformed(target, monkeypatch, capsys, harness, bad):
@@ -434,3 +434,28 @@ def test_lesson_contention_preserves_existing_capture(target, monkeypatch, tool)
         assert len(observed_checks.read_checks(target)[0]) == 1
     else:
         assert observe_session_path(target, "private-session").exists()
+
+
+@pytest.mark.parametrize("mode", ["observe", "off"])
+def test_unclassified_capture_has_an_explicit_marker(target, monkeypatch, capsys, mode):
+    _set_mode(target, mode, capsys)
+    command = "echo " + "x" * 70_000
+    assert run(monkeypatch, "codex", payload(target, "codex", tool_input={"command": command})) == 0
+    (record,) = observed_checks.read_checks(target)[0]
+    assert record.tool == "unclassified"
+    assert observed_checks.check_kind(record.tool) == "unclassified"
+    assert record.status == "unknown"
+    assert record.command_digest == observed_checks.DIGEST_UNAVAILABLE
+
+
+@pytest.mark.parametrize("shape", _BOUNDED_HOOK_COMMANDS)
+def test_codex_bash_event_work_bound(target, monkeypatch, shape):
+    from brigade.claude_hooks import command_tokens
+
+    budgets = _measure_event_budget(monkeypatch)
+    command, _ = _BOUNDED_HOOK_COMMANDS[shape]
+    started = time.perf_counter()
+    assert run(monkeypatch, "codex", payload(target, "codex", tool_input={"command": command})) == 0
+    assert time.perf_counter() - started < 3
+    assert len(budgets) == 1
+    assert all(budget.steps <= 2 * command_tokens.MAX_RECOGNITION_STEPS for budget in budgets)
