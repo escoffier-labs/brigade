@@ -178,7 +178,15 @@ CI promotes approved text and restores the latest eligible approved bundle on ro
 
 A never-approved bundle that qualifies for promotion gets a separate pull request on `ledger/approve/<subject>-<fp12>` after the automatic evidence update lands. The writer opens at most one new approval pull request per run. Approvals serialize through main because each proposal records the ledger it was built from. The pull request description includes the changed files, bundle fingerprint, comparison link, and attest jobs. Large diffs are excerpted with a link to the full comparison. The owner reviews the final head on GitHub, reruns failed CI jobs if the recompute ran before the review, and queues the pull request once CI passes. Closing an approval pull request permanently rejects its fingerprint, even if that pull request is reopened. The writer skips updates and CI dispatch for rejected approvals. If the writer cannot read an approval's close history or auto-merge state, it stops publication. If auto-merge is enabled on an approval pull request, the writer disables it and skips publication for that approval for the run. A failure to disable auto-merge stops publication. A refreshed head needs a fresh review.
 
-Enable **Allow GitHub Actions to create and approve pull requests** in the repository's Actions settings so the built-in token can open these pull requests. The writer uses an explicit workflow dispatch to produce the required `ci-gate` on a branch it published with that token.
+The publish job uses a GitHub App installation token for both Git pushes and pull request operations when the repository variable `LEDGER_APP_ID` is set. App-authenticated pushes and pull request creation trigger pull request CI without the **Approve workflows to run** click that can block pull requests created with the built-in token. The compute job uses the read-only built-in token.
+
+Install the App on this repository only. Store the numeric App ID in the repository Actions variable `LEDGER_APP_ID` and the App's private key in the repository Actions secret `LEDGER_APP_PRIVATE_KEY`. The App needs these repository permissions.
+
+- **Contents: Read and write** for branch pushes and merge operations.
+- **Pull requests: Read and write** to read, open, edit and close pull requests, leave comments and manage auto-merge.
+- **Actions: Read and write** to read attest and CI runs and dispatch `ci.yml`.
+
+Leave `LEDGER_APP_ID` unset to use the built-in token for publishing. That path requires **Allow GitHub Actions to create and approve pull requests** in the repository's Actions settings. The writer explicitly dispatches `ci.yml` on either path. Once the variable is set, a failure to mint the installation token fails the publish job.
 
 `brigade outcome ledger` shows the ledger on main, including its trials, approved versions and open approval pull requests. Use `brigade outcome ledger --plan` with current local main history and GitHub CLI access to preview the scheduled decision. Both commands are read-only. The work brief summarizes its committed ledger locally and links to the GitHub approval search when a fingerprint awaits its owner.
 
