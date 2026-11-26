@@ -1,8 +1,10 @@
 //! SQLite schema definition.
 
-use anyhow::{Context, Result, ensure};
-use rusqlite::{Connection, Transaction};
-use serde::Serialize;
+use std::ops::Deref;
+
+use anyhow::{Result, ensure};
+use rusqlite::{Connection, ErrorCode, OptionalExtension, Transaction};
+use serde::{Serialize, Serializer, ser::SerializeStruct};
 
 /// Bumped when the on-disk schema changes; surfaced in JSON packs from Phase 2 on.
 pub const SCHEMA_VERSION: u32 = 10;
@@ -10,45 +12,166 @@ pub const SCHEMA_VERSION: u32 = 10;
 /// Compare all three fields. A backup restores the counter and generation.
 /// A fresh random ID prevents writes on the restored history from reusing
 /// an identity previously seen at the same counter.
-#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct GraphRevision {
     pub graph_generation: String,
     pub graph_revision: i64,
     pub graph_revision_id: String,
 }
 
-/// Read the revision and compatibility marker in one SQLite snapshot.
-/// On a WAL connection this also works inside a caller's read transaction.
-pub fn graph_revision(conn: &Connection) -> Result<GraphRevision> {
-    let (revision, schema): (GraphRevision, Option<String>) = conn
-        .query_row(
-            "SELECT generation, counter, commit_id,
-                    (SELECT value FROM meta WHERE key = 'schema_version')
-             FROM graph_revision WHERE singleton = 1",
-            [],
-            |row| {
-                Ok((
-                    GraphRevision {
-                        graph_generation: row.get(0)?,
-                        graph_revision: row.get(1)?,
-                        graph_revision_id: row.get(2)?,
-                    },
-                    row.get(3)?,
-                ))
-            },
+impl GraphRevision {
+    pub fn same_snapshot(&self, other: &Self) -> bool {
+        self == other
+    }
+
+    pub fn token(&self) -> String {
+        format!(
+            "{}:{}:{}",
+            self.graph_generation, self.graph_revision, self.graph_revision_id
         )
-        .context("graph revision unavailable; run sync to initialize it")?;
-    // Older engines can still open this additive schema. Their sync writes
-    // its own schema version atomically with the graph, invalidating the
-    // revision until the next supported sync rotates the generation.
-    ensure!(
-        schema.is_none_or(|version| version.parse() == Ok(SCHEMA_VERSION)),
-        "graph revision unavailable for the stored schema; run sync with the current engine"
-    );
-    Ok(revision)
+    }
 }
 
-fn prepare_graph_revision(tx: &Transaction<'_>) -> Result<bool> {
+impl Serialize for GraphRevision {
+    fn serialize<S: Serializer>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error> {
+        let mut fields = serializer.serialize_struct("GraphRevision", 4)?;
+        fields.serialize_field("graph_generation", &self.graph_generation)?;
+        fields.serialize_field("graph_revision", &self.graph_revision)?;
+        fields.serialize_field("graph_revision_id", &self.graph_revision_id)?;
+        fields.serialize_field("graph_revision_token", &self.token())?;
+        fields.end()
+    }
+}
+
+/// Read the schema marker and revision from the same SQLite snapshot.
+pub fn graph_revision(conn: &Connection) -> Result<GraphRevision> {
+    let result = if conn.is_autocommit() {
+        conn.unchecked_transaction()
+            .map_err(anyhow::Error::from)
+            .and_then(|snapshot| read_graph_revision(&snapshot))
+    } else {
+        read_graph_revision(conn)
+    };
+    result.map_err(|error| {
+        match error
+            .downcast_ref::<rusqlite::Error>()
+            .and_then(rusqlite::Error::sqlite_error_code)
+        {
+            Some(ErrorCode::ReadOnly | ErrorCode::CannotOpen) => {
+                error.context("cannot read graph revision: SQLite WAL sidecars must be accessible")
+            }
+            _ => error,
+        }
+    })
+}
+
+fn read_graph_revision(conn: &Connection) -> Result<GraphRevision> {
+    ensure!(
+        checked_schema_version(conn)? == Some(SCHEMA_VERSION),
+        "graph revision unavailable: no current sync schema marker"
+    );
+    ensure!(
+        table_exists(conn, "graph_revision")?,
+        "graph revision unavailable: missing revision table"
+    );
+    conn.query_row(
+        "SELECT generation, counter, commit_id FROM graph_revision WHERE singleton = 1",
+        [],
+        |row| {
+            Ok(GraphRevision {
+                graph_generation: row.get(0)?,
+                graph_revision: row.get(1)?,
+                graph_revision_id: row.get(2)?,
+            })
+        },
+    )
+    .optional()?
+    .ok_or_else(|| anyhow::anyhow!("graph revision unavailable: missing revision row"))
+}
+
+/// Graph content writers can only run inside a transaction that tracks the revision.
+/// Only this module owns the transaction or can commit it.
+pub(super) struct GraphWrite<'conn> {
+    tx: Transaction<'conn>,
+    schema_cookie: i64,
+    total_changes: u64,
+}
+
+impl Deref for GraphWrite<'_> {
+    type Target = Connection;
+
+    fn deref(&self) -> &Self::Target {
+        &self.tx
+    }
+}
+
+#[derive(PartialEq, Eq)]
+enum RevisionUpdate {
+    Seeded,
+    Track,
+    RotateIfChanged,
+    Rotate,
+}
+
+impl<'conn> GraphWrite<'conn> {
+    fn begin(conn: &'conn Connection) -> Result<Self> {
+        let tx = conn.unchecked_transaction()?;
+        let schema_cookie = tx.pragma_query_value(None, "schema_version", |row| row.get(0))?;
+        let total_changes = tx.total_changes();
+        Ok(Self {
+            tx,
+            schema_cookie,
+            total_changes,
+        })
+    }
+
+    fn commit<T>(
+        self,
+        update: RevisionUpdate,
+        finish: impl FnOnce(&Connection) -> Result<T>,
+    ) -> Result<T> {
+        let schema_cookie: i64 =
+            self.pragma_query_value(None, "schema_version", |row| row.get(0))?;
+        let changed =
+            self.total_changes() != self.total_changes || schema_cookie != self.schema_cookie;
+        if update == RevisionUpdate::Rotate || (update != RevisionUpdate::Seeded && changed) {
+            advance_graph_revision(
+                &self.tx,
+                matches!(
+                    update,
+                    RevisionUpdate::Rotate | RevisionUpdate::RotateIfChanged
+                ),
+            )?;
+        }
+        // Provenance and the summary are still in the transaction, but
+        // provenance writes do not participate in graph revision accounting.
+        let result = finish(&self.tx)?;
+        self.tx.commit()?;
+        Ok(result)
+    }
+}
+
+pub(super) fn write_sync<T, R>(
+    conn: &Connection,
+    force: bool,
+    write: impl FnOnce(&GraphWrite<'_>, SchemaUpgrade) -> Result<T>,
+    finish: impl FnOnce(&Connection, T) -> Result<R>,
+) -> Result<R> {
+    let tx = GraphWrite::begin(conn)?;
+    let version = checked_schema_version(&tx)?;
+    let upgrade = upgrade_for_sync(&tx, version)?;
+    let result = write(&tx, upgrade)?;
+    let update = if version != Some(SCHEMA_VERSION) {
+        RevisionUpdate::Rotate
+    } else if force {
+        RevisionUpdate::RotateIfChanged
+    } else {
+        RevisionUpdate::Track
+    };
+    tx.commit(update, |conn| finish(conn, result))
+}
+
+fn prepare_graph_revision(tx: &GraphWrite<'_>) -> Result<bool> {
     tx.execute_batch(
         "CREATE TABLE IF NOT EXISTS graph_revision (
              singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -72,7 +195,7 @@ fn prepare_graph_revision(tx: &Transaction<'_>) -> Result<bool> {
     Ok(!exists)
 }
 
-pub(super) fn advance_graph_revision(tx: &Transaction<'_>, rotate_generation: bool) -> Result<()> {
+fn advance_graph_revision(tx: &Transaction<'_>, rotate_generation: bool) -> Result<()> {
     let rows = tx.execute(
         "UPDATE graph_revision
          SET generation = CASE WHEN ?1 THEN lower(hex(randomblob(16))) ELSE generation END,
@@ -83,10 +206,6 @@ pub(super) fn advance_graph_revision(tx: &Transaction<'_>, rotate_generation: bo
     )?;
     ensure!(rows == 1, "graph revision row missing");
     Ok(())
-}
-
-pub(super) fn schema_cookie(conn: &Connection) -> Result<i64> {
-    Ok(conn.pragma_query_value(None, "schema_version", |row| row.get(0))?)
 }
 
 /// v9 assignment rows are filled by the Python extractor fingerprint bump.
@@ -138,8 +257,8 @@ pub(crate) fn clear_parse_census_pending(tx: &Connection) -> Result<()> {
 }
 
 pub fn init_schema(conn: &Connection) -> Result<()> {
-    let tx = conn.unchecked_transaction()?;
-    let previous_schema = schema_cookie(&tx)?;
+    let tx = GraphWrite::begin(conn)?;
+    checked_schema_version(&tx)?;
     tx.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS files (
@@ -239,17 +358,17 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
     tx.execute_batch(SKIPPED_FILES_TABLE)?;
     tx.execute_batch(MODULE_ASSIGNMENTS_TABLE)?;
     ensure_import_columns(&tx)?;
-    let initialized = prepare_graph_revision(&tx)?;
-    if !initialized && schema_cookie(&tx)? != previous_schema {
-        advance_graph_revision(&tx, false)?;
-    }
-    tx.commit()?;
-    Ok(())
+    let update = if prepare_graph_revision(&tx)? {
+        RevisionUpdate::Seeded
+    } else {
+        RevisionUpdate::Track
+    };
+    tx.commit(update, |_| Ok(()))
 }
 
 /// Apply write-path schema upgrades needed before sync can insert current rows,
 /// returning how much derived state the caller must rebuild.
-pub(super) fn upgrade_for_sync(tx: &Transaction<'_>) -> Result<SchemaUpgrade> {
+fn upgrade_for_sync(tx: &GraphWrite<'_>, version: Option<u32>) -> Result<SchemaUpgrade> {
     let conn: &Connection = tx;
     let mut upgrade = SchemaUpgrade::None;
     conn.execute_batch(MODULE_ASSIGNMENTS_TABLE)?;
@@ -267,7 +386,7 @@ pub(super) fn upgrade_for_sync(tx: &Transaction<'_>) -> Result<SchemaUpgrade> {
     // no longer be derived for its files; reindex once to populate them. The
     // stored version (not table existence) is the signal, because init_schema
     // creates the empty table before this runs.
-    if stored_schema_version(conn)?.is_some_and(|version| version < 5) {
+    if version.is_some_and(|version| version < 5) {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS pending_calls (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -297,7 +416,7 @@ pub(super) fn upgrade_for_sync(tx: &Transaction<'_>) -> Result<SchemaUpgrade> {
     // columns the symbols table already stores, so the migration rewrites ids
     // in place (symbols, pending_calls, FTS) and re-resolves edges, re-parsing
     // nothing. Pre-v5 databases skip this: their FullReindex regenerates ids.
-    if stored_schema_version(conn)?.is_some_and(|version| (5..7).contains(&version)) {
+    if version.is_some_and(|version| (5..7).contains(&version)) {
         rewrite_symbol_ids_v7(tx)?;
         upgrade = upgrade.max(SchemaUpgrade::RebuildEdges);
     }
@@ -332,7 +451,7 @@ pub(super) fn upgrade_for_sync(tx: &Transaction<'_>) -> Result<SchemaUpgrade> {
 /// `(start_line, old id)` order, which matches extraction's traversal order
 /// except for exotic same-line duplicates; those converge to traversal order
 /// the next time their file re-extracts, and edges rebuild either way.
-fn rewrite_symbol_ids_v7(tx: &Transaction<'_>) -> Result<()> {
+fn rewrite_symbol_ids_v7(tx: &GraphWrite<'_>) -> Result<()> {
     use crate::extractors::common::symbol_id;
     use std::collections::HashMap;
 
@@ -381,19 +500,25 @@ fn rewrite_symbol_ids_v7(tx: &Transaction<'_>) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn stored_schema_version(conn: &Connection) -> Result<Option<u32>> {
-    let meta_exists: bool = conn.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta')",
-        [],
-        |row| row.get(0),
-    )?;
-    if !meta_exists {
+pub(super) fn checked_schema_version(conn: &Connection) -> Result<Option<u32>> {
+    if !table_exists(conn, "meta")? {
         return Ok(None);
     }
-    Ok(crate::store::meta::read(conn, "schema_version")?.and_then(|value| value.parse().ok()))
+    let marker = super::meta::read(conn, "schema_version")?;
+    let version = marker
+        .as_deref()
+        .and_then(|value| value.parse::<u32>().ok());
+    ensure!(
+        version.is_none_or(|version| version <= SCHEMA_VERSION),
+        "database schema is newer than this engine"
+    );
+    if version == Some(SCHEMA_VERSION) && marker != Some(SCHEMA_VERSION.to_string()) {
+        return Ok(None);
+    }
+    Ok(version)
 }
 
-fn ensure_import_columns(conn: &Connection) -> Result<()> {
+fn ensure_import_columns(conn: &GraphWrite<'_>) -> Result<()> {
     let mut stmt = conn.prepare("PRAGMA table_info(imports)")?;
     let columns = stmt
         .query_map([], |row| row.get::<_, String>(1))?

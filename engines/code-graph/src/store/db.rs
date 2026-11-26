@@ -144,6 +144,13 @@ pub(crate) fn is_index_dir(path: &Path) -> bool {
 
 /// Open (creating parent dirs) a WAL-mode SQLite connection.
 pub fn open_db(path: &Path) -> Result<Connection> {
+    // Even closing a read-write WAL connection can checkpoint committed
+    // data. Check an existing database before opening a writable handle.
+    if path.try_exists()? {
+        let reader = open_read_only(path)?;
+        let snapshot = reader.unchecked_transaction()?;
+        super::schema::checked_schema_version(&snapshot)?;
+    }
     if let Some(parent) = path.parent() {
         let records_index_dir_creation = (parent.file_name() == Some(OsStr::new(LEGACY_INDEX_DIR))
             || is_index_dir(parent))
@@ -186,7 +193,8 @@ fn normalize_dir(path: &Path) -> PathBuf {
 /// Open an existing db read-only. Used by the MCP server and query commands so they can never
 /// mutate the graph. Deliberately NOT `immutable=1`: these dbs are rewritten by a background
 /// sync, and immutable connections skip locking entirely, so a concurrent write could serve
-/// torn reads. SQLite (3.22+) reads a quiescent WAL db without creating sidecar files.
+/// torn reads. A WAL reader may create the WAL and shared-memory sidecars. If they cannot
+/// be opened or created, the read can fail even when the main database is readable.
 pub fn open_read_only(path: &Path) -> Result<Connection> {
     let conn = Connection::open_with_flags(
         path,

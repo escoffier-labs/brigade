@@ -9,6 +9,7 @@ use rusqlite::{Connection, params};
 
 use crate::extractors::common::{MODULE_SYMBOL_KIND, MODULE_SYMBOL_NAME, hex_hash};
 use crate::extractors::{extractor_fingerprint_for, language_for};
+use crate::store::schema::GraphWrite;
 use crate::store::skipped::SkippedStat;
 use crate::store::walk::Entry;
 
@@ -53,7 +54,7 @@ pub(super) fn stale_plan<'a>(
 /// Insert one extracted file's rows: the file record, its symbols (plus FTS),
 /// imports, and pending calls awaiting cross-file resolution.
 pub(super) fn write_file_graph(
-    tx: &Connection,
+    tx: &GraphWrite<'_>,
     graph: &crate::model::FileGraph,
     now: i64,
 ) -> Result<()> {
@@ -169,7 +170,7 @@ fn is_module_pseudo_symbol(symbol: &crate::model::Symbol) -> bool {
     symbol.kind == MODULE_SYMBOL_KIND && symbol.name == MODULE_SYMBOL_NAME
 }
 
-pub(super) fn purge_file_graph(tx: &Connection, path: &str) -> Result<()> {
+pub(super) fn purge_file_graph(tx: &GraphWrite<'_>, path: &str) -> Result<()> {
     tx.execute(
         "DELETE FROM symbols_fts WHERE file_path = ?1",
         params![path],

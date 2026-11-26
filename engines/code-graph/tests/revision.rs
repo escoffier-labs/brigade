@@ -100,6 +100,9 @@ fn revision_sync_lifecycle_and_git_exclude() {
         let summary = sync(&db, root);
         assert_eq!(summary["files"], files, "{operation}");
         assert_eq!(summary["skipped"], skipped, "{operation}");
+        if operation == "prune skipped" {
+            assert_eq!(summary["unchanged"], true);
+        }
         let next = Revision::read(&summary);
         next.advanced_from(&previous);
         let unchanged = sync(&db, root);
@@ -124,7 +127,7 @@ fn symbol_count(conn: &Connection) -> i64 {
 }
 
 #[test]
-fn revision_status_reads_committed_wal_snapshot_and_never_writes() {
+fn revision_status_reads_committed_wal_snapshot_without_mutating_main_file() {
     let dir = TempDir::new().unwrap();
     let root = dir.path();
     let db = root.join("index.db");
@@ -155,13 +158,26 @@ fn revision_status_reads_committed_wal_snapshot_and_never_writes() {
     let writer = open_db(&db).unwrap();
     let tx = writer.unchecked_transaction().unwrap();
     tx.execute("DELETE FROM symbols", []).unwrap();
+    tx.execute("UPDATE graph_revision SET counter = counter + 1", [])
+        .unwrap();
     // A competing sync lock plus an actual SQLite writer must not block status.
     let _lock = brigade_code_graph::store::lock::SyncLock::acquire(&db).unwrap();
     let bytes = fs::read(&db).unwrap();
+    let mtime = fs::metadata(&db).unwrap().modified().unwrap();
     assert_eq!(revision(&db, root), next);
     assert_eq!(fs::read(&db).unwrap(), bytes);
+    assert_eq!(fs::metadata(&db).unwrap().modified().unwrap(), mtime);
     assert_eq!(symbol_count(&reader), 1);
     tx.rollback().unwrap();
+}
+
+// The fixture can use a raw file copy only after all connections close.
+fn copy_quiescent_database(source: &Path, destination: &Path) {
+    for db in [source, destination] {
+        assert!(!db.with_extension("db-wal").exists());
+        assert!(!db.with_extension("db-shm").exists());
+    }
+    fs::copy(source, destination).unwrap();
 }
 
 // A restored backup can report the original revision for that exact snapshot.
@@ -175,21 +191,26 @@ fn revision_restore_divergence_and_rebuild() {
     let file = root.join("app.py");
     fs::write(&file, "def baseline(): pass\n").unwrap();
     let baseline = Revision::read(&sync(&db, root));
-    fs::copy(&db, &backup).unwrap();
+    copy_quiescent_database(&db, &backup);
 
     fs::write(&file, "def first_history(): pass\n").unwrap();
-    let first = Revision::read(&sync(&db, root));
-    fs::copy(&backup, &db).unwrap();
+    sync(&db, root);
+    let first = graph_revision(&open_db(&db).unwrap()).unwrap();
+    copy_quiescent_database(&backup, &db);
     assert_eq!(revision(&db, root), baseline);
 
     fs::write(&file, "def second_history(): pass\n").unwrap();
-    let second = Revision::read(&sync(&db, root));
-    assert_eq!(first.counter, second.counter);
-    assert_eq!(first.generation, second.generation);
-    assert_ne!(first.id, second.id);
+    sync(&db, root);
+    let second = graph_revision(&open_read_only(&db).unwrap()).unwrap();
+    assert_eq!(first.graph_revision, second.graph_revision);
+    assert_eq!(first.graph_generation, second.graph_generation);
+    assert_ne!(first.graph_revision_id, second.graph_revision_id);
+    assert!(first.same_snapshot(&first));
+    assert!(!first.same_snapshot(&second));
+    assert_ne!(first.token(), second.token());
 
     let forced = Revision::read(&json(&db, root, &["sync", "--force", "--json"]));
-    assert_ne!(forced.generation, second.generation);
+    assert_ne!(forced.generation, second.graph_generation);
     fs::remove_file(&db).unwrap();
     let rebuilt = Revision::read(&sync(&db, root));
     assert_ne!(rebuilt.generation, forced.generation);
@@ -236,9 +257,22 @@ fn revision_migration_and_resolver_repair() {
     let after_old_writer = Revision::read(&sync(&db, root));
     assert_ne!(after_old_writer.generation, repaired.generation);
 
+    // Exercise the pre-v9 parse-census upgrade against the same fixture shape.
+    conn.execute_batch(
+        "ALTER TABLE files DROP COLUMN parse_errors;
+         DROP TABLE skipped_files;
+         UPDATE meta SET value = '7' WHERE key = 'schema_version';",
+    )
+    .unwrap();
+    let summary = sync(&db, root);
+    assert_eq!(summary["unchanged"], false);
+    assert_eq!(symbol_count(&conn), 1);
+    let upgraded = Revision::read(&summary);
+    assert_ne!(upgraded.generation, after_old_writer.generation);
+
     // Schema init itself is idempotent on a current database.
     init_schema(&conn).unwrap();
-    assert_eq!(revision(&db, root), after_old_writer);
+    assert_eq!(revision(&db, root), upgraded);
 }
 
 #[test]
@@ -334,4 +368,167 @@ fn revision_watch_initial_sync_advances() {
     result.unwrap();
     assert!(line.starts_with("watching "), "{line}");
     revision(&db, root).advanced_from(&initial);
+}
+
+fn assert_cli_error(output: &std::process::Output, message: &str) {
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains(message), "{stderr}");
+}
+
+#[test]
+fn revision_requires_a_current_sync_marker() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let db = root.join("index.db");
+    assert!(engine(&db, root, &["init"]).status.success());
+    assert_cli_error(
+        &engine(&db, root, &["revision", "--json"]),
+        "graph revision unavailable",
+    );
+
+    let mut previous = Revision::read(&sync(&db, root));
+    let conn = open_db(&db).unwrap();
+    for marker in [None, Some("9-dev"), Some("9"), Some("010")] {
+        conn.execute("DELETE FROM meta WHERE key = 'schema_version'", [])
+            .unwrap();
+        if let Some(marker) = marker {
+            conn.execute("INSERT INTO meta VALUES ('schema_version', ?1)", [marker])
+                .unwrap();
+        }
+        assert_cli_error(
+            &engine(&db, root, &["revision", "--json"]),
+            "graph revision unavailable",
+        );
+        let current = Revision::read(&sync(&db, root));
+        assert_ne!(current.generation, previous.generation, "{marker:?}");
+        assert_eq!(revision(&db, root), current);
+        previous = current;
+    }
+}
+
+#[test]
+fn newer_schema_is_refused_without_modifying_the_database() {
+    use brigade_code_graph::mcp::handle_request;
+    use serde_json::json;
+
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let db = root.join(".brigade/code-graph/code-graph.db");
+    fs::write(root.join("app.py"), "def added(): pass\n").unwrap();
+    sync(&db, root);
+    let conn = Connection::open(&db).unwrap();
+    // A database newer than this build need not use WAL or today's tables.
+    conn.pragma_update(None, "journal_mode", "DELETE").unwrap();
+    conn.execute_batch(
+        "UPDATE meta SET value = '11' WHERE key = 'schema_version';
+         DROP TABLE module_assignments;",
+    )
+    .unwrap();
+    let bytes = fs::read(&db).unwrap();
+    let mtime = fs::metadata(&db).unwrap().modified().unwrap();
+    let message = "database schema is newer than this engine";
+    let error = init_schema(&conn).unwrap_err();
+    assert!(error.to_string().contains(message), "{error:#}");
+    drop(conn);
+
+    for args in [&["init"][..], &["sync", "--json"], &["revision", "--json"]] {
+        assert_cli_error(&engine(&db, root, args), message);
+        assert_eq!(fs::read(&db).unwrap(), bytes, "{args:?}");
+        assert_eq!(fs::metadata(&db).unwrap().modified().unwrap(), mtime);
+    }
+
+    let response = handle_request(
+        &db,
+        &json!({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                "params": {"name": "search", "arguments": {"query": "added", "refresh": true}}}),
+    )
+    .unwrap();
+    // The refresh fails, while the existing MCP query contract can still answer.
+    let content = response["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(content.contains("refresh_error:"), "{response}");
+    assert!(content.contains(message), "{response}");
+    assert_eq!(fs::read(&db).unwrap(), bytes);
+    assert_eq!(fs::metadata(&db).unwrap().modified().unwrap(), mtime);
+
+    #[cfg(feature = "watch")]
+    {
+        assert_cli_error(&engine(&db, root, &["watch"]), message);
+        assert_eq!(fs::read(&db).unwrap(), bytes);
+        assert_eq!(fs::metadata(&db).unwrap().modified().unwrap(), mtime);
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn revision_reports_when_wal_sidecars_are_inaccessible() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let db = root.join("index.db");
+    sync(&db, root);
+    assert!(!db.with_extension("db-wal").exists());
+    assert!(!db.with_extension("db-shm").exists());
+    let original = fs::metadata(root).unwrap().permissions();
+    fs::set_permissions(root, fs::Permissions::from_mode(0o500)).unwrap();
+    let output = engine(&db, root, &["revision", "--json"]);
+    fs::set_permissions(root, original).unwrap();
+
+    // Root can create sidecars even without directory write permission.
+    if unsafe { libc::geteuid() } != 0 {
+        assert_cli_error(&output, "SQLite WAL sidecars");
+        assert!(!String::from_utf8_lossy(&output.stderr).contains("run sync"));
+    }
+}
+
+#[test]
+fn revision_text_reports_the_same_fields_as_json() {
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let db = root.join("index.db");
+    sync(&db, root);
+    let fields = json(&db, root, &["revision", "--json"]);
+    let output = engine(&db, root, &["revision"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let lines: Vec<_> = stdout.lines().collect();
+    assert_eq!(lines.len(), 4);
+    for (key, value) in fields.as_object().unwrap() {
+        let rendered = value
+            .as_str()
+            .map_or_else(|| value.to_string(), str::to_owned);
+        assert!(lines.contains(&format!("{key}: {rendered}").as_str()));
+    }
+}
+
+#[test]
+fn refusing_a_newer_schema_does_not_checkpoint_its_wal() {
+    use rusqlite::config::DbConfig;
+
+    let dir = TempDir::new().unwrap();
+    let root = dir.path();
+    let db = root.join("index.db");
+    sync(&db, root);
+    let writer = Connection::open(&db).unwrap();
+    writer
+        .set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)
+        .unwrap();
+    writer
+        .execute(
+            "UPDATE meta SET value = '11' WHERE key = 'schema_version'",
+            [],
+        )
+        .unwrap();
+    drop(writer);
+    let wal = db.with_extension("db-wal");
+    let main_bytes = fs::read(&db).unwrap();
+    let wal_bytes = fs::read(&wal).unwrap();
+    assert!(!wal_bytes.is_empty());
+
+    for args in [&["init"][..], &["sync", "--json"], &["revision", "--json"]] {
+        assert_cli_error(&engine(&db, root, args), "database schema is newer");
+        assert_eq!(fs::read(&db).unwrap(), main_bytes, "{args:?}");
+        assert_eq!(fs::read(&wal).unwrap(), wal_bytes, "{args:?}");
+    }
 }

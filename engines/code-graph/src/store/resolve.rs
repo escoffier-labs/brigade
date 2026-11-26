@@ -9,6 +9,7 @@ use rusqlite::{Connection, params};
 
 use crate::extractors::python::WILDCARD_IMPORT;
 use crate::model::{CallKind, Import, ModuleAssignment, PendingCall};
+use crate::store::schema::GraphWrite;
 
 /// Bump when resolution rules change; persisted edges must be rebuilt on sync.
 ///
@@ -44,7 +45,7 @@ enum ImportResolution {
 /// edges from callers in unchanged files, and resolutions that a change made
 /// stale (a fallback superseded by a strict match, a deleted target) disappear
 /// instead of lingering.
-pub(super) fn rebuild_edges(tx: &Connection) -> Result<()> {
+pub(super) fn rebuild_edges(tx: &GraphWrite<'_>) -> Result<()> {
     tx.execute("DELETE FROM edges", [])?;
     let name_index = load_name_index(tx)?;
     let import_index = load_import_index(tx)?;

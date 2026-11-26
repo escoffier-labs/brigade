@@ -303,6 +303,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 println!("graph_generation: {}", revision.graph_generation);
                 println!("graph_revision: {}", revision.graph_revision);
                 println!("graph_revision_id: {}", revision.graph_revision_id);
+                println!("graph_revision_token: {}", revision.token());
             }
         }
         Command::Search {

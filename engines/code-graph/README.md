@@ -103,6 +103,35 @@ When the sync root is inside a git repository, `sync` follows `.gitignore` and `
 
 A file that cannot be indexed does not fail the sync. Sync skips it, drops any rows it had, indexes everything else, and prints `skipped files=N <reason>=N` when anything is skipped. Files that are not valid UTF-8 are skipped rather than decoded lossily, so stored line numbers always match the file. Reasons are `unreadable_utf8`, `io_error`, and `parse_error`. A skipped file is retried when its size or mtime changes (or on `sync --force`). An `io_error` skip is also retried once the file becomes readable again, because a permission fix changes neither. Its entry clears once it indexes or is deleted. Doctor JSON includes `skipped: {count, sample: [{path, reason}]}`, `parse_errors: {count, sample: [path]}` for indexed files where tree-sitter had to recover from syntax errors, and a `warnings` array of strings describing both. Samples list at most five paths. Skipped and parse-error files never change the verdict, so a permanently bad vendored file does not pin `doctor` to `STALE`. `evaluate` reports the same skips in a `skipped` list and `totals.skipped`.
 
+### Compare committed graph snapshots
+
+Run `brigade-code-graph --db PATH revision --json` to read a snapshot's revision, or
+`brigade-code-graph --db PATH sync --json` to get the revision committed by sync.
+Both return `graph_generation`, the integer `graph_revision`, `graph_revision_id`,
+and `graph_revision_token`. Compare the complete token as one string. It combines
+the generation, counter, and commit ID in that order, separated by colons.
+An equal token means the committed graph content is identical. Sync provenance
+such as `synced_at`, `tool_version`, branch, and HEAD is excluded, so `stats`
+and `doctor` output can differ at an equal revision.
+
+The legacy `unchanged` flag only describes the file reindex and edge rebuild
+decisions during that sync. For example, pruning a skipped file advances the
+revision even when `unchanged` is true. Use the token for snapshot comparisons.
+
+A revision is unavailable until a current sync has committed its schema marker.
+A missing, malformed, or older marker also makes the revision unavailable.
+When either read fails, fall back to inspecting the graph snapshots. The revision
+command opens the database read-only and takes no sync lock. SQLite may still
+need to open or create WAL and shared-memory sidecars, so a read can fail if
+they are inaccessible.
+
+Engine writes update the revision in the transaction that changes the graph.
+Direct SQL edits are outside that guarantee. Use the SQLite backup API to make
+or restore a consistent snapshot. Copying the main file beside a live WAL can
+omit committed data. Restoring a complete snapshot restores its revision too.
+Subsequent writes on the restored database get new random commit IDs, even
+when the counter repeats a value from the previous history.
+
 ## MCP server
 
 `brigade-code-graph-mcp` speaks newline-delimited JSON-RPC 2.0 over stdio. It has no async runtime and no extra dependencies, so the sidecar stays small. `refresh: true` starts an incremental graph-index write and waits up to 10 seconds before opening the query read-only. If the refresh fails or times out, the query proceeds and appends a `refresh_error` note to its text result. A timed-out worker may finish concurrently with that read-only query. Without `refresh`, query tools do not write the graph.

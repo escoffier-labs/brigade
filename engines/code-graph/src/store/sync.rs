@@ -5,7 +5,7 @@
 //! preserves the public sync surface and the transaction order.
 
 use std::collections::{BTreeMap, HashSet};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use rusqlite::Connection;
@@ -23,9 +23,8 @@ use crate::store::repo_policy::{
 };
 use crate::store::resolve::rebuild_edges;
 use crate::store::schema::{
-    GraphRevision, SCHEMA_VERSION, SchemaUpgrade, advance_graph_revision,
-    clear_parse_census_pending, graph_revision, schema_cookie, stored_schema_version,
-    upgrade_for_sync,
+    GraphRevision, GraphWrite, SchemaUpgrade, clear_parse_census_pending, graph_revision,
+    write_sync,
 };
 use crate::store::skipped::{clear_skipped, load_skipped, record_skipped, skipped_reason_counts};
 use crate::store::walk::{Entry, collect_sync_walk};
@@ -71,23 +70,35 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
             legacy_created.then_some(legacy)
         }
     };
-    let tx = conn.unchecked_transaction()?;
-    let previous_schema = schema_cookie(&tx)?;
-    let previous_changes = tx.total_changes();
-    let stored_schema = stored_schema_version(&tx)?;
-    anyhow::ensure!(
-        stored_schema.is_none_or(|version| version <= SCHEMA_VERSION),
-        "database schema is newer than this engine"
-    );
-    let previous_engine = stored_schema.is_some_and(|version| version < SCHEMA_VERSION);
-    let upgrade = upgrade_for_sync(&tx)?;
+    write_sync(
+        conn,
+        force,
+        |tx, upgrade| index_graph(tx, &root, force, upgrade, created_index_dir),
+        |conn, (unchanged, deleted, clear_census)| {
+            if clear_census {
+                clear_parse_census_pending(conn)?;
+            }
+            crate::store::meta::write_sync_meta(conn)?;
+            write_branch_meta(conn, &root)?;
+            summarize(conn, unchanged, deleted)
+        },
+    )
+}
+
+fn index_graph(
+    tx: &GraphWrite<'_>,
+    root: &Path,
+    force: bool,
+    upgrade: SchemaUpgrade,
+    created_index_dir: Option<PathBuf>,
+) -> Result<(bool, usize, bool)> {
     let force_full_reindex = force || upgrade == SchemaUpgrade::FullReindex;
 
-    let entries = collect_sync_walk(&root, false)?.entries;
-    let db_files = load_db_files(&tx)?;
-    let skipped = load_skipped(&tx)?;
-    if let Some(dir) = created_index_dir.filter(|_| db_files.is_empty() && has_git_marker(&root)) {
-        ensure_index_ignored(&root, &dir)?;
+    let entries = collect_sync_walk(root, false)?.entries;
+    let db_files = load_db_files(tx)?;
+    let skipped = load_skipped(tx)?;
+    if let Some(dir) = created_index_dir.filter(|_| db_files.is_empty() && has_git_marker(root)) {
+        ensure_index_ignored(root, &dir)?;
     }
 
     let on_disk: HashSet<&str> = entries.iter().map(|entry| entry.rel.as_str()).collect();
@@ -117,43 +128,28 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
             .collect();
         purge.extend(deleted.iter().map(String::as_str));
         for path in purge {
-            purge_file_graph(&tx, path)?;
+            purge_file_graph(tx, path)?;
         }
 
         // Parse and IO failures are recorded (old rows were purged above).
         // Database errors abort the transaction.
         let now = now_ts();
         for entry in files_to_index {
-            match index_file(&root, &entry.path, entry.lang) {
+            match index_file(root, &entry.path, entry.lang) {
                 Ok(graph) => {
-                    write_file_graph(&tx, &graph, now)?;
-                    clear_skipped(&tx, &entry.rel)?;
+                    write_file_graph(tx, &graph, now)?;
+                    clear_skipped(tx, &entry.rel)?;
                 }
-                Err(failure) => record_skipped(&tx, entry, &failure, now)?,
+                Err(failure) => record_skipped(tx, entry, &failure, now)?,
             }
         }
-        rebuild_edges(&tx)?;
+        rebuild_edges(tx)?;
     }
     for path in skipped_gone {
-        clear_skipped(&tx, path)?;
+        clear_skipped(tx, path)?;
     }
 
-    // Count every graph DML operation and DDL change, including migrations
-    // and skipped-only pruning, before writing sync provenance.
-    if tx.total_changes() != previous_changes
-        || schema_cookie(&tx)? != previous_schema
-        || previous_engine
-    {
-        advance_graph_revision(&tx, force || previous_engine)?;
-    }
-    if force_full_reindex {
-        clear_parse_census_pending(&tx)?;
-    }
-    crate::store::meta::write_sync_meta(&tx)?;
-    write_branch_meta(&tx, &root)?;
-    let summary = summarize(&tx, !changed, deleted.len())?;
-    tx.commit()?;
-    Ok(summary)
+    Ok((!changed, deleted.len(), force_full_reindex))
 }
 
 fn summarize(conn: &Connection, unchanged: bool, deleted: usize) -> Result<SyncSummary> {

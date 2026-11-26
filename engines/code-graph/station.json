@@ -28,6 +28,14 @@
           "timeout_seconds": 10
         },
         {
+          "kind": "revision-json",
+          "command": ["brigade-code-graph", "revision", "--json"],
+          "read_only": true,
+          "timeout_seconds": 10,
+          "probe": ["brigade-code-graph", "revision", "--help"],
+          "probe_contains": ["--json"]
+        },
+        {
           "kind": "doctor-json",
           "command": ["brigade-code-graph", "doctor", "--json"],
           "read_only": true,

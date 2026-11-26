@@ -31,6 +31,7 @@ fn command_args<'a>(db: &'a Path, command: &'a str) -> Vec<String> {
         "context" => vec!["--db".into(), db, "context".into(), "helper".into()],
         "neighbors" => vec!["--db".into(), db, "neighbors".into(), "app.py".into()],
         "outline" => vec!["--db".into(), db, "outline".into(), "app.py".into()],
+        "revision" => vec!["--db".into(), db, "revision".into(), "--json".into()],
         "stats" => vec!["--db".into(), db, "stats".into()],
         "doctor" => vec!["--db".into(), db, "doctor".into()],
         other => panic!("unknown query command: {other}"),
@@ -239,6 +240,7 @@ fn query_commands_do_not_create_default_db_state_when_missing() {
         "neighbors",
         "outline",
         "stats",
+        "revision",
         "doctor",
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -253,6 +255,7 @@ fn query_commands_do_not_create_default_db_state_when_missing() {
             "neighbors" => cmd.args(["neighbors", "app.py"]),
             "outline" => cmd.args(["outline", "app.py"]),
             "stats" => cmd.arg("stats"),
+            "revision" => cmd.args(["revision", "--json"]),
             "doctor" => cmd.arg("doctor"),
             other => panic!("unknown query command: {other}"),
         };
@@ -281,6 +284,7 @@ fn query_commands_do_not_mutate_existing_db_state() {
         "neighbors",
         "outline",
         "stats",
+        "revision",
         "doctor",
     ] {
         let dir = tempfile::tempdir().unwrap();

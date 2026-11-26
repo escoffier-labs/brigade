@@ -263,3 +263,43 @@ fn doctor_reports_per_language_coverage() {
     assert_eq!(rust["call_sites"], 0);
     assert_eq!(rust["cross_file_edges"], 0);
 }
+
+#[test]
+fn graph_revision_and_sync_summary_json_have_stable_shapes() {
+    use brigade_code_graph::store::schema::graph_revision;
+    use serde_json::{json, to_value};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let conn = open_db(&root.join("index.db")).unwrap();
+    init_schema(&conn).unwrap();
+    let summary = sync_repo(&conn, root).unwrap();
+    let revision = graph_revision(&conn).unwrap();
+    let token = format!(
+        "{}:{}:{}",
+        revision.graph_generation, revision.graph_revision, revision.graph_revision_id
+    );
+    let revision_fields = json!({
+        "graph_generation": revision.graph_generation,
+        "graph_revision": revision.graph_revision,
+        "graph_revision_id": revision.graph_revision_id,
+        "graph_revision_token": token,
+    });
+    assert_eq!(to_value(&revision).unwrap(), revision_fields);
+
+    let mut summary_fields = json!({
+        "files": 0,
+        "symbols": 0,
+        "calls": 0,
+        "imports": 0,
+        "unchanged": false,
+        "deleted": 0,
+        "skipped": 0,
+        "skipped_by_reason": {},
+    });
+    summary_fields
+        .as_object_mut()
+        .unwrap()
+        .extend(revision_fields.as_object().unwrap().clone());
+    assert_eq!(to_value(summary).unwrap(), summary_fields);
+}

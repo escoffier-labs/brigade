@@ -36,6 +36,7 @@ fn assert_supported_read_only_command(command: &Value, context: &str) {
                 | "evaluate"
                 | "explain"
                 | "stats"
+                | "revision"
                 | "doctor"
                 | "diff"
                 | "blend"

@@ -17,6 +17,7 @@ use rusqlite::{Connection, params};
 use serde::Serialize;
 
 use crate::extractors::{IndexFailure, SkipReason};
+use crate::store::schema::GraphWrite;
 use crate::store::schema::{table_exists, table_has_column};
 use crate::store::walk::Entry;
 
@@ -105,7 +106,7 @@ pub(super) fn load_skipped(conn: &Connection) -> Result<HashMap<String, SkippedS
 }
 
 pub(super) fn record_skipped(
-    tx: &Connection,
+    tx: &GraphWrite<'_>,
     entry: &Entry,
     failure: &IndexFailure,
     now: i64,
@@ -125,7 +126,7 @@ pub(super) fn record_skipped(
     Ok(())
 }
 
-pub(super) fn clear_skipped(tx: &Connection, path: &str) -> Result<()> {
+pub(super) fn clear_skipped(tx: &GraphWrite<'_>, path: &str) -> Result<()> {
     tx.execute("DELETE FROM skipped_files WHERE path = ?1", params![path])?;
     Ok(())
 }
