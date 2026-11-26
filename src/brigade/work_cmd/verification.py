@@ -27,7 +27,6 @@ from .. import (
     receipt_json,
     receipt_schema,
     receipt_signing,
-    runguard,
 )
 from .. import verification_contract, verify_manifest, verify_manifest_git, verify_trial
 from ..agent_identity import stamp_verify_identity as _stamp_harness_session
@@ -39,6 +38,7 @@ from . import reviews as reviews_mod
 from . import scanners as scanners_mod
 from . import verify_argv_files, verify_ci, verify_gate, verify_ranking, verify_receipt_details, verify_runtime
 from .closeout_receipt import write_markdown as _write_work_closeout_markdown
+from .verify_receipt_details import _capture_verify_identity, _git_head_branch, _receipt_git_snapshot
 from .verify_scoreability import _print_graph_impact, _print_scoreability_notice, _scoreability_notice
 
 
@@ -68,42 +68,6 @@ def _verification_shell_meta_re() -> re.Pattern[str]:
 def _verification_split_command(command: str) -> list[str]:
     """Split a raw ``--command`` string with platform-aware shlex rules."""
     return split_verify_command(command, windows=_verification_is_windows())
-
-
-def _git_head_branch(target: Path, *, paths: bool = False) -> verify_manifest_git.WorktreeIdentity | None:
-    # rev-parse applies --abbrev-ref only to the arguments that follow it.
-    try:
-        if paths:
-            result = helpers._git(
-                target, "rev-parse", "--show-toplevel", "--absolute-git-dir", "HEAD", "--abbrev-ref", "HEAD"
-            )
-            lines = result.stdout.rstrip("\n").split("\n")
-            if result.returncode == 0 and len(lines) == 4 and all(lines):
-                root, git_dir, head, branch = lines
-                if Path(root).is_absolute() and Path(git_dir).is_absolute():
-                    return verify_manifest_git.WorktreeIdentity(head.strip(), branch.strip(), git_dir, root.strip())
-        result = helpers._git(target, "rev-parse", "HEAD", "--abbrev-ref", "HEAD")
-    except (OSError, UnicodeError):
-        if paths:
-            return _git_head_branch(target)
-        return None
-    head, _, branch = (value.strip() for value in result.stdout.partition("\n"))
-    if result.returncode or not head or not branch:
-        return None
-    return verify_manifest_git.WorktreeIdentity(head, branch)
-
-
-def _receipt_git_snapshot(
-    target: Path, *, facts: verify_manifest_git.VerifyGitFacts | None = None
-) -> dict[str, Any] | None:
-    try:
-        identity = facts.identity if facts is not None and facts.read_identity is not None else _git_head_branch(target)
-        status = helpers._git(target, "status", "--porcelain")
-    except OSError:
-        return None
-    if identity is None or status.returncode != 0:
-        return None
-    return {"head": identity.head, "branch": identity.branch, "dirty_files": len(status.stdout.splitlines())}
 
 
 def _high_risk_command_message(executable: str) -> str:
@@ -1530,40 +1494,6 @@ def _git_with_index(target: Path, index_file: Path, *args: str) -> subprocess.Co
         return subprocess.CompletedProcess(exc.cmd, 124, stdout="", stderr=f"git timed out after {exc.timeout:g}s")
     except OSError:
         return subprocess.CompletedProcess(["git"], 127, stdout="", stderr="git unavailable")
-
-
-def _capture_verify_identity(target: Path, run_dir: Path) -> dict[str, Any]:
-    unavailable: dict[str, Any] = {
-        "schema_version": receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION,
-        "baseline_commit": None,
-        "tree_fingerprint": None,
-        "tree_fingerprint_head": None,
-        "changes_patch_sha256": None,
-    }
-    patch_path = run_dir / "changes.patch"
-    try:
-        tree_fingerprint, baseline_commit = localio.tree_fingerprint_with_head(target)
-        if baseline_commit is None or tree_fingerprint is None:
-            return unavailable
-        # This caller consumes patch bytes only. Counts used by run evidence
-        # are still collected by the default patch API.
-        runguard.collect_changes_patch(target, patch_path, count_tracked=False)
-        patch_bytes = patch_path.read_bytes()
-        # Patch collection reads live files and the live index. Keep a fresh
-        # observation on each side of it, even before the test command starts.
-        if localio.tree_fingerprint_with_head(target) != (tree_fingerprint, baseline_commit):
-            patch_path.unlink(missing_ok=True)
-            return unavailable
-    except (OSError, runguard.RunGuardError):
-        patch_path.unlink(missing_ok=True)
-        return unavailable
-    return {
-        "schema_version": receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION,
-        "baseline_commit": baseline_commit,
-        "tree_fingerprint": tree_fingerprint,
-        "tree_fingerprint_head": baseline_commit,
-        "changes_patch_sha256": hashlib.sha256(patch_bytes).hexdigest(),
-    }
 
 
 def _run_verify_commands(

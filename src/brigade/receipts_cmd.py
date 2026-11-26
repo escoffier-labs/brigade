@@ -13,7 +13,6 @@ from datetime import datetime, timezone
 from functools import cached_property
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 from . import __version__
 from . import code_references
@@ -26,6 +25,7 @@ from . import receipt_signing
 from . import receipt_replay
 from . import trust_gate
 from .inbox_lock import InboxLockTimeout, held_file_lock
+from .receipt_git import _github_remote_parts, _metadata_with_git, _receipt_git
 from .receipts_import_contract import MissingImportAcknowledgement, _miseledger_import_summary
 from .untrusted import scan_handoff_injection_heuristics
 
@@ -803,27 +803,6 @@ def _git_value(target: Path, *args: str) -> str | None:
     return value or None
 
 
-def _github_host(host: str | None) -> bool:
-    return bool(host and (host == "github.com" or host.endswith(".github.com")))
-
-
-def _strip_git_suffix(repo: str) -> str:
-    return repo[:-4] if repo.endswith(".git") else repo
-
-
-def _github_remote_parts(remote: str) -> tuple[str, str, str] | None:
-    parsed = urlparse(remote)
-    if parsed.scheme == "https" and _github_host(parsed.hostname):
-        parts = [part for part in parsed.path.split("/") if part]
-        if len(parts) == 2:
-            return parsed.hostname or "", parts[0], _strip_git_suffix(parts[1])
-        return None
-    match = re.match(r"^git@([^:]+):([^/]+)/(.+)$", remote)
-    if match and _github_host(match.group(1)):
-        return match.group(1), match.group(2), _strip_git_suffix(match.group(3))
-    return None
-
-
 @dataclass(frozen=True)
 class _ExportOrigin:
     target: Path
@@ -832,17 +811,6 @@ class _ExportOrigin:
     def parts(self) -> tuple[str, str, str] | None:
         remote = _git_value(self.target, "remote", "get-url", "origin")
         return _github_remote_parts(remote) if remote else None
-
-
-def _receipt_git(payload: dict[str, Any]) -> dict[str, Any] | None:
-    git = payload.get("git")
-    if not isinstance(git, dict):
-        return None
-    head = git.get("head")
-    if not isinstance(head, str) or not head:
-        return None
-    copied = {key: git[key] for key in ("head", "branch", "dirty_files") if key in git}
-    return copied if copied else None
 
 
 def _git_commit_links(item_external_id: str, payload: dict[str, Any], origin: _ExportOrigin) -> list[dict[str, Any]]:
@@ -860,13 +828,6 @@ def _git_commit_links(item_external_id: str, payload: dict[str, Any], origin: _E
             "url": f"https://{host}/{org}/{repo}/commit/{git['head']}",
         }
     ]
-
-
-def _metadata_with_git(metadata: dict[str, Any], payload: dict[str, Any]) -> dict[str, Any]:
-    git = _receipt_git(payload)
-    if git is not None:
-        metadata["git"] = git
-    return metadata
 
 
 def _code_reference_repository(origin: _ExportOrigin) -> str | None:
