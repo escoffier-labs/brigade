@@ -1,1 +1,1 @@
-- Record the matched repeat of Orca qualification pair 1.
+- Record the completed governed Orca qualification for #2884: five matched pairs passed, with a matched repeat of pair 1.

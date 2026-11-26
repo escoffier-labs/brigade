@@ -258,7 +258,8 @@ acceptance, 5.588 seconds on the failed recovery, and 29.622 seconds on paged
 closeout. The failure probe was at 21:17:24 UTC. Orca reported ready at
 21:23:55 UTC, 391 seconds later. The outage onset was unobserved. The first
 timed retry began at 21:25:05 UTC and returned a refusal at 21:25:11 UTC.
-Closeout resumed at 23:30:41 UTC after a 7,530.6-second wait. The collector
+Closeout resumed at 23:30:41 UTC after a 7,530.6-second wait for the #2947
+transcript fix. The collector
 counts the outage and the Brigade re-pin as two parent interventions.
 
 Original 1B's last batch command ended at 23:31:51.969 UTC. The collector
@@ -311,6 +312,11 @@ were outside the batch command paths in both arms. Arm B recorded
 attempt 6 was 6.17 GiB.
 
 ### Protocol overhead and measurement limits
+
+Across pairs 2 through 5, governed Orca batches took about 3.4 times as
+long as Brigade batches: 220.421 against 64.660 seconds of verified
+elapsed time (3.41 times), and 218.605 against 63.077 seconds of command
+time (3.47 times). The matched pair 1 repeat shows the same pattern.
 
 Governed batches in pairs 2 through 5 each made 45 timed calls, 24 Orca
 and 21 Brigade, for 53.4 to 57.4 seconds of command time. The longest
