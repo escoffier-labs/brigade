@@ -42,11 +42,29 @@ case "$gate_mode" in
   [eE][nN][fF][oO][rR][cC][eE]) gate_mode=enforce ;;
   ""|[oO][fF][fF]) gate_mode=off ;;
   *)
-    gate_display="${gate_mode//$'\n'/\\n}"
-    gate_display="${gate_display//$'\r'/\\r}"
+    LC_ALL=C printf -v gate_display '%q' "$gate_mode"
     printf "push gate: unrecognised brigade.pushGate value '%s'; the gate is not running\n" "$gate_display" >&2
     ;;
 esac
+# Probe with Bash's own deadline. The candidate cannot enforce its own timeout.
+gate_timeout_usable() {
+  local probe_pid probe_result
+  {
+    IFS= read -r -t 2 probe_pid || return 1
+    if IFS= read -r -t 2 probe_result && [[ "$probe_result" == usable ]]; then
+      return 0
+    fi
+    kill -KILL "$probe_pid" 2>/dev/null || true
+    return 1
+  } < <(
+    timeout -k 1 1 true </dev/null >/dev/null 2>&1 &
+    probe_pid=$!
+    printf '%s\n' "$probe_pid"
+    if wait "$probe_pid" 2>/dev/null; then
+      printf '%s\n' usable
+    fi
+  )
+}
 case "$gate_mode" in
   warn|enforce)
     gate_rc=0
@@ -58,8 +76,8 @@ case "$gate_mode" in
     elif ! command -v timeout >/dev/null 2>&1; then
       gate_error="GNU coreutils timeout is missing from Git's PATH"
       gate_repair="Restore GNU coreutils timeout on Git's PATH, then run brigade work verify push-gate status and retry."
-    elif ! timeout -k 1 1 true >/dev/null 2>&1; then
-      gate_error="timeout on Git's PATH does not support the required -k invocation"
+    elif ! gate_timeout_usable; then
+      gate_error="timeout on Git's PATH is unusable (the -k probe failed or timed out)"
       gate_repair="Put GNU coreutils timeout on Git's PATH, then run brigade work verify push-gate status and retry."
     else
       gate_args=()

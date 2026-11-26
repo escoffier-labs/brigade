@@ -628,7 +628,7 @@ def test_installed_gate_startup_error(push_repo, capsys, monkeypatch, mode, fail
         if mode == "warn" and failure == "no-brigade":
             assert result.stderr.count("brigade is missing from Git's PATH") == 1
         if failure == "wrong-timeout" and (mode == "warn" or blocked):
-            assert "does not support the required -k invocation" in result.stderr
+            assert "is unusable (the -k probe failed or timed out)" in result.stderr
 
 
 def test_log_byte_bound_keeps_newest_records(push_repo, monkeypatch):
@@ -837,7 +837,10 @@ def test_old_hook_with_enforce_reports_ineffective_and_records_allow(push_repo, 
     )
     hook.chmod(0o755)
     assert _gate(push_repo, "install", "--mode", "enforce") == 1
-    assert ENFORCE_V1_NOTICE in capsys.readouterr().err
+    output = capsys.readouterr()
+    notice = "Replace the version 1 hook block before enabling enforce mode."
+    assert (output.out + output.err).count(notice) == 1
+    assert ENFORCE_V1_NOTICE not in output.out + output.err
     assert _status(push_repo, capsys)["configured_mode"] is None
     _git(push_repo, "config", "--local", "brigade.pushGate", "enforce")
     info = _status(push_repo, capsys)
@@ -849,6 +852,12 @@ def test_old_hook_with_enforce_reports_ineffective_and_records_allow(push_repo, 
     assert "missing_receipt" not in pushed.stderr
     (row,) = _log_rows(push_repo)
     assert row["reason"] == "hook_too_old" and row["blocked"] is False
+    _git(push_repo, "tag", "example-tag")
+    _git(push_repo, "branch", "example-deletion")
+    for refspec in ("refs/tags/example-tag", "example-deletion", ":example-deletion"):
+        update = subprocess.run(["git", "push", "origin", refspec], cwd=push_repo, capture_output=True, text=True)
+        assert update.returncode == 0
+        assert (ENFORCE_V1_NOTICE in update.stderr) is (refspec == "example-deletion")
 
 
 @pytest.mark.parametrize("failure", ["wrong-timeout", "missing-timeout", "missing-brigade", "unwired"])
@@ -949,3 +958,168 @@ def test_real_two_second_git_deadline_warns_and_allows(push_repo, monkeypatch, c
     assert "timed out" in capsys.readouterr().err.lower()
     (row,) = _log_rows(push_repo)
     assert row["reason"] == "check_timeout"
+
+
+def test_stray_backup_reproduction_prunes_nothing_and_can_push(push_repo, monkeypatch, capsys):
+    tip = _policy(push_repo)
+    good = _receipt(push_repo, _tree(push_repo))
+    _bare_remote(push_repo)
+    monkeypatch.setenv("PATH", _path_with_brigade())
+    for index in range(130):
+        backup = good.parent.with_name(f"backup-{index}")
+        backup.mkdir()
+        (backup / "receipt.json").write_text("{", encoding="utf-8")
+    assert _gate(push_repo, "install", "--mode", "enforce") == 0
+    capsys.readouterr()
+    assert _gate(push_repo, "prune") == 0
+    output = capsys.readouterr()
+    assert "Pruned 0 local verify run(s). Local receipts remaining: 1." in output.out
+    assert output.err.count("mv -- ") == 130
+    assert good.is_file() and len(list(good.parent.parent.glob("backup-*"))) == 130
+    pushed = subprocess.run(["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True)
+    assert pushed.returncode == 0 and pushed.stderr.count("ignoring malformed receipt") == 1
+    remote = Path(_git(push_repo, "remote", "get-url", "origin"))
+    assert _git(remote, "rev-parse", "refs/heads/main") == tip
+
+
+@pytest.mark.parametrize("store_kind", ["file", "symlink"])
+def test_prune_and_gate_reject_non_directory_store(push_repo, capsys, store_kind):
+    _policy(push_repo)
+    store = push_repo / ".brigade" / "work" / "verify-runs"
+    store.parent.mkdir(parents=True)
+    real = push_repo / "existing-store"
+    real.mkdir()
+    token = real / "keep"
+    token.touch()
+    if store_kind == "symlink":
+        store.symlink_to(real, target_is_directory=True)
+    else:
+        store.write_text("preserve me", encoding="utf-8")
+    assert _gate(push_repo, "prune") == 1
+    message = capsys.readouterr().err
+    assert "receipt store" in message and str(store) in message
+    assert token.is_file() and os.path.lexists(store)
+    assert _single(push_repo, capsys)[1]["status"] == "indeterminate"
+
+
+def test_prune_honors_grace_period_and_start_time_order(push_repo, capsys):
+    from time import time
+
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    older = _receipt(push_repo, tree, started_at="2026-01-01T12:00:01.100000Z")
+    newer = _receipt(push_repo, tree, second=2, started_at="2026-01-01T12:00:01.900000Z")
+    destination = newer.parent.with_name("20260101-120001-work-verify-000000")
+    newer.parent.rename(destination)
+    config = push_repo / ".brigade" / "config.json"
+    config.write_text(
+        '{"version": 1, "depth": "workspace", "harnesses": ["codex"], "verify_runs_keep": 1}', encoding="utf-8"
+    )
+    assert _gate(push_repo, "prune") == 0
+    assert "Pruned 0" in capsys.readouterr().out and older.is_file()
+    past = time() - 120
+    os.utime(older, (past, past))
+    os.utime(older.parent, (past, past))
+    assert _gate(push_repo, "prune") == 0
+    assert "Pruned 1" in capsys.readouterr().out
+    assert not older.exists() and (destination / "receipt.json").exists()
+
+
+@pytest.mark.parametrize("mode", ["warn", "enforce"])
+def test_hanging_timeout_probe_is_bounded_in_real_push(push_repo, monkeypatch, capsys, mode):
+    from time import monotonic
+
+    _policy(push_repo)
+    _bare_remote(push_repo)
+    monkeypatch.setenv("PATH", _path_with_brigade())
+    assert _gate(push_repo, "install", "--mode", mode) == 0
+    capsys.readouterr()
+    tools = push_repo / ".git" / "fixture-bin"
+    tools.mkdir()
+    fake = tools / "timeout"
+    fake.write_text("#!/bin/sh\nexec sleep 30\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tools) + os.pathsep + _path_with_brigade())
+    start = monotonic()
+    result = subprocess.run(["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True, timeout=8)
+    assert monotonic() - start < 8
+    assert (result.returncode != 0) is (mode == "enforce")
+    assert result.stderr.count("is unusable (the -k probe failed or timed out)") == 1
+
+
+@pytest.mark.parametrize("missing", ["brigade", "timeout"])
+def test_enforce_refusal_does_not_create_minimal_hook(push_repo, monkeypatch, capsys, missing):
+    from brigade.work_cmd import push_gate
+
+    real_which = push_gate.which
+    monkeypatch.setattr(push_gate, "which", lambda name: None if name == missing else real_which(name))
+    git_config = push_repo / ".git" / "config"
+    before = git_config.read_bytes()
+    assert _gate(push_repo, "install", "--mode", "enforce") == 1
+    assert missing in capsys.readouterr().err
+    assert git_config.read_bytes() == before
+    assert not (push_repo / ".git" / "hooks" / "pre-push").exists()
+
+
+def test_unknown_mode_escapes_terminal_controls(push_repo, capsys):
+    tip = _policy(push_repo)
+    assert _gate(push_repo, "install", "--mode", "warn") == 0
+    capsys.readouterr()
+    _git(push_repo, "config", "--local", "brigade.pushGate", "block\x1b[31m\x07")
+    hook = push_repo / ".git" / "hooks" / "pre-push"
+    result = subprocess.run(
+        [str(hook)], cwd=push_repo, input=_line(tip, "refs/heads/topic"), text=True, capture_output=True
+    )
+    assert result.returncode == 0 and "unrecognised" in result.stderr
+    assert "\x1b" not in result.stderr and "\x07" not in result.stderr
+    assert len(result.stderr.splitlines()) == 1
+
+
+def test_status_reports_git_config_include_cycle(push_repo, capsys):
+    extra = push_repo / ".git" / "fixture-extra-config"
+    _git(push_repo, "config", "--file", str(extra), "include.path", str(extra))
+    _git(push_repo, "config", "--local", "include.path", str(extra))
+    assert _gate(push_repo, "status") == 1
+    message = capsys.readouterr().err
+    assert "include depth" in message and "a Git worktree is required" not in message
+
+
+def test_prune_reports_invalid_writer_receipt_before_removing_valid_runs(push_repo, capsys):
+    from time import time
+
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    older = _receipt(push_repo, tree)
+    invalid = _receipt(push_repo, tree, second=2)
+    invalid.write_text("{", encoding="utf-8")
+    _receipt(push_repo, tree, second=3)
+    past = time() - 120
+    os.utime(older, (past, past))
+    os.utime(older.parent, (past, past))
+    (push_repo / ".brigade" / "config.json").write_text(
+        '{"version": 1, "depth": "workspace", "harnesses": ["codex"], "verify_runs_keep": 1}', encoding="utf-8"
+    )
+    assert _gate(push_repo, "prune") == 1
+    error = capsys.readouterr().err
+    assert str(invalid) in error and "mv -- " in error
+    assert older.is_file() and invalid.is_file()
+
+
+def test_cap_warns_once_for_stray_receipts_across_refs(push_repo, monkeypatch, capsys):
+    base = _policy(push_repo)
+    good = _receipt(push_repo, _tree(push_repo))
+    _receipt(push_repo, _tree(push_repo), second=2)
+    stranger = good.parent.with_name("backup-old")
+    stranger.mkdir()
+    (stranger / "receipt.json").write_text("{", encoding="utf-8")
+    tip = _commit(push_repo, "second tip")
+    _git(push_repo, "config", "--local", "brigade.pushGate", "enforce")
+    monkeypatch.chdir(push_repo)
+    monkeypatch.setattr(verify_push, "_RECEIPT_LIMIT", 1)
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(_line(base, "refs/heads/base") + "\n" + _line(tip, "refs/heads/topic"))
+    )
+    assert push_gate_hook.run(hook_v2=True) == 3
+    warning = capsys.readouterr().err
+    assert warning.count("ignoring malformed receipt") == 1
+    assert warning.count("local receipt scan reached its limit") == 2

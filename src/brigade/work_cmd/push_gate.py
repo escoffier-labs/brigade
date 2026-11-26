@@ -6,10 +6,10 @@ import argparse
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
-import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from importlib.resources import files
@@ -61,6 +61,9 @@ class Repository:
             target, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", "--git-path", "hooks"
         )
         if result.returncode != 0:
+            error = result.stderr.strip()
+            if error and "not a git repository" not in error and "must be run in a work tree" not in error:
+                raise OSError(error)
             return None
         root, common, hooks = (Path(line) for line in result.stdout.splitlines())
         return cls(root, common.resolve(), hooks / "pre-push")
@@ -107,12 +110,16 @@ def _timeout_state() -> str:
     return "incompatible"
 
 
-def _enforce_issue(info: dict[str, Any]) -> str | None:
-    if not info["wired"]:
+def _enforce_issue(info: dict[str, Any], *, will_create: bool = False) -> str | None:
+    if not info["wired"] and not will_create:
         return "Wire the effective executable pre-push hook with the current Brigade block."
     if info["hook_version"] == 1:
-        return ENFORCE_V1_NOTICE
-    if not info["current"]:
+        return (
+            ENFORCE_V1_NOTICE
+            if info["mode"] == "enforce"
+            else "Replace the version 1 hook block before enabling enforce mode."
+        )
+    if not info["current"] and not will_create:
         return "Replace the installed Brigade hook block with the current block."
     if not info["brigade_on_path"]:
         return "Put brigade on Git's PATH."
@@ -160,7 +167,7 @@ def status(repo: Repository) -> dict[str, Any]:
     return info
 
 
-def describe(info: dict[str, Any]) -> str:
+def describe(info: dict[str, Any], *, include_issue: bool = True) -> str:
     mode = info["mode"]
     if info["invalid_mode"]:
         mode += f" (unrecognised brigade.pushGate value {info['configured_mode']!r})"
@@ -185,40 +192,61 @@ def describe(info: dict[str, Any]) -> str:
             f". Ignored Git config value {info['ignored_mode']!r}. "
             "Only clone-local config and its includes select the push gate mode."
         )
-    if mode == "enforce" and (issue := _enforce_issue(info)):
+    if include_issue and mode == "enforce" and (issue := _enforce_issue(info)):
         description += f". {issue}"
     return description
 
 
+def _create_minimal_hook(repo: Repository) -> bool:
+    repo.hook.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        stream = repo.hook.open("xb")
+    except FileExistsError:
+        return False
+    try:
+        with stream:
+            stream.write(_minimal_hook())
+        repo.hook.chmod(0o755)
+    except OSError:
+        repo.hook.unlink()
+        raise
+    return True
+
+
 def _install(repo: Repository, mode: str) -> None:
+    can_create = repo.hook.parent.resolve() == repo.common / "hooks" and not os.path.lexists(repo.hook)
     if mode != "enforce":
         _write_mode(repo.root, mode)
-    if repo.hook.parent.resolve() == repo.common / "hooks" and not os.path.lexists(repo.hook):
-        repo.hook.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with repo.hook.open("xb") as stream:
-                stream.write(_minimal_hook())
-            repo.hook.chmod(0o755)
-        except FileExistsError:
-            pass
+        if can_create:
+            _create_minimal_hook(repo)
     info = status(repo)
-    issue = _enforce_issue(info) if mode == "enforce" else None
-    if mode == "enforce" and issue is None and info["mode"] != mode:
+    issue = _enforce_issue(info, will_create=can_create) if mode == "enforce" else None
+    write_mode = mode == "enforce" and info["mode"] != mode
+    if write_mode and issue is None:
         source = _git(repo.root, "config", "--local", "--includes", "--null", "--show-origin", "--get", _MODE_KEY)
         if source.returncode not in (0, 1):
             raise OSError(f"could not locate Git config key {_MODE_KEY}")
         origin = source.stdout.partition("\0")[0].removeprefix("file:")
         if origin and (repo.root / origin).resolve() != repo.common / "config":
             issue = f"Set {_MODE_KEY}=enforce in the included Git config {origin!r}."
-        else:
-            _write_mode(repo.root, mode)
-            info = status(repo)
-    print(describe(info))
+    if mode == "enforce" and issue is None:
+        created = can_create and _create_minimal_hook(repo)
+        if can_create and not created:
+            raise OSError("The effective pre-push hook appeared during install. Inspect it and retry.")
+        try:
+            if write_mode:
+                _write_mode(repo.root, mode)
+        except (OSError, subprocess.TimeoutExpired):
+            if created and _read_hook(repo.hook) == _minimal_hook():
+                repo.hook.unlink()
+            raise
+        info = status(repo)
+    print(describe(info, include_issue=issue is None))
     if not info["wired"] or not info["current"]:
         print("The effective hook was left in place. Add or update these lines after capturing pre-push input:")
         print(_snippet().decode("ascii"), end="")
-        if info["hook_version"] == 1:
-            print("The v1 hook allows the push even in enforce mode. Replace its marked block with v2.")
+        if info["hook_version"] == 1 and issue is None and info["mode"] != "enforce":
+            print("The version 1 hook block must be replaced before it can enforce.")
         print("For a Brigade content guard hook, refresh from the shipped templates/hooks/pre-push file.")
     if issue is not None:
         raise ValueError(issue)
@@ -232,6 +260,76 @@ def _uninstall(repo: Repository) -> None:
         and _read_hook(repo.hook) == _minimal_hook()
     ):
         repo.hook.unlink()
+
+
+_PRUNE_GRACE_SECONDS = 60
+
+
+def _prune(repo: Repository) -> None:
+    from .verification import _archive_verify_run, _verify_archive_root
+    from .verify_push import _RECEIPT_LIMIT, _Indeterminate, _Receipts, _receipt_started_at
+
+    keep = config.resolve_verify_runs_keep(repo.root)
+    if keep > _RECEIPT_LIMIT:
+        raise ValueError(f"Set verify_runs_keep in {config.CONFIG_REL_PATH} to at most {_RECEIPT_LIMIT}.")
+    receipts = _Receipts(repo.root, float("inf"))
+    try:
+        named, stray = receipts.inventory()
+        for name in sorted(stray):
+            problem = receipts._entry_problem(name, "has a non-writer directory name")
+            print(f"{problem}\n{problem.remedy}", file=sys.stderr)
+        now = datetime.now(UTC)
+        runs: list[tuple[datetime, str, bool]] = []
+        for name, second in named:
+            receipt = receipts._load(name)
+            if receipt is None:
+                continue
+            if isinstance(receipt, _Indeterminate):
+                raise receipt
+            started = _receipt_started_at(receipt)
+            if started is None or started.replace(microsecond=0) != second or started > now:
+                raise receipts._entry_problem(name, "has an invalid, mismatched, or future start timestamp")
+            runs.append((started, name, receipt["status"] == "running"))
+    except _Indeterminate as exc:
+        raise ValueError(f"{exc}\n{exc.remedy}" if exc.remedy else str(exc)) from exc
+
+    # The writer does not hold a retention lock. Preserve active runs and
+    # recent writes even when they fall outside the configured retention.
+    cutoff = now.timestamp() - _PRUNE_GRACE_SECONDS
+    stale = []
+    for started, name, running in sorted(runs, reverse=True)[keep:]:
+        if running or started.timestamp() > cutoff:
+            continue
+        path = receipts.root / name
+        if max(path.lstat().st_mtime, (path / "receipt.json").lstat().st_mtime) <= cutoff:
+            stale.append(path)
+
+    removed = 0
+    if stale:
+        _, configured_archive = config.resolve_verify_archive(repo.root)
+        try:
+            archive = _verify_archive_root(repo.root)
+            if archive is None:
+                raise OSError("verify archival is disabled")
+            if archive.exists() and not archive.stat().st_mode & 0o222:
+                raise PermissionError("archive directory has no write permissions")
+            for path in reversed(stale):
+                _archive_verify_run(path, archive)
+                if max(path.lstat().st_mtime, (path / "receipt.json").lstat().st_mtime) <= cutoff:
+                    shutil.rmtree(path)
+                    removed += 1
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise OSError(
+                f"Could not write or complete pruning via verify archive {str(configured_archive)!r}: {exc}"
+            ) from exc
+
+    remaining = len(runs) - removed
+    if remaining > _RECEIPT_LIMIT:
+        raise ValueError(
+            f"{remaining} receipts remain in {str(receipts.root)!r}. "
+            f"Wait for active runs and the {_PRUNE_GRACE_SECONDS}-second grace period, then retry."
+        )
+    print(f"Pruned {removed} local verify run(s). Local receipts remaining: {remaining}.")
 
 
 def _report_text(report: dict[str, Any]) -> None:
@@ -292,17 +390,7 @@ def dispatch(args: argparse.Namespace) -> int:
         elif command == "install":
             _install(repo, args.mode)
         elif command == "prune":
-            from .verification import _prune_verify_runs
-            from .verify_push import _RECEIPT_LIMIT, _Indeterminate, _Receipts
-
-            if config.resolve_verify_runs_keep(repo.root) > _RECEIPT_LIMIT:
-                raise ValueError(f"Set verify_runs_keep in {config.CONFIG_REL_PATH} to at most {_RECEIPT_LIMIT}.")
-            removed = _prune_verify_runs(repo.root)
-            try:
-                remaining = len(_Receipts(repo.root, time.monotonic() + 2).names)
-            except _Indeterminate as exc:
-                raise ValueError(str(exc)) from exc
-            print(f"Pruned {removed} local verify run(s). Local receipts remaining: {remaining}.")
+            _prune(repo)
         else:
             _uninstall(repo)
             print(f"push gate: mode unset for {repo.root}")

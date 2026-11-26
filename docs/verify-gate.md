@@ -166,8 +166,9 @@ An unreadable or malformed receipt in another directory generates a warning
 because the writer could never use that directory as a run. Invalid test
 counts, including negative numbers and booleans, make a receipt malformed.
 A symbolic link in the receipt directory makes the verdict indeterminate.
-If more than 128 receipt files exist, the result is indeterminate even if
-a pass is present.
+Only receipt files in writer-named directories count toward the cap. If
+more than 128 such receipts exist, the result is indeterminate even if a
+pass is present. The check reports ignored malformed entries once per push.
 
 | Result | Meaning |
 | --- | --- |
@@ -182,7 +183,10 @@ If the scan limit leaves the verdict indeterminate, set `verify_runs_keep`
 in `.brigade/config.json` to at most 128 and check the configured archive.
 The default retention is 50 runs, and the default archive is
 `.brigade/work/verify-archive`. Run `brigade work verify push-gate prune`
-to apply retention. A fresh verification run resolves an unordered
+to retain the newest writer-named receipts by recorded start time and archive
+older eligible runs. Prune leaves non-writer directories in place and lists
+each with a move command. Prune reports invalid writer-named receipts before
+changing retention. A fresh verification run resolves an unordered
 pass and failure in the same second. If the base or declaration is the
 problem, fetch the default branch or correct the declaration as indicated
 by the reason, then run the push check again.
@@ -246,7 +250,8 @@ The log records outcomes only when the gate can start and write the log.
 
 The gate requires a `timeout` command that supports the GNU coreutils `-k`
 option. Stock macOS and Git for Windows may lack that command. Windows'
-own `timeout.exe` does not support this invocation. The hook asks the
+own `timeout.exe` does not support this invocation. Bash bounds the readiness
+probe independently of the `timeout` command being checked. The hook asks the
 gate process to stop after five seconds and kills it one second later if
 needed. Warn mode reports indeterminate verdicts and gate errors and lets
 the push continue. In enforce mode a gate error blocks
@@ -269,8 +274,15 @@ evaluation error before Brigade can read the policy, use the printed
 - An indeterminate verdict blocks in enforce mode. Follow the printed
   recovery guidance. For a receipt-store problem, repair the named entry
   or prune as indicated before retrying. The 128-file cap depends on
-  `verify_runs_keep` and a working verify archive. A failed archive copy
-  leaves the original receipt in place.
+  `verify_runs_keep` and a working verify archive. Prune archives first and
+  never deletes a run it could not archive. An archive error identifies the
+  archive and the first failure.
+- The receipt store must be a directory. The gate reports a symbolic link or
+  a regular file at that path, and retention leaves it in place.
+- Prune and the receipt writer do not share a lock. Prune preserves running
+  runs and waits at least 60 seconds after a run starts or its directory or
+  receipt is updated. If fresh runs keep the store above the cap, retry
+  pruning after they finish and the grace period elapses.
 - A broken required-check declaration on the trusted base cannot be repaired
   by a push through this gate. Restore the declaration on the trusted base
   or fetch the corrected default branch before retrying.

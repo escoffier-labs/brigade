@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import shlex
 import subprocess
 import sys
@@ -708,6 +709,9 @@ def test_cap_remedy_uses_configured_archive_and_restores_verdict(push_repo, caps
         '"verify_runs_keep": 1, "verify_archive_dir": ".brigade/custom-archive"}',
         encoding="utf-8",
     )
+    old_time = time.time() - 120
+    os.utime(old, (old_time, old_time))
+    os.utime(old.parent, (old_time, old_time))
     monkeypatch.setattr(verify_push, "_RECEIPT_LIMIT", 1)
     code, result = _single(push_repo, capsys)
     assert (code, result["status"]) == (3, "indeterminate")
@@ -716,10 +720,12 @@ def test_cap_remedy_uses_configured_archive_and_restores_verdict(push_repo, caps
         for value in ("verify_runs_keep", str(gate_config), ".brigade/custom-archive", str(old.parent.parent))
     )
     archive = push_repo / ".brigade" / "custom-archive"
-    archive.write_text("fixture archive path conflict", encoding="utf-8")
+    archive.mkdir(mode=0o500)
     assert main(shlex.split(result["remedy"])[1:]) == 1
+    failure = capsys.readouterr().err
+    assert str(archive) in failure and "Could not write" in failure and "no write permissions" in failure
     assert old.is_file()
-    archive.unlink()
+    archive.chmod(0o700)
     assert main(shlex.split(result["remedy"])[1:]) == 0
     assert (archive / old.parent.name / "receipt.json").is_file()
     assert "Pruned 1 local verify run(s)." in capsys.readouterr().out

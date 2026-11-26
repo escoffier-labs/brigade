@@ -48,12 +48,12 @@ def run(*, hook_v2: bool = False) -> int:
         return 0
     legacy_enforce = mode == "enforce" and not hook_v2
     enforce = mode == "enforce" and hook_v2
-    if legacy_enforce:
-        print(ENFORCE_V1_NOTICE, file=sys.stderr)
     try:
         updates = branch_updates(verify_push._read_stdin(deadline))
         if not updates:
             return 0
+        if legacy_enforce:
+            print(ENFORCE_V1_NOTICE, file=sys.stderr)
         common = _git(target, "rev-parse", "--path-format=absolute", "--git-common-dir", deadline=deadline)
         if common.returncode:
             raise OSError("could not locate the common Git directory")

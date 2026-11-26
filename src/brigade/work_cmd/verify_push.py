@@ -14,7 +14,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import cache, cached_property, partial
-from itertools import groupby, islice
+from itertools import groupby
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
@@ -163,14 +163,29 @@ def _name_second(name: str) -> datetime | None:
     return None
 
 
+def _snapshot_tree(receipt: dict[str, Any]) -> str | None:
+    return ((receipt.get("gating") or {}).get("plan") or {}).get("snapshot_tree")
+
+
+def _move_out_command(path: Path) -> str:
+    return f'mv -- {shlex.quote(str(path))} "$(mktemp -d)"'
+
+
 class _Receipts:
     def __init__(self, target: Path, deadline: float) -> None:
         self.target = target
         self.root = target / ".brigade" / "work" / "verify-runs"
         self.deadline = deadline
+        self._cap_error: _Indeterminate | None = None
 
     def _names(self) -> Iterator[str]:
         try:
+            if not stat.S_ISDIR(self.root.lstat().st_mode):
+                raise _Indeterminate(
+                    f"Verification receipt store {str(self.root)!r} must be a directory. "
+                    "Move the symbolic link or other file and restore a real receipt directory.",
+                    remedy=_move_out_command(self.root),
+                )
             with os.scandir(self.root) as dirs:
                 for entry in dirs:
                     _remaining(self.deadline)
@@ -188,39 +203,66 @@ class _Receipts:
     def _entry_problem(self, name: str, description: str, *, receipt: bool = False) -> _Indeterminate:
         directory = self.root / name
         entry = directory / "receipt.json" if receipt else directory
-        move = f'mv -- {shlex.quote(str(directory))} "$(mktemp -d)"'
         return _Indeterminate(
-            f"Verification entry {str(entry)!r} {description}. Move the run out of the receipt store.", remedy=move
+            f"Verification entry {str(entry)!r} {description}. Move the run out of the receipt store.",
+            remedy=_move_out_command(directory),
         )
 
+    def inventory(self, *, limit: int | None = None) -> tuple[list[tuple[str, datetime]], list[str]]:
+        named: list[tuple[str, datetime]] = []
+        stray: list[str] = []
+        for name in self._names():
+            second = _name_second(name)
+            if second is None:
+                stray.append(name)
+            elif limit is None or len(named) < limit:
+                named.append((name, second))
+        return named, stray
+
     @cached_property
-    def names(self) -> list[str]:
-        names = list(islice(self._names(), _RECEIPT_LIMIT + 1))
-        if len(names) > _RECEIPT_LIMIT:
+    def entries(self) -> list[tuple[str, datetime | None, dict[str, Any] | _Indeterminate | None]]:
+        if self._cap_error is not None:
+            raise self._cap_error
+        named, stray = self.inventory(limit=_RECEIPT_LIMIT + 1)
+        entries: list[tuple[str, datetime | None, dict[str, Any] | _Indeterminate | None]] = []
+        ignored = 0
+        first_ignored = ""
+        for name in stray:
+            receipt = self._load(name)
+            if isinstance(receipt, _Indeterminate):
+                ignored += 1
+                first_ignored = first_ignored or name
+            elif receipt is not None:
+                # Only the binding is needed to reject a matching stray directory.
+                entries.append(
+                    (
+                        name,
+                        None,
+                        {
+                            "tree_fingerprint": receipt["tree_fingerprint"],
+                            "gating": {"plan": {"snapshot_tree": _snapshot_tree(receipt)}},
+                        },
+                    )
+                )
+        if ignored:
+            print(
+                f"push gate: ignoring malformed receipt in a non-run directory {str(self.root / first_ignored)!r} "
+                f"({ignored} entr{'y' if ignored == 1 else 'ies'}).",
+                file=sys.stderr,
+            )
+        if len(named) > _RECEIPT_LIMIT:
             try:
                 _, archive = config.resolve_verify_archive(self.target)
             except (OSError, ValueError):
                 archive = self.target / config.DEFAULT_VERIFY_ARCHIVE_DIR
-            raise _Indeterminate(
+            self._cap_error = _Indeterminate(
                 f"The local receipt scan reached its limit of {_RECEIPT_LIMIT} in {str(self.root)!r}. "
                 f"Set verify_runs_keep in {str(self.target / config.CONFIG_REL_PATH)!r} to at most {_RECEIPT_LIMIT} "
                 f"and check that the verify archive {str(archive)!r} is writable and has space.",
                 remedy=f"brigade work verify push-gate prune --target {shlex.quote(str(self.target))}",
             )
-        return sorted(names, reverse=True)
-
-    @cached_property
-    def entries(self) -> list[tuple[str, datetime | None, dict[str, Any] | _Indeterminate | None]]:
-        entries = []
-        for name in self.names:
-            second, receipt = _name_second(name), self._load(name)
-            if second is None and isinstance(receipt, _Indeterminate):
-                print(
-                    f"push gate: ignoring malformed receipt in a non-run directory {str(self.root / name)!r}",
-                    file=sys.stderr,
-                )
-                continue
-            entries.append((name, second, receipt))
+            raise self._cap_error
+        entries.extend((name, second, self._load(name)) for name, second in sorted(named, reverse=True))
         return entries
 
     def _load(self, name: str) -> dict[str, Any] | _Indeterminate | None:
@@ -271,9 +313,7 @@ class _Receipts:
                     raise receipt
                 ordered.append((second, receipt))
                 continue
-            stamp = receipt.get("gating") or {}
-            plan = stamp.get("plan") or {}
-            if receipt["tree_fingerprint"] != tree or plan.get("snapshot_tree") not in (None, tree):
+            if receipt["tree_fingerprint"] != tree or _snapshot_tree(receipt) not in (None, tree):
                 continue
             started = _receipt_started_at(receipt)
             if second is None or started is None or started.replace(microsecond=0) != second:
