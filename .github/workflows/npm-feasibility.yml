@@ -28,9 +28,21 @@ on:
       - 'scripts/published-artifact-acceptance.py'
       - 'pyproject.toml'
   workflow_dispatch:
+    inputs:
+      payload_mode:
+        description: Payload to package and test without publishing
+        type: choice
+        default: current-source
+        options: [current-source, stable-payload]
+      expected_sha:
+        description: Exact packaging commit required for stable-payload mode
+        type: string
 
 permissions:
   contents: read
+
+env:
+  PAYLOAD_MODE: ${{ inputs.payload_mode || 'current-source' }}
 
 defaults:
   run:
@@ -49,6 +61,12 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+      - name: Require the exact stable candidate dispatch commit
+        if: env.PAYLOAD_MODE == 'stable-payload'
+        env:
+          EXPECTED_SHA: ${{ inputs.expected_sha }}
+        run: |
+          test "$GITHUB_SHA" = "$EXPECTED_SHA"
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: '24.22.0'
@@ -66,17 +84,44 @@ jobs:
           PYTHONPATH=src python -m brigade work verify run --target .
           --argv-json '["node","--test","npm/feasibility/provenance.test.cjs"]'
           --timeout 300 --capture brigade-work
-      - name: Build six current-source candidate archives once from clean source
+      - name: Build six candidate archives once from clean source
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --porcelain --untracked-files=all)"
-          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--candidate","--out",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py",process.env.PAYLOAD_MODE==="stable-payload"?"--stamp-publishing-repository":"--candidate","--out",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
           PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 600 --capture brigade-work
       - name: Verify candidate payload and packaging identities against clean source
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--candidate","--verify-artifacts",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py",...(process.env.PAYLOAD_MODE==="stable-payload"?[]:["--candidate"]),"--verify-artifacts",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
           PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 120 --capture brigade-work
+      - name: Verify release-generated manifest attestation
+        if: env.PAYLOAD_MODE == 'stable-payload'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          manifest="$RUNNER_TEMP/npm-artifacts/build/component-manifest-v1.json"
+          repository=$(python scripts/verify_component_manifest_provenance.py --manifest "$manifest" --print-repository)
+          gh attestation verify "$manifest" --repo "$repository" --signer-workflow "$repository/.github/workflows/publish.yml" --format json > "$RUNNER_TEMP/attestation.json"
+          python scripts/verify_component_manifest_provenance.py --check-attestation-json "$RUNNER_TEMP/attestation.json"
+      - name: Pack the stable compatibility candidate separately
+        if: env.PAYLOAD_MODE == 'stable-payload'
+        run: |
+          out="$RUNNER_TEMP/npm-compat"
+          stage="$RUNNER_TEMP/npm-compat-package"
+          repository_url=$(node -p "require('./npm/feasibility/provenance.cjs').publishingPackageRepositoryUrl(process.env)")
+          issues_url="${repository_url#git+}"
+          issues_url="${issues_url%.git}/issues"
+          mkdir -p "$out"
+          cp -R distribution/escoffier-labs-brigade/npm "$stage"
+          (cd "$stage" && npm pkg set "repository.url=$repository_url" "bugs.url=$issues_url" && npm pack --ignore-scripts --pack-destination "$out")
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: env.PAYLOAD_MODE == 'stable-payload'
+        with:
+          name: stable-npm-candidate-compat
+          path: ${{ runner.temp }}/npm-compat/*.tgz
+          retention-days: 14
+          if-no-files-found: error
       # Retained artifacts in this public repository are public, not confidential.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
@@ -136,14 +181,19 @@ jobs:
         with:
           name: unreleased-npm-candidate-archives
           path: ${{ runner.temp }}/npm-artifacts
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        if: env.PAYLOAD_MODE == 'stable-payload'
+        with:
+          name: stable-npm-candidate-compat
+          path: ${{ runner.temp }}/npm-compat
       - name: Verify candidate payload and packaging identities against clean source
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--candidate","--verify-artifacts",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py",...(process.env.PAYLOAD_MODE==="stable-payload"?[]:["--candidate"]),"--verify-artifacts",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
           PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 120 --capture brigade-work
       - name: Full native npm and npx acceptance with fresh private HOME and Node-only PATH
         run: |
-          argv=$(node -e 'process.stdout.write(JSON.stringify(["node","npm/feasibility/acceptance.cjs","--artifacts",process.env.RUNNER_TEMP+"/npm-artifacts","--out",process.env.RUNNER_TEMP+"/npm-receipts","--expected-platform","${{ matrix.platform }}"]))')
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["node","npm/feasibility/acceptance.cjs","--artifacts",process.env.RUNNER_TEMP+"/npm-artifacts","--out",process.env.RUNNER_TEMP+"/npm-receipts","--expected-platform","${{ matrix.platform }}",...(process.env.PAYLOAD_MODE==="stable-payload"?["--compat-archive",process.env.RUNNER_TEMP+"/npm-compat/escoffier-labs-brigade-"+require("./npm/feasibility/runtime.json").version+".tgz"]:[])]))')
           PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 900 --capture brigade-work
           python - <<'PYCODE'
           import json, os
@@ -154,6 +204,8 @@ jobs:
           assert result['acceptanceMode'] == 'native-default'
           assert result['nodeVersion'] == 'v24.22.0'
           assert result['npmVersion'] == '11.19.1'
+          if os.environ.get('PAYLOAD_MODE') == 'stable-payload':
+              assert any(check['name'] == 'compat-local-version' and check['exit'] == 0 for check in result['checks'])
           if result['platform'] != 'win32-x64':
               assert len(result['cancellationModes']) == 6
               assert {m['signal'] for m in result['cancellationModes']} == {'SIGINT', 'SIGTERM', 'SIGHUP'}

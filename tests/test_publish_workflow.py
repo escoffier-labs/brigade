@@ -605,6 +605,81 @@ def test_publish_workflow_verifies_version_check_endpoint_after_pypi_upload():
     )
 
 
+@pytest.mark.parametrize("mode", ["current-source", "stable-payload"])
+def test_read_only_candidate_modes_select_the_expected_preparation_and_acceptance(mode, tmp_path):
+    import json
+    import os
+    import shlex
+
+    work = ROOT / ".github/workflows"
+    workflow = _load_workflow_yaml(work / "npm-feasibility.yml")
+    trigger = workflow.get("on", workflow.get(True))
+    inputs = trigger["workflow_dispatch"]["inputs"]
+    assert inputs["payload_mode"]["default"] == "current-source"
+    assert inputs["payload_mode"]["options"] == ["current-source", "stable-payload"]
+    assert workflow["env"]["PAYLOAD_MODE"] == "${{ inputs.payload_mode || 'current-source' }}"
+    assert workflow["permissions"] == {"contents": "read"}
+    jobs = workflow["jobs"]
+    assert set(jobs["candidate-gate"]["needs"]) == {"package", "acceptance", "isolated-signals"}
+    assert "if" not in jobs["isolated-signals"]
+    assert all("environment" not in job and "permissions" not in job for job in jobs.values())
+
+    commands = []
+    for job in (jobs["package"], jobs["acceptance"]):
+        for step in job["steps"]:
+            for line in step.get("run", "").splitlines():
+                if line.startswith("argv=$(node "):
+                    node_args = shlex.split(line.removeprefix("argv=$(").removesuffix(")"))
+                    result = subprocess.check_output(
+                        node_args, env={**os.environ, "PAYLOAD_MODE": mode, "RUNNER_TEMP": str(tmp_path)}, text=True
+                    )
+                    commands.append(json.loads(result))
+    build, verify_package, verify_native, accept = commands
+    for args, flag in zip(
+        (build, verify_package, verify_native), ("--out", "--verify-artifacts", "--verify-artifacts"), strict=True
+    ):
+        assert args[:2] == ["python", "npm/feasibility/prepare.py"]
+        flags = (["--candidate"] if mode == "current-source" else []) + (
+            ["--stamp-publishing-repository"] if mode == "stable-payload" and flag == "--out" else []
+        )
+        assert args[2:] == [*flags, flag, str(tmp_path / "npm-artifacts")]
+    assert ("--compat-archive" in accept) == (mode == "stable-payload")
+    if mode == "stable-payload":
+        version = json.loads((ROOT / "npm/feasibility/runtime.json").read_text())["version"]
+        assert accept[-2:] == [
+            "--compat-archive",
+            str(tmp_path / "npm-compat" / f"escoffier-labs-brigade-{version}.tgz"),
+        ]
+    compat_steps = [
+        step
+        for job in (jobs["package"], jobs["acceptance"])
+        for step in job["steps"]
+        if step.get("with", {}).get("name") == "stable-npm-candidate-compat"
+    ]
+    assert [step["uses"].split("@")[0] for step in compat_steps] == [
+        "actions/upload-artifact",
+        "actions/download-artifact",
+    ]
+    assert all(step["if"] == "env.PAYLOAD_MODE == 'stable-payload'" for step in compat_steps)
+    assert "--registry-spec" not in accept
+    assert not any(
+        "--candidate" in line for line in (work / "npm-publish.yml").read_text().splitlines() if "prepare.py" in line
+    )
+
+
+@pytest.mark.parametrize("sha_matches", [False, True])
+def test_stable_candidate_dispatch_requires_the_expected_sha(sha_matches):
+    import os
+
+    workflow = _load_workflow_yaml(ROOT / ".github/workflows/npm-feasibility.yml")
+    guard = next(step for step in workflow["jobs"]["package"]["steps"] if "EXPECTED_SHA" in step.get("env", {}))
+    assert guard["if"] == "env.PAYLOAD_MODE == 'stable-payload'"
+    assert guard["env"]["EXPECTED_SHA"] == "${{ inputs.expected_sha }}"
+    env = {**os.environ, "GITHUB_SHA": "a" * 40, "EXPECTED_SHA": "a" * 40 if sha_matches else ""}
+    result = subprocess.run(["bash", "-e", "-c", guard["run"]], env=env, check=False)
+    assert (result.returncode == 0) == sha_matches
+
+
 def test_npm_release_workflow_has_dispatch_source_oidc_and_native_gates():
     workflow = _load_workflow_yaml(ROOT / ".github/workflows/npm-publish.yml")
     trigger = workflow.get("on", workflow.get(True))
@@ -660,7 +735,7 @@ def test_npm_release_workflow_has_dispatch_source_oidc_and_native_gates():
     assert 'test "$GITHUB_REF" = refs/heads/main' in publish
     assert 'test "$GITHUB_SHA" = "$EXPECTED_SHA"' in publish
     assert 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"' in publish
-    assert 'test "$RELEASE_TAG" = v0.32.0' in publish
+    assert 'test "$RELEASE_TAG" = v0.32.1' in publish
     guard = next(step for step in jobs["publish"]["steps"] if "EXPECTED_SHA" in step.get("env", {}))
     assert guard["env"]["EXPECTED_SHA"] == "${{ inputs.expected_sha }}"
     assert guard["env"]["RELEASE_TAG"] == "${{ inputs.release_tag }}"
@@ -669,7 +744,7 @@ def test_npm_release_workflow_has_dispatch_source_oidc_and_native_gates():
     argv = next(
         step["run"] for step in jobs["registry-acceptance"]["steps"] if "--registry-spec" in step.get("run", "")
     )
-    assert '"--registry-spec","brigadestack@0.32.0"' in argv
+    assert '"--registry-spec","brigadestack@0.32.1"' in argv
 
 
 def revalidation_python(step_name):

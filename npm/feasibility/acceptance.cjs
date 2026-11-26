@@ -189,6 +189,8 @@ from pathlib import Path
 from contextlib import closing,redirect_stderr
 from brigade import __version__,distribution,update_notify as n,update_cmd as u
 assert distribution.is_npm()
+# The pinned v0.32.1 wheel predates #2940's transport and opt-out User-Agent.
+legacy_refresh=__version__=='0.32.1'
 log=Path(${JSON.stringify(sentinel)})
 def denied(*a,**kw):
  log.write_text('forbidden'); raise AssertionError('unexpected update side effect')
@@ -198,7 +200,10 @@ def fetch(request,timeout):
  requests.append((request,timeout))
  response=io.BytesIO(b'{"latest":"98.0.0"}'); response.status=200
  return closing(response)
-n._open_version_request=fetch
+if legacy_refresh:
+ n.urllib.request.urlopen=fetch
+else:
+ n._open_version_request=fetch
 n.subprocess.Popen=lambda *a,**kw: spawns.append((a,kw))
 class TTY(io.StringIO):
  def isatty(self): return True
@@ -221,7 +226,7 @@ for extra in ({},{'DO_NOT_TRACK':'1'},{'BRIGADE_TELEMETRY':'0'}):
  request,timeout=requests[0]
  assert request.full_url=='https://check.brigade.tools/v1/version' and request.get_method()=='GET' and request.data is None and timeout==5
  if extra:
-  assert dict(request.header_items())=={'User-agent':'brigadestack-update-check'}
+  assert dict(request.header_items())=={'User-agent':'Python-urllib' if legacy_refresh else 'brigadestack-update-check'}
  else:
   assert request.get_header('User-agent')==f'brigadestack/{__version__} ({platform.system()})'
   assert request.get_header('X-brigade-channel')=='npm'
@@ -293,7 +298,7 @@ async function proveCanceledReceipt(target,run) {
 }
 async function main() {
   const seen=new Set();
-  const valued=new Set(['--artifacts','--out','--expected-platform','--registry-spec','--expected-packaging-sha','--version-check-python']);
+  const valued=new Set(['--artifacts','--out','--expected-platform','--registry-spec','--expected-packaging-sha','--version-check-python','--compat-archive']);
   for(let i=0;i<args.length;i++) {
     const name=args[i];
     assert.ok(valued.has(name) || name==='--contained-linux-uncatchable','Unknown option: '+name);
@@ -325,6 +330,12 @@ async function main() {
   receipt.sourceSha256=metadata.sourceSha256;
   assert.ok(receipt.sourceSha256,'packed artifacts must identify final source');
   runtime=metadata.runtime;
+  const compatArchive=seen.has('--compat-archive')?option('--compat-archive'):null;
+  if(compatArchive) {
+    assert.ok(!registryMode,'--compat-archive requires local archives');
+    assert.match(runtime.version,/^\d+\.\d+\.\d+$/,'compatibility candidate requires a stable payload');
+    assert.equal(runtime.version,runtime.payloadVersion);
+  }
   const launcherArtifact=metadata.artifacts.find(a=>!a.platform);
   if(registryMode) assert.equal(registrySpec,`${launcherArtifact.name}@${runtime.version}`,'registry spec must pin reviewed launcher');
   const platform=receipt.platform;
@@ -360,6 +371,25 @@ async function main() {
       assert.equal(hash(wheel),packed.payload.sha256);assert.equal(wheel.length,packed.payload.bytes);
       assert.equal([...files.keys()].filter(n=>n.startsWith('package/wheel/')).length,1);
     }
+  }
+  let compatIntegrity;
+  if(compatArchive) {
+    const data=fs.readFileSync(compatArchive);
+    compatIntegrity='sha512-'+crypto.createHash('sha512').update(data).digest('base64');
+    const files=tarFiles(data);
+    const payload=['LICENSE','README.md','launcher.cjs'];
+    assert.deepEqual([...files.keys()].sort(),[...payload,'package.json'].map(name=>'package/'+name));
+    const directory='distribution/escoffier-labs-brigade/npm';
+    const manifest=JSON.parse(files.get('package/package.json'));
+    assert.equal(manifest.name,'@escoffier-labs/brigade');
+    assert.equal(manifest.version,runtime.version);
+    assert.deepEqual(manifest.dependencies,{brigadestack:runtime.version});
+    assert.deepEqual(manifest.bin,{brigade:'launcher.cjs'});
+    assert.deepEqual(manifest.repository,{type:'git',url:archiveRepositoryUrl,directory});
+    for(const name of payload) {
+      assert.deepEqual(files.get('package/'+name),fs.readFileSync(path.join(__dirname,'../..',directory,name)));
+    }
+    receipt.artifacts.push({filename:path.basename(compatArchive),sha256:hash(data),bytes:data.length});
   }
   if(registryMode) {
     assert.equal(metadata.sourceCommit,expectedPackagingSha,'artifact packaging commit must equal expected packaging SHA (default GITHUB_SHA)');
@@ -434,6 +464,23 @@ async function main() {
   const toolReceipt=path.join(contract.runtimeEnvironment(env,runtime).UV_TOOL_DIR,contract.toolName(runtime),'uv-receipt.toml');
   const installedMtime=fs.statSync(toolReceipt).mtimeMs;
   const warm=await call('warm-version',['--version']);versionOK(warm);assert.equal(cold.stdout,warm.stdout,'bootstrap stdout must be byte identical');assert.equal(fs.statSync(toolReceipt).mtimeMs,installedMtime);assert.equal(warm.stderr,'');
+  if(compatArchive) {
+    const compatPrefix=path.join(root,'compat-prefix');
+    const compatName='@escoffier-labs/brigade';
+    const install=await execute(process.execPath,[npmCli,'install','--offline','--ignore-scripts','--no-audit','--no-fund','--prefix',compatPrefix,compatArchive,...chosen.map(a=>path.join(artifactsDir,a.filename))]);
+    record('compat-local-install',install);assert.equal(install.exit,0,install.stderr);
+    const lock=JSON.parse(fs.readFileSync(path.join(compatPrefix,'package-lock.json'),'utf8'));
+    for(const artifact of [{name:compatName,integrity:compatIntegrity},...chosen]) {
+      const entry=lock.packages['node_modules/'+artifact.name];
+      assert.equal(entry.version,runtime.version);
+      assert.equal(entry.integrity,artifact.integrity);
+    }
+    const compatLauncher=path.join(compatPrefix,'node_modules',...compatName.split('/'),'launcher.cjs');
+    const version=await execute(process.execPath,[compatLauncher,'--version']);
+    record('compat-local-version',version);versionOK(version);
+    const help=await execute(process.execPath,[compatLauncher,'--help']);
+    record('compat-local-help',help);assert.equal(help.exit,0,help.stderr);
+  }
   assert.equal(fs.statSync(toolReceipt).mtimeMs,installedMtime,'warm startup must not rewrite installation receipt');assert.equal(warm.stderr,'','warm bootstrap should be quiet');
   // Archive/install boundary: the packed launcher must share alias/canonical state.
   const aliasReal=path.join(root,'alias-real'),aliasParent=path.join(root,'alias-parent');
