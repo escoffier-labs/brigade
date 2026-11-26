@@ -3775,7 +3775,7 @@ def test_recognizer_work_bound(shape):
         command = _recognition_input(shape, count)
         budget = command_tokens.RecognitionBudget()
         assert not runtime._is_raw_verification_text(command, depth=0, budget=budget)
-        assert 0 < budget.steps <= 80 * count
+        assert 0 < budget.steps <= 24 * len(command)
 
     unit = len(_recognition_input(shape, 2)) - len(_recognition_input(shape, 1))
     count = 1 + (65535 - len(_recognition_input(shape, 1))) // unit
@@ -3791,14 +3791,244 @@ def test_recognizer_budget_exhaustion_returns_false(monkeypatch):
     command = "cd src && env -S 'pytest -q'"
     assert runtime.is_raw_verification(command)
     monkeypatch.setattr(command_tokens, "MAX_RECOGNITION_STEPS", 5 * len(command) + 1)
+    assert runtime._recognize(command) is command_tokens.Recognition.UNDECIDED
     assert not runtime.is_raw_verification(command)
 
 
-def test_long_runner_command_through_pre_and_post_tool_use(target):
-    command = _recognition_input("npx", 8000)
-    for event in ("PreToolUse", "PostToolUse"):
-        payload = _payload(target, event, tool_name="Bash", tool_input={"command": command})
-        assert runtime.handle_payload(event, payload) is None
-        state = runtime.read_session_state(target, "session-1")
-        assert state is not None
-        assert state.get("hook_timeout_count", 0) == 0
+@pytest.mark.parametrize("event", ["PreToolUse", "PostToolUse"])
+def test_long_runner_command_through_pre_and_post_tool_use(target, monkeypatch, event):
+    from brigade.claude_hooks import command_tokens
+
+    measured = set()
+    charge = command_tokens.RecognitionBudget.charge
+
+    def measured_charge(self, steps):
+        measured.add(self)
+        return charge(self, steps)
+
+    monkeypatch.setattr(command_tokens.RecognitionBudget, "charge", measured_charge)
+    segments = ["npx --unfamiliar " + "! " * 1360 + "echo" for _ in range(22)]
+    lead = "pytest" if event == "PreToolUse" else "true"
+    command = " && ".join([lead, *segments])
+    payload = _payload(target, event, tool_name="Bash", tool_input={"command": command})
+    started = time.perf_counter()
+    result = runtime.handle_payload(event, payload)
+    elapsed = time.perf_counter() - started
+    assert len(measured) == 1
+    (budget,) = measured
+    assert 0 < budget.steps < 2_000_000
+    assert not budget.exhausted
+    if event == "PreToolUse":
+        assert elapsed < 3
+        output = result["hookSpecificOutput"]
+        assert output["permissionDecision"] == "deny"
+        assert "Route verification through Brigade" in output["permissionDecisionReason"]
+    else:
+        assert result is None
+
+
+_STRESS_PREFIXES = {
+    "npx": ("", "npx --unfamiliar "),
+    "uv": ("", "uv run --unfamiliar "),
+    "poetry": ("", "poetry run --unfamiliar "),
+    "make": ("", "make --unfamiliar "),
+    "npm": ("", "npm --unfamiliar run "),
+    "pnpm": ("", "pnpm --unfamiliar run "),
+    "yarn": ("", "yarn --unfamiliar run "),
+    "bun": ("", "bun --unfamiliar run "),
+    "assignments": ("npx --unfamiliar ", "FLAG=demo "),
+    "control": ("npx --unfamiliar ", "! "),
+    "ruff": ("npx --unfamiliar ", "ruff format "),
+    "env": ("npx --unfamiliar ", "env -S '' "),
+    "heredoc": ("echo ", r'<<"a\"b" '),
+}
+
+
+def _recognition_stress(shape, size, final="echo"):
+    prefix, unit = _STRESS_PREFIXES[shape]
+    if shape == "heredoc":
+        final = ""
+    count = (size - len(prefix) - len(final)) // len(unit)
+    return (prefix + unit * count + final).ljust(size)
+
+
+@pytest.mark.parametrize("shape", _STRESS_PREFIXES)
+def test_recognizer_visits_each_position_once_per_shell_depth(shape, monkeypatch):
+    from collections import Counter
+
+    from brigade.claude_hooks import command_tokens
+
+    class StorageWithoutCopies(list):
+        def __getitem__(self, index):
+            assert not isinstance(index, slice), "recognition copied a backing token span"
+            return super().__getitem__(index)
+
+    init = command_tokens.TokenView.__init__
+
+    def checked_init(view, words, budget, start=0, *, storage=None, tail=None):
+        if storage is None:
+            words = StorageWithoutCopies(words)
+        init(view, words, budget, start, storage=storage, tail=tail)
+
+    monkeypatch.setattr(command_tokens.TokenView, "__init__", checked_init)
+    calls = Counter()
+    scan = runtime._scan_position
+
+    def counted(tokens, *, depth):
+        calls[tokens.position, depth] += 1
+        return scan(tokens, depth=depth)
+
+    monkeypatch.setattr(runtime, "_scan_position", counted)
+    for size in (300, 1000, 4000, 16000, 65535):
+        calls.clear()
+        budget = command_tokens.RecognitionBudget()
+        result = runtime._recognize(_recognition_stress(shape, size), budget)
+        assert result is command_tokens.Recognition.NO
+        assert 0 < budget.steps <= 36 * size
+        assert calls and max(calls.values()) == 1
+        assert len(calls) <= 5 * size
+
+
+@pytest.mark.parametrize("shape", ["npx", "assignments", "control", "ruff", "env"])
+def test_recognizer_reaches_later_segment(shape):
+    from brigade.claude_hooks import command_tokens
+
+    command = _recognition_stress(shape, 15000) + " && pytest -q"
+    assert runtime._recognize(command) is command_tokens.Recognition.YES
+
+
+def test_recognizer_shell_lexer_matches_shlex():
+    from itertools import product
+
+    words = ("a", "é", "''", "'a b'", '"a b"', '"a\\b"', "\\&", "';'")
+    for first, divider, second in product(words, ("", " ", "&&", "\n", ";>"), words):
+        command = first + divider + second
+        assert runtime._shell_tokens(command) == list(runtime._shell_lexer(command))
+
+
+def test_recognizer_windows_env_lexer_matches_shlex(monkeypatch):
+    from itertools import product
+
+    from brigade.claude_hooks import command_tokens
+
+    monkeypatch.setattr(command_tokens, "os", SimpleNamespace(name="nt"))
+    words = ("a", "é", "''", "'a b'", '"a b"', r'"a\b"', r"\&", "';'")
+    for first, divider, second in product(words, ("", " ", "&&", "\n", ";>"), words):
+        command = first + divider + second
+        try:
+            expected = shlex.split(command, posix=False)
+        except ValueError:
+            with pytest.raises(ValueError):
+                command_tokens._split_env_words(command)
+        else:
+            assert command_tokens._split_env_words(command) == expected
+
+
+@pytest.mark.parametrize("mode", ["strict", "observe", "off"])
+@pytest.mark.parametrize("limit", ["length", "nesting", "work"])
+def test_undecided_recognition_enforces_only_strict(target, monkeypatch, mode, limit):
+    from brigade.claude_hooks import command_tokens
+
+    monkeypatch.setattr(runtime.work_mode, "resolve_mode", lambda _target: mode)
+    if limit == "length":
+        command = "pytest " + "a" * 70_000
+        assert len(command) > 65536
+    elif limit == "nesting":
+        command = "echo done"
+        for _ in range(5):
+            command = shlex.join(["bash", "-lc", command])
+    else:
+        command = "echo done"
+        monkeypatch.setattr(command_tokens, "MAX_RECOGNITION_STEPS", 1)
+    assert runtime._recognize(command) is runtime.Recognition.UNDECIDED
+    assert not runtime.is_raw_verification(command)
+    result = runtime.handle_payload(
+        "PreToolUse", _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": command})
+    )
+    if mode != "strict":
+        assert result is None
+    else:
+        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+        assert "too long or too deeply nested" in result["hookSpecificOutput"]["permissionDecisionReason"]
+
+
+def test_recognizer_finds_verifier_after_long_control_prefix():
+    command = "npx --unfamiliar " + "! " * 1500 + "arg pytest"
+    assert runtime.is_raw_verification(command)
+
+
+def test_parenthesized_reader_preserves_quoted_nested_substitution():
+    nested = 'printf "%s" "$(echo "$(pytest -q)")"'
+    command = "(" + nested + ") && true"
+    assert runtime._read_parenthesized(command, 1) == (nested, len(nested) + 1)
+    assert runtime.is_raw_verification(command)
+
+
+def _recognition_compat_commands():
+    import random
+
+    rng = random.Random(2851)
+    commands = [
+        "pytest -q",
+        "echo done",
+        "python -I -m unittest",
+        "ruff format --check",
+        "ruff format src/",
+        "make -j 4 check",
+        "npm run test:unit",
+        "command -p pytest",
+        "command -v pytest",
+        "env -u FLAG echo done",
+        "env -S 'env -S \"pytest -q\"'",
+        "check",
+        "test:unit",
+        'echo "$(printf "%s" "$(pytest)")"',
+        "true && pytest",
+    ]
+    runners = [
+        "npx --prefix ./src",
+        "npx --future ./src",
+        "uv run --no-sync",
+        "uv run --future ./src",
+        "poetry run -q",
+        "poetry run --future ./src",
+        "make --future ./src",
+        "npm --future ./src run",
+        "pnpm --silent run",
+        "yarn --future ./src run",
+        "bun --silent run",
+    ]
+    wrappers = [
+        lambda text: "bash -lc " + shlex.quote(text),
+        lambda text: "env -S " + shlex.quote(text),
+        lambda text: "env --split-string=" + shlex.quote(text),
+        lambda text: "FLAG=demo MODE=demo " + text,
+        lambda text: "! ! " + text,
+        lambda text: "cd ./src && " + text,
+        lambda text: rng.choice(runners) + " " + text,
+    ]
+    for _ in range(4096):
+        command = rng.choice(commands)
+        for _ in range(rng.randrange(1, 4)):
+            command = rng.choice(wrappers)(command)
+        yield command
+
+
+def _recognition_compat_digest(classify, first_verifier):
+    from hashlib import sha256
+
+    digest = sha256()
+    for command in _recognition_compat_commands():
+        row = [classify(command), first_verifier(command)]
+        digest.update(json.dumps(row).encode("ascii") + b"\n")
+    return digest.hexdigest()
+
+
+def test_recognizer_seeded_comparison_with_main():
+    # Digest of 4,096 pairs from main at 41780bb5579c. The comparison
+    # includes classification and the command chosen for the replacement.
+    expected = {
+        "nt": "d5326ad3e19c6f5628346c74ad3c0f9574a605d0f30e9cab60339dab99cb7816",
+        "posix": "3f01860a9cb3764363fa5c0e7a0e7322070243f22b3d83cd134423e96911ae78",
+    }
+    assert _recognition_compat_digest(runtime.is_raw_verification, runtime._first_verifier_command) == expected[os.name]

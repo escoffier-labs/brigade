@@ -136,9 +136,22 @@ def bash_scopes(command: object, cwd: Path, *, depth: int = 0) -> dict[Path, boo
     Observation roots keep fingerprint detection for scripts and subagents.
     Unresolved write operands conservatively retain their command cwd.
     """
-    rt = _rt()
-    if not isinstance(command, str) or not command.strip():
+    if not isinstance(command, str):
         return {}
+    budget = _rt().EVENT_BUDGET.get()
+    if budget is None:
+        return _scan_bash_scopes(command, cwd, depth=depth)
+    key = command, cwd, depth
+    if key not in budget.scopes:
+        budget.scopes[key] = _scan_bash_scopes(command, cwd, depth=depth)
+    return budget.scopes[key]
+
+
+def _scan_bash_scopes(command: str, cwd: Path, *, depth: int) -> dict[Path, bool]:
+    rt = _rt()
+    if not command.strip():
+        return {}
+    rt.charge_event(len(command))
     try:
         tokens = rt._shell_path_tokens(rt._strip_heredoc_bodies(command))
     except ValueError:
@@ -176,9 +189,7 @@ def bash_scopes(command: object, cwd: Path, *, depth: int = 0) -> dict[Path, boo
             segments[-1].append(token)
     effective = cwd
     for index, segment in enumerate(segments):
-        stripped = rt._strip_command_prefixes(segment)
-        while stripped and stripped[0] in _SHELL_KEYWORDS:
-            stripped = rt._strip_command_prefixes(stripped[1:])
+        stripped = rt._strip_command_prefixes(segment, keywords=_SHELL_KEYWORDS)
         if not stripped:
             continue
         add(effective)

@@ -15,6 +15,7 @@ from pathlib import Path
 
 from .. import work_mode
 from ..wiring import resolve_wired_target
+from .command_tokens import EVENT_BUDGET, RecognitionBudget, RecognitionLimit, charge_event
 from .write_attribution import _literal_path, _rt
 
 _KEYWORDS = {"!", "{", "(", "if", "then", "elif", "else", "do", "while", "until", "time"}
@@ -130,19 +131,26 @@ def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Pat
     verifications only inside a plain ``&&`` chain; a command that changes
     directory any other way marks every verification in it undetermined.
     """
-    rt = _rt()
+    if EVENT_BUDGET.get() is not None:
+        return _verifier_cwds(command, cwd, depth=depth)
+    budget = RecognitionBudget()
+    context = EVENT_BUDGET.set(budget)
     try:
-        tokens = rt._shell_tokens(rt._strip_heredoc_bodies(command))
+        return _verifier_cwds(command, cwd, depth=depth)
+    except RecognitionLimit:
+        return [None]
+    finally:
+        EVENT_BUDGET.reset(context)
+        budget.release()
+
+
+def _verifier_cwds(command: str, cwd: Path | None, *, depth: int) -> list[Path | None]:
+    rt = _rt()
+    charge_event(2 * len(command))
+    try:
+        tokens, segments, separators = rt._segmented_command(rt._strip_heredoc_bodies(command))
     except ValueError:
         return [None]
-    segments: list[list[str]] = [[]]
-    separators: list[str] = []
-    for token in tokens:
-        if token in rt._SHELL_SEPARATORS:
-            separators.append(token)
-            segments.append([])
-        else:
-            segments[-1].append(token)
     # Judged on token text: `(cd x`, `{ cd x`, `$(cd x` and a backtick cd hide it from a segment-head check.
     changes_directory = any(token.lstrip("({`$") in {"cd", "pushd", "popd"} for token in tokens)
     if changes_directory and not (_plain_and_chain(command, segments, separators) and _cd_then_checks(segments)):
@@ -150,9 +158,7 @@ def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Pat
     found: list[Path | None] = []
     effective = cwd
     for segment in segments:
-        stripped = rt._strip_command_prefixes(segment)
-        while stripped and stripped[0] in _KEYWORDS:
-            stripped = rt._strip_command_prefixes(stripped[1:])
+        stripped = rt._strip_command_prefixes(segment, keywords=_KEYWORDS)
         if not stripped:
             continue
         if Path(stripped[0]).name == "cd":
@@ -171,7 +177,7 @@ def verifier_cwds(command: str, cwd: Path | None, *, depth: int = 0) -> list[Pat
             else:
                 # A wrapper such as `env -C dir bash -c ...` starts the nested shell elsewhere.
                 start = None if _overrides_cwd(stripped) else effective
-                found.extend(verifier_cwds(nested, start, depth=depth + 1))
+                found.extend(_verifier_cwds(nested, start, depth=depth + 1))
             continue
         if rt._segment_is_verifier(segment) or rt._is_brigade_verify(rt._strip_env(segment)):
             found.append(None if _overrides_cwd(segment) else effective)
@@ -186,7 +192,8 @@ def governing_modes(
         return []
     start = Path(cwd) if isinstance(cwd, str) and cwd else root
     modes: dict[Path, str] = {}
-    for path in verifier_cwds(command, start):
+    for path in dict.fromkeys(verifier_cwds(command, start)):
+        charge_event(1)
         wired = resolve_wired_target(str(path), harness=harness) if path is not None else None
         target = wired if wired is not None else root
         modes[target] = work_mode.resolve_mode(target)
