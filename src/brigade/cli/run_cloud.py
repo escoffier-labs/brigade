@@ -7,6 +7,7 @@ import json
 import os
 import stat
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -606,9 +607,14 @@ def dispatch(args) -> int:
                 print("Codex Cloud leases " + " ".join(f"{name}={value}" for name, value in sync_result.items()))
             return int(bool(sync_result["errors"]))
 
-        launch_intents = codex_cloud.reconcile_launches(target)
-
+        inventory_started = datetime.now(timezone.utc)
         observations, github = cloud_tracker.observe_provider_details(target)
+        launch_intents = codex_cloud.reconcile_launches(target)
+        reconciled_codex_tasks = frozenset(
+            row["task_id"]
+            for row in launch_intents
+            if row["state"] == "tracked" and isinstance(row.get("task_id"), str)
+        )
         provider_tasks = cloud_tracker._legacy_provider_tasks(observations)  # noqa: SLF001 - compatibility projection
         cursor_wired = observations["cursor-cloud"].configured
         hub_leases: list[dict[str, Any]] = []
@@ -622,11 +628,13 @@ def dispatch(args) -> int:
             pass
         payload = cloud_tracker.sync_payload(
             target,
+            now=inventory_started,
             provider_tasks=provider_tasks,
             github=github,
             cursor_wired=cursor_wired,
             provider_observations=observations,
             hub_leases=hub_leases,
+            reconciled_codex_tasks=reconciled_codex_tasks,
         )
         if launch_intents:
             payload["launch_intents"] = launch_intents
@@ -644,6 +652,8 @@ def dispatch(args) -> int:
             print(
                 f"  landing: task={row.get('task_id')} state={row.get('landing_state')} commit={row.get('landing_commit')}"
             )
+        for row in payload.get("needs_investigation", []):
+            print(f"  needs-investigation: task={row.get('task_id')} label={row.get('label')}")
         for row in payload.get("needs_you", []):
             print(f"  needs-you: {row.get('detail')}")
         for row in launch_intents:

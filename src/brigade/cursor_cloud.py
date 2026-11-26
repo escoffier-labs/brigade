@@ -12,13 +12,17 @@ import base64
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+from .cloud_observation import PageReport
 
 DEFAULT_BASE_URL = "https://api.cursor.com"
 DEFAULT_DEADLINE = 10.0
@@ -291,88 +295,139 @@ def get_agent_usage(
     return None
 
 
+class AgentInventory(list[dict[str, Any]]):
+    """Sanitized agent rows with coverage for the list endpoint."""
+
+    complete = False
+    reason: str | None = None
+
+
+def _enrich_agent(
+    row: dict[str, Any],
+    api_key: str,
+    base_url: str,
+    opener: Any,
+    include_usage: bool,
+    remaining: Callable[[], float],
+) -> None:
+    agent_id, run_id = row["id"], row["latestRunId"]
+    timeout = remaining()
+    if not run_id or timeout <= 0:
+        return
+    try:
+        run = get_run(agent_id, run_id, api_key, base_url=base_url, deadline=timeout, opener=opener)
+    except CursorCloudError:
+        return
+    row["latestRunState"] = run.get("state")
+    if isinstance(run.get("duration_ms"), int):
+        row["duration_ms"] = run["duration_ms"]
+    if isinstance(run.get("updated_at"), str):
+        row["updated_at"] = run["updated_at"]
+    timeout = remaining()
+    if include_usage and timeout > 0:
+        try:
+            usage = get_agent_usage(
+                agent_id, api_key, run_id=run_id, base_url=base_url, deadline=timeout, opener=opener
+            )
+        except Exception:  # noqa: BLE001 - usage is best-effort
+            return
+        if usage:
+            row["usage"] = usage
+
+
 def list_agents(
     api_key: str,
     *,
     base_url: str = DEFAULT_BASE_URL,
     deadline: float = DEFAULT_DEADLINE,
-    max_pages: int = DEFAULT_MAX_PAGES,
-    max_items: int = DEFAULT_MAX_ITEMS,
+    max_pages: int | None = DEFAULT_MAX_PAGES,
+    max_items: int | None = DEFAULT_MAX_ITEMS,
     active_only: bool = False,
     include_usage: bool = False,
     opener=None,
-) -> list[dict[str, Any]]:
-    """GET /v1/agents with bounded pagination, resolving latestRunId via the run endpoint.
+    inventory_deadline: float | None = None,
+    on_page: PageReport | None = None,
+    priority_agent_ids: frozenset[str] = frozenset(),
+) -> AgentInventory:
+    """List sanitized agents and indicate whether all list pages were read.
 
-    Returns a list of sanitized agent rows. Each row contains at least ``id``,
-    ``name``, ``latestRunId``, and ``latestRunState`` (when resolved).
+    With an absolute monotonic inventory deadline, enumerate pages before
+    fetching optional run details. The deadline covers both kinds of reads.
+    Resolve prioritized agents first without changing the inventory row order.
     """
+    if inventory_deadline is None and (max_pages is None or max_items is None):
+        raise ValueError("Uncapped Cursor inventory requires a deadline")
     opener = opener or _default_opener
-    items_seen = 0
+
+    def remaining() -> float:
+        return deadline if inventory_deadline is None else min(deadline, inventory_deadline - time.monotonic())
+
     cursor: str | None = None
-    agents: list[dict[str, Any]] = []
-    for _ in range(max(1, max_pages)):
+    seen_cursors: set[str] = set()
+    agents = AgentInventory()
+    valid_rows = True
+    pages_read = 0
+    while max_pages is None or pages_read < max(1, max_pages):
+        timeout = remaining()
+        if timeout <= 0:
+            agents.reason = "provider-timeout"
+            break
         url = f"{base_url.rstrip('/')}/v1/agents"
         if cursor:
-            url += f"?cursor={urllib.parse.quote(cursor)}"
-        payload = _call(opener, _build_request(url, api_key), deadline=deadline)
-        raw_agents = payload.get("items")
-        if not isinstance(raw_agents, list):
-            raise CursorCloudError("Cursor Cloud /v1/agents response missing 'items' array")
+            url += f"?cursor={urllib.parse.quote(cursor, safe='')}"
+        try:
+            payload = _call(opener, _build_request(url, api_key), deadline=timeout)
+            raw_agents = payload.get("items")
+            if not isinstance(raw_agents, list):
+                raise CursorCloudError("Cursor Cloud /v1/agents response missing 'items' array")
+        except CursorCloudError as exc:
+            if inventory_deadline is None or pages_read == 0:
+                raise
+            agents.reason = exc.reason
+            break
+        if remaining() <= 0:
+            agents.reason = "provider-timeout"
+            break
+        pages_read += 1
         next_cursor = payload.get("nextCursor")
         for raw in raw_agents:
-            if not isinstance(raw, dict):
+            if not isinstance(raw, dict) or not isinstance(raw.get("id"), str) or not raw["id"]:
+                valid_rows = False
                 continue
-            agent_id = raw.get("id")
-            if not isinstance(agent_id, str):
-                continue
+            if max_items is not None and len(agents) >= max(1, max_items):
+                valid_rows = False
+                break
             name = raw.get("name")
             latest_run_id = raw.get("latestRunId")
             row: dict[str, Any] = {
-                "id": agent_id,
+                "id": raw["id"],
                 "name": name if isinstance(name, str) else None,
                 "latestRunId": latest_run_id if isinstance(latest_run_id, str) else None,
                 "latestRunState": None,
             }
-            if row["latestRunId"]:
-                try:
-                    run = get_run(
-                        agent_id, row["latestRunId"], api_key, base_url=base_url, deadline=deadline, opener=opener
-                    )
-                    row["latestRunState"] = run.get("state")
-                    if isinstance(run.get("duration_ms"), int):
-                        row["duration_ms"] = run["duration_ms"]
-                    if isinstance(run.get("updated_at"), str):
-                        row["updated_at"] = run["updated_at"]
-                except CursorCloudError:
-                    # Preserve the agent row even if the run fetch fails.
-                    pass
-                else:
-                    if include_usage:
-                        try:
-                            usage = get_agent_usage(
-                                agent_id,
-                                api_key,
-                                run_id=row["latestRunId"],
-                                base_url=base_url,
-                                deadline=deadline,
-                                opener=opener,
-                            )
-                        except (CursorCloudError, Exception):  # noqa: BLE001 - usage is best-effort
-                            usage = None
-                        if usage:
-                            row["usage"] = usage
+            if inventory_deadline is None:
+                _enrich_agent(row, api_key, base_url, opener, include_usage, remaining)
             agents.append(row)
-            items_seen += 1
-            if items_seen >= max_items:
-                break
-        if items_seen >= max_items:
+        if next_cursor in (None, ""):
+            agents.complete = valid_rows
+        if on_page is not None:
+            on_page(agents, agents.complete)
+        if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
             break
-        if not isinstance(next_cursor, str) or not next_cursor:
+        if max_items is not None and len(agents) >= max(1, max_items):
             break
+        seen_cursors.add(next_cursor)
         cursor = next_cursor
+    if inventory_deadline is not None:
+        prioritized = (
+            sorted(agents, key=lambda row: row["id"] not in priority_agent_ids) if priority_agent_ids else agents
+        )
+        for row in prioritized:
+            if remaining() <= 0:
+                break
+            _enrich_agent(row, api_key, base_url, opener, include_usage, remaining)
     if active_only:
-        agents = [a for a in agents if is_active_state(a.get("latestRunState"))]
+        agents[:] = [a for a in agents if is_active_state(a.get("latestRunState"))]
     return agents
 
 

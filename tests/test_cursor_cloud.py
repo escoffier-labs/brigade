@@ -992,3 +992,56 @@ class TestObservationMetadata:
     def test_get_agent_usage_feature_unavailable_is_none(self):
         opener = FakeOpener([_error_response(403, {"error": "feature_unavailable"})])
         assert cursor_cloud.get_agent_usage("agent-1", _FAKE_KEY, opener=opener.open) is None
+
+
+def test_list_agents_inventory_reads_all_pages_before_enrichment():
+    import time
+
+    opener = FakeOpener(
+        [
+            _json_response({"items": [{"id": f"agent-{i}"} for i in range(100)], "nextCursor": "next"}),
+            _json_response({"items": [{"id": "agent-final", "latestRunId": "run-final"}]}),
+            _json_response({"id": "run-final", "status": "RUNNING"}),
+        ]
+    )
+    inventory = cursor_cloud.list_agents(
+        _FAKE_KEY, opener=opener.open, max_pages=None, max_items=None, inventory_deadline=time.monotonic() + 10
+    )
+
+    assert len(inventory) == 101
+    assert inventory.complete
+    assert inventory[-1]["latestRunState"] == "running"
+    assert opener.calls[1].full_url.endswith("?cursor=next")
+
+
+def test_list_agents_inventory_keeps_sightings_on_later_page_error():
+    import time
+
+    opener = FakeOpener(
+        [
+            _json_response({"items": [{"id": "agent-seen", "latestRunId": "run-seen"}], "nextCursor": "next"}),
+            TimeoutError(),
+            _json_response({"id": "run-seen", "status": "RUNNING"}),
+        ]
+    )
+    inventory = cursor_cloud.list_agents(
+        _FAKE_KEY, opener=opener.open, max_pages=None, max_items=None, inventory_deadline=time.monotonic() + 10
+    )
+
+    assert [row["id"] for row in inventory] == ["agent-seen"]
+    assert not inventory.complete
+    assert inventory.reason == "transport-failure"
+
+
+def test_list_agents_empty_cursor_ends_inventory():
+    opener = FakeOpener(
+        [
+            _json_response({"items": [{"id": "agent-first"}], "nextCursor": "next"}),
+            _json_response({"items": [{"id": "agent-last"}], "nextCursor": ""}),
+            _json_response({"items": [{"id": "agent-first"}]}),
+        ]
+    )
+    agents = cursor_cloud.list_agents(_FAKE_KEY, opener=opener.open)
+    assert agents.complete
+    assert [row["id"] for row in agents] == ["agent-first", "agent-last"]
+    assert len(opener.calls) == 2
