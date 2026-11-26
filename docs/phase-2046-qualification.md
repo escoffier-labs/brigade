@@ -22,13 +22,19 @@ also enforces read-only through Brigade's worker policy. The harness checks
 that all observed worktrees are distinct, clean, and at the pinned revision.
 Approval waits, if any, remain in the measured time.
 
-Campaign 03 stopped in pair 1 when the medium-effort T3 guide worker waited
-for operator direction instead of returning the Git checks (`status-guide.json`
-and `failure.json` in the retained T3 evidence). Each shared task now starts
-by stating that the operator assigned the read-only workload and authorized
-the two commands. The expected revision and file digest still come from
-the pinned Git objects. Replay uses the task text version saved in
-`campaign.json` so earlier batches retain their original fingerprints.
+The authorization preamble was tried in campaigns 04 and 05 after the
+medium-effort T3 guide worker in campaign 03 waited for operator direction.
+In campaign 05, a low-effort governed T3 worker two delegation levels deep
+refused the task with the preamble. In the 2026-11-26 depth-two probes using
+`delegate_task` without a Brigade claim, the plain task completed at low
+(P1) and medium (P3) effort. The low-effort task with the preamble (P2)
+refused. Campaigns 01 and 02 completed all six low-effort governed T3 tasks
+with plain text. All these workers used `gpt-6.2-sol`.
+
+New campaigns use version 3, which restores the exact plain text from
+version 1. Replay uses the task text version saved in `campaign.json`,
+including the preamble for version 2, to preserve the original
+fingerprints. Expected answers still come from the pinned Git objects.
 
 ## Run the campaign
 

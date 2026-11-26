@@ -1,0 +1,1 @@
+- Restore plain matched qualification task text for new campaigns and preserve replay of campaigns that used the authorization preamble.

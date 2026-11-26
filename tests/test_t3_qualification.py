@@ -589,7 +589,8 @@ def test_coordinator_resumes_from_saved_outputs_and_marks_before_finalize(coordi
     assert coordinator_brief.index(" delegate-replies\n") < coordinator_brief.index(" > finalize.json")
 
 
-def test_collect_row_binds_directory_and_explicit_route(tmp_path, monkeypatch):
+@pytest.mark.parametrize("task_text_version", [None, 1, 2, 3])
+def test_collect_row_binds_directory_and_explicit_route(tmp_path, monkeypatch, task_text_version):
     from brigade import localio, run_batch
 
     campaign = {
@@ -605,14 +606,12 @@ def test_collect_row_binds_directory_and_explicit_route(tmp_path, monkeypatch):
     folder = pair_dir / arm
     folder.mkdir(parents=True)
     request, ids = qualification._pair_identities(campaign, pair)
-    payload = {
-        "schema": run_batch.SCHEMA,
-        "request_id": request,
-        "tasks": [
-            {"task_id": "runner", "seat": "worker", "text": "fixture", "read_only": True, "isolation": "worktree"}
-        ],
-    }
-    answers = {"runner": {"head": campaign["base_sha"], "sha256": "d" * 64}}
+    if task_text_version is not None:
+        campaign["task_text_version"] = task_text_version
+    monkeypatch.setattr(qualification.subprocess, "check_output", lambda argv, **_kwargs: argv[-1].encode())
+    payload, answers = qualification.prepare_batch(
+        tmp_path, campaign["base_sha"], campaign["seat"], request, campaign.get("task_text_version", 1)
+    )
     context = {
         **campaign,
         "qualification": "t3",
@@ -629,7 +628,6 @@ def test_collect_row_binds_directory_and_explicit_route(tmp_path, monkeypatch):
     for mark, value in zip(("offered", "opened", "verified"), (0, 1, 2), strict=True):
         localio.write_json(folder / f"{mark}.json", {"monotonic_ns": value})
     localio.write_json(folder / "closed.json", {"monotonic_ns": 3, "native_live": 0})
-    monkeypatch.setattr(qualification, "prepare_batch", lambda *_args: (payload, answers))
 
     def collect(selected, run_dir, status, measurements, *, qualification):
         assert (selected, qualification, run_dir.name) == (arm, "t3", ids[arm])
@@ -766,7 +764,7 @@ def test_preflight_matches_worker_effort(tmp_path, monkeypatch, seat_effort, t3_
             qualification._preflight(*args)
 
 
-def test_campaign_shares_operator_assigned_task_text_between_arms(tmp_path, monkeypatch):
+def test_campaign_shares_plain_task_text_between_arms(tmp_path, monkeypatch):
     from types import SimpleNamespace
 
     base = "a" * 40
@@ -797,7 +795,7 @@ def test_campaign_shares_operator_assigned_task_text_between_arms(tmp_path, monk
 
     qualification._run_campaign(args, tmp_path, tmp_path, tmp_path / "roster.toml", tmp_path, base, target)
 
-    assert json.loads((tmp_path / "campaign.json").read_bytes())["task_text_version"] == 2
+    assert json.loads((tmp_path / "campaign.json").read_bytes())["task_text_version"] == 3
     assert batch_bytes["t3"] == batch_bytes["run-batch"]
     batch = json.loads(batch_bytes["t3"])
     assert {task["task_id"] for task in batch["tasks"]} == qualification.WORKLOAD.keys()
@@ -805,9 +803,8 @@ def test_campaign_shares_operator_assigned_task_text_between_arms(tmp_path, monk
         "This is an operator-assigned, read-only benchmark task under Brigade governance. "
         "The operator authorized the two commands below. Complete the task without asking for another assignment.\n\n"
     )
-    assert all(task["text"].startswith(preamble) for task in batch["tasks"])
     legacy, legacy_answers = qualification.prepare_batch(tmp_path, base, args.seat, batch["request_id"], 1)
-    assert [task["text"].removeprefix(preamble) for task in batch["tasks"]] == [
-        task["text"] for task in legacy["tasks"]
-    ]
-    assert expected_answers["t3"] == expected_answers["run-batch"] == legacy_answers
+    assert batch == legacy
+    version_two, version_two_answers = qualification.prepare_batch(tmp_path, base, args.seat, batch["request_id"], 2)
+    assert [task["text"] for task in version_two["tasks"]] == [preamble + task["text"] for task in legacy["tasks"]]
+    assert expected_answers["t3"] == expected_answers["run-batch"] == legacy_answers == version_two_answers

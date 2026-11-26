@@ -39,8 +39,8 @@ WORKLOAD = {
     "package": "pyproject.toml",
     "runner": "src/brigade/run_batch.py",
 }
-TASK_TEXT_VERSION = 2
-TASK_PREAMBLE = (
+TASK_TEXT_VERSION = 3
+V2_TASK_PREAMBLE = (
     "This is an operator-assigned, read-only benchmark task under Brigade governance. "
     "The operator authorized the two commands below. Complete the task without asking for another assignment.\n\n"
 )
@@ -180,10 +180,10 @@ def prepare_batch(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     # Preserve the original text and fingerprint when replaying older campaigns.
     evidence.require(
-        type(task_text_version) is int and task_text_version in (1, TASK_TEXT_VERSION),
+        type(task_text_version) is int and task_text_version in (1, 2, 3),
         "unsupported qualification task text version",
     )
-    preamble = TASK_PREAMBLE if task_text_version == TASK_TEXT_VERSION else ""
+    preamble = V2_TASK_PREAMBLE if task_text_version == 2 else ""
     answers = {}
     tasks = []
     for task, path in WORKLOAD.items():
