@@ -1486,7 +1486,7 @@ def _temporary_miseledger_export_path(target: Path) -> Path:
 
 
 def _import_miseledger_file(
-    path: Path, *, binary: str | None, strict: bool, quiet: bool
+    path: Path, *, binary: str | None, strict: bool, quiet: bool, timeout: int = 120
 ) -> tuple[bool, str | None, bool]:
     """Import a JSONL export with miseledger. Return failure, repair hint, and timeout."""
     if binary is None:
@@ -1499,6 +1499,9 @@ def _import_miseledger_file(
         return True, None, False
     prefix = "error" if strict else "warning"
     try:
+        command = Path(binary)
+        if not command.is_absolute() and command.is_file():
+            binary = str(command.absolute())
         result = subprocess.run(
             [binary, "import", "adapter", str(path), "--source", "brigade", "--json"],
             check=False,
@@ -1506,7 +1509,7 @@ def _import_miseledger_file(
             stderr=subprocess.PIPE,
             stdin=subprocess.DEVNULL,
             text=True,
-            timeout=120,
+            timeout=timeout,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
         detail = _one_line(str(exc), 500)
@@ -1583,15 +1586,16 @@ def _repository_export_result(
     target: Path,
     limit: int,
     new_only: bool,
+    automatic_batch: int = 0,
 ) -> dict[str, Any]:
     receipts, candidate_count, collection_error_kinds = _collect_export_receipts(target)
-    collection_error_count = len(collection_error_kinds)
     selected = receipts[:limit] if limit else receipts
+    cursor_hashes = _read_miseledger_cursor_hashes(target) if new_only else set()
+    pending_count = skipped_count = 0
+    if automatic_batch:
+        selected, pending_count = receipt_replay.oldest_pending(receipts, cursor_hashes, _receipt_hash, automatic_batch)
+        skipped_count = len(receipts) - pending_count
     records = [_miseledger_item(receipt, target, ordinal) for ordinal, receipt in enumerate(selected, start=1)]
-    cursor_hashes: set[str] = set()
-    if new_only:
-        cursor_hashes = _read_miseledger_cursor_hashes(target)
-    skipped_count = 0
     kept_records: list[dict[str, Any]] = []
     for record in records:
         raw = record.get("raw")
@@ -1602,7 +1606,7 @@ def _repository_export_result(
         kept_records.append(record)
     lines = _miseledger_jsonl_lines(kept_records)
     exported_count = len(lines)
-    error_count = collection_error_count
+    error_count = len(collection_error_kinds)
     status = _single_repo_export_status(
         candidate_count=candidate_count,
         exported_count=exported_count,
@@ -1616,6 +1620,7 @@ def _repository_export_result(
         "skipped_count": skipped_count,
         "error_count": error_count,
         "collection_error_kinds": collection_error_kinds,
+        "pending_count": pending_count if automatic_batch else exported_count,
         "lines": lines,
         "cursor_hashes": cursor_hashes,
         "target": target,
@@ -1699,7 +1704,7 @@ def index_miseledger_receipts(*, target: Path, quiet: bool = False) -> dict[str,
         with receipt_replay.replay_lock(target):
             binary = component_bins.resolve("brigade-evidence")
             engine = receipt_replay.engine_identity(binary)
-            state = receipt_replay.read_state(target, engine)
+            state = receipt_replay.state_for_engine(target, engine)
             skipped = receipt_replay.skipped_index(target, state)
             if skipped:
                 return _index_result_payload(empty, status=skipped["status"]) | skipped
@@ -1718,11 +1723,12 @@ def index_miseledger_receipts(*, target: Path, quiet: bool = False) -> dict[str,
 def _index_pending_receipts(
     target: Path, binary: str | None, engine: dict[str, Any] | None, state: dict[str, Any], *, quiet: bool
 ) -> dict[str, Any]:
-    result = _repository_export_result(target=target, limit=0, new_only=True)
+    batch_size = state.get("batch_size", receipt_replay.AUTO_BATCH_SIZE)
+    result = _repository_export_result(target=target, limit=0, new_only=True, automatic_batch=batch_size)
     lines = result["lines"]
-    candidate_count = int(result["candidate_count"])
-    exported_count = int(result["exported_count"])
-    skipped_count = int(result["skipped_count"])
+    candidate_count = result["candidate_count"]
+    exported_count = result["exported_count"]
+    payload = _index_result_payload(result, status="failed")
 
     if candidate_count == 0:
         payload = _index_result_payload(result, status="empty")
@@ -1730,7 +1736,7 @@ def _index_pending_receipts(
         return payload
 
     if not lines:
-        status = "nothing-new" if skipped_count > 0 else "empty"
+        status = "nothing-new" if result["skipped_count"] else "empty"
         payload = _index_result_payload(result, status=status)
         payload["message"] = f"miseledger indexing: {status}"
         return payload
@@ -1738,41 +1744,35 @@ def _index_pending_receipts(
     output_path = _temporary_miseledger_export_path(target)
     exit_code, written_hashes = _write_miseledger_lines_to_path(output_path, lines)
     if exit_code != 0:
-        payload = _index_result_payload(result, status="failed")
         payload["message"] = "miseledger indexing: export write failed"
         return payload
 
-    import_failed, repair, timed_out = _import_miseledger_file(output_path, binary=binary, strict=False, quiet=quiet)
+    import_failed, repair, timed_out = _import_miseledger_file(
+        output_path, binary=binary, strict=False, quiet=quiet, timeout=receipt_replay.AUTO_IMPORT_TIMEOUT
+    )
     if repair is not None or timed_out:
-        receipt_replay.record_failure(
-            target,
-            state,
-            engine,
-            kind=receipt_replay.OUTDATED if repair is not None else "timeout",
-            pending_count=exported_count,
-            candidate_count=candidate_count,
-        )
-    else:
-        receipt_replay.clear_state(target)
+        kind = receipt_replay.OUTDATED if repair is not None else "timeout"
+        receipt_replay.record_replay(target, state, engine, result, kind=kind)
     if import_failed:
-        payload = _index_result_payload(result, status="failed")
         payload["message"] = "miseledger indexing: import failed (receipts pending)"
         if repair is not None:
             payload["reason"] = receipt_replay.OUTDATED
             payload["repair"] = repair
         return payload
 
-    cursor_hashes = result.get("cursor_hashes")
-    if not isinstance(cursor_hashes, set):
-        cursor_hashes = set()
-    if _advance_miseledger_cursor(target, cursor_hashes, written_hashes) != 0:
-        payload = _index_result_payload(result, status="failed")
+    if _advance_miseledger_cursor(target, result["cursor_hashes"], written_hashes) != 0:
         payload["message"] = "miseledger indexing: cursor write failed"
         return payload
 
-    payload = _index_result_payload(result, status="indexed")
-    payload["message"] = f"miseledger indexing: indexed {exported_count} receipt(s)"
-    return payload
+    remaining = receipt_replay.finish_batch(target, state, engine, result)
+    detail = f"miseledger indexing: indexed {exported_count} receipt(s)"
+    if remaining:
+        return payload | {
+            "status": "draining",
+            "remaining_count": remaining,
+            "message": f"{detail} ({remaining} pending)",
+        }
+    return payload | {"status": "indexed", "message": detail}
 
 
 def _write_aggregate_lines(output_path: Path, lines: list[tuple[str, str]]) -> tuple[int, list[str]]:
@@ -1800,13 +1800,24 @@ def _export_miseledger_fleet(
         _print_export_result(_fleet_export_payload([], status="failed"))
         return 1
 
-    enabled_entries = [entry for entry in entries if entry.enabled]
+    enabled_entries = [(entry, entry.path.is_dir()) for entry in entries if entry.enabled]
+    targets = [entry.path for entry, exists in enabled_entries if exists]
+    with receipt_replay.explicit_retry_locks(targets, enabled=import_miseledger) as locked:
+        if not locked:
+            _print_export_result(_fleet_export_payload([], status="failed", import_error_count=1))
+            return 1
+        return _export_fleet_entries(target, out, limit, new_only, import_miseledger, enabled_entries)
+
+
+def _export_fleet_entries(
+    target: Path, out: str | Path, limit: int, new_only: bool, run_import: bool, enabled_entries: list[tuple[Any, bool]]
+) -> int:
     repo_results: list[dict[str, Any]] = []
     aggregate_lines: list[tuple[str, str]] = []
     written_hashes_by_target: dict[Path, list[str]] = {}
 
-    for entry in enabled_entries:
-        if not entry.path.is_dir():
+    for entry, exists in enabled_entries:
+        if not exists or not entry.path.is_dir():
             print(f"error: enabled repo path is missing: {entry.repo_id}", file=sys.stderr)
             repo_results.append(
                 {
@@ -1845,20 +1856,20 @@ def _export_miseledger_fleet(
         if result_written:
             written_hashes_by_target[result["target"]] = result_written
 
-    if import_miseledger:
+    if run_import:
         import_error_count, cursor_exit = (
             _explicit_import(output_path, repo_results, written_hashes_by_target, new_only=new_only, strict=True)
             if aggregate_lines
             else (0, 0)
         )
-        if cursor_exit:
-            _print_export_result(_fleet_export_payload(repo_results, status="failed"))
-            return 1
     else:
         import_error_count = 0
-        if _finalize_repo_cursors(repo_results, new_only=new_only, written_hashes_by_target=written_hashes_by_target):
-            _print_export_result(_fleet_export_payload(repo_results, status="failed"))
-            return 1
+        cursor_exit = _finalize_repo_cursors(
+            repo_results, new_only=new_only, written_hashes_by_target=written_hashes_by_target
+        )
+    if cursor_exit:
+        _print_export_result(_fleet_export_payload(repo_results, status="failed"))
+        return 1
 
     status = _fleet_export_status([str(result["status"]) for result in repo_results])
     if import_error_count:
@@ -1955,6 +1966,19 @@ def export_miseledger(
         print("error: --json requires --out to name a file", file=sys.stderr)
         return 2
 
+    with receipt_replay.explicit_retry_locks((target,), enabled=import_miseledger) as locked:
+        if not locked:
+            if json_output:
+                _print_export_result(
+                    _single_repo_export_payload(
+                        dict(status="failed", candidate_count=0, exported_count=0, skipped_count=0, error_count=1)
+                    )
+                )
+            return 1
+        return _export_repo(target, out, limit, new_only, import_miseledger, json_output)
+
+
+def _export_repo(target: Path, out: str | Path, limit: int, new_only: bool, run_import: bool, json_output: bool) -> int:
     result = _repository_export_result(target=target, limit=limit, new_only=new_only)
     lines = result["lines"]
     if not json_output and not result["candidate_count"]:
@@ -1963,19 +1987,19 @@ def export_miseledger(
     output_path: Path | None = None
     if str(out) != "-":
         output_path = Path(out).expanduser()
-    elif import_miseledger and lines:
+    elif run_import and lines:
         output_path = _temporary_miseledger_export_path(target)
 
     if output_path is not None:
         exit_code, written_hashes = _write_miseledger_lines_to_path(output_path, lines)
-    elif not import_miseledger:
+    elif not run_import:
         exit_code, written_hashes = _write_miseledger_lines_to_stdout(lines)
     else:
         exit_code, written_hashes = 0, []
 
     written_by_target = {target: written_hashes}
     if exit_code == 0:
-        if import_miseledger:
+        if run_import:
             if lines and output_path is not None:
                 import_exit, cursor_exit = _explicit_import(
                     output_path, [result], written_by_target, new_only=new_only, strict=json_output
@@ -2003,22 +2027,21 @@ def _explicit_import(
     strict: bool,
 ) -> tuple[int, int]:
     """Return import and cursor errors separately for the fleet summary."""
-    try:
-        with receipt_replay.explicit_retry_locks(written_hashes_by_target):
-            failed, _, _ = _import_miseledger_file(
-                output_path, binary=component_bins.resolve("brigade-evidence"), strict=strict, quiet=strict
-            )
-            if failed:
-                return 1, 0
-            for target in written_hashes_by_target:
-                receipt_replay.clear_state(target)
-            cursor_exit = _finalize_repo_cursors(
-                repo_results, new_only=new_only, written_hashes_by_target=written_hashes_by_target
-            )
-            return 0, cursor_exit
-    except OSError as exc:
-        print(f"error: could not lock evidence import; export kept at {output_path}: {exc}", file=sys.stderr)
+    paused = any(
+        receipt_replay.read_state(target).get("kind") in (receipt_replay.OUTDATED, "timeout")
+        for target in written_hashes_by_target
+    )
+    if paused:
+        print("Bypassing automatic receipt indexing pause or cooldown for this import.", file=sys.stderr)
+    failed, _, _ = _import_miseledger_file(
+        output_path, binary=component_bins.resolve("brigade-evidence"), strict=strict, quiet=strict
+    )
+    if failed:
         return 1, 0
+    cleared = [receipt_replay.clear_state(target) for target in written_hashes_by_target]
+    if paused and any(cleared):
+        print("Cleared automatic receipt indexing pause or cooldown after acknowledgement.", file=sys.stderr)
+    return 0, _finalize_repo_cursors(repo_results, new_only=new_only, written_hashes_by_target=written_hashes_by_target)
 
 
 def main(argv: list[str] | None = None) -> int:
