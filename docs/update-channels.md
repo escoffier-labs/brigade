@@ -135,7 +135,10 @@ on a pipx install, run `brigade update --channel beta` with network access. When
 setup finds a compatible cached manifest whose digest ships in the CLI, its
 refusal prints the actual path and release version. That command can run offline
 if the component assets are cached. An installed stable CLI can also authenticate
-its own exact packaged release manifest or a byte-for-byte copy. A source
+its own exact packaged release manifest or a byte-for-byte copy. Offline setup
+checks that a cached or named manifest matches the installed package byte for
+byte and is internally consistent for the running release, without contacting
+the publisher to confirm the tag's commit or the published digest. A source
 checkout or editable install uses the package directory in its own code tree.
 A compatibility-only manifest in that tree does not qualify. Other release
 manifests need network access for authentication against the exact release's

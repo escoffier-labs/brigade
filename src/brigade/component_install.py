@@ -1238,7 +1238,7 @@ def _packaged_exact_release() -> ResolvedRelease | None:
     version = update_cmd._parse_tag(tag)
     if version is None or any(revision.startswith(f"{tag}+") for revision in component_release_pins.MANIFEST_DIGESTS):
         return None
-    path = templates.template_root() / "components" / "manifest-v1.json"
+    path = component_manifest.manifest_path()
     try:
         content = path.read_bytes()
         manifest = component_manifest.load_bytes(content, source=path)
@@ -1274,9 +1274,7 @@ def _offline_packaged_release(roots: SetupRoots, state: UpdateState | None) -> R
     except FileNotFoundError:
         return packaged
     if cached != packaged.manifest_bytes:
-        raise ComponentInstallError(
-            f"cached manifest digest does not match the packaged exact-release manifest: {cache_path}"
-        )
+        print(f"component setup: ignoring corrupt cached manifest: {cache_path}", file=sys.stderr)
     return packaged
 
 

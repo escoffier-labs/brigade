@@ -1645,11 +1645,13 @@ def test_offline_setup_uses_its_packaged_exact_release(tmp_path, monkeypatch, ca
         pytest.fail("offline setup attempted an asset request")
 
     result = setup_native_components(env=env, offline=True, opener=no_download)
-    if cache == "different":
-        assert result == 1
-        assert "digest" in capsys.readouterr().err
-        return
     assert result == 0
+    err = capsys.readouterr().err
+    if cache == "different":
+        assert f"ignoring corrupt cached manifest: {cached}" in err
+        assert cached.read_bytes() == content + b" "
+    else:
+        assert "corrupt cached manifest" not in err
     installed = component_state.load_installed_state(Path(component_paths.installed_state_path(roots.data_root)))
     assert installed is not None
     assert installed.manifest_revision == f"{tag}+{commit}"
@@ -1667,7 +1669,7 @@ def test_compatible_offline_setup_authenticates_a_copy_of_its_packaged_manifest(
     copy = tmp_path / "copy.json"
     copy.write_bytes(content + b" " if different else content)
     monkeypatch.setattr(brigade, "__version__", version)
-    monkeypatch.setattr(component_install.templates, "template_root", lambda: package.parents[1])
+    monkeypatch.setattr(component_manifest, "manifest_path", lambda: package)
     monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
     monkeypatch.setattr(update_cmd, "_DefaultHttp", lambda: pytest.fail("offline setup attempted a release request"))
     assert setup_native_components(
@@ -1677,9 +1679,19 @@ def test_compatible_offline_setup_authenticates_a_copy_of_its_packaged_manifest(
         assert "does not match the packaged" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("revision", ["v0.98.6+" + "a" * 40, "v0.98.7+" + "b" * 40, "v0.98.7+invalid"])
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("manifest_revision", "v0.98.6+" + "a" * 40),
+        ("manifest_revision", "v0.98.7+" + "b" * 40),
+        ("manifest_revision", "v0.98.7+invalid"),
+        ("brigade_version", "0.98.6"),
+        ("release_tag", "v0.98.6"),
+        ("download_url", release_manifest_url("v0.98.7")),
+    ],
+)
 def test_offline_setup_rejects_packaged_manifest_with_inconsistent_release_coordinates(
-    tmp_path, monkeypatch, capsys, revision
+    tmp_path, monkeypatch, capsys, field, value
 ):
     env = linux_env(tmp_path)
     package = tmp_path / "package" / "components" / "manifest-v1.json"
@@ -1687,7 +1699,13 @@ def test_offline_setup_rejects_packaged_manifest_with_inconsistent_release_coord
     version = "0.98.7"
     write_release_manifest(package, brigade_version=version, target_commit="a" * 40)
     raw = json.loads(package.read_bytes())
-    raw["manifest_revision"] = revision
+    component = next(iter(raw["components"].values()))
+    if field == "release_tag":
+        component["source"][field] = value
+    elif field == "download_url":
+        next(iter(component["assets"].values()))[field] = value
+    else:
+        raw[field] = value
     package.write_text(json.dumps(raw), encoding="utf-8")
     monkeypatch.setattr(brigade, "__version__", version)
     monkeypatch.setattr(component_install.templates, "template_root", lambda: package.parents[1])
@@ -1696,8 +1714,9 @@ def test_offline_setup_rejects_packaged_manifest_with_inconsistent_release_coord
     assert "offline setup requires a verified exact-release manifest cache" in capsys.readouterr().err
 
 
+@pytest.mark.parametrize("mismatch", ["digest", "commit"])
 def test_offline_setup_authenticates_the_package_file_instead_of_the_state_selected_cache(
-    tmp_path, monkeypatch, capsys
+    tmp_path, monkeypatch, capsys, mismatch
 ):
     env = linux_env(tmp_path)
     package = tmp_path / "package" / "components" / "manifest-v1.json"
@@ -1711,10 +1730,10 @@ def test_offline_setup_authenticates_the_package_file_instead_of_the_state_selec
     _precache_fixture_assets(env, package)
 
     roots = resolve_roots(env=env)
-    altered = content + b" "
-    digest = hashlib.sha256(altered).hexdigest()
+    selected = content + b" " if mismatch == "digest" else content
+    digest = hashlib.sha256(selected).hexdigest()
     cache_selected_by_state = Path(component_paths.verified_manifest_path(roots.cache_root, digest))
-    write_verified_cache(cache_selected_by_state, payload=altered)
+    write_verified_cache(cache_selected_by_state, payload=selected)
     state_path = Path(component_paths.update_state_path(roots.data_root))
     update_cmd.write_update_state(
         state_path,
@@ -1725,7 +1744,7 @@ def test_offline_setup_authenticates_the_package_file_instead_of_the_state_selec
             version,
             42,
             tag,
-            commit,
+            "b" * 40 if mismatch == "commit" else commit,
             release_manifest_url(tag),
             digest,
             "2026-11-26T00:00:00+00:00",
@@ -1733,7 +1752,11 @@ def test_offline_setup_authenticates_the_package_file_instead_of_the_state_selec
     )
 
     assert setup_native_components(env=env, offline=True) == 1
-    assert "does not match the packaged exact-release manifest" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    if mismatch == "digest":
+        assert "does not match the packaged exact-release manifest" in error
+    else:
+        assert "cached manifest release commit does not match update state" in error
     assert not Path(component_paths.installed_state_path(roots.data_root)).exists()
 
 
