@@ -564,6 +564,118 @@ def test_windows_explicit_sync_returns_with_live_engine(tmp_path, monkeypatch, c
     assert "still running" in stderr and "12345" in stderr and "brigade code doctor" in stderr
 
 
+# --- run_windows_sync direct contract ---------------------------------------
+
+
+def test_run_windows_sync_forwards_argv_and_cwd_and_reads_temp_output(tmp_path, monkeypatch):
+    launches = []
+
+    def launch(argv, **kwargs):
+        launches.append({"argv": argv, "kwargs": kwargs})
+        kwargs["stdout"].write(b'{"ok": true}\n')
+        kwargs["stderr"].write(b"engine note\n")
+        return SimpleNamespace(pid=12345, wait=lambda *, timeout=None: 0), "detached"
+
+    monkeypatch.setattr(proc, "spawn_detached", launch)
+    argv = ["/fake/engine", "sync", str(tmp_path), "--force"]
+
+    result = code_graph_background.run_windows_sync(argv, timeout=12.5, cwd=tmp_path)
+
+    assert launches[0]["argv"] == argv
+    assert launches[0]["kwargs"]["cwd"] == tmp_path
+    assert set(launches[0]["kwargs"]) == {"cwd", "stdout", "stderr"}
+    assert (result.code, result.stdout, result.stderr) == (0, '{"ok": true}\n', "engine note\n")
+    assert result.timed_out is False
+
+
+def test_run_windows_sync_timeout_keeps_child_running(tmp_path, monkeypatch):
+    waited = []
+
+    def wait(*, timeout=None):
+        waited.append(timeout)
+        raise subprocess.TimeoutExpired("engine", timeout)
+
+    reapers = []
+
+    def reaper(*, target, daemon):
+        reapers.append(daemon)
+        return SimpleNamespace(start=lambda: None)
+
+    monkeypatch.setattr(
+        proc,
+        "spawn_detached",
+        lambda *args, **kwargs: (SimpleNamespace(pid=12345, wait=wait), "detached"),
+    )
+    monkeypatch.setattr(code_graph_background, "Thread", reaper)
+
+    result = code_graph_background.run_windows_sync(["/fake/engine", "sync"], timeout=3.0, cwd=tmp_path)
+
+    assert waited == [3.0]
+    assert reapers == [True]
+    assert (result.code, result.stdout, result.timed_out) == (124, "", True)
+    assert "still running" in result.stderr
+    assert "12345" in result.stderr
+    assert "brigade code doctor" in result.stderr
+
+
+def test_run_windows_sync_falls_back_to_popen_when_detach_is_refused(tmp_path, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise proc.DetachedLaunchError("detach refused")
+
+    launches = []
+
+    def start(argv, **kwargs):
+        launches.append({"argv": argv, "kwargs": kwargs})
+        return SimpleNamespace(pid=54321, wait=lambda *, timeout=None: 0, stderr=BytesIO())
+
+    monkeypatch.setattr(proc, "spawn_detached", refuse)
+    monkeypatch.setattr(subprocess, "Popen", start)
+    monkeypatch.setattr(proc, "detached_launch_kwargs", lambda *, job_breakaway: {"creationflags": 4})
+    argv = ["/fake/engine", "sync", str(tmp_path)]
+
+    result = code_graph_background.run_windows_sync(argv, timeout=5.0, cwd=tmp_path)
+
+    assert launches[0]["argv"] == argv
+    assert launches[0]["kwargs"]["cwd"] == tmp_path
+    assert launches[0]["kwargs"]["creationflags"] == 4
+    assert launches[0]["kwargs"]["stdin"] == subprocess.DEVNULL
+    assert result.code == 0
+
+
+@pytest.mark.parametrize(
+    ("exc", "code", "message"),
+    [
+        (FileNotFoundError(2, "No such file or directory"), 127, "command not found: engine"),
+        (PermissionError(13, "Permission denied"), 126, "command permission denied: engine"),
+    ],
+)
+def test_run_windows_sync_maps_launch_oserror(tmp_path, monkeypatch, exc, code, message):
+    def refuse(*args, **kwargs):
+        raise exc
+
+    monkeypatch.setattr(proc, "spawn_detached", refuse)
+
+    result = code_graph_background.run_windows_sync(["/fake/engine", "sync"], timeout=5.0, cwd=tmp_path)
+
+    assert (result.code, result.stdout, result.stderr) == (code, "", message + "\n")
+    assert result.timed_out is False
+
+
+def test_run_windows_sync_maps_popen_fallback_launch_oserror(tmp_path, monkeypatch):
+    def refuse(*args, **kwargs):
+        raise proc.DetachedLaunchError("detach refused")
+
+    def missing(*args, **kwargs):
+        raise FileNotFoundError(2, "No such file or directory")
+
+    monkeypatch.setattr(proc, "spawn_detached", refuse)
+    monkeypatch.setattr(subprocess, "Popen", missing)
+
+    result = code_graph_background.run_windows_sync(["/fake/engine", "sync"], timeout=5.0, cwd=tmp_path)
+
+    assert (result.code, result.stdout, result.stderr) == (127, "", "command not found: engine\n")
+
+
 def test_windows_dependency_hook_sync_does_not_kill_writer(tmp_path, monkeypatch, graph_sync_platform):
     from brigade.claude_hooks import dependencies
 

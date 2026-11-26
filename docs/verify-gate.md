@@ -129,22 +129,45 @@ remote object ID. Use `--ref <name>` to check a single local ref without
 reading standard input. Use `--target <path>` to select a worktree and
 `--json` for one object with a `refs` array.
 
-The check skips tags, deletions, and unchanged refs. It compares each pushed
-branch tip's committed tree to the newest tested receipt in that worktree
-with the same tree fingerprint or saved plan snapshot. It skips running,
-busy, and canceled receipts. A newer failed or ineligible run takes
-precedence over an older pass. Changes in the working tree and session
-identity have no effect. The declaration comes from the merge base of the
-pushed tip and the fetched default branch.
+The check skips tags, deletions, and unchanged refs. It searches the newest
+128 runs in the worktree for an eligible receipt whose tree fingerprint or
+saved plan snapshot exactly matches the pushed branch tip's committed tree.
+It skips running, busy, and canceled receipts. Changes in the working tree
+and session identity have no effect. The declaration comes from the merge
+base of the pushed tip and the fetched default branch.
+
+A newer failure takes precedence over an older pass if the run's command
+starts with the current required command prefix, regardless of the policy
+declaration or base recorded in the receipt. A command that failed or timed
+out, or recorded failed or errored tests, counts as a failure. If an older
+receipt has only a failed or timed-out overall status and includes the
+required command, the gate treats the required command as failed. A failed
+run that started on the pushed tree still counts if the tree changed during
+the run. Rerun the required check on the pushed tree to clear the failure.
+
+Unrelated commands, runs rejected before execution, and runs that collected
+no tests leave an older eligible pass valid. The same applies when a run
+supplied no selector or passed the tests it ran but missed required files.
+A policy with no required command prefix accepts any eligible receipt for
+the tree.
+
+Across seconds the check orders runs by their directory names, and within
+one second it orders them by their parsed `started_at` timestamps.
 
 | Result | Meaning |
 | --- | --- |
-| `ok` | The newest matching receipt meets the required check. |
+| `ok` | An eligible receipt matches the tree and no newer run failed the same required check. |
 | `missing_receipt` | There is no matching local receipt. |
-| `rejected` | The newest matching receipt fails the required check. |
+| `rejected` | A newer run failed the required check, or the scan found matching receipts but none were eligible. |
 | `not_applicable` | Neither the base nor the fetched default branch tip declares a required check. Text output is silent for this result. |
 | `base_predates_policy` | Update the branch from the default branch to pick up the declaration. |
 | `indeterminate` | The check could not reach a verdict, for example because the base is unresolved, the declaration is malformed, or a limit was reached. |
+
+If the scan limit or an unordered pass and failure in the same second leaves
+the verdict indeterminate, rerun the required check for the pushed tree to
+record a fresh receipt. If the base or declaration is the problem, fetch the
+default branch or correct the declaration as indicated by the reason, then
+run the push check again.
 
 The exit code is 1 if any result is `missing_receipt` or `rejected`, or 3
 if the only problems are `base_predates_policy` or `indeterminate`. It
@@ -160,6 +183,7 @@ Local receipts can be forged. Required CI on the head commit is the proof.
 
 Run `brigade work verify push-gate install` to set this clone to `warn`.
 The gate advises on missing or rejected receipts and lets the push continue.
+An indeterminate verdict also lets the push continue and prints no advisory.
 Use `install --mode off` to turn off checking and recording. An unset mode
 also means `off`.
 

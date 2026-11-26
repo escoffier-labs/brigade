@@ -5,9 +5,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from pathlib import Path
 
-from brigade import outcome_ratchet_report
+from brigade import ci_attestation, outcome_ledger, outcome_ratchet_report
 from brigade.center_cmd.dashboard import data
 from brigade.center_cmd.dashboard import render as html
+from brigade.outcome_ledger_git import GitError, Repo
 
 NAME = "outcomes"
 TITLE = "Outcomes"
@@ -22,12 +23,45 @@ _RATCHET_EMPTY_MESSAGE = (
     "`brigade outcome reconcile --target . --report --proposals`."
 )
 _RATCHET_STALE_DAYS = 7
+_LEDGER_MAX_BYTES = 1024 * 1024
 
 
 def fetch(target: Path) -> dict:
     payload = data.run_json(target, ["outcome", "rank"])
     payload["ratchet"] = data.run_json(target, ["outcome", "ratchet"])
+    try:
+        raw = _read_committed_ledger(Repo(target))
+        if raw is not None:
+            payload["ledger"] = outcome_ledger.parse_ledger(raw, allow_empty=True)
+            payload["ledger_repo_slug"] = ci_attestation.repo_slug(target)
+    except (GitError, outcome_ledger.LedgerError):
+        payload["ledger_error"] = True
     return payload
+
+
+def _read_committed_ledger(repo: Repo) -> bytes | None:
+    # Resolve HEAD once so all checks and the read use the same commit.
+    head = repo._run("rev-parse", "--verify", "--quiet", "HEAD^{commit}", check=False)
+    if head.returncode == 1:
+        return None
+    if head.returncode != 0:
+        raise GitError("cannot resolve HEAD")
+    commit = head.stdout.decode("ascii").strip()
+    path = outcome_ledger.LEDGER_PATH
+    entry = repo._run("ls-tree", "--full-tree", commit, "--", path).stdout
+    if not entry:
+        return None
+    if not entry.startswith((b"100644 blob ", b"100755 blob ")):
+        raise GitError("ledger is not a regular file")
+
+    size = repo._run("cat-file", "-s", f"{commit}:{path}").stdout
+    try:
+        blob_bytes = int(size)
+    except ValueError as exc:
+        raise GitError("invalid ledger blob size") from exc
+    if blob_bytes > _LEDGER_MAX_BYTES:
+        raise GitError("ledger exceeds the byte cap")
+    return repo.show(commit, path, strict=True)
 
 
 def render(payload: dict, nonce: str) -> str:
@@ -35,7 +69,83 @@ def render(payload: dict, nonce: str) -> str:
     if payload.get("error"):
         return html.error_panel(TITLE, str(payload["error"]))
 
-    return _ranking_panel(payload) + _ratchet_panel(payload.get("ratchet"))
+    return _ranking_panel(payload) + _ratchet_panel(payload.get("ratchet")) + _ledger_panel(payload)
+
+
+def _ledger_panel(payload: dict) -> str:
+    title = "CI outcome ledger"
+    unreadable = "CI outcome ledger is unreadable"
+    if payload.get("ledger_error"):
+        return html.error_panel(title, unreadable)
+    ledger = payload.get("ledger")
+    try:
+        if ledger is None:
+            return html.panel(title, "<p>No CI outcome ledger in this repository</p>")
+        covers = ledger["covers"]
+        body = [
+            f"<p>Cutoff {html.esc(covers['cutoff_at'])} · Main "
+            f'<code title="{html.esc(covers["main_sha"])}">{html.esc(covers["main_sha"][:12])}</code></p>'
+        ]
+        subjects = ledger["subjects"]
+        if not subjects:
+            body.append("<p>No skill decisions in the CI outcome ledger</p>")
+        for key, subject in sorted(subjects.items()):
+            body.append(_ledger_subject(key.removeprefix("skill:"), subject, payload.get("ledger_repo_slug")))
+    except (KeyError, TypeError):
+        return html.error_panel(title, unreadable)
+    return html.panel(title, "".join(body))
+
+
+def _ledger_subject(skill_id: str, subject: dict, slug: str | None) -> str:
+    decision = subject["decision"]
+    code = decision["code"]
+    code_html = f" (<code>{html.esc(code)}</code>)" if code is not None else ""
+    parts = [
+        f"<h3>{html.esc(skill_id)}</h3>",
+        f"<p>Status {html.esc(subject['status'])} · Band {html.esc(subject['band'])}</p>",
+        f"<p>Decision <strong>{html.esc(decision['action'])}</strong>{code_html}"
+        f" · {html.esc(decision['decided_at'])}</p>",
+        f"<p>{html.esc(decision['reason'])}</p>",
+    ]
+    restore = subject["restore"]
+    if restore is not None:
+        parts.append(
+            f"<p>Restore from <code>{html.esc(restore['from_commit'][:12])}</code> "
+            f"to <code>{html.esc(restore['to_commit'][:12])}</code></p>"
+        )
+    trials = subject["trials"]
+    if not isinstance(trials, list):
+        raise TypeError("trials must be a list")
+    if not trials:
+        parts.append("<p>No attested trials recorded</p>")
+    else:
+        parts.append("<h4>Trials</h4><ul>")
+        parts.extend(_ledger_trial(trial, slug) for trial in trials)
+        parts.append("</ul>")
+    return "".join(parts)
+
+
+def _ledger_trial(trial: dict, slug: str | None) -> str:
+    detail = f"<code>{html.esc(trial['sha'][:12])}</code> · {html.esc(trial['outcome'])}"
+    if trial["reason"] is not None:
+        detail += f" · {html.esc(trial['reason'])}"
+    jobs = trial["jobs"]
+    if not isinstance(jobs, list):
+        raise TypeError("jobs must be a list")
+    if jobs:
+        detail += "<ul>" + "".join(_ledger_job(job, slug) for job in jobs) + "</ul>"
+    return f"<li>{detail}</li>"
+
+
+def _ledger_job(job: dict, slug: str | None) -> str:
+    run_id, job_id = job["run_id"], job["job_id"]
+    if type(run_id) is not int or type(job_id) is not int:
+        raise TypeError("run and job IDs must be integers")
+    label = html.esc(f"Run {run_id}, job {job_id}")
+    if slug:
+        href = html.esc(f"https://github.com/{slug}/actions/runs/{run_id}/job/{job_id}")
+        label = f'<a href="{href}">{label}</a>'
+    return f"<li>{label} · {html.esc(job['conclusion'])} · {html.esc(job['completed_at'])}</li>"
 
 
 def _ranking_panel(payload: dict) -> str:

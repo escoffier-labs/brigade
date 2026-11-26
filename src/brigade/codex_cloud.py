@@ -27,6 +27,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from . import bug_io, cloud_tracker, dirfd, fleet_client, localio, proc
+from .cloud_observation import PageReport
 from .inbox_lock import InboxLockTimeout, held_file_lock
 from .isolated_exec import trusted_cwd
 
@@ -1232,7 +1233,7 @@ def canary(
         }
     inventory = list_tasks(cwd=target)
     audit = environment_audit_ref(selector, env_id)
-    environment_seen = _environment_seen(env_id, inventory.tasks)
+    environment_seen = _environment_seen(env_id, inventory.tasks) if inventory.ok and inventory.complete else "unknown"
     if not inventory.ok:
         return {
             "ok": False,
@@ -1288,49 +1289,60 @@ def _classify_list_failure(result: proc.Result) -> str:
 
 def list_tasks(
     *,
-    max_items: int = DEFAULT_MAX_ITEMS,
-    max_pages: int = MAX_LIST_PAGES,
+    max_items: int | None = DEFAULT_MAX_ITEMS,
+    max_pages: int | None = MAX_LIST_PAGES,
     cwd: Path | None = None,
     process_registry: proc.ProcessRegistry | None = None,
     command_timeout: float = DEFAULT_LIST_TIMEOUT,
     include_launch_tags: bool = False,
+    deadline: float | None = None,
+    on_page: PageReport | None = None,
 ) -> ListTasksResult:
     """Run ``codex cloud list --json`` and return a bounded, sanitized task list.
 
     Only the documented ``{tasks: [...], cursor}`` schema is accepted. Reads use
     the documented 1-20 item limit and cursor pagination, with fixed page and
-    item caps; ``max_pages`` lowers the page cap (at least one page is read).
+    item caps by default. A deadline permits uncapped paging and bounds the
+    time across all page reads. Failed reads retain completed pages.
     Task rows retain id, normalized state, environment id, and, when
     requested by reconciliation, a validated launch tag extracted from the title.
     """
-    item_cap = max(0, min(max_items, DEFAULT_MAX_ITEMS))
+    if deadline is None and (max_items is None or max_pages is None):
+        raise ValueError("Uncapped Codex inventory requires a deadline")
+    item_cap = max(0, min(max_items, DEFAULT_MAX_ITEMS)) if max_items is not None else None
+    page_cap = max(1, min(max_pages, MAX_LIST_PAGES)) if max_pages is not None else None
     sanitized: list[dict[str, Any]] = []
     cursor: str | None = None
     seen_cursors: set[str] = set()
     seen_task_ids: set[str] = set()
     complete = False
     valid_rows = True
-    for _page in range(max(1, min(max_pages, MAX_LIST_PAGES))):
-        if len(sanitized) >= item_cap:
+    page = 0
+    while page_cap is None or page < page_cap:
+        if item_cap is not None and len(sanitized) >= item_cap:
             break
-        limit = min(MAX_LIST_LIMIT, item_cap - len(sanitized))
-        if limit < 1:
-            break
+        timeout = command_timeout if deadline is None else min(command_timeout, deadline - time.monotonic())
+        if timeout <= 0:
+            return ListTasksResult(sanitized, ok=False, reason="provider-timeout", complete=False)
+        page += 1
+        limit = MAX_LIST_LIMIT if item_cap is None else min(MAX_LIST_LIMIT, item_cap - len(sanitized))
         argv = ["codex", "cloud", "list", "--json", "--limit", str(limit)]
         if cursor is not None:
             argv += ["--cursor", cursor]
         if process_registry is None:
-            result = proc.run(argv, timeout=command_timeout, cwd=cwd)
+            result = proc.run(argv, timeout=timeout, cwd=cwd)
         else:
-            result = proc.run(argv, timeout=command_timeout, cwd=cwd, process_registry=process_registry)
+            result = proc.run(argv, timeout=timeout, cwd=cwd, process_registry=process_registry)
+        if deadline is not None and time.monotonic() >= deadline:
+            return ListTasksResult(sanitized, ok=False, reason="provider-timeout", complete=False)
         if result.code != 0:
-            return ListTasksResult([], ok=False, reason=_classify_list_failure(result))
+            return ListTasksResult(sanitized, ok=False, reason=_classify_list_failure(result), complete=False)
         try:
             data = json.loads((result.stdout or "").strip())
         except json.JSONDecodeError:
-            return ListTasksResult([], ok=False, reason="list-json-invalid")
+            return ListTasksResult(sanitized, ok=False, reason="list-json-invalid", complete=False)
         if not isinstance(data, dict) or not isinstance(data.get("tasks"), list):
-            return ListTasksResult([], ok=False, reason="list-json-unsupported")
+            return ListTasksResult(sanitized, ok=False, reason="list-json-unsupported", complete=False)
         for raw in data["tasks"]:
             if not isinstance(raw, dict):
                 valid_rows = False
@@ -1356,11 +1368,13 @@ def list_tasks(
                         task["launch_tag"] = tags.pop()
             sanitized.append(task)
             seen_task_ids.add(task_id)
-            if len(sanitized) >= item_cap:
+            if item_cap is not None and len(sanitized) >= item_cap:
                 break
         next_cursor = data.get("cursor")
         if next_cursor in (None, ""):
             complete = valid_rows and len(data["tasks"]) <= limit
+        if on_page is not None:
+            on_page(sanitized, complete)
         if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
             break
         seen_cursors.add(next_cursor)

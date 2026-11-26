@@ -1,0 +1,1 @@
+- Show committed CI skill decisions, restore targets, and attest job links in the Center Outcomes view alongside the weekly ratchet report.
