@@ -39,6 +39,8 @@ def owned_run(workspace: Path, run_dir: Path, *, wait_seconds: float = 0) -> Ite
             if not runguard.is_active_run_owner(workspace, run_dir):
                 raise EnrollmentError("run-owner", "run ownership was not established")
             yield
+    except runguard.ForeignRunLockError as exc:
+        raise EnrollmentError("run-owner", "stale run lock does not belong to this run") from exc
     except runguard.RunLockError as exc:
         raise EnrollmentError("run-busy", "another lifecycle holds the workspace run lock") from exc
     except runguard.RunGuardError as exc:

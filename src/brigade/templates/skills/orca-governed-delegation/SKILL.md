@@ -29,7 +29,9 @@ Keep the original enrollment and retry keys for retained work.
 For a batch, complete the start and acceptance steps for all tasks first.
 Once all worker starts are accepted, the coordinator may run steps 5 through 7
 concurrently across tasks. Keep those steps in order within each task and
-save the native replies separately for each task.
+save the native replies separately for each task. Per-task verbs such as
+`observe`, `ack`, and `hold-resolve` may wait up to five seconds for the
+workspace run lock and return `run-busy` if it is still held.
 
 1. Enroll the batch: `brigade orca open <batch.json> --target <workspace>`. It prints a
    Brigade run and task identity and launches nothing. If it refuses with
@@ -82,6 +84,7 @@ save the native replies separately for each task.
    `release-unverified` blocks closeout until the post-release observation
    proves release.
 
+`finalize` fails immediately if the workspace run lock is held.
 After every task's closeout chain finishes, run
 `brigade orca finalize <run> --target <workspace>` once. Then run
 `brigade orca status <run> --json --target <workspace>` once to confirm
