@@ -131,24 +131,65 @@ def test_required_claim_distinguishes_real_configuration_read_failures(tmp_path,
         config.chmod(0o600)
 
 
-@pytest.mark.parametrize("error", [PermissionError, FileNotFoundError, NotADirectoryError])
-def test_strict_fleet_section_distinguishes_unreadable_and_missing_paths(tmp_path, monkeypatch, error):
-    config = tmp_path / "parent" / "fleet.toml"
+@pytest.mark.parametrize("kind", ["directory", "fifo"])
+@pytest.mark.parametrize("strict", [True, False])
+def test_fleet_section_refuses_non_regular_config(tmp_path, kind, strict):
+    config = tmp_path / "fleet.toml"
+    if kind == "directory":
+        config.mkdir()
+    else:
+        if os.name != "posix" or not hasattr(os, "mkfifo"):
+            pytest.skip("FIFO requires POSIX support")
+        os.mkfifo(config)
+
+    if strict:
+        with pytest.raises(fleet_client.FleetClientError, match="^fleet configuration could not be read$"):
+            fleet_client._read_fleet_section(config, strict=True)
+    else:
+        assert fleet_client._read_fleet_section(config) == {}
+
+
+@pytest.mark.parametrize(
+    ("failure", "error"),
+    [
+        ("unreadable-file", PermissionError),
+        ("unreadable-parent", PermissionError),
+        ("windows-directory", PermissionError),
+        ("missing", FileNotFoundError),
+        ("parent-is-file", NotADirectoryError),
+        ("other-io-error", OSError),
+    ],
+    ids=["unreadable-file", "unreadable-parent", "windows-directory", "missing", "parent-is-file", "other-io-error"],
+)
+@pytest.mark.parametrize("strict", [True, False])
+def test_fleet_section_distinguishes_unreadable_and_missing_paths(tmp_path, monkeypatch, failure, error, strict):
+    parent = tmp_path / "parent"
+    config = parent / "fleet.toml"
+    if failure == "parent-is-file":
+        parent.touch()
+    elif failure != "missing":
+        parent.mkdir()
+        if failure == "windows-directory":
+            config.mkdir()
+        else:
+            config.write_text("[fleet]\n", encoding="utf-8")
     open_file = os.open
+    is_file = Path.is_file
 
     def fail_open(path, *args, **kwargs):
         if path == config:
             raise error
         return open_file(path, *args, **kwargs)
 
-    # Python 3.14 reports False even when permission blocked the lookup.
-    monkeypatch.setattr(Path, "is_file", lambda self: False)
+    # Python 3.14 masks a permission failure when probing an inaccessible parent.
+    if failure == "unreadable-parent":
+        monkeypatch.setattr(Path, "is_file", lambda path: False if path == config else is_file(path))
     monkeypatch.setattr(os, "open", fail_open)
-    if error is PermissionError:
+    if strict and error not in (FileNotFoundError, NotADirectoryError):
         with pytest.raises(fleet_client.FleetClientError, match="^fleet configuration could not be read$"):
             fleet_client._read_fleet_section(config, strict=True)
     else:
-        assert fleet_client._read_fleet_section(config, strict=True) == {}
+        assert fleet_client._read_fleet_section(config, strict=strict) == {}
 
 
 def test_strict_loader_treats_config_disappearance_as_missing(tmp_path, monkeypatch):

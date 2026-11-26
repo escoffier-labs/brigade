@@ -1,1 +1,1 @@
-- Report unreadable fleet configuration as a configuration error during required claim admission on Python 3.14.
+- Report unreadable or non-regular fleet configuration files as configuration errors during required claim admission.

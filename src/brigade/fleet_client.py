@@ -271,7 +271,7 @@ def _read_fleet_section(config_path: Path, *, strict: bool = False) -> dict[str,
         fd = os.open(config_path, os.O_RDONLY | _O_NONBLOCK | getattr(os, "O_BINARY", 0))
         try:
             if not stat.S_ISREG(os.fstat(fd).st_mode):
-                return {}
+                raise OSError("fleet configuration is not a regular file")
             with open(fd, encoding="utf-8", closefd=False) as stream:
                 payload = tomllib.loads(stream.read())
         finally:
