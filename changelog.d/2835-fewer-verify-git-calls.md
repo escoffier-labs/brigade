@@ -1,0 +1,1 @@
+- Work verification batches Git reads for receipt identity, required-test planning, registered verifiers, and receipt export.

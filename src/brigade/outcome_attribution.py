@@ -40,7 +40,7 @@ import stat
 import sys
 from collections.abc import Collection, Iterator, Mapping, Sequence
 from pathlib import Path, PurePosixPath
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import dirfd, localio, outcome as core, receipt_schema
 from .claude_hooks import anchored_io, skill_invocations
@@ -63,6 +63,10 @@ NATIVE_SESSION_ENV = "CLAUDE_CODE_SESSION_ID"
 MAX_STATE_BYTES = 1_048_576
 MAX_STATES_SCANNED = 512
 _FINGERPRINT = re.compile(r"[0-9a-f]{16}")
+
+
+if TYPE_CHECKING:
+    from .verify_manifest_git import VerifyGitFacts
 
 
 def normalize_attribution_source(value: object) -> str:
@@ -284,6 +288,7 @@ def capture_artifacts(
     artifact_kind: str,
     run_id: str,
     observed: bool,
+    git_facts: VerifyGitFacts | None = None,
 ) -> int:
     """Write one ledger row per artifact id; ``observed`` marks them ``session_observed``."""
     from . import outcome_cmd
@@ -299,6 +304,7 @@ def capture_artifacts(
                 run_id=run_id,
                 json_output=False,
                 attribution_source=source,
+                git_facts=git_facts,
             )
             or rc
         )

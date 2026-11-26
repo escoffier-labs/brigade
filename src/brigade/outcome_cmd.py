@@ -19,7 +19,7 @@ import sys
 import time
 import unicodedata
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from . import (
     causal_receipt,
@@ -55,6 +55,10 @@ DEFAULT_CAPTURE_ARTIFACT_ID = "brigade-work"
 
 class OutcomeLedgerError(RuntimeError):
     """Outcome ledger persistence failed; callers must not assume the append succeeded."""
+
+
+if TYPE_CHECKING:
+    from .verify_manifest_git import VerifyGitFacts
 
 
 def resolve_capture_artifact_id(*candidates: str | None) -> str:
@@ -1105,6 +1109,7 @@ def append_records(
     records: list[core.OutcomeRecord],
     *,
     lineage: list[dict[str, Any] | None] | None = None,
+    git_facts: VerifyGitFacts | None = None,
 ) -> None:
     """Append outcome records under an exclusive lock with interrupted-write recovery.
 
@@ -1118,7 +1123,12 @@ def append_records(
     resolved_target = target.expanduser().resolve()
     from .work_cmd import helpers as work_helpers
 
-    repo_root = work_helpers._git_value(resolved_target, "rev-parse", "--show-toplevel")
+    identity = git_facts.identity if git_facts is not None and git_facts.target == resolved_target else None
+    repo_root = (
+        identity.root
+        if identity is not None and identity.root is not None
+        else work_helpers._git_value(resolved_target, "rev-parse", "--show-toplevel")
+    )
     if repo_root is not None:
         resolved_root = Path(repo_root).resolve()
         if resolved_target != resolved_root and not (resolved_target / ".brigade" / "config.json").is_file():
@@ -1989,6 +1999,7 @@ def capture(
     run_receipt: str | None = None,
     json_output: bool = False,
     attribution_source: str = core.CALLER_TYPED,
+    git_facts: VerifyGitFacts | None = None,
 ) -> int:
     """Correlate a verified receipt outcome into the digest-chained ledger.
 
@@ -2078,7 +2089,7 @@ def capture(
     )
     companion = _outcome_causal_receipt(record, receipt)
     try:
-        append_records(target, [record], lineage=[companion] if companion is not None else None)
+        append_records(target, [record], lineage=[companion] if companion is not None else None, git_facts=git_facts)
     except OutcomeLedgerError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1

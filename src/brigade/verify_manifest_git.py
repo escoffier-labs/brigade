@@ -3,15 +3,25 @@
 from __future__ import annotations
 import hashlib
 import json
+import logging
 import os
+import re
 import subprocess
+import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass
 from functools import cached_property, partial
 from pathlib import Path
 from time import monotonic
 from typing import Any, Literal
 
+from . import localio
+
 MAX_MANIFEST_BYTES = 1024 * 1024
+REQUIRED_CHECK_PATH = "verify/required-check.json"
+_MANIFEST_DIR = "verify/manifests"
+_OBJECT_ID = re.compile(rb"[0-9a-f]{40}|[0-9a-f]{64}")
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -48,13 +58,18 @@ def trusted_git_env() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
 
 
+def _git_timeout(command: list[str], deadline: float | None) -> float:
+    timeout = 30.0 if deadline is None else min(30.0, deadline - monotonic())
+    if timeout <= 0:
+        raise subprocess.TimeoutExpired(command, timeout)
+    return timeout
+
+
 def _git(
     target: Path, *args: str, deadline: float | None = None, git_env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[bytes]:
     command = ["git", *args]
-    timeout = 30.0 if deadline is None else min(30.0, deadline - monotonic())
-    if timeout <= 0:
-        raise subprocess.TimeoutExpired(command, timeout)
+    timeout = _git_timeout(command, deadline)
     try:
         return subprocess.run(
             command,
@@ -80,11 +95,74 @@ def resolve_base(
     return _BaseResolver(target, deadline=deadline, git_env=git_env).resolve(commit)
 
 
+@dataclass(frozen=True)
+class WorktreeIdentity:
+    head: str
+    branch: str
+    git_dir: str | None = None
+    root: str | None = None
+
+
+@dataclass(frozen=True)
+class VerifyGitFacts:
+    """Lazy Git observations owned by one side of a verify command."""
+
+    target: Path
+    capture_registry: bool = False
+    read_identity: Callable[[Path], WorktreeIdentity | None] | None = None
+
+    @cached_property
+    def identity(self) -> WorktreeIdentity | None:
+        return self.read_identity(self.target) if self.read_identity is not None else None
+
+    @cached_property
+    def tree(self) -> tuple[str | None, str | None]:
+        return localio.tree_fingerprint_with_head(self.target)
+
+    @cached_property
+    def base(self) -> BaseResolution:
+        return _BaseResolver(self.target, deadline=None, git_env=None, batch_refs=True).resolve("HEAD")
+
+    @cached_property
+    def base_files(self) -> _BaseFiles | None:
+        if not self.capture_registry:
+            return None
+        return _read_base_files(self.target, self.base, include_policy=True)
+
+
 class _BaseResolver:
     """Resolve each commit against one local default branch snapshot."""
 
-    def __init__(self, target: Path, *, deadline: float | None, git_env: dict[str, str] | None) -> None:
+    def __init__(
+        self, target: Path, *, deadline: float | None, git_env: dict[str, str] | None, batch_refs: bool = False
+    ) -> None:
         self._git = partial(_git, target, deadline=deadline, git_env=git_env)
+        self._batch_refs = batch_refs
+
+    def _origin_head(self) -> BaseResolution | None:
+        result = self._git(
+            "for-each-ref", "--format=%(refname)%09%(symref)%09%(objecttype)%09%(objectname)", "refs/remotes/origin"
+        )
+        if result.returncode:
+            return None
+        refs = {fields[0]: fields[1:] for line in result.stdout.splitlines() if len(fields := line.split(b"\t")) == 4}
+        symref = refs.get(b"refs/remotes/origin/HEAD")
+        if symref is None:
+            return None
+        reference, kind, oid = symref
+        target = refs.get(reference)
+        if (
+            not reference.startswith(b"refs/remotes/origin/")
+            or target != [b"", kind, oid]
+            or kind != b"commit"
+            or not _OBJECT_ID.fullmatch(oid)
+            or not reference.isascii()
+        ):
+            # Keep Git's legacy peeling, fallback and broken-ref behavior.
+            return None
+        return BaseResolution(
+            "resolved", "default_branch", reference.decode("ascii"), default_branch_tip=oid.decode("ascii")
+        )
 
     @cached_property
     def _default_branch(self) -> BaseResolution:
@@ -94,6 +172,8 @@ class _BaseResolver:
             return BaseResolution("unresolved_default_branch", message="Git could not list remotes for this target")
         if not remotes.stdout.strip():
             return BaseResolution("resolved", "no_remote")
+        if self._batch_refs and (resolved := self._origin_head()) is not None:
+            return resolved
         candidates: list[str] = []
         symbolic = git("symbolic-ref", "--quiet", "refs/remotes/origin/HEAD")
         if symbolic.returncode == 0:
@@ -153,6 +233,111 @@ def _require_base(base: BaseResolution) -> tuple[str, str, str]:
     if base.status != "resolved" or not base.commit or not base.source or not base.reference:
         raise ManifestGitError(base.status, base.message or "verify manifest base is unresolved")
     return base.commit, base.source, base.reference
+
+
+@dataclass(frozen=True)
+class _BaseFiles:
+    manifest_ids: frozenset[str]
+    policy: bytes | None
+
+
+def _base_batch_fallback(reason: str) -> _BaseFiles | None:
+    # Reasons are fixed labels or numeric status. Git's stderr can contain
+    # repository-controlled text, paths and escape sequences.
+    _LOG.debug("Committed verification files: falling back to individual reads (%s)", reason)
+    return None
+
+
+def _read_base_files(
+    target: Path, base: BaseResolution, *, include_policy: bool = False, deadline: float | None = None
+) -> _BaseFiles | None:
+    """Read advisory IDs and optionally the committed declaration in two Git launches."""
+    if base.status != "resolved" or base.commit is None or not (target / ".git").exists():
+        return None
+    paths = [_MANIFEST_DIR]
+    if include_policy:
+        paths.append(REQUIRED_CHECK_PATH)
+    try:
+        listing = _git(target, "ls-tree", "-r", "-t", "-l", "-z", base.commit, "--", *paths, deadline=deadline)
+    except subprocess.TimeoutExpired:
+        return _base_batch_fallback("tree listing timed out")
+    if listing.returncode:
+        return _base_batch_fallback(f"tree listing exit {listing.returncode}")
+    requests: dict[bytes, int] = {}
+    manifests: set[bytes] = set()
+    policy_oid = None
+    for row in listing.stdout.split(b"\0")[:-1]:
+        metadata, _, path = row.partition(b"\t")
+        is_policy = include_policy and path == REQUIRED_CHECK_PATH.encode("ascii")
+        try:
+            name = path.decode("utf-8")
+        except UnicodeDecodeError:
+            continue
+        if not is_policy and (Path(name).parent.as_posix() != _MANIFEST_DIR or not name.endswith(".json")):
+            continue
+        fields = metadata.split()
+        if len(fields) != 4:
+            return _base_batch_fallback("invalid tree entry")
+        mode, kind, oid, size = fields
+        if mode not in {b"100644", b"100755"} or kind != b"blob" or not _OBJECT_ID.fullmatch(oid) or not size.isdigit():
+            if is_policy:
+                return _base_batch_fallback("invalid policy entry")
+            continue
+        length = int(size)
+        if length > MAX_MANIFEST_BYTES:
+            if is_policy:
+                return _base_batch_fallback("policy exceeds blob limit")
+            continue
+        requests[oid] = length
+        if is_policy:
+            policy_oid = oid
+        else:
+            manifests.add(oid)
+    if not requests:
+        return _BaseFiles(frozenset(), None)
+    # Preserve the bounded per-manifest path for unusually large registries.
+    if sum(requests.values()) > 64 * MAX_MANIFEST_BYTES:
+        return _base_batch_fallback("registry exceeds batch limit")
+    ids: set[str] = set()
+    policy = None
+    try:
+        with tempfile.TemporaryFile() as output:
+            command = ["git", "cat-file", "--batch"]
+            result = subprocess.run(
+                command,
+                cwd=target,
+                input=b"".join(oid + b"\n" for oid in requests),
+                stdout=output,
+                stderr=subprocess.DEVNULL,
+                timeout=_git_timeout(command, deadline),
+                env=trusted_git_env(),
+            )
+            if result.returncode:
+                return _base_batch_fallback(f"blob read exit {result.returncode}")
+            output.seek(0)
+            for oid, length in requests.items():
+                if output.readline(128).split() != [oid, b"blob", str(length).encode("ascii")]:
+                    return _base_batch_fallback("invalid blob header")
+                raw = output.read(length)
+                if len(raw) != length or output.read(1) != b"\n":
+                    return _base_batch_fallback("incomplete blob")
+                if oid == policy_oid:
+                    policy = raw
+                if oid in manifests:
+                    try:
+                        payload = json.loads(raw.decode("utf-8"))
+                    except (UnicodeDecodeError, json.JSONDecodeError):
+                        continue
+                    except RecursionError:
+                        return _base_batch_fallback("manifest nesting limit")
+                    manifest_id = payload.get("manifest_id") if isinstance(payload, dict) else None
+                    if isinstance(manifest_id, str) and manifest_id:
+                        ids.add(manifest_id)
+    except subprocess.TimeoutExpired:
+        return _base_batch_fallback("blob read timed out")
+    except OSError:
+        return _base_batch_fallback("blob I/O failed")
+    return _BaseFiles(frozenset(ids), policy)
 
 
 def list_base_manifests(target: Path, base: BaseResolution) -> list[Path]:
