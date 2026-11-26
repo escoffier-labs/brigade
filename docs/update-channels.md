@@ -134,8 +134,15 @@ The receipt importer requires engines from v0.31.0 or later. To refresh the pin
 on a pipx install, run `brigade update --channel beta` with network access. When
 setup finds a compatible cached manifest whose digest ships in the CLI, its
 refusal prints the actual path and release version. That command can run offline
-if the component assets are cached. Other release manifests need network access
-for authentication against the exact release's published size and digest.
+if the component assets are cached. An installed stable CLI can also authenticate
+its own exact packaged release manifest or a byte-for-byte copy. Offline setup
+checks that a cached or named manifest matches the installed package byte for
+byte and is internally consistent for the running release, without contacting
+the publisher to confirm the tag's commit or the published digest. A source
+checkout or editable install uses the package directory in its own code tree.
+A compatibility-only manifest in that tree does not qualify. Other release
+manifests need network access for authentication against the exact release's
+published size and digest.
 
 On an unreleased source build or an npm install with a refused beta pin, you can
 also supply a compatible stable manifest explicitly. Verify its SHA-256 against
@@ -184,7 +191,7 @@ To go back, run `npm uninstall --global brigadestack`, then `npm install --globa
 
 ## Compatibility window
 
-`brigade setup` normally resolves the running CLI's exact `vX.Y.Z` release manifest, never `latest`. Before the first unified release is available, only an absent exact release or manifest can select the bundled standalone manifest. Digest failures, malformed release metadata, manifest parse failures, and component download failures never fall back. `brigade setup --manifest-source standalone` is the explicit one-unified-release compatibility path. Offline setup uses a verified exact-manifest cache when present or that explicit standalone compatibility path.
+`brigade setup` normally resolves the running CLI's exact `vX.Y.Z` release manifest, never `latest`. Before the first unified release is available, only an absent exact release or manifest can select the bundled standalone manifest. Digest failures, malformed release metadata, manifest parse failures, and component download failures never fall back. `brigade setup --manifest-source standalone` is the explicit one-unified-release compatibility path. With its engine assets cached, offline setup can use the exact manifest shipped in the installed stable package, an authenticated cached manifest, or the explicit standalone compatibility path.
 
 For version drift and refused beta pins, see [Repair managed engines](#repair-managed-engines).
 
