@@ -117,7 +117,11 @@ def test_work_verify_detached_worker_survives_and_releases_pipes(tmp_path, monke
 
 
 @pytest.mark.parametrize("launcher_alive", [True, False])
-def test_worker_claims_launcher_reservation_with_different_pid(tmp_path, monkeypatch, launcher_alive):
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_worker_claims_launcher_reservation_with_different_pid(
+    tmp_path, monkeypatch, graph_sync_platform, launcher_alive, platform
+):
+    graph_sync_platform(platform)
     lock = code_graph_background._lock_path(tmp_path)
     reservation = lock.with_suffix(".json")
     claim = {"pid": 12345, "created": time.time(), "started": None, "token": "claim-token"}
@@ -131,7 +135,7 @@ def test_worker_claims_launcher_reservation_with_different_pid(tmp_path, monkeyp
 
     def sync(argv, **kwargs):
         calls.append(argv)
-        return SimpleNamespace(returncode=0, wait=lambda **kwargs: 0)
+        return SimpleNamespace(returncode=0, wait=lambda **kwargs: 0, stderr=BytesIO())
 
     monkeypatch.setattr(subprocess, "run", sync)
     monkeypatch.setattr(subprocess, "Popen", sync)
@@ -312,7 +316,9 @@ def test_ready_graph_ignores_old_exit_and_observes_without_git(
     assert lock.with_suffix(".exit.json").exists() is has_old_exit
 
 
-def test_dead_launcher_replacement_and_late_worker_stay_silent(tmp_path, monkeypatch):
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+def test_dead_launcher_replacement_and_late_worker_stay_silent(tmp_path, monkeypatch, graph_sync_platform, platform):
+    graph_sync_platform(platform)
     lock = code_graph_background._lock_path(tmp_path)
     db = lock.parent / "code-graph.db"
     reservation = lock.with_suffix(".json")
@@ -333,7 +339,7 @@ def test_dead_launcher_replacement_and_late_worker_stay_silent(tmp_path, monkeyp
 
     def sync(argv, **kwargs):
         calls.append(argv)
-        return SimpleNamespace(returncode=0, wait=lambda **kwargs: 0)
+        return SimpleNamespace(returncode=0, wait=lambda **kwargs: 0, stderr=BytesIO())
 
     monkeypatch.setattr(subprocess, "run", sync)
     monkeypatch.setattr(subprocess, "Popen", sync)

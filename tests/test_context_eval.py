@@ -1,9 +1,11 @@
 """Contract tests: context_eval must read what graphtrail_delta actually writes (#1644)."""
 
 import json
+import sqlite3
+from contextlib import closing
 from pathlib import Path
 
-from brigade import aboyeur, context_eval, code_graph_delta
+from brigade import aboyeur, code_graph_background, code_graph_delta, context_eval, engine_paths
 
 
 def _diff_node(file_path: str, name: str) -> dict:
@@ -16,16 +18,22 @@ def _diff_node(file_path: str, name: str) -> dict:
     }
 
 
-def _write_real_sidecar(monkeypatch, tmp_path: Path, diff_payload: dict) -> dict:
+def _write_real_sidecar(monkeypatch, tmp_path: Path, diff_payload: dict, *, windows: bool = False) -> dict:
     """Run the real sidecar writer with graphtrail's diff output stubbed."""
+    monkeypatch.setattr(code_graph_background, "may_run_killable_foreground_sync", lambda: not windows)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     snapshot = run_dir / code_graph_delta.SNAPSHOT_NAME
     snapshot.write_text("before")
+    db = tmp_path / engine_paths.CODE_GRAPH_DB
+    db.parent.mkdir(parents=True)
+    with closing(sqlite3.connect(db)) as connection, connection:
+        connection.execute("CREATE TABLE meta (key TEXT, value TEXT)")
+        connection.execute("INSERT INTO meta VALUES ('synced_at', '1')")
     before = {
         "ok": True,
         "binary": "graphtrail",
-        "db_path": str(tmp_path / ".brigade" / "code-graph" / "code-graph.db"),
+        "db_path": str(db),
         "before_snapshot_path": str(snapshot),
     }
 
@@ -80,6 +88,17 @@ def test_context_eval_for_run_scores_real_sidecar(monkeypatch, tmp_path):
     assert result["counts"]["delta_files"] == 2
     assert result["brief_hit_rate"] == 0.5
     assert "truncated" not in result
+
+
+def test_windows_writes_stale_sidecar_without_context_eval_score(monkeypatch, tmp_path):
+    delta = _write_real_sidecar(monkeypatch, tmp_path, {"changed_nodes": [_diff_node("a.py", "f")]}, windows=True)
+    brief = aboyeur.CodeGraphBrief(attached=True, text="- `a.py:1`\n", bytes=11)
+
+    assert delta["stale_after"] is True
+    assert delta["stale_graph_used"] is True
+    assert delta["commands"]["after_sync"] is None
+    assert context_eval.extract_delta_files(delta["sidecar_path"]) == ["a.py"]
+    assert aboyeur._context_eval_for_run(brief, delta) is None
 
 
 def test_context_eval_for_run_flags_truncated_delta_and_withholds_rate(monkeypatch, tmp_path):
