@@ -8,9 +8,12 @@ import os
 import stat
 import sys
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .removed_commands import REMOVED_IN
+
+if TYPE_CHECKING:
+    from .. import cloud_tracker
 
 _PROMPT_FILE_MAX_BYTES = 64 * 1024
 _LAUNCH_LABEL_MAX = 120
@@ -989,7 +992,10 @@ def _dispatch_cloud_ops(args, target: Path) -> int:
         print(f"error: unknown cloud command: {command}", file=sys.stderr)
         return 2
 
-    observation = cloud_tracker.observe_provider(args.provider, target)
+    if args.provider == "grokbot-cloud":
+        observation = _observe_explicit_grokbot()
+    else:
+        observation = cloud_tracker.observe_provider(args.provider, target)
     provider_result: dict[str, Any] = {
         "ok": observation.configured and observation.reachable and observation.reason is None,
         "provider": args.provider,
@@ -1055,6 +1061,21 @@ def _dispatch_cloud_ops(args, target: Path) -> int:
             print(f"task_count: {provider_result['task_count']}")
             print("apply: no")
     return 0 if provider_result["ok"] else 1
+
+
+def _observe_explicit_grokbot() -> cloud_tracker.ProviderObservation:
+    from .. import cloud_tracker, fleet_client_grokbot
+
+    try:
+        decision = fleet_client_grokbot.whoami()
+    except Exception:  # noqa: BLE001 - provider health must stay bounded
+        return cloud_tracker.ProviderObservation(True, False, "transport-failure", {})
+    if decision.granted:
+        return cloud_tracker.ProviderObservation(True, True, None, {})
+    reason = _grokbot_health_reason(decision.reason)
+    configured = reason != "unconfigured"
+    reachable = reason not in {"unconfigured", "actor-not-enrolled", "auth-failure", "transport-failure"}
+    return cloud_tracker.ProviderObservation(configured, reachable, reason, {})
 
 
 def _grokbot_health_reason(reason: str) -> str:

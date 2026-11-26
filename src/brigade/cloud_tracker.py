@@ -32,7 +32,8 @@ CLOUD_BRANCH_PREFIXES = ("codex/", "cursor/", "grokbot/", "claude/")
 # The work brief's GitHub observation shares this budget across its reads and
 # fits inside the brief's own section deadline.
 BRIEF_GITHUB_BUDGET_SECONDS = 4.0
-TRACKER_PROVIDERS = frozenset({"codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud"})
+TRACKER_PROVIDERS = frozenset({"codex-cloud", "cursor-cloud", "claude-cloud"})
+_REGISTRY_PROVIDERS = TRACKER_PROVIDERS | {"grokbot-cloud"}
 
 READY_STATES = frozenset({"ready", "completed", "succeeded", "applied"})
 FAILED_STATES = frozenset({"failed", "errored", "error", "cancelled", "canceled", "expired"})
@@ -347,7 +348,7 @@ def register(
     launch_lease_id: str | None = None,
     launch_repo: str | None = None,
 ) -> dict[str, Any]:
-    if provider not in TRACKER_PROVIDERS:
+    if provider not in _REGISTRY_PROVIDERS:
         raise ValueError("provider must be one of: codex-cloud, cursor-cloud, grokbot-cloud, claude-cloud")
     if not label.strip():
         raise ValueError("label must not be empty")
@@ -869,20 +870,13 @@ def _provider_for_branch(branch: str) -> str:
 def _grokbot_rows(
     target: Path, *, github: dict[str, Any], now: datetime, stale_ready_hours: int
 ) -> list[dict[str, Any]]:
-    """Project queue jobs into tracker rows without reading private envelopes."""
-    try:
-        from . import grokbot_jobs
+    """Project retained local queue jobs into tracker rows."""
+    from . import grokbot_jobs
 
+    try:
         queue_rows = grokbot_jobs.tracker_rows(target)
     except Exception:  # noqa: BLE001 - tracker remains available when queue storage is unavailable
-        from . import grokbot_jobs
-
-        if grokbot_jobs.hub_authority(target):
-            return [_grokbot_hub_unavailable_row()]
         return []
-
-    if any(isinstance(job, dict) and job.get("degraded") for job in queue_rows):
-        return [_grokbot_hub_unavailable_row()]
 
     rows: list[dict[str, Any]] = []
     for job in queue_rows:
@@ -914,7 +908,7 @@ def _grokbot_rows(
                 "label": job.get("label"),
                 "branch": branch,
                 "dispatched_at": job.get("queued_at"),
-                "source": "grokbot-hub" if grokbot_jobs.hub_authority(target) else "grokbot-queue",
+                "source": "grokbot-queue",
                 "expected_artifact": artifact,
             },
             provider_tasks={job_id: {"state": job.get("state"), "ready_at": job.get("updated_at")}},
@@ -932,27 +926,13 @@ def _grokbot_rows(
             "state": job.get("state"),
             "classification": classification_row["classification"],
             "artifact_refs": refs,
-            "source": "grokbot-hub" if grokbot_jobs.hub_authority(target) else "grokbot-queue",
+            "source": "grokbot-queue",
         }
         for key in ("created_at", "updated_at", "queued_at", "claimed_at"):
             if isinstance(job.get(key), str):
                 row[key] = job[key]
         rows.append(row)
     return rows
-
-
-def _grokbot_hub_unavailable_row() -> dict[str, Any]:
-    return {
-        "id": "grokbot:hub-unavailable",
-        "provider": "grokbot-cloud",
-        "job_id": "grokbot-hub-unavailable",
-        "label": "Grok Bot hub unavailable",
-        "state": "unavailable",
-        "classification": "needs-investigation",
-        "degraded": True,
-        "artifact_refs": {"kind": "report"},
-        "source": "grokbot-hub",
-    }
 
 
 def _grokbot_artifact_refs(
@@ -1020,10 +1000,9 @@ def status_payload(
             provider_observations=provider_observations,
         )
         for entry in registry["entries"]
-        if entry.get("provider") in TRACKER_PROVIDERS
+        if entry.get("provider") in _REGISTRY_PROVIDERS
     ]
     grokbot_rows = _grokbot_rows(target, github=github, now=observed, stale_ready_hours=stale_ready_hours)
-    grokbot_degraded = any(row.get("degraded") for row in grokbot_rows)
     entries.extend(grokbot_rows)
     known_queue_branches = {
         refs["branch"]
@@ -1051,13 +1030,10 @@ def status_payload(
             "authority": claude_cloud_routine.OBSERVATION_REASON,
             "detail": claude_cloud_routine.SOURCE_DETAIL,
         },
-        "grokbot-cloud": {
-            "wired": True,
-            "authority": "hub" if grokbot_jobs.hub_authority(target) else "local-queue",
-            **({"degraded": True, "detail": "hub unavailable"} if grokbot_degraded else {}),
-        },
         "github": {"wired": True, "authority": "ground-truth"},
     }
+    if not grokbot_jobs.hub_authority(target):
+        sources["grokbot-cloud"] = {"wired": True, "authority": "local-queue"}
     if provider_observations:
         for provider, observation in provider_observations.items():
             source = sources.get(provider)
@@ -1732,34 +1708,12 @@ def observe_cursor_cloud_tasks(target: Path) -> dict[str, Any]:
     return _cursor_cloud_observation(target).tasks
 
 
-def _grokbot_cloud_observation() -> ProviderObservation:
-    from . import fleet_client_grokbot
-
-    try:
-        decision = fleet_client_grokbot.whoami()
-    except Exception:  # noqa: BLE001 - provider health must stay bounded
-        return ProviderObservation(True, False, "transport-failure", {})
-    if decision.granted:
-        return ProviderObservation(True, True, None, {})
-    if decision.reason == "no-hub":
-        return ProviderObservation(False, False, "unconfigured", {})
-    if decision.reason == "no-identity":
-        return ProviderObservation(True, False, "actor-not-enrolled", {})
-    if decision.reason == "auth-failed":
-        return ProviderObservation(True, False, "auth-failure", {})
-    if decision.reason == "hub-unavailable":
-        return ProviderObservation(True, False, "transport-failure", {})
-    return ProviderObservation(True, True, decision.reason, {})
-
-
 def observe_provider(provider: str, target: Path, *, codex_max_items: int | None = None) -> ProviderObservation:
     """Observe exactly one provider without exposing credentials or bodies."""
     if provider == "codex-cloud":
         return _codex_cloud_observation(target, codex_max_items=codex_max_items)
     if provider == "cursor-cloud":
         return _cursor_cloud_observation(target)
-    if provider == "grokbot-cloud":
-        return _grokbot_cloud_observation()
     if provider == "claude-cloud":
         # No provider wire exists in Brigade. The conductor launches and reads
         # routine runs, and reports what it saw through register or adopt.
