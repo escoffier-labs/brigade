@@ -1,1 +1,1 @@
-- Allow a governed T3 qualification wake during batch launch when it follows that task's own delegate reply.
+- Allow a governed T3 qualification wake during batch launch when it follows that task's own delegate reply. The coordinator records only the waking task.

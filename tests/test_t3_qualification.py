@@ -1,6 +1,8 @@
 """Synthetic evidence for the #2046 matched experiment."""
 
 import json
+import shlex
+import sys
 from copy import deepcopy
 
 import pytest
@@ -461,7 +463,6 @@ def test_reads_direct_turn_and_applied_settings(tmp_path):
 
 
 def test_report_refuses_rewritten_record(tmp_path, matched_records, monkeypatch):
-    import sys
 
     fast = next(row for row in matched_records if (row["pair"], row["record"]["arm"]) == (2, "run-batch"))
     fast["record"]["verified_completion_seconds"] -= 1
@@ -501,7 +502,8 @@ def test_timing_uses_one_clock_with_forward_wall_drift():
     assert sum(duration for duration in phases.values() if duration is not None) == pytest.approx(total)
 
 
-def test_coordinator_renders_single_marks_outside_task_loop(tmp_path):
+@pytest.fixture
+def coordinator_brief(tmp_path):
     context = {
         "workspace": str(tmp_path / "workload"),
         "run_ids": {"t3": "t3-example"},
@@ -509,20 +511,28 @@ def test_coordinator_renders_single_marks_outside_task_loop(tmp_path):
         "seat": "worker",
     }
     qualification._write_brief(tmp_path, context, tmp_path / "roster.toml")
-    brief = (tmp_path / "coordinator.txt").read_text(encoding="utf-8")
+    return (tmp_path / "coordinator.txt").read_text(encoding="utf-8")
+
+
+def test_coordinator_renders_single_marks_outside_task_loop(coordinator_brief):
+    brief = coordinator_brief
     commands = [line.split()[-1] for line in brief.splitlines() if "brigade.t3_qualification mark " in line]
     assert commands == [
         "opened",
         "delegate-start",
         "delegate-reply-TASK",
         "delegate-replies",
-        "wake-guide",
-        "wake-package",
-        "wake-runner",
+        "wake-TASK",
     ]
     assert brief.index(" delegate-start") < brief.index("For each task ID")
     assert brief.index(" delegate-replies") > brief.index("accepted-TASK.json")
-    assert "Run only the command for that task" in brief
+    assert (
+        brief.index(" > claim-TASK.json")
+        < brief.index("b. Call delegate_task")
+        < brief.index(" delegate-reply-TASK")
+        < brief.index(" > accepted-TASK.json")
+    )
+    assert "Substitute the waking task ID for TASK" in brief
 
 
 def test_collect_row_binds_directory_and_explicit_route(tmp_path, monkeypatch):
@@ -588,27 +598,38 @@ def test_collect_row_binds_directory_and_explicit_route(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("early_wake", [False, True])
-def test_t3_marks_allow_wakes_during_launch_after_own_reply(tmp_path, early_wake):
+def test_t3_marks_allow_wakes_during_launch_after_own_reply(tmp_path, monkeypatch, coordinator_brief, early_wake):
     from brigade import t3_qualification_evidence as evidence
 
-    # Tenths of a second after opened. Guide and package finish before the
-    # last launch reply, while runner finishes after the launch closes.
-    marks = {
-        "delegate-start": 84,
-        "delegate-reply-guide": 350,
-        "wake-guide": 340 if early_wake else 464,
-        "delegate-reply-package": 620,
-        "wake-package": 720,
-        "delegate-reply-runner": 890,
-        "delegate-replies": 909,
-        "wake-runner": 966,
-    }
-    for name, stamp in marks.items():
+    wake_commands = [
+        shlex.split(line)[3:]
+        for line in coordinator_brief.splitlines()
+        if "brigade.t3_qualification mark " in line and line.split()[-1].startswith("wake-")
+    ]
+
+    def mark_wake(task, stamp):
+        monkeypatch.setattr(evidence, "clock", lambda: {"monotonic_ns": stamp})
+        for command in wake_commands:
+            monkeypatch.setattr(sys, "argv", ["qualification", *command[:-1], command[-1].replace("TASK", task)])
+            qualification.main()
+
+    # Tenths of a second after opened, following the pair 1 wake ordering.
+    def mark_launch(name, stamp):
         (tmp_path / f"{name}.json").write_text(json.dumps({"monotonic_ns": stamp}), encoding="utf-8")
+
+    mark_launch("delegate-start", 84)
+    mark_launch("delegate-reply-guide", 350)
+    mark_wake("guide", 340 if early_wake else 464)
+    assert sorted(path.name for path in tmp_path.glob("wake-*.json")) == ["wake-guide.json"]
+    mark_launch("delegate-reply-package", 660)
+    mark_wake("package", 720)
+    mark_launch("delegate-reply-runner", 890)
+    mark_launch("delegate-replies", 909)
+    mark_wake("runner", 966)
 
     args = (tmp_path, {"monotonic_ns": 0}, {"monotonic_ns": 1000}, {"guide", "package", "runner"})
     if early_wake:
-        with pytest.raises(ValueError, match="out of order"):
+        with pytest.raises(ValueError, match="out of order for guide"):
             evidence._validate_t3_marks(*args)
     else:
         evidence._validate_t3_marks(*args)

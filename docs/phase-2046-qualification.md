@@ -59,7 +59,9 @@ finalizing. The parent's finish command verifies the retained outputs and
 publishes `measurements.json` atomically. The runner checks the readiness
 receipt and capabilities report and checks the measurements against the
 durable evidence before advancing. Each wake must follow its own task's reply
-mark. A wake can precede the batch-wide launch-complete mark. It waits up to one hour by default for each parent
+mark. A wake can precede the batch-wide launch-complete mark. The per-task
+reply mark is written by the parent, with no retained timestamp to verify it
+independently. The runner waits up to one hour by default for each parent
 submission. `--parent-timeout` sets that limit in seconds.
 
 A refusal, inconclusive observation, evidence mismatch, or timeout stops the

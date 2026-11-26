@@ -257,7 +257,6 @@ def _write_brief(folder: Path, context: dict[str, Any], roster_path: Path) -> No
             "--json",
         ),
         mark=shell(*prefix, "mark", str(folder)),
-        wake_marks="\n       ".join(shell(*prefix, "mark", str(folder), f"wake-{task}") for task in WORKLOAD),
         open=shell(
             *CLI, "t3", "open", str(folder.parent / "batch.json"), "--target", workspace, "--roster", str(roster_path)
         ),
