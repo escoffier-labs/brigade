@@ -139,7 +139,7 @@ def test_listener_token_gate(tmp_path, header, status):
 def test_cloud_agent_no_node_token_fallback(tmp_path, monkeypatch):
     from brigade import fleet_client
 
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: pytest.fail("node fallback"))
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: pytest.fail("node fallback"))
     data = cloud_document(tmp_path)
     Path(data["auth"]["token_file"]).unlink()
     with pytest.raises(DotError):

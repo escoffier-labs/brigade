@@ -41,7 +41,7 @@ def scoped_hub(configured, monkeypatch, watch_settings):
     document = json.loads(document_path.read_text())
     document["hub"]["message_token_file"] = str(path)
     document_path.write_text(json.dumps(document))
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(watch_settings))
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: dict(watch_settings))
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: "node-a")
     return message_scope(*message_settings(str(path))[:2])
 
