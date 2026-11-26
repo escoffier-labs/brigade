@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -74,6 +76,63 @@ def _write_cards(target: Path, count: int, *, category: str, tags: list[str]) ->
 def _project(target: Path, vault: Path, capsys) -> dict:
     assert cli.main(["memory", "project-vault", "--target", str(target), "--vault", str(vault), "--json"]) == 0
     return json.loads(capsys.readouterr().out)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX RLIMIT_NOFILE")
+def test_project_vault_with_more_notes_than_available_descriptors(tmp_path: Path, vault: Path, capsys) -> None:
+    import resource
+
+    soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
+    fd_dir = Path("/proc/self/fd")
+    if fd_dir.is_dir():
+        open_fds = len(os.listdir(fd_dir))
+    else:
+        scan_limit = os.sysconf("SC_OPEN_MAX") if soft_limit == resource.RLIM_INFINITY else soft_limit
+        if scan_limit < 0:
+            pytest.skip("requires a finite descriptor scan limit")
+        open_fds = 0
+        for fd in range(scan_limit):
+            try:
+                os.fstat(fd)
+            except OSError as exc:
+                if exc.errno != errno.EBADF:
+                    raise
+            else:
+                open_fds += 1
+
+    # Leave room for the directory walks, SQLite, and pytest's own I/O.
+    lowered_limit = open_fds + 48
+    if soft_limit != resource.RLIM_INFINITY and soft_limit < lowered_limit:
+        pytest.skip("requires at least 48 additional descriptor slots")
+
+    card_count = lowered_limit * 2
+    _write_cards(tmp_path, card_count, category="operations", tags=[])
+    (tmp_path / "rules").mkdir()
+    (tmp_path / "rules" / "retention.md").write_text("# Retention\nKeep records.\n", encoding="utf-8")
+    (tmp_path / "TOOLS.md").write_text("# Tool Notes\nUse approved tools.\n", encoding="utf-8")
+
+    resource.setrlimit(resource.RLIMIT_NOFILE, (lowered_limit, hard_limit))
+    try:
+        result = _project(tmp_path, vault, capsys)
+    finally:
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft_limit, hard_limit))
+
+    assert result["receipt"]["terminal_state"] == "committed"
+    projection = vault / "Brigade Memory"
+    assert len(list((projection / "Cards").glob("*.md"))) == card_count
+    assert (projection / "Rules" / "Retention.md").is_file()
+    assert (projection / "Tools" / "Tool Notes.md").is_file()
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="counts descriptors through /proc/self/fd")
+def test_project_vault_closes_destination_descriptors(tmp_path: Path, vault: Path, capsys) -> None:
+    _write_cards(tmp_path, 12, category="operations", tags=[])
+
+    before = len(os.listdir("/proc/self/fd"))
+    result = _project(tmp_path, vault, capsys)
+
+    assert result["receipt"]["terminal_state"] == "committed"
+    assert len(os.listdir("/proc/self/fd")) == before
 
 
 def test_project_vault_is_linked_redacted_idempotent_and_reports_drift(tmp_path: Path, vault: Path, capsys) -> None:
@@ -164,7 +223,11 @@ def test_project_vault_restores_the_vault_when_a_transaction_fails(
 
     monkeypatch.setattr(obsidian_vault.kernel, "execute", fail_during_commit)
 
+    fd_dir = Path("/proc/self/fd")
+    before = len(os.listdir(fd_dir)) if fd_dir.is_dir() else None
     result = obsidian_vault._project_payload(target=tmp_path, vault=vault)
+    if before is not None:
+        assert len(os.listdir(fd_dir)) == before
 
     assert result["receipt"]["terminal_state"] == "restored"
     assert result["written"] == 0

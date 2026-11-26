@@ -1,0 +1,1 @@
+- Share destination directory descriptors during Obsidian vault projection so large note collections can fit under the process file descriptor limit.
