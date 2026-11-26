@@ -582,9 +582,10 @@ def dispatch(args) -> int:
         return 0
 
     if command == "sync":
-        if args.codex_leases_only:
-            from .. import codex_cloud
+        from .. import codex_cloud, fleet_client
 
+        if args.codex_leases_only:
+            # Scheduled maintenance has a fixed budget and only touches bound leases.
             sync_result = codex_cloud.sync_leases(target)
             if args.json:
                 print(json.dumps(sync_result, sort_keys=True))
@@ -592,7 +593,7 @@ def dispatch(args) -> int:
                 print("Codex Cloud leases " + " ".join(f"{name}={value}" for name, value in sync_result.items()))
             return int(bool(sync_result["errors"]))
 
-        from .. import fleet_client
+        launch_intents = codex_cloud.reconcile_launches(target)
 
         observations, github = cloud_tracker.observe_provider_details(target)
         provider_tasks = cloud_tracker._legacy_provider_tasks(observations)  # noqa: SLF001 - compatibility projection
@@ -614,6 +615,8 @@ def dispatch(args) -> int:
             provider_observations=observations,
             hub_leases=hub_leases,
         )
+        if launch_intents:
+            payload["launch_intents"] = launch_intents
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 0
@@ -630,6 +633,8 @@ def dispatch(args) -> int:
             )
         for row in payload.get("needs_you", []):
             print(f"  needs-you: {row.get('detail')}")
+        for row in launch_intents:
+            print(f"  launch: {row['tag']} {row['state']} ({row['reason']})")
         return 0
 
     if command == "status":
@@ -664,6 +669,8 @@ def dispatch(args) -> int:
             extra = f" url={url}" if url else ""
             if row.get("landing_state"):
                 extra += f" landing={row['landing_state']} commit={row.get('landing_commit')}"
+            if row.get("launch_state"):
+                extra += f" launch={row['launch_state']} tag={row.get('launch_tag')}"
             print(
                 f"  - [{row.get('classification')}] {row.get('label')} "
                 f"provider={row.get('provider')} task={row.get('task_id')} branch={row.get('branch')}{extra}"

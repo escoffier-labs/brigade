@@ -912,6 +912,24 @@ and release their own leases while polling. See [scheduler support](scheduled-ca
 
 `--env-var` stores only the variable name in `.brigade/cloud/codex.json`. `--env-id` stores the id locally (mode 0600) and is the fallback when an env var is not available. Seat the worker as `cli = "codex-cloud:configured"` or `cli = "codex-cloud:$CODEX_CLOUD_ENV"`. Literal `codex-cloud:<env-id>` still works. Allow the seat with a `"codex-cloud:*"` entry in `limits.allow_models`. Model pins are rejected because the cloud environment decides the model. `brigade run cloud doctor` and `brigade run cloud canary` accept `--selector` (`configured`, `$VAR`, or a literal id) and fail closed with a safe `reason` when the `codex` CLI is missing, unauthenticated, or returns unsupported list JSON; an empty inventory may pass. When the inventory is non-empty, canary reports `environment_seen` as `true`, `false`, or `unknown` by comparing sanitized task `environment_id` values against the resolved selector; an empty inventory leaves `environment_seen` at `unknown` and does not prove the execution selector is valid. Resolved environments are recorded on tracker rows and worker results as `environment_id` for literal seats or `environment_fingerprint` for configured/`$VAR` selectors. Read-only `brigade run` dispatch blocks `codex-cloud` unless the seat sets `cloud_safe_mode = true` after explicit review. `brigade run cloud canary` lists tasks only; it never calls `codex cloud exec` or `codex cloud apply`. Cloud config discovery stops at the git repo root or the operator home directory, whichever comes first while walking parents.
 
+Before either the roster or `brigade run cloud launch --provider codex-cloud`
+submits a task, BrigadeStack writes a `needs-reconcile` intent to the workspace
+registry. It stores a prompt hash and puts a unique bracketed tag at the start
+of the provider prompt, with a request to preserve the tag in the task title.
+If the registry write fails, submission stops. A confirmed exec failure marks
+the row `not-launched`. An ambiguous submit, a rejected bind, or a failed
+registry update leaves the intent in `needs-reconcile`.
+
+Run `brigade run cloud sync --target .` to retry pending intents. Sync retries
+the bind for a recorded task ID or searches the Codex CLI inventory for one
+exact tag in the title. A successful bind records the task as `tracked`. A
+complete inventory with no tag match after five minutes marks the intent
+`not-launched`. Failed, incomplete, or conflicting observations leave it in
+`needs-reconcile`. Tag recovery depends on the provider retaining the prompt
+tag in the title. Sync neither releases an unbound lease nor cancels a task
+based on a launch-intent observation. `brigade run cloud status` shows the
+launch state and tag.
+
 The local adapters use explicit non-interactive execution modes. Writable Antigravity runs pass `--add-dir <cwd> --dangerously-skip-permissions`; read-only runs pass `--sandbox` without either write flag. When `agy --help` lists `--mode plan`, read-only runs add `--mode plan` and `--add-dir <cwd>`, because plan mode is what blocks file writes. A headless run that exits 0 after `jetski: no output produced` fails with agy's reason in the detail. Writable Kimi runs pass `--yolo`; read-only runs pass `--plan`. Cursor write runs use `cursor-agent -p --output-format text -f`. Direct read-only Cursor runs use `--trust --mode plan`, which keeps the workspace read-only but has model-specific output limits: Composer 2.5 findings go to Cursor's plan artifact instead of assistant stdout, so BrigadeStack rejects that combination before spawning the process. Grok 4.5 has also returned exit 0 with empty assistant text in this mode. BrigadeStack preserves the process stdout, stderr, and exit code, then reports the ACP alternative.
 
 Use the reviewed ACP transport when a Cursor model needs read-only findings on stdout:
