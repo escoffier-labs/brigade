@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import timezone
+from datetime import datetime, timezone
 from typing import Any
 
 from .contracts import require
@@ -40,13 +40,34 @@ class LimitedFleetTools(FleetTools):
         value = json.loads(old["summary"]).get("repository")
         return value if isinstance(value, str) else None
 
+    @staticmethod
+    def _utc_day_start(now: datetime) -> float:
+        return now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0).timestamp()
+
+    @staticmethod
+    def _daily_attempts(connection: sqlite3.Connection, since: float) -> int:
+        row = connection.execute("SELECT COUNT(*) FROM duet_dispatch_attempts WHERE ts>=?", (since,)).fetchone()
+        return int(row[0])
+
+    def dispatch_usage(self) -> dict[str, int]:
+        with self.state.transaction() as connection:
+            open_slots, unassigned = connection.execute(
+                "SELECT COUNT(*), COUNT(*) - COUNT(request_id) FROM duet_dispatch WHERE open=1"
+            ).fetchone()
+            return {
+                "open": open_slots,
+                "attempts_used_today": self._daily_attempts(connection, self._utc_day_start(self.clock())),
+                "open_without_request_id": unassigned,
+            }
+
     def _fleet(self, action: str, payload: dict[str, Any], *, timeout: float, mutating: bool = False) -> dict[str, Any]:
         limits = self.runtime.dispatch_limits
         assert limits is not None
         launching = action in {"submit", "followup"}
         observing = action in {"status", "wait"}
-        control = action == "interrupt" or (not self._owned_requests_only and action in {"answer", "approve"})
-        if not (launching or observing or control):
+        drives_work = not self._owned_requests_only and action in {"answer", "approve"}
+        duet_interrupt = self._owned_requests_only and action == "interrupt"
+        if not (launching or observing or drives_work or duet_interrupt):
             return super()._fleet(action, payload, timeout=timeout, mutating=mutating)
 
         reservation = None
@@ -58,16 +79,16 @@ class LimitedFleetTools(FleetTools):
             if self._owned_requests_only and (observing or action in {"followup", "interrupt"}) and row is None:
                 return {"error": "unknown_request"}
             repository = payload["repository"] if action == "submit" else (row["repository"] or None) if row else None
-            check_repository = launching or control or self._owned_requests_only
+            if repository is None and request_id is not None and (drives_work or action == "followup"):
+                repository = self._journal_repository(connection, request_id)
+            check_repository = launching or drives_work or self._owned_requests_only
             if limits.repositories is not None and check_repository:
-                if repository is None and request_id is not None and not self._owned_requests_only:
-                    repository = self._journal_repository(connection, request_id)
                 if repository is not None and repository not in limits.repositories:
                     return {"error": "repository_not_allowed"}
                 if launching and repository is None:
-                    return {"error": "unknown_request"}
-            elif action == "followup" and row is None and request_id is not None:
-                repository = self._journal_repository(connection, request_id)
+                    return {"error": "unknown_request" if self._owned_requests_only else "repository_unknown"}
+            if drives_work and repository is None:
+                return {"error": "repository_unknown"}
             if launching:
                 if len(payload["prompt"].encode("utf-8")) > limits.prompt_max_bytes:
                     return {"error": "prompt_too_large"}
@@ -77,15 +98,12 @@ class LimitedFleetTools(FleetTools):
                 if (row is None or not row["open"]) and open_count >= limits.max_open:
                     return {"error": "open_limit"}
                 now = self.clock()
-                # Clock normally returns UTC; normalize before defining the daily boundary.
-                midnight = now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-                used = connection.execute(
-                    "SELECT COUNT(*) FROM duet_dispatch_attempts WHERE ts>=?", (midnight.timestamp(),)
-                ).fetchone()[0]
+                midnight = self._utc_day_start(now)
+                used = self._daily_attempts(connection, midnight)
                 if used >= limits.daily_limit:
                     return {"error": "daily_limit"}
                 connection.execute("INSERT INTO duet_dispatch_attempts VALUES (?)", (now.timestamp(),))
-                connection.execute("DELETE FROM duet_dispatch_attempts WHERE ts<?", (midnight.timestamp(),))
+                connection.execute("DELETE FROM duet_dispatch_attempts WHERE ts<?", (midnight,))
                 if row is None:
                     reservation = connection.execute(
                         "INSERT INTO duet_dispatch(request_id,repository,open,busy) VALUES (?,?,1,1)",

@@ -124,21 +124,36 @@ by this policy and the existing tool limits still apply.
     "repositories": ["example-repo"],
     "max_open": 3,
     "daily_limit": 20,
-    "prompt_max_bytes": 32768
+    "prompt_max_bytes": 24576
   }
 }
 ```
 
-Omit `repositories` to allow all configured aliases. The numeric values in
-the example are the defaults. The daily budget counts launch attempts per
-UTC day. The prompt limit counts UTF-8 bytes, including any appended owner
-authorization. A terminal status or wait result releases an open slot.
-An uncertain launch retains its reservation for reconciliation.
+An empty `dispatch_limits` object enables the numeric defaults shown above.
+Omitting `repositories` allows all configured aliases. An empty
+`repositories: []` list denies all repositories. The daily budget counts
+launch attempts per UTC day. The prompt limit counts UTF-8 bytes, including
+any appended owner authorization. Dot accepts configured values up to 32768
+and caps the effective limit at 24576 bytes.
 
-With an allowlist configured, a followup requires a known repository.
-Answer, approve and interrupt check the allowlist when Dot knows the request's
-repository. They use no launch quota. `dot_t3_capabilities` reports the
-configured values under `fleet.limits`.
+Answer and approve require a known repository whenever dispatch limits are
+configured. With an allowlist, followup also requires a known repository.
+These calls return `repository_unknown` when a required repository cannot
+be resolved and `repository_not_allowed` when it is outside the allowlist.
+Interrupt can stop any request regardless of the repository or dispatch
+budget. Answer, approve and interrupt use no launch quota.
+
+Unknown outcomes or a crash retain the reservation. Inspect `fleet_recent`
+and ask the operator to reconcile before retrying. No automatic expiry can
+reopen capacity for unknown work. Status and wait release slots only after a
+confirmed terminal state. Interrupt alone does not release a slot. When
+`events_enabled` is false, automatic release is disabled. Call
+`fleet_status` or `fleet_wait` explicitly to observe completion.
+
+`dot_t3_capabilities` reports effective values under `fleet.limits`.
+`fleet.usage` reports open slots, today's attempts and the number of open
+reservations without a request ID. A reservation can lack an ID while submit
+is in flight or after an uncertain outcome.
 
 ### Tool grants
 

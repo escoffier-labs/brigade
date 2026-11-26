@@ -238,7 +238,12 @@ class DotTools:
             pass
 
     def dot_t3_capabilities(self) -> dict[str, Any]:
-        """Static description only: no IO, no subprocess, no config read."""
+        """Describe Dot and read local usage when dispatch limits are configured."""
+        dispatch = {}
+        if self.runtime.dispatch_limits is not None:
+            dispatch["limits"] = self._dispatch_limits()
+            if isinstance(self.fleet, LimitedFleetTools):
+                dispatch["usage"] = self.fleet.dispatch_usage()
         return dict(
             bridge_version="6",
             operating_instructions=self.profile.operating_instructions,
@@ -269,7 +274,7 @@ class DotTools:
                 ),
                 runtime_mode="full-access (trusted operator fleet; children do not raise T3 approval prompts)",
                 max_prompt_bytes=MAX_PROMPT_BYTES,
-                **({"limits": self._dispatch_limits()} if self.runtime.dispatch_limits is not None else {}),
+                **dispatch,
                 handles=(
                     "Keep the returned request_id. fleet_recent lists every mutating bridge call with its "
                     "request_id and outcome, including calls whose HTTP response was lost."
