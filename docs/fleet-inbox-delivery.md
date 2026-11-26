@@ -14,6 +14,54 @@ Connector tools depend on runtime settings and grants. For a ChatGPT dot, `hoste
 | `dot` | `agent:miller` | `dot` | `message_send` | `inbox_list` | `inbox_ack` | `inbox_reply` | `message_status` | - | `hosted-subscription` | Send follows `messaging_enabled`, or `dispatch_enabled` when unset. Subscription requires `events_enabled`. | - |
 | `cloud-agent` | `agent:cloud-agent` | `cloud-agent` | `message_send` | `inbox_list` | `inbox_ack` | `inbox_reply` | - | - | `next-start` | `messaging_enabled: true` required for all messaging tools. Send and reply share 20 messages per hour. | - |
 
+## Wake limits
+
+- **Local Claude Code and Codex.** The next `UserPromptSubmit` or eligible
+  `PostToolUse` can show new mail. Tool polls are at least 20 seconds apart
+  (`TOOL_POLL_INTERVAL_SECONDS`). Each delivery shows up to 3 messages
+  (`MAX_DELIVERED_MESSAGES`). The hub request has a 2-second deadline, and
+  failures trigger a 60-second backoff for both hooks. Idle sessions stay idle.
+  Codex requires hook installation and a one-time interactive trust step on
+  each host. See the [inbox delivery source](../src/brigade/fleet_inbox_delivery.py)
+  and [Codex setup](#codex).
+- **Duet (claude.ai).** The runtime rejects `events_enabled` and
+  `callback_hosts`. A session or routine reads mail when it calls
+  `inbox_list` ([Duet runtime](../src/brigade/dot/runtime_config.py),
+  [inbox tool](../src/brigade/dot/profile.py)).
+- **Dot (ChatGPT).** With `events_enabled: true` and an active
+  `fleet.inbox.message` subscription, a webhook can wake the hosted client.
+  The host syncs the hub every `poll_seconds` to queue events. The hosted
+  client wakes without polling and reads mail with `inbox_list`.
+  See the [Dot event service](../src/brigade/dot/events.py),
+  [sync interval](../src/brigade/dot/lifecycle.py),
+  [event queue](../src/brigade/dot/state.py), and
+  [inbox tool](../src/brigade/dot/profile.py).
+
+  - The Fleet Hub's separate MCP Events dispatcher allows 8 total attempts per
+    delivery and caps delivery attempts at 120 per hour per subscription. It clamps
+    subscription TTL to between 1 minute and 7 days and deletes the subscription
+    on HTTP `410` ([MCP Events](fleet-mcp-events.md),
+    [Hub dispatch](../src/brigade/fleet_hub_events_dispatch.py),
+    [Hub subscriptions](../src/brigade/fleet_hub_events.py)).
+  - The Dot connector allows 100 subscriptions per instance, 30 wake attempts
+    per hour, and at most 1 normal-priority wake attempt every 300 seconds.
+    Retry backoff uses a 30-second base and doubles per failed attempt, starting
+    at 60 seconds after the first failure and capping at 1 hour. Dot has no
+    fixed attempt cap. It accepts TTLs from 1 minute to 7 days or `null` for
+    no expiry, and deletes a subscription on HTTP `410`. Each webhook POST has
+    a 10-second timeout. See the [Dot event service](../src/brigade/dot/events.py)
+    and [webhook transport](../src/brigade/dot/webhooks.py).
+- **Cloud agent (Codex Cloud workers).** The runtime sets `events_enabled`
+  to false. With `messaging_enabled: true`, a worker can call `inbox_list`
+  to read mail at its next task start ([cloud runtime](../src/brigade/dot/cloud_runtime.py),
+  [tool gates](../src/brigade/dot/profile.py),
+  [wake capability](../src/brigade/fleet_agent_capabilities.py)).
+
+In the 2026-11-26 Dot test, the next hub sync queued the event about 15 seconds
+after the send, and the first webhook attempt succeeded. The first tool calls
+from the hosted turn appeared 32 seconds after delivery.
+[Observed test](https://github.com/escoffier-labs/brigadestack/issues/2592#issuecomment-7188709976).
+
 ## What the session sees
 
 On a prompt, and on tool use at most every 20 seconds, a hook reads the node's unacknowledged mail that this session has not been shown. Up to three messages go into the session as additional context:
@@ -48,7 +96,11 @@ Nothing to install. The managed work-loop hooks already fire `UserPromptSubmit` 
 
 ## Codex
 
-Codex 0.163.0 accepts `additionalContext` from `UserPromptSubmit` and `PostToolUse` hook output. Brigade does not edit `~/.codex`, so add the hook yourself in `~/.codex/hooks.json` and approve it when Codex asks:
+Codex 0.172.0 accepts `additionalContext` from `UserPromptSubmit` and
+`PostToolUse` hook output and skips untrusted hooks. Add the entries below to
+`~/.codex/hooks.json`, then open `/hooks` in an interactive Codex session and
+trust the entries once on each host. Headless and app-server sessions skip the
+trust prompt. [Codex hook trust](agent-assisted-setup.md).
 
 ```json
 {

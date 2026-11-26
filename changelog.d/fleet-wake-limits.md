@@ -1,0 +1,1 @@
+- Document when each Fleet inbox can deliver mail or wake an agent, including webhook limits and the Codex hook trust step.
