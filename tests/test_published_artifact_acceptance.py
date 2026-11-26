@@ -934,24 +934,25 @@ def test_imported_item_ids_from_sql_rows(acceptance_module):
     assert ids == ["73a4dea0caf74b08af5e0f59", "deadbeefcafebabe"]
 
 
-def test_install_brigade_cli_retries_when_simple_index_lags(acceptance_module):
+def test_install_brigade_cli_retries_when_simple_index_lags(acceptance_module, capsys):
     clock = [0.0]
-    sleeps = []
     attempts = []
 
     def runner(argv, **kwargs):
         attempts.append(argv)
-        if len(attempts) < 3:
+        if clock[0] < 610:
             return subprocess.CompletedProcess(
                 argv,
                 1,
                 "",
-                "ERROR: No matching distribution found for brigade-cli==1.2.3",
+                "Some possibly relevant errors from pip install:\n"
+                "    ERROR: Could not find a version that satisfies the requirement brigadestack==1.2.3 "
+                "(from versions: 1.2.2)\n"
+                "    ERROR: No matching distribution found for brigadestack==1.2.3",
             )
         return subprocess.CompletedProcess(argv, 0, "installed", "")
 
     def sleep(seconds):
-        sleeps.append(seconds)
         clock[0] += seconds
 
     acceptance_module.install_brigade_cli(
@@ -960,19 +961,50 @@ def test_install_brigade_cli_retries_when_simple_index_lags(acceptance_module):
         env={},
         sleep=sleep,
         monotonic=lambda: clock[0],
-        timeout_seconds=30,
-        poll_interval_seconds=5,
     )
 
-    assert len(attempts) == 3
-    assert sleeps == [5, 5]
+    assert clock[0] == 610
+    assert len(attempts) == 62
+    assert all(
+        argv[1:] == ["-m", "pipx", "install", "--pip-args=--no-cache-dir", "brigadestack==1.2.3"] for argv in attempts
+    )
+    assert capsys.readouterr() == ("", "")
 
 
-def test_install_brigade_cli_does_not_retry_permanent_failure(acceptance_module):
+def test_install_brigade_cli_reports_final_error_at_retry_deadline(acceptance_module):
+    clock = [0.0]
+    attempts = []
+
     def runner(argv, **kwargs):
-        return subprocess.CompletedProcess(argv, 1, "", "permission denied")
+        attempts.append(clock[0])
+        return subprocess.CompletedProcess(
+            argv, 1, "", f"Attempt at {clock[0]:g}\nERROR: No matching distribution found for brigadestack==1.2.3"
+        )
 
-    with pytest.raises(acceptance_module.AcceptanceError, match="permission denied"):
+    def sleep(seconds):
+        clock[0] += seconds
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="within 900 seconds") as error:
+        acceptance_module.install_brigade_cli("1.2.3", runner=runner, sleep=sleep, monotonic=lambda: clock[0])
+
+    assert attempts == list(range(0, 901, 10))
+    assert str(error.value).endswith("Attempt at 900\nERROR: No matching distribution found for brigadestack==1.2.3")
+    assert "Attempt at 0\n" not in str(error.value)
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "permission denied",
+        "404 Client Error: Not Found for url: https://example.invalid/missing.whl",
+        "ERROR: No matching distribution found for another-package==1.2.3",
+    ],
+)
+def test_install_brigade_cli_does_not_retry_permanent_failure(acceptance_module, detail):
+    def runner(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, 1, "", detail)
+
+    with pytest.raises(acceptance_module.AcceptanceError, match="failed with exit 1") as error:
         acceptance_module.install_brigade_cli(
             "1.2.3",
             runner=runner,
@@ -982,6 +1014,7 @@ def test_install_brigade_cli_does_not_retry_permanent_failure(acceptance_module)
             timeout_seconds=30,
             poll_interval_seconds=5,
         )
+    assert str(error.value).endswith(detail)
 
 
 def test_smoke_import_and_search_uses_json_search_and_imported_ids(acceptance_module, tmp_path):
