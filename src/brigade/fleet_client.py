@@ -104,6 +104,7 @@ from uuid import uuid4
 from .fleet_event_report import report_event_detailed as report_event_detailed
 
 if TYPE_CHECKING:
+    from .fleet_home_guard import FleetTokenRefusal
     from .fleet_session_presence import SessionSnapshot
     from .fleet_client_cloud import admit_cloud as admit_cloud, bind_cloud as bind_cloud, release_cloud as release_cloud
 
@@ -758,8 +759,9 @@ def report_event(event: dict[str, Any], *, base_path: Path | None = None, node_i
 
 def report_journal_event(
     envelope: dict[str, Any], *, journal_path: Path | None = None, workspace: Path | None = None
-) -> bool:
+) -> bool | FleetTokenRefusal:
     """Report durable events using the trusted run workspace when supplied."""
+    from .fleet_home_guard import FleetTokenFileError, report_token_file_refusal
     from .worktree_lease import worktree_event_parent
 
     try:
@@ -803,6 +805,8 @@ def report_journal_event(
         }
         if not all(event[k] is not None for k in ("run_id", "state", "ts", "sequence", "digest")):
             return False
+    except FleetTokenFileError as exc:
+        return report_token_file_refusal("fleet journal report", exc)
     except Exception:
         return False
     return report_event(event, base_path=base_path)
@@ -1331,7 +1335,7 @@ def _classify_session_write_error(exc: BaseException) -> str:
 
 def _post_session(snapshot: SessionSnapshot, *, action: str, hub_url: str | None) -> SessionWriteResult:
     """POST /sessions. Never spools; ordinary failures return a bounded reason."""
-    from .fleet_home_guard import FleetTokenFileError
+    from .fleet_home_guard import FleetTokenFileError, report_token_file_refusal
 
     try:
         if snapshot.cloud_context is not None:
@@ -1362,7 +1366,7 @@ def _post_session(snapshot: SessionSnapshot, *, action: str, hub_url: str | None
                 return SessionWriteResult(ok=True)
             return SessionWriteResult(ok=False, reason=f"http_status:{response.status}")
     except FleetTokenFileError as exc:
-        _LOG.warning("fleet session %s: %s", action, exc)
+        report_token_file_refusal(f"fleet session {action}", exc)
         return SessionWriteResult(ok=False, reason=exc.code)
     except Exception as exc:
         return SessionWriteResult(ok=False, reason=_classify_session_write_error(exc))

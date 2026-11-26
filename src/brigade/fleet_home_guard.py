@@ -17,6 +17,7 @@ import os
 import shlex
 import stat
 import sys
+from dataclasses import dataclass
 from pathlib import Path, PurePath
 from typing import Any
 
@@ -121,6 +122,20 @@ class FleetTokenFileError(fleet_client.FleetClientError):
     """A configured fleet token file failed validation or could not be read."""
 
     code = "token-file-refused"
+
+
+@dataclass(frozen=True)
+class FleetTokenRefusal:
+    reason: str
+    detail: str
+
+    def __bool__(self) -> bool:
+        return False
+
+
+def report_token_file_refusal(operation: str, error: FleetTokenFileError) -> FleetTokenRefusal:
+    fleet_client._LOG.warning("%s: %s", operation, error)
+    return FleetTokenRefusal(error.code, str(error))
 
 
 class FleetTokenPermissionError(FleetTokenFileError):

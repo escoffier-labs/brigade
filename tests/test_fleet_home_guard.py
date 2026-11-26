@@ -706,3 +706,25 @@ def test_best_effort_fleet_operations_log_token_refusals(tmp_path, monkeypatch, 
     assert fleet_event_report.report({}) == "failed"
     assert fleet_client_cloud._cloud_op("admit").reason == "token-file-refused"
     assert sum("node.token" in record.message and "chmod 600" in record.message for record in caplog.records) == 3
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX token permissions")
+@pytest.mark.parametrize("operation", ["journal", "presence", "grokbot", "model-lease"])
+def test_token_file_refusal_is_reported_by_best_effort_callers(tmp_path, monkeypatch, no_fleet_env, caplog, operation):
+    from brigade import fleet_client_cloud, fleet_client_grokbot, fleet_session_presence
+
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path))
+    path = _token(tmp_path / "node.token", "fixture-token")
+    path.chmod(0o640)
+    (tmp_path / "fleet.toml").write_text(f'[fleet]\nhub_url = "{USER_HUB}"\nnode_token_file = "node.token"\n')
+    calls = {
+        "journal": lambda: fleet_client.report_journal_event({}),
+        "presence": lambda: fleet_session_presence._publish_presence("SessionStart", tmp_path, "fixture"),
+        "grokbot": fleet_client_grokbot.list_jobs,
+        "model-lease": lambda: fleet_client_cloud._model_lease_op("release"),
+    }
+    result = calls[operation]()
+    assert result.reason == "token-file-refused"
+    assert "node.token" in result.detail and "chmod 600" in result.detail
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING and "node.token" in r.message]
+    assert len(warnings) == 1 and "chmod 600" in warnings[0].message

@@ -39,7 +39,7 @@ def report(event: dict[str, Any]) -> ReportResult:
 
 def _report(event: dict[str, Any], *, detailed: bool) -> ReportResult:
     from . import fleet_client as client
-    from .fleet_home_guard import FleetTokenFileError
+    from .fleet_home_guard import FleetTokenFileError, report_token_file_refusal
 
     try:
         config = client.load_fleet_config()
@@ -53,7 +53,7 @@ def _report(event: dict[str, Any], *, detailed: bool) -> ReportResult:
         token = config["token"]
         spool = client.spool_path(resolved_node_id)
     except FleetTokenFileError as exc:
-        client._LOG.warning("fleet event report: %s", exc)
+        report_token_file_refusal("fleet event report", exc)
         return "failed"
     except Exception:
         return "failed"
