@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import shlex
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -11,7 +10,7 @@ from time import monotonic
 
 from .. import __version__
 from ..verify_manifest_git import _git
-from . import push_gate_log, verify_push
+from . import push_gate_display, push_gate_log, verify_push
 from .push_gate import ENFORCE_V1_NOTICE, _mode, _normalized_mode
 from .verify_push_input import branch_updates
 
@@ -33,17 +32,16 @@ def run(*, hook_v2: bool = False) -> int:
     try:
         configured = _mode(target)
         mode = _normalized_mode(configured)
-    except Exception:
-        print(
-            "push gate: could not read brigade.pushGate from Git config. Run brigade work verify push-gate status.",
-            file=sys.stderr,
+    except Exception as exc:
+        push_gate_display.diagnostic(
+            f"push gate: did not run for this push because Git could not read the configuration: {exc}",
+            "Fix the Git configuration, then check with brigade work verify push-gate status.",
         )
-        return 2 if hook_v2 else 0
+        return 0
     if mode not in {"warn", "enforce"}:
         if mode not in {"", "off"}:
-            print(
-                f"push gate: unrecognised brigade.pushGate value {configured!r}; the gate is not running",
-                file=sys.stderr,
+            push_gate_display.diagnostic(
+                f"push gate: unrecognised brigade.pushGate value {configured!r}; the gate is not running"
             )
         return 0
     legacy_enforce = mode == "enforce" and not hook_v2
@@ -99,17 +97,24 @@ def run(*, hook_v2: bool = False) -> int:
             remedy = item["remedy"]
             tip = item["tip"]
             if not remedy:
-                remedy = f"brigade work verify push-check --target {shlex.quote(str(target))} --ref {tip}"
+                remedy = (
+                    f"brigade work verify push-check --target {push_gate_display.shell_arg(str(target))} "
+                    f"--ref {push_gate_display.shell_arg(tip)}"
+                )
             label = f"push gate: {item['ref']} ({verdict})"
             if not refused and verdict == "indeterminate":
-                print(f"{label} {item['reason']} Run: {' '.join(remedy.splitlines())}", file=sys.stderr)
+                command, _, guidance = remedy.partition("\n")
+                advisory = f"{label} {item['reason']}"
+                if guidance:
+                    advisory += f" {guidance}"
+                push_gate_display.diagnostic(f"{advisory} Run: {command}")
             else:
-                print(label, file=sys.stderr)
+                lines = [label]
                 if refused or code == verify_push._MASKED_PASS:
-                    print(item["reason"], file=sys.stderr)
+                    lines.append(item["reason"])
                 if refused and remedy.startswith("brigade work verify run "):
-                    print(f"Verify commit {tip} in this worktree, then retry the push.", file=sys.stderr)
-                print(remedy, file=sys.stderr)
+                    lines.append(f"Verify commit {tip} in this worktree, then retry the push.")
+                push_gate_display.diagnostic(*lines, remedy=remedy)
         rows.append(
             {
                 "schema": push_gate_log.SCHEMA,

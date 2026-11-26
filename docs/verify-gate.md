@@ -132,8 +132,7 @@ reading standard input. Use `--target <path>` to select a worktree and
 The check skips tags, deletions, and unchanged refs. It checks up to 128
 local receipt files. The receipt's tree fingerprint and its plan snapshot
 tree, if present, must both match the pushed branch tip's committed tree.
-Directories without a receipt and runs marked running, busy, or canceled
-provide no verification evidence. Changes in the working tree and session
+A directory without a receipt provides no verification evidence. Changes in the working tree and session
 identity have no effect. The declaration comes from the merge base of the
 pushed tip and the fetched default branch.
 
@@ -146,12 +145,16 @@ required command, the gate treats the required command as failed. A failed
 run that started on the pushed tree still counts if the tree changed during
 the run. Rerun the required check on the pushed tree to clear the failure.
 
-Unrelated commands, runs rejected before execution, and runs that collected
-no tests leave an older eligible pass valid, including a timeout that recorded
-an empty collection. The same applies when a run
-supplied no selector or passed the tests it ran but missed required files.
-A policy with no required command prefix accepts any eligible receipt for
-the tree.
+A failed or timed-out run of the required check counts even when it
+collected no tests or omitted a test selector. A run of the required check
+that completed without meeting the current eligibility rules, or was
+explicitly rejected, also takes precedence over an older pass. A terminal
+run whose recorded commands are all unrelated leaves an earlier verdict in
+place. A newer run with an inconclusive status, such as a running, busy, or
+interrupted run, or a rejected command whose identity was never recorded,
+gives an indeterminate verdict unless it already records a required check
+failure. A policy with no required command prefix accepts any eligible
+receipt for the tree.
 
 Across seconds the check orders runs by the UTC timestamp in the directory
 name. The name must have the writer's timestamp and suffix format. For a
@@ -233,9 +236,12 @@ marked block with the v2 block printed by install. The v1 hook discards
 the gate's exit status, so it still allows the push with `enforce` set.
 
 `brigade work verify push-gate status` shows the effective hook, its version,
-whether it can run, and whether enforcement is effective. Install refuses
-to enable enforce mode until the current hook block, `brigade`, and a usable
-`timeout` are available. `brigade work verify push-gate uninstall` clears the
+whether it can run, and whether enforcement is effective. Status can confirm
+enforcement for the current managed minimal hook and the shipped full hook.
+For a customised hook that contains the current block, status and install
+say that the block is present and that enforcement cannot be confirmed.
+Install still accepts the current block in a customised hook. Install
+requires the current hook block, `brigade`, and a usable `timeout`. `brigade work verify push-gate uninstall` clears the
 clone's mode and removes an unmodified minimal hook if present. It keeps
 the records.
 
@@ -270,6 +276,9 @@ evaluation error before Brigade can read the policy, use the printed
   Brigade adds no bypass and cannot detect that Git skipped the hook.
 - A clone opts in through `push-gate install` and needs the current hook.
   The older v1 block allows the push even when the clone is set to enforce.
+- When Git cannot read the clone's configuration, the gate does not run and
+  reports the error. Fix the configuration and check with
+  `brigade work verify push-gate status`.
 - Verify receipts are local files. The gate checks their shape, the agreement
   between the run name and start time, and the exact tree IDs. It does not
   authenticate receipts. Required CI supplies independent evidence on the

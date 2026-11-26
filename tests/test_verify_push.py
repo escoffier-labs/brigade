@@ -156,12 +156,12 @@ def test_dirty_worktree(push_repo, capsys, committed_receipt):
 
 
 @pytest.mark.parametrize("status", ["busy", "running", "canceled"])
-def test_ignores_unfinished_receipt(push_repo, capsys, status):
+def test_unfinished_receipt_is_indeterminate(push_repo, capsys, status):
     _policy(push_repo)
     tree = _tree(push_repo)
     _receipt(push_repo, tree, status=status)
     code, result = _single(push_repo, capsys)
-    assert (code, result["status"]) == (1, "missing_receipt")
+    assert (code, result["status"]) == (3, "indeterminate")
     _receipt(push_repo, tree, second=2)
     assert _single(push_repo, capsys)[0] == 0
 
@@ -185,7 +185,9 @@ def test_latest_required_failure_or_pass_governs(push_repo, capsys, failure_seco
     code, result = _single(push_repo, capsys)
     assert (code, result["status"]) == expected
     if code:
-        assert result["reason"] == "The most recent run of the required check failed. An earlier run had passed."
+        assert result["reason"] == (
+            "The most recent run of the required check did not complete successfully. An earlier run had passed."
+        )
 
 
 @pytest.mark.parametrize("command_status", ["failed", "timed_out"])
@@ -229,27 +231,45 @@ def test_newest_lint_does_not_hide_failure_before_pass(push_repo, capsys, differ
 
 
 @pytest.mark.parametrize(
-    "later",
+    ("later", "expected"),
     [
-        {"status": "failed", "command_status": "failed", "passed": 0},
-        {"status": "timed_out", "command_status": "timed_out", "passed": 0},
-        {"status": "rejected", "command_status": "rejected"},
-        {"status": "canceled", "command_status": "failed"},
-        {"status": "failed", "command_status": "failed", "argv": PREFIX},
-        {
-            "status": "failed",
-            "command_status": "completed",
-            "extra_commands": [{"argv": ["git", "status"], "status": "failed"}],
-        },
+        pytest.param({"status": "failed", "command_status": "failed", "passed": 0}, "rejected", id="no-tests"),
+        pytest.param(
+            {"status": "failed", "command_status": "timed_out", "passed": 0}, "rejected", id="timed-out-no-tests"
+        ),
+        pytest.param({"status": "rejected", "command_status": "rejected"}, "rejected", id="rejected"),
+        pytest.param({"status": "canceled", "command_status": "failed"}, "rejected", id="canceled-after-failure"),
+        pytest.param({"status": "failed", "command_status": "failed", "argv": PREFIX}, "rejected", id="no-selector"),
+        pytest.param(
+            {
+                "status": "failed",
+                "command_status": "completed",
+                "extra_commands": [{"argv": ["git", "status"], "status": "failed"}],
+            },
+            "rejected",
+            id="ineligible-multi-command-run",
+        ),
+        pytest.param({"status": "failed", "argv": ["git", "status"]}, "ok", id="unrelated-run"),
+        pytest.param({"status": "running"}, "indeterminate", id="running"),
+        pytest.param({"status": "canceled", "command_status": "interrupted"}, "indeterminate", id="interrupted"),
+        pytest.param({"status": "busy", "command_status": "busy"}, "indeterminate", id="busy"),
+        pytest.param(
+            {"status": "rejected", "argv": ["git", "status"], "extra_commands": [{"status": "rejected"}]},
+            "indeterminate",
+            id="rejected-with-no-argv",
+        ),
+        *[
+            pytest.param({"command_status": status}, "indeterminate", id=status)
+            for status in ("killed", "error", "cancelled", "skipped", "unknown")
+        ],
     ],
-    ids=["no-tests", "timed-out-no-tests", "rejected", "canceled", "no-selector", "unrelated-command-failed"],
 )
-def test_ineligible_run_without_required_failure_keeps_pass(push_repo, capsys, later):
+def test_newer_receipt_outcome_governs_unless_unrelated(push_repo, capsys, later, expected):
     _policy(push_repo)
     tree = _tree(push_repo)
     _receipt(push_repo, tree)
     _receipt(push_repo, tree, second=2, **later)
-    assert _single(push_repo, capsys) == (0, {"ref": "HEAD", "status": "ok", "reason": None, "remedy": None})
+    assert _single(push_repo, capsys)[1]["status"] == expected
 
 
 @pytest.mark.parametrize("status", ["failed", "rejected"])
@@ -495,8 +515,8 @@ def test_plan_snapshot_and_remedy(push_repo, capsys, missing, prior_pass):
         plan=plan,
     )
     code, result = _single(push_repo, capsys)
-    assert (code, result["status"]) == ((1, "rejected") if missing and not prior_pass else (0, "ok"))
-    if missing and not prior_pass:
+    assert (code, result["status"]) == ((1, "rejected") if missing else (0, "ok"))
+    if missing:
         assert EXTRA_SELECTOR in result["reason"]
         assert json.dumps([*PREFIX, *files]) in result["remedy"]
         assert "--worktree" not in result["remedy"]

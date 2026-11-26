@@ -6,7 +6,6 @@ import io
 import json
 import os
 import re
-import shlex
 import stat
 import subprocess
 import sys
@@ -22,7 +21,7 @@ from time import monotonic
 from typing import Any
 
 from .. import config, localio, verify_manifest_git
-from . import verify_gate
+from . import push_gate_display, verify_gate
 from .verify_push_input import INPUT_BYTES, branch_updates
 
 _BUDGET_SECONDS = 2.0
@@ -56,6 +55,7 @@ class _Candidate:
     eligible: bool
     failed: bool
     reason: str
+    uncertain: bool = False
 
 
 class _Indeterminate(Exception):
@@ -168,7 +168,7 @@ def _snapshot_tree(receipt: dict[str, Any]) -> str | None:
 
 
 def _move_out_command(path: Path) -> str:
-    return f'mv -- {shlex.quote(path.as_posix())} "$(mktemp -d)"'
+    return f'mv -- {push_gate_display.shell_arg(path.as_posix())} "$(mktemp -d)"'
 
 
 class _Receipts:
@@ -245,10 +245,9 @@ class _Receipts:
                     )
                 )
         if ignored:
-            print(
+            push_gate_display.diagnostic(
                 f"push gate: ignoring malformed receipt in a non-run directory {str(self.root / first_ignored)!r} "
                 f"({ignored} entr{'y' if ignored == 1 else 'ies'}).",
-                file=sys.stderr,
             )
         if len(named) > _RECEIPT_LIMIT:
             try:
@@ -259,7 +258,7 @@ class _Receipts:
                 f"The local receipt scan reached its limit of {_RECEIPT_LIMIT} in {str(self.root)!r}. "
                 f"Set verify_runs_keep in {str(self.target / config.CONFIG_REL_PATH)!r} to at most {_RECEIPT_LIMIT} "
                 f"and check that the verify archive {str(archive)!r} is writable and has space.",
-                remedy=f"brigade work verify push-gate prune --target {shlex.quote(str(self.target))}",
+                remedy=f"brigade work verify push-gate prune --target {push_gate_display.shell_arg(str(self.target))}",
             )
             raise self._cap_error
         entries.extend((name, second, self._load(name)) for name, second in sorted(named, reverse=True))
@@ -320,8 +319,7 @@ class _Receipts:
                 raise self._entry_problem(name, "has an invalid or mismatched start timestamp")
             if started > now:
                 raise self._entry_problem(name, "has a start timestamp in the future")
-            if receipt["status"] not in _UNFINISHED:
-                ordered.append((second, receipt))
+            ordered.append((second, receipt))
 
         for _, group in groupby(ordered, key=lambda entry: entry[0]):
             yield self._group(group)
@@ -335,6 +333,12 @@ class _Receipts:
 
 
 def _remedy(target: Path, policy: verify_gate._GatePolicy, receipt: dict[str, Any], *, fresh: bool = False) -> str:
+    def render(argv: list[str]) -> str:
+        return (
+            f"brigade work verify run --target {push_gate_display.shell_arg(str(target))} "
+            f"--argv-json {push_gate_display.shell_arg(json.dumps(argv))}"
+        )
+
     stamp = receipt.get("gating")
     plan = stamp.get("plan") if isinstance(stamp, dict) else None
     argv = plan.get("run_argv") if isinstance(plan, dict) else None
@@ -345,8 +349,8 @@ def _remedy(target: Path, policy: verify_gate._GatePolicy, receipt: dict[str, An
         and len(argv) > len(prefix)
         and all(isinstance(arg, str) and arg for arg in argv)
     ):
-        return verify_gate._render_verify_command(target, argv)
-    command = verify_gate._render_verify_command(target, verify_gate._suggested_argv(policy))
+        return render(argv)
+    command = render(verify_gate._suggested_argv(policy))
     if fresh:
         command += " --no-reuse"
     if policy.needs_arguments:
@@ -365,12 +369,18 @@ def _tree_verdict(
             candidates = (_classify_receipt(policy, prefix, tree, receipt, deadline) for receipt in group)
             ordered = _order_candidates(candidates) if prefix else list(candidates)
             for candidate in ordered:
+                if not prefix and candidate.receipt["status"] in _UNFINISHED:
+                    continue
+                if candidate.uncertain:
+                    raise _Indeterminate(
+                        "The most recent possible run of the required check has an inconclusive status."
+                    )
                 if candidate.eligible:
                     if failure is None:
                         return _Verdict("ok")
                     return replace(
                         failure,
-                        reason="The most recent run of the required check failed. An earlier run had passed.",
+                        reason=f"{failure.reason} An earlier run had passed.",
                         reason_code=_MASKED_PASS,
                     )
                 if failure is None:
@@ -381,7 +391,7 @@ def _tree_verdict(
                             policy,
                             candidate.receipt,
                             candidate.reason,
-                            "The selected run of the required check",
+                            "The most recent run of the required check",
                         )
                     rank = (candidate.ran_required, candidate.started_at or _EARLIEST)
                     if rejection is None or rank > rejection[0]:
@@ -413,20 +423,41 @@ def _classify_receipt(
         for command in receipt["commands"]
         if prefix and isinstance(command["argv"], list) and command["argv"][: len(prefix)] == prefix
     ]
-    checked = [command for command in required if not policy.needs_arguments or len(command["argv"]) > len(prefix)]
-    failed = _failed_required_check(receipt, checked)
-    if eligible and failed:
-        eligible, reason = False, "no_tests_passed"
-    if eligible and prefix and not required:
-        eligible, reason = False, "not_the_required_check"
-    return _Candidate(receipt, _receipt_started_at(receipt), bool(required), eligible, failed, reason)
+    statuses = {_command_status(receipt, command) for command in required}
+    failed = _failed_required_check(receipt, required)
+    planned = receipt.get("planned_commands")
+    uncertain = (
+        bool(prefix)
+        and not failed
+        and (
+            receipt["status"] not in {"completed", "failed", "rejected", "timed_out"}
+            or (isinstance(planned, list) and len(planned) > len(receipt["commands"]))
+            or any(command["argv"] is None for command in receipt["commands"])
+            or bool(statuses - {"completed", "rejected"})
+        )
+    )
+    if "timed_out" in statuses:
+        eligible, reason = False, "required_check_timed_out"
+    elif eligible and (failed or uncertain or "rejected" in statuses):
+        eligible, reason = False, "not_completed"
+    elif eligible and prefix:
+        eligible, reason = verify_gate._required_check_verdict(receipt, policy)
+    return _Candidate(
+        receipt,
+        _receipt_started_at(receipt),
+        bool(required),
+        eligible,
+        failed or (bool(required) and not eligible and not uncertain),
+        reason,
+        uncertain,
+    )
 
 
 def _order_candidates(candidates: Iterator[_Candidate]) -> list[_Candidate]:
     """Order one second of runs without using run ID suffixes to break a pass/failure tie."""
     group = list(candidates)
     passes = {item.started_at for item in group if item.eligible}
-    failures = {item.started_at for item in group if item.failed}
+    failures = {item.started_at for item in group if item.failed or item.uncertain}
     if passes and failures and (None in passes or None in failures or passes & failures):
         raise _Indeterminate(
             "The push check could not order a pass and failure in the same second. "
@@ -435,19 +466,20 @@ def _order_candidates(candidates: Iterator[_Candidate]) -> list[_Candidate]:
     return sorted(group, key=lambda item: item.started_at or _EARLIEST, reverse=True)
 
 
+def _command_status(receipt: dict[str, Any], command: dict[str, Any]) -> str:
+    status: str | None = command.get("status")
+    return receipt["status"] if status is None else status
+
+
 def _failed_required_check(receipt: dict[str, Any], commands: list[dict[str, Any]]) -> bool:
     """Recognize required command failure, timeout, or recorded test failures and errors."""
     for command in commands:
         outcomes = command.get("test_outcomes")
-        status = command.get("status")
-        if status is None:
-            status = receipt.get("status")  # Older receipts may only have the overall status.
+        status = _command_status(receipt, command)
         if isinstance(outcomes, dict):
             for count in (outcomes.get("failed"), outcomes.get("errors")):
                 if type(count) is int and count > 0:
                     return True
-            if outcomes.get("no_tests_ran") is True and status in {"failed", "timed_out"}:
-                continue
         if status in ("failed", "timed_out"):
             return True
     return False
@@ -461,6 +493,8 @@ def _rejected(
     run_label: str,
 ) -> _Verdict:
     explanation, _ = verify_gate._plan_guidance(receipt, reason)
+    if reason == "required_check_timed_out":
+        explanation = "The last run timed out."
     explanation = explanation or f"The last run has an ineligible verdict ({reason.replace('_', ' ')})."
     if explanation.startswith("The last run"):
         explanation = run_label + explanation.removeprefix("The last run")
@@ -588,7 +622,7 @@ def push_check(*, target: Path, ref: str | None, json_output: bool) -> int:
         updates = branch_updates(_read_stdin(deadline)) if ref is None else []
         results = _check(target, updates, ref, deadline) if updates or ref is not None else []
     except ValueError as exc:
-        print(f"push-check: {exc}", file=sys.stderr)
+        push_gate_display.diagnostic(f"push-check: {exc}")
         return 2
     except (OSError, _Indeterminate) as exc:
         results = [_Verdict("indeterminate", str(exc)).public(ref)]
@@ -600,10 +634,12 @@ def push_check(*, target: Path, ref: str | None, json_output: bool) -> int:
             if result["status"] == "not_applicable":
                 continue
             name = result["ref"] or "push-check"
-            print(f"{name}: {result['status']}")
-            for key in ("reason", "remedy"):
-                if result[key]:
-                    print(result[key])
+            print(push_gate_display.terminal_text(f"{name}: {result['status']}"))
+            if result["reason"]:
+                print(push_gate_display.terminal_text(result["reason"]))
+            if result["remedy"]:
+                for line in result["remedy"].split("\n"):
+                    print(push_gate_display.terminal_text(line))
 
     statuses = {result["status"] for result in results}
     if statuses & {"missing_receipt", "rejected"}:

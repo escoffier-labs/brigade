@@ -1,1 +1,2 @@
 - Add opt-in enforcement to the Git push gate. Clones in enforce mode refuse branch updates with missing, rejected, or indeterminate verification receipts.
+- Treat newer timeouts of the required check as failures even when no tests were collected, and verify the installed hook before reporting enforcement as effective.

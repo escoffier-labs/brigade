@@ -897,13 +897,17 @@ def test_install_enforce_does_not_write_mode_when_unavailable(push_repo, monkeyp
         assert "does not support" in output.out
 
 
-def test_warn_mode_read_failure_is_advisory(push_repo, monkeypatch, capsys):
+@pytest.mark.parametrize("hook_v2", [False, True])
+def test_mode_read_failure_is_advisory(push_repo, monkeypatch, capsys, hook_v2):
     def fail(target):
-        raise OSError("fixture Git config failure")
+        raise OSError("fixture Git config failure \x1b[31m\nsecond line")
 
     monkeypatch.setattr(push_gate_hook, "_mode", fail)
-    assert push_gate_hook.run() == 0
-    assert "could not read brigade.pushGate" in capsys.readouterr().err
+    assert push_gate_hook.run(hook_v2=hook_v2) == 0
+    message, remedy = capsys.readouterr().err.splitlines()
+    assert "did not run for this push because Git could not read the configuration" in message
+    assert r"fixture Git config failure \x1b[31m\nsecond line" in message
+    assert remedy == "Fix the Git configuration, then check with brigade work verify push-gate status."
 
     from brigade.work_cmd.push_gate import _minimal_hook
 
@@ -912,7 +916,7 @@ def test_warn_mode_read_failure_is_advisory(push_repo, monkeypatch, capsys):
     hook.chmod(0o755)
     _bash_fixture(push_repo, monkeypatch, "git() { return 3; }\n")
     result = _run_gate_hook(push_repo, hook, "")
-    assert result.returncode == 0 and result.stderr.count("could not read brigade.pushGate") == 1
+    assert result.returncode == 0 and result.stderr.count("did not run for this push") == 1
 
 
 def test_retention_cap_warning_and_empty_report(push_repo, capsys):
@@ -1139,3 +1143,182 @@ def test_native_windows_timeout_status_probes_git_bash(tmp_path, monkeypatch):
 
     monkeypatch.setattr(push_gate.subprocess, "run", run)
     assert push_gate._timeout_state() == "usable"
+
+
+@pytest.mark.parametrize("variant", ["minimal", "full", "exit-first", "never-run", "suffix", "harmless-prefix"])
+def test_enforcement_status_requires_exact_hook(push_repo, monkeypatch, capsys, variant):
+    from brigade.work_cmd.push_gate import _guard_bytes, _minimal_hook
+
+    monkeypatch.setenv("PATH", _path_with_brigade())
+    hook = push_repo / ".git" / "hooks" / "pre-push"
+    shebang, body = _minimal_hook().split(b"\n", 1)
+    contents = {
+        "minimal": _minimal_hook(),
+        "full": _guard_bytes(),
+        "exit-first": shebang + b"\nexit 0\n" + body,
+        "never-run": shebang + b"\nif false; then\n" + body + b"fi\n",
+        "suffix": _minimal_hook() + b":\n",
+        "harmless-prefix": shebang + b"\n:\n" + body,
+    }[variant]
+    hook.write_bytes(contents)
+    hook.chmod(0o755)
+
+    assert _gate(push_repo, "install", "--mode", "enforce") == 0
+    notice = "Block present, hook not verified. Enforcement cannot be confirmed because the hook has other content."
+    verified = variant in {"minimal", "full"}
+    assert (notice in capsys.readouterr().out) is not verified
+    info = _status(push_repo, capsys)
+    assert info["current"] and info["wired"]
+    assert info["hook_verified"] is info["enforce_effective"] is verified
+    assert _gate(push_repo, "status") == 0
+    assert (notice in capsys.readouterr().out) is not verified
+    assert hook.read_bytes() == contents
+
+
+@pytest.mark.parametrize("mode", ["warn", "enforce"])
+def test_newer_timeout_with_empty_collection_in_real_push(push_repo, monkeypatch, capsys, mode):
+    base = _policy(push_repo)
+    _bare_remote(push_repo)
+    remote = Path(_git(push_repo, "remote", "get-url", "origin"))
+    _git(push_repo, "push", "origin", "main")
+    monkeypatch.setenv("PATH", _path_with_brigade())
+    assert _gate(push_repo, "install", "--mode", mode) == 0
+    capsys.readouterr()
+    (push_repo / "src.py").write_text("value = 2\n", encoding="utf-8")
+    tip = _commit(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree)
+    _receipt(push_repo, tree, second=2, status="failed", command_status="timed_out", passed=0)
+    push = subprocess.run(["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True, timeout=15)
+    assert (push.returncode != 0) is (mode == "enforce")
+    assert "refs/heads/main (rejected)" in push.stderr and "timed out. An earlier run had passed." in push.stderr
+    assert "brigade work verify run" in push.stderr
+    assert _git(remote, "rev-parse", "refs/heads/main") == (base if mode == "enforce" else tip)
+
+
+@pytest.mark.parametrize("mode", ["warn", "enforce"])
+def test_mode_read_error_allows_real_push(push_repo, monkeypatch, capsys, mode):
+    _policy(push_repo)
+    _bare_remote(push_repo)
+    monkeypatch.setenv("PATH", _path_with_brigade())
+    assert _gate(push_repo, "install", "--mode", mode) == 0
+    capsys.readouterr()
+    _bash_fixture(
+        push_repo,
+        monkeypatch,
+        "git() {\n"
+        '  if [[ "$1" == config ]]; then\n'
+        "    printf 'fixture Git configuration error \\033[31m\\n' >&2\n"
+        "    return 3\n"
+        "  fi\n"
+        '  command git "$@"\n'
+        "}\n",
+    )
+    push = subprocess.run(["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True, timeout=15)
+    assert push.returncode == 0, push.stderr
+    assert push.stderr.count("did not run for this push because Git could not read the configuration") == 1
+    assert "fixture" in push.stderr and "configuration" in push.stderr and "\x1b" not in push.stderr
+    assert "Fix the Git configuration, then check with brigade work verify push-gate status." in push.stderr
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows disallows ESC and newline in directory names")
+def test_enforce_remedy_moves_exact_directory_with_control_characters(push_repo, monkeypatch, capsys):
+    tip = _policy(push_repo)
+    receipt = _receipt(push_repo, _tree(push_repo))
+    stray = receipt.parent.with_name("bad \x1b[31m\n' receipt")
+    receipt.parent.rename(stray)
+    _git(push_repo, "config", "--local", "brigade.pushGate", "enforce")
+    monkeypatch.chdir(push_repo)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(_line(tip, "refs/heads/topic") + "\n"))
+    assert push_gate_hook.run(hook_v2=True) == 3
+    output = capsys.readouterr().err
+    assert "\x1b" not in output and r"\x1b" in output and r"\n" in output
+    remedy = next(line for line in output.splitlines() if line.startswith("mv -- "))
+    scratch = push_repo.parent / "moved"
+    scratch.mkdir()
+    monkeypatch.setenv("TMPDIR", str(scratch))
+    subprocess.run([_gate_bash(), "-c", remedy], cwd=push_repo, check=True)
+    assert not stray.exists()
+    (destination,) = scratch.iterdir()
+    assert (destination / stray.name / "receipt.json").is_file()
+    assert _single(push_repo, capsys)[1]["status"] == "missing_receipt"
+
+
+def test_hook_escapes_ref_plan_guidance_and_preserves_remedy(push_repo, monkeypatch, capsys):
+    from tests.test_verify_push import PREFIX, SELECTOR
+
+    tip = _policy(push_repo, coverage=True)
+    tree = _tree(push_repo)
+    filename = "tests/test_\x1b\x9b\x7f\u202e.py"
+    argv = [*PREFIX, SELECTOR, filename]
+    plan = {
+        "schema_version": 1,
+        "snapshot_tree": tree,
+        "base_commit": tip,
+        "mode": "selective",
+        "missing_files": [filename],
+        "required_files": [SELECTOR, filename],
+        "run_argv": argv,
+    }
+    _receipt(push_repo, tree, plan=plan)
+    _git(push_repo, "config", "--local", "brigade.pushGate", "enforce")
+    monkeypatch.chdir(push_repo)
+    ref = "refs/heads/topic\u202e"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(_line(tip, ref) + "\n"))
+    assert push_gate_hook.run(hook_v2=True) == 3
+    output = capsys.readouterr().err
+    assert r"refs/heads/topic\u202e" in output
+    assert r"test_\x1b\x9b\x7f\u202e.py" in output
+    assert all(char not in output for char in "\x1b\x9b\x7f\u202e")
+    remedy = next(line for line in output.splitlines() if line.startswith("brigade work verify run "))
+    assert json.loads(shlex.split(remedy)[-1]) == argv
+
+
+def test_status_surfaces_git_config_command_error(push_repo, monkeypatch, capsys):
+    from brigade.work_cmd import push_gate
+
+    git = push_gate._git
+
+    def fail_config(target, *args):
+        if args[0] == "config":
+            return subprocess.CompletedProcess(args, 1, "", "fixture Git error \x1b[31m\nextra detail")
+        return git(target, *args)
+
+    monkeypatch.setattr(push_gate, "_git", fail_config)
+    assert _gate(push_repo, "status") == 1
+    assert capsys.readouterr().err == (
+        r"push gate: Git could not read the configuration: fixture Git error \x1b[31m\nextra detail" + "\n"
+    )
+
+
+def test_bash_argument_rendering_preserves_control_bytes(push_repo):
+    from brigade.work_cmd.push_gate_display import shell_arg
+
+    raw = "folder \x1b\n' \x9b\u202e"
+    quoted = shell_arg(raw)
+    assert all(char not in quoted for char in "\x1b\n\x9b\u202e")
+    result = subprocess.run(
+        [_gate_bash(), "-c", f"printf '%s' {quoted}"], cwd=push_repo, capture_output=True, check=True
+    )
+    assert result.stdout.decode("utf-8") == raw
+
+
+def test_report_escapes_observation_labels(push_repo, capsys):
+    from brigade.work_cmd import push_gate_log
+
+    log = push_gate_log.log_path(push_repo / ".git")
+    push_gate_log.append(
+        log,
+        [
+            {
+                "schema": push_gate_log.SCHEMA,
+                "time": "2026-01-01T00:00:00+00:00",
+                "result": "bad\x1b\u202e",
+                "would_block": False,
+                "duration_ms": 1,
+            }
+        ],
+    )
+    assert _gate(push_repo, "report") == 0
+    output = capsys.readouterr().out
+    assert r"bad\x1b\u202e=1" in output and "\x1b" not in output and "\u202e" not in output
