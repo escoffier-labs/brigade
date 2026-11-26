@@ -1,0 +1,1 @@
+- Report a projection plan error when a directory walk receives an empty or relative parent path.
