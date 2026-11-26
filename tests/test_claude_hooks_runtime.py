@@ -4179,3 +4179,96 @@ def test_claude_unclassified_capture(target, monkeypatch, mode):
     assert result is None
     (record,) = observed_checks.read_checks(target)[0]
     assert (record.tool, record.status, record.exit_code) == ("unclassified", "unknown", None)
+
+
+@pytest.mark.parametrize(
+    "event, interrupted",
+    [("PostToolUse", False), ("PostToolUseFailure", False), ("PostToolUseFailure", True)],
+)
+def test_stop_keeps_own_incomplete_bash_write_after_later_foreign_write(tmp_path, monkeypatch, event, interrupted):
+    target = _git_wired_claude(tmp_path)
+    (target / "earlier.py").write_text("value = 0\n")
+    subprocess.run(["git", "add", "earlier.py"], cwd=target, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "fixture"], cwd=target, check=True, capture_output=True)
+    session = "own-write"
+    monkeypatch.setattr(runtime, "_run_brief", lambda _target: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session))
+
+    def edit(name, session_id):
+        path = target / name
+        path.write_text("value = 1\n")
+        runtime.handle_payload(
+            "PostToolUse",
+            _payload(
+                target, "PostToolUse", session_id=session_id, tool_name="Write", tool_input={"file_path": str(path)}
+            ),
+        )
+
+    edit("earlier.py", session)
+    tree = localio.tree_fingerprint(target)
+    assert tree is not None
+    before = _write_session_receipt(target, session, tree_fingerprint=tree)
+    command = "touch own.py; " + "cd a && " * 500 + ("false" if event == "PostToolUseFailure" else "true")
+    pre = _payload(target, "PreToolUse", session_id=session, tool_name="Bash", tool_input={"command": command})
+    assert runtime.handle_payload("PreToolUse", pre) is None
+    (target / "own.py").touch()
+    runtime.handle_payload(event, {**pre, "hook_event_name": event, "is_interrupt": interrupted})
+    state = runtime.read_session_state(target, session)
+    assert state and state["write_observed"]
+    stamp = state["last_write_at"]
+    assert stamp > before["last_write_at"]
+    assert stamp == state["last_attributed_write_at"] == state["last_verification_write_at"]
+    assert "pending_bash_fingerprint" not in state and "pending_bash_started_at" not in state
+
+    edit("other.py", "other-session")
+    assert runtime._foreign_write_since(target, session, datetime.fromisoformat(stamp))
+    result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session, stop_hook_active=False))
+    assert result and result["decision"] == "block"
+
+
+@pytest.mark.parametrize("mode", ["strict", "observe", "off"])
+@pytest.mark.parametrize("case", ["surrogate", "null", "long-component", "attribution", "known-verifier"])
+def test_bash_pretooluse_unreadable_command_is_denied_only_in_strict(target, monkeypatch, mode, case):
+    monkeypatch.setattr(runtime.work_mode, "resolve_mode", lambda _target: mode)
+    commands = {
+        "surrogate": "pytest /\ud800",
+        "null": "echo a\x00b",
+        "long-component": "echo " + shlex.quote(str(target / ("x" * 300))),
+        "attribution": "echo done",
+        "known-verifier": "pytest -q",
+    }
+    if case in {"attribution", "known-verifier"}:
+
+        def unavailable(*_args, **_kwargs):
+            raise RuntimeError("fixture attribution error")
+
+        monkeypatch.setattr(runtime.write_attribution, "bash_scopes", unavailable)
+    event = "PreToolUse"
+    result = runtime.handle_payload(
+        event, _payload(target, event, tool_name="Bash", tool_input={"command": commands[case]})
+    )
+    if mode != "strict":
+        assert result is None
+        return
+    state = runtime.read_session_state(target, "session-1")
+    assert state is None or not state.get("write_observed")
+    output = result["hookSpecificOutput"]
+    assert output["permissionDecision"] == "deny"
+    expected = (
+        "The hook recognized a verification command but could not read it completely. "
+        "Run the verification through `brigade work verify run`. "
+        if case in {"surrogate", "known-verifier"}
+        else "The hook could not read this command. "
+    )
+    assert output["permissionDecisionReason"] == (
+        expected + "Split the command, or move the long content into a file and run the command using that file."
+    )
+
+
+def test_bash_hook_transport_denies_unreadable_verifier(target, capsys):
+    event = "PreToolUse"
+    payload = _payload(target, event, tool_name="Bash", tool_input={"command": "pytest /\ud800"})
+    assert runtime.hook_run(event=event, package=runtime.PACKAGE_REF, stdin_text=json.dumps(payload)) == 0
+    output = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+    assert output["permissionDecision"] == "deny"
+    assert "brigade work verify run" in output["permissionDecisionReason"]

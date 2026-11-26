@@ -89,9 +89,10 @@ def _on_event(
     tool_input = payload.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
     verdict = rt._recognize(command)
-    if not isinstance(command, str) or verdict is rt.Recognition.NO:
+    budget = rt.EVENT_BUDGET.get()
+    unclassified = verdict is rt.Recognition.UNDECIDED or (budget is not None and budget.unreadable)
+    if not isinstance(command, str) or (verdict is rt.Recognition.NO and not unclassified):
         return
-    unclassified = verdict is rt.Recognition.UNDECIDED
     status, code = claude_status(event, payload)
     duration = payload.get("duration_ms")
     duration = duration if type(duration) is int and duration >= 0 else None

@@ -7,7 +7,7 @@ from typing import Any, Mapping
 
 from . import agent_identity, observed_checks, work_mode
 from .claude_hooks import runtime, verification_mode
-from .claude_hooks.command_tokens import command_event, event_wired_target as resolve_wired_target
+from .claude_hooks.command_tokens import EVENT_BUDGET, command_event, event_wired_target as resolve_wired_target
 
 CODEX_HOOK_CONTEXT = "codex-observe"
 CODEX_HOOK_COMMAND = "brigade work presence-hook --harness codex --stdin --context codex-observe"
@@ -73,7 +73,8 @@ def _capture(harness: str, payload: dict[str, Any], target: Path | None, pin: Pa
         verdict = runtime._recognize(command)
         if not isinstance(command, str) or verdict is runtime.Recognition.NO:
             return
-        unclassified = verdict is runtime.Recognition.UNDECIDED
+        budget = EVENT_BUDGET.get()
+        unclassified = verdict is runtime.Recognition.UNDECIDED or (budget is not None and budget.unreadable)
         identity = codex_identity(payload)
         modes = (
             [(target, work_mode.resolve_mode(target))]

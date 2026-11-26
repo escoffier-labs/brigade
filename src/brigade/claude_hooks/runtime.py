@@ -47,6 +47,7 @@ from .command_tokens import (
     RecognitionLimit,
     TokenTail,
     TokenView,
+    UnreadableCommand,
     charge_event,
     command_event,
     command_step_limit,
@@ -698,11 +699,14 @@ def effective_hook_target(
     work to that wired workspace and no-ops everywhere else.
     """
     derived = wired_target_from_payload(payload, attribute_writes=attribute_writes)
+    return _pinned_hook_target(derived, payload.get("cwd"), pin)
+
+
+def _pinned_hook_target(derived: Path | None, raw_cwd: object, pin: Path | None) -> Path | None:
     resolved_pin = _resolve_pin(pin)
     if resolved_pin is not None:
         if derived is not None and _path_is_within(derived, resolved_pin):
             return None if is_operator_home(derived) else derived
-        raw_cwd = payload.get("cwd")
         if isinstance(raw_cwd, str) and raw_cwd.strip():
             cwd = resolved_path(Path(raw_cwd))
             if cwd is not None and _path_is_within(cwd, resolved_pin) and not is_operator_home(resolved_pin):
@@ -1361,9 +1365,13 @@ def _recognize(command: object, budget: RecognitionBudget | None = None) -> Reco
     with budget.in_phase("classification"):
         if command not in budget.verdicts:
             try:
+                budget.charge(len(command))
+                budget.unreadable |= bool(re.search(r"[\x00\ud800-\udfff]", command))
                 yes = _is_raw_verification_text(command, depth=0, budget=budget)
-                budget.verdicts[command] = Recognition.YES if yes else Recognition.NO
-            except RecognitionLimit:
+                budget.verdicts[command] = (
+                    Recognition.YES if yes else Recognition.UNDECIDED if budget.unreadable else Recognition.NO
+                )
+            except (RecognitionLimit, UnreadableCommand):
                 budget.verdicts[command] = Recognition.UNDECIDED
         verdict = budget.verdicts[command]
     if active is None:
@@ -2086,19 +2094,44 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
         return _handle_payload(event, payload, pin=pin)
     with command_event() as budget:
         command = _as_tool_input(payload.get("tool_input")).get("command")
-        verdict = _recognize(command)
-        with budget.in_phase("attribution"):
-            try:
+        verdict = Recognition.UNDECIDED
+        try:
+            verdict = _recognize(command)
+            with budget.in_phase("attribution"):
                 return _handle_payload(event, payload, pin=pin)
-            except RecognitionLimit:
-                target = budget.target or _bash_fallback_target(payload, pin)
-                if event != "PreToolUse" or not payload.get("session_id"):
-                    return None
-                if verdict is Recognition.YES and target is not None and work_mode.is_strict(target):
-                    return _bash_permission(
-                        "Split the command or run the verification through `brigade work verify run`."
-                    )
-                return _undecided_pretooluse(target, command) if verdict is Recognition.UNDECIDED else None
+        except anchored_io.SessionIntegrityError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - strict returns a permission decision on analysis errors
+            if event != "PreToolUse" and not isinstance(exc, (RecognitionLimit, UnreadableCommand)):
+                raise
+            target = budget.target or _bash_fallback_target(payload, pin)
+            if event != "PreToolUse":
+                if target is not None:
+                    budget.attribution_incomplete = True
+                    budget.unreadable |= isinstance(exc, UnreadableCommand)
+                    return _handle_event(event, payload, pin=pin, target_override=target)
+                return None
+            return _bash_analysis_refusal(target, verdict, command, unreadable=not isinstance(exc, RecognitionLimit))
+
+
+_BASH_FILE_ADVICE = "Split the command, or move the long content into a file and run the command using that file."
+
+
+def _bash_analysis_refusal(
+    target: Path | None, verdict: Recognition, command: object, *, unreadable: bool
+) -> dict[str, Any] | None:
+    if target is None or not work_mode.is_strict(target):
+        return None
+    if verdict is Recognition.YES:
+        if unreadable:
+            return _bash_permission(
+                "The hook recognized a verification command but could not read it completely. "
+                f"Run the verification through `brigade work verify run`. {_BASH_FILE_ADVICE}"
+            )
+        return _bash_permission("Split the command or run the verification through `brigade work verify run`.")
+    if unreadable:
+        return _bash_permission(f"The hook could not read this command. {_BASH_FILE_ADVICE}")
+    return _undecided_pretooluse(target, command) if verdict is Recognition.UNDECIDED else None
 
 
 def _bash_fallback_target(payload: dict[str, Any], pin: Path | None) -> Path | None:
@@ -2106,9 +2139,10 @@ def _bash_fallback_target(payload: dict[str, Any], pin: Path | None) -> Path | N
     cwd = payload.get("cwd")
     context = EVENT_BUDGET.set(None)
     try:
-        if budget is not None and isinstance(cwd, str) and (cwd, "claude") not in budget.wired:
-            budget.wired[cwd, "claude"] = resolve_wired_target(cwd)
-        return effective_hook_target({"cwd": cwd}, pin=pin)
+        derived = resolve_wired_target(cwd)
+        if budget is not None and isinstance(cwd, str):
+            budget.wired[cwd, "claude"] = derived
+        return _pinned_hook_target(derived, cwd, pin)
     finally:
         EVENT_BUDGET.reset(context)
 
@@ -2131,10 +2165,7 @@ def _undecided_pretooluse(target: Path | None, command: object) -> dict[str, Any
         if isinstance(command, str) and len(command) > MAX_COMMAND_CHARS
         else f"{command_step_limit():,}-step"
     )
-    return _bash_permission(
-        f"This command exceeds the {limit} classification limit. "
-        "Split the command, or move the long content into a file and run the command using that file."
-    )
+    return _bash_permission(f"This command exceeds the {limit} classification limit. {_BASH_FILE_ADVICE}")
 
 
 def _handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None) -> dict[str, Any] | None:
@@ -2162,7 +2193,7 @@ def _handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None) ->
         # S24: card reads and the Stop capture, within what is left of the budget.
         remaining = _hook_timeout_seconds() - (_monotonic() - started)
         hub_recall.after_event(event, payload, lambda: effective_hook_target(payload, pin=pin), budget=remaining)
-    except RecognitionLimit:
+    except (RecognitionLimit, UnreadableCommand):
         # Advisory work cannot replace the permission decision already made.
         pass
     return result
@@ -2272,17 +2303,17 @@ def _handle_event(
         tool_input: dict[str, Any] = raw_tool_input if isinstance(raw_tool_input, dict) else {}
         command = tool_input.get("command")
         budget = EVENT_BUDGET.get()
-        if budget is not None:
-            budget.target = target
         baseline = event_fingerprint(target)
         state["pending_bash_fingerprint"] = baseline or _UNAVAILABLE_FINGERPRINT
         state["pending_bash_started_at"] = localio.utc_now_iso()
         _write_session_state_preserving_latch(target, session_id, state, log_target=target)
         recognition = _recognize(command)
+        if recognition is Recognition.UNDECIDED or (budget is not None and budget.unreadable):
+            return _bash_analysis_refusal(
+                target, recognition, command, unreadable=budget is not None and budget.unreadable
+            )
         if recognition is Recognition.NO:
             return None
-        if recognition is Recognition.UNDECIDED:
-            return _undecided_pretooluse(target, command)
         if not verification_mode.verification_enforced(command, payload.get("cwd"), target):
             return None
         state["verify_denied_count"] = int(state.get("verify_denied_count") or 0) + 1
@@ -2329,7 +2360,9 @@ def _handle_event(
             }
         }
 
-    if event == "PostToolUse":
+    budget = EVENT_BUDGET.get()
+    incomplete = budget is not None and budget.attribution_incomplete
+    if event == "PostToolUse" or (event == "PostToolUseFailure" and incomplete):
         tool_name = payload.get("tool_name")
         raw_post_tool_input = payload.get("tool_input")
         post_tool_input: dict[str, Any] = raw_post_tool_input if isinstance(raw_post_tool_input, dict) else {}
@@ -2347,8 +2380,6 @@ def _handle_event(
                     target, session_id, state, log_target=target, patch_fields=("read_files",)
                 )
             return None
-        budget = EVENT_BUDGET.get()
-        incomplete = budget is not None and budget.attribution_incomplete
         wrote = tool_name in _WRITE_TOOLS or (
             tool_name == "Bash"
             and (incomplete or write_attribution.touches_worktree(target, command, cwd=payload.get("cwd")))
@@ -2396,7 +2427,7 @@ def _handle_event(
             _write_session_state_preserving_latch(
                 target, session_id, state, log_target=target, capture_artifact_id=capture_artifact_id
             )
-            if presence_target is not None:
+            if presence_target is not None and event == "PostToolUse":
                 presence.emit_presence("PostToolUse", presence_target, session_id)
         elif state.get("pending_bash_fingerprint") is not None:
             state.pop("pending_bash_fingerprint", None)
@@ -2405,11 +2436,6 @@ def _handle_event(
         return None
 
     if event == "PostToolUseFailure":
-        budget = EVENT_BUDGET.get()
-        if budget is not None and budget.attribution_incomplete:
-            state.update(write_observed=True, last_verification_write_at=localio.utc_now_iso())
-            _write_session_state_preserving_latch(target, session_id, state, log_target=target)
-            return None
         return check_events.failure_followup(payload, target, session_id, state)
 
     if event == "Stop":
@@ -2718,7 +2744,18 @@ def _hook_run_body_unchecked(
     """
     pin = _resolve_pin(pin_target)
     session_id = _session_id_from_payload(payload)
-    log_target = _resolve_log_target(payload, pin=pin)
+    log_probe_failed = False
+    try:
+        log_target = _resolve_log_target(payload, pin=pin)
+    except anchored_io.SessionIntegrityError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - command-derived target errors must reach the Bash boundary
+        post_path_error = event in {"PostToolUse", "PostToolUseFailure"} and isinstance(exc, UnreadableCommand)
+        if payload.get("tool_name") != "Bash" or not (event == "PreToolUse" or post_path_error):
+            raise
+        log_probe_failed = True
+        log_target = _bash_fallback_target(payload, pin)
+
     latched = False
     announce = False
     if log_target is not None:
@@ -2750,7 +2787,15 @@ def _hook_run_body_unchecked(
             "session_id": session_id,
         }
 
-    result = _isolated_handle_payload(event, payload, pin=pin)
+    if log_probe_failed and event == "PreToolUse":
+        command = _as_tool_input(payload.get("tool_input")).get("command")
+        try:
+            verdict = _recognize(command)
+        except Exception:  # noqa: BLE001 - fall back to unreadable-command refusal
+            verdict = Recognition.UNDECIDED
+        result = _bash_analysis_refusal(log_target, verdict, command, unreadable=True)
+    else:
+        result = _isolated_handle_payload(event, payload, pin=pin)
     result, claim_path = _strip_claim(result)
     if log_target is not None:
         _clear_hook_timeouts(log_target, session_id)

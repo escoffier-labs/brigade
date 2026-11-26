@@ -10,6 +10,7 @@ from .command_tokens import (
     MAX_COMMAND_CHARS,
     MAX_OBSERVED_ROOTS,
     RecognitionLimit,
+    UnreadableCommand,
     event_wired_target as resolve_wired_target,
 )
 
@@ -266,8 +267,9 @@ def handle_event(event: str, payload: dict[str, Any], *, pin: Path | None) -> di
             else primary
         )
         scopes = bash_scopes(command, cwd)
-    except RecognitionLimit:
+    except (RecognitionLimit, UnreadableCommand) as exc:
         budget.attribution_incomplete = True
+        budget.unreadable |= isinstance(exc, UnreadableCommand)
         primary = rt._bash_fallback_target(payload, pin)
         if primary is None:
             return None
@@ -284,6 +286,7 @@ def handle_event(event: str, payload: dict[str, Any], *, pin: Path | None) -> di
             state = rt.read_session_state(target, str(payload.get("session_id") or ""))
             if not state or not state.get("pending_bash_fingerprint"):
                 continue
+        budget.target = target
         with budget.in_phase("followup"):
             current = rt._handle_event(event, payload, pin=pin, target_override=target)
         if current is not None:

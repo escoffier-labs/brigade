@@ -468,3 +468,26 @@ def test_codex_bash_event_work_bound(target, monkeypatch, shape):
             assert elapsed < _HOOK_TIME_BACKSTOP_SECONDS
         steps.append(_assert_hook_steps(command, budgets, shape=shape).steps)
     _assert_hook_scaling(*steps)
+
+
+@pytest.mark.parametrize("mode", ["strict", "observe", "off"])
+@pytest.mark.parametrize("case", ["surrogate", "null", "long-component", "attribution"])
+def test_codex_observation_does_not_classify_unreadable_commands(target, monkeypatch, capsys, mode, case):
+    from brigade.claude_hooks import verification_mode
+
+    _set_mode(target, mode, capsys)
+    if case == "attribution":
+
+        def unavailable(*_args, **_kwargs):
+            raise RuntimeError("fixture attribution error")
+
+        monkeypatch.setattr(verification_mode, "governing_modes", unavailable)
+    command = {
+        "surrogate": "pytest /\ud800",
+        "null": "echo a\x00b",
+        "long-component": "cd ./" + "x" * 300 + " && pytest",
+        "attribution": "pytest -q",
+    }[case]
+    assert run(monkeypatch, "codex", payload(target, "codex", tool_input={"command": command})) == 0
+    assert capsys.readouterr() == ("{}\n", "")
+    assert all(record.tool == "unclassified" for record in observed_checks.read_checks(target)[0])

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import errno
 import os
+import stat
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -24,6 +26,10 @@ class RecognitionLimit(Exception):
     """Stop recognition when the command exceeds its work budget."""
 
 
+class UnreadableCommand(Exception):
+    """A shell command or one of its paths cannot be read."""
+
+
 class Recognition(Enum):
     NO = auto()
     YES = auto()
@@ -37,6 +43,7 @@ class RecognitionBudget:
         self.stopped: set[str] = set()
         self.phase = "classification"
         self.attribution_incomplete = False
+        self.unreadable = False
         self.verdicts: dict[str, Recognition] = {}
         self.paths: dict[tuple[Path, str, bool], Path] = {}
         self.wired: dict[tuple[str, str | None], Path | None] = {}
@@ -128,13 +135,28 @@ def command_event() -> Iterator[RecognitionBudget]:
 def event_wired_target(cwd: object, *, harness: str | None = "claude") -> Path | None:
     budget = EVENT_BUDGET.get()
     if budget is None or not isinstance(cwd, str):
-        return resolve_wired_target(cwd, harness=harness)
+        try:
+            return resolve_wired_target(cwd, harness=harness)
+        except ValueError as exc:
+            raise UnreadableCommand from exc
     key = cwd, harness
     if key not in budget.wired:
         # The resolver may visit every ancestor, with a path lookup at each.
         budget.charge_path(32 + len(cwd) * (1 + len(Path(cwd).parts)))
-        budget.wired[key] = resolve_wired_target(cwd, harness=harness)
+        try:
+            budget.wired[key] = resolve_wired_target(cwd, harness=harness)
+        except ValueError as exc:
+            raise UnreadableCommand from exc
     return budget.wired[key]
+
+
+def _path_status(path: Path) -> os.stat_result | None:
+    try:
+        return path.lstat()
+    except OSError as exc:
+        if exc.errno == errno.ENAMETOOLONG or getattr(exc, "winerror", None) == 206:
+            raise UnreadableCommand from exc
+        return None
 
 
 def resolve_command_path(raw: str, cwd: Path, *, expand_vars: bool = True) -> Path:
@@ -142,19 +164,19 @@ def resolve_command_path(raw: str, cwd: Path, *, expand_vars: bool = True) -> Pa
     key = cwd, raw, expand_vars
     if budget is not None and key in budget.paths:
         return budget.paths[key]
-    expanded = expand_user_path(Path(os.path.expandvars(raw) if expand_vars else raw))
-    if budget is not None:
-        budget.charge_path(16 + len(raw) + len(str(cwd)) + len(str(expanded)))
-    if not expanded.is_absolute() and len(expanded.parts) == 1 and expanded.name not in {"..", "."}:
+    try:
+        expanded = expand_user_path(Path(os.path.expandvars(raw) if expand_vars else raw))
+        if budget is not None:
+            budget.charge_path(16 + len(raw) + len(str(cwd)) + len(str(expanded)))
         candidate = cwd / expanded
-        try:
-            # cwd is already resolved by the hook or the previous cd. A plain
-            # child needs only its own symlink check.
-            result = candidate.resolve(strict=False) if budget is None or candidate.is_symlink() else candidate
-        except OSError:
-            result = candidate
-    else:
-        result = (cwd / expanded).resolve(strict=False)
+        status = _path_status(candidate)
+        simple_child = not expanded.is_absolute() and len(expanded.parts) == 1 and expanded.name != ".."
+        if budget is not None and simple_child and (status is None or not stat.S_ISLNK(status.st_mode)):
+            result = candidate  # The hook already resolved the parent.
+        else:
+            result = candidate.resolve(strict=False)
+    except ValueError as exc:
+        raise UnreadableCommand from exc
     if budget is not None:
         budget.paths[key] = result
     return result
