@@ -238,6 +238,7 @@ def test_code_sync_uses_graphtrail_bin_override(monkeypatch, tmp_path):
 
     monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(override))
     monkeypatch.setattr(proc, "which", lambda _: pytest.fail("resolver should use BRIGADE_CODE_GRAPH_BIN first"))
+    monkeypatch.setattr(code_graph_background, "may_run_killable_foreground_sync", lambda: True)
     monkeypatch.setattr(proc, "run", lambda args, **_: calls.append(args) or proc.Result(0, "", ""))
 
     assert cli.main(["code", "sync", str(tmp_path)]) == 0
@@ -501,6 +502,7 @@ def test_proc_run_uses_argv_lists_not_shell(monkeypatch, tmp_path):
         return proc.Result(0, "", "")
 
     monkeypatch.setattr(context_cmd, "_graphtrail_bin", lambda: "/fake/graphtrail")
+    monkeypatch.setattr(code_graph_background, "may_run_killable_foreground_sync", lambda: True)
     monkeypatch.setattr(proc, "run", fake_run)
 
     assert cli.main(["code", "sync", str(tmp_path / "space dir")]) == 0
