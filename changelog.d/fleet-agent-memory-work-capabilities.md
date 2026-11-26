@@ -1,0 +1,1 @@
+- The fleet agent capability tables now show memory credentials, read and handoff paths, work visibility, and current cloud-agent limits.
