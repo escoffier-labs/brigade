@@ -83,11 +83,11 @@ func cmdImportSourceHarvest(args []string, out, errw io.Writer) int {
 			cancel()
 		}
 		waitErr := cmd.Wait()
-		if importErr != nil {
-			return importErr
-		}
 		if ctx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("timed out after %s", externalScannerTimeout)
+		}
+		if importErr != nil {
+			return importErr
 		}
 		if waitErr != nil {
 			msg := strings.TrimSpace(stderr.String())

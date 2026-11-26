@@ -39,7 +39,10 @@ exec 1>&-
 while [ ! -f "$FILES_CRAWL_GATE" ]; do sleep 0.01; done
 fi
 if [ -n "$FILES_CRAWL_WARN" ]; then printf '{"warnings":["fixture warning"]}\n' >&2; fi
+if [ "${path##*/}" = "001.txt" ]; then
 if [ -n "$FILES_CRAWL_TRUNCATED" ]; then printf '{"schema":'; exit 1; fi
+if [ -n "$FILES_CRAWL_SLOW_FRAGMENT" ]; then printf '{"schema":'; exec sleep 5; fi
+fi
 if [ -n "$FILES_CRAWL_BAD" ]; then printf 'invalid record\n'; fi
 if [ -z "$FILES_CRAWL_WARN" ]; then printf '{"path":"%s","records":1}\n' "$path" >&2; fi
 `
@@ -53,20 +56,50 @@ if [ -z "$FILES_CRAWL_WARN" ]; then printf '{"path":"%s","records":1}\n' "$path"
 func TestFilesCrawlRetriesTruncatedExport(t *testing.T) {
 	withTempHome(t)
 	filesExporter(t)
-	path := filepath.Join(t.TempDir(), "fixture.txt")
-	if err := os.WriteFile(path, []byte("fixture"), 0600); err != nil {
-		t.Fatal(err)
+	root := t.TempDir()
+	for _, name := range []string{"000.txt", "001.txt", "002.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
 	}
 	t.Setenv("FILES_CRAWL_TRUNCATED", "1")
-	var out, errw bytes.Buffer
-	if code := cmdCrawlFiles([]string{path, "--json"}, &out, &errw); code == 0 ||
-		!strings.Contains(errw.String(), "line 2: truncated final record") {
-		t.Fatalf("expected a truncation failure, got exit %d, stdout %s, stderr %s", code, &out, &errw)
+	for sweep, wantInserted := range []float64{2, 0} {
+		got := runJSON(t, "crawl", "files", root, "--json")
+		if got["complete"] != true || got["files_parsed"] != wantInserted ||
+			got["files_skipped"] != 2-wantInserted || got["inserted_items"] != wantInserted {
+			t.Fatalf("sweep %d did not finish around the truncated file: %v", sweep, got)
+		}
+		warnings, _ := got["warnings"].([]any)
+		if len(warnings) != 1 || !strings.Contains(fmt.Sprint(warnings[0]), "001.txt: line 2: truncated final record") {
+			t.Fatalf("sweep %d did not report retried truncation: %v", sweep, got)
+		}
 	}
 	t.Setenv("FILES_CRAWL_TRUNCATED", "")
-	got := runJSON(t, "crawl", "files", path, "--json")
+	got := runJSON(t, "crawl", "files", root, "--json")
 	if got["complete"] != true || got["files_parsed"] != float64(1) || got["inserted_items"] != float64(1) {
 		t.Fatalf("retry did not import the truncated file: %v", got)
+	}
+}
+
+func TestFilesCrawlTimeoutMidRecord(t *testing.T) {
+	withTempHome(t)
+	filesExporter(t)
+	root := t.TempDir()
+	for _, name := range []string{"000.txt", "001.txt"} {
+		if err := os.WriteFile(filepath.Join(root, name), []byte("fixture"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Setenv("FILES_CRAWL_SLOW_FRAGMENT", "1")
+	got := runJSON(t, "crawl", "files", root, "--budget", "500ms", "--json")
+	if got["complete"] != false || got["resume_cursor"] != filepath.Join(root, "000.txt") ||
+		got["inserted_items"] != float64(1) || strings.Contains(fmt.Sprint(got["warnings"]), "truncated final record") {
+		t.Fatalf("budget expiry lost the timeout result: %v", got)
+	}
+	t.Setenv("FILES_CRAWL_SLOW_FRAGMENT", "")
+	got = runJSON(t, "crawl", "files", root, "--json")
+	if got["complete"] != true || got["files_parsed"] != float64(1) {
+		t.Fatalf("resume after budget expiry: %v", got)
 	}
 }
 

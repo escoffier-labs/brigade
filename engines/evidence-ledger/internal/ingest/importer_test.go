@@ -63,6 +63,63 @@ func TestImportAdapterReaderFinalRecord(t *testing.T) {
 	}
 }
 
+func TestImportAdapterReaderFinalRecordWarnings(t *testing.T) {
+	oversized := strings.TrimSuffix(adapterRecord("reader-test", "item:1", strings.Repeat("x", sources.MaxLineBytes), "fixture.jsonl", 1), "\n")
+	for _, tc := range []struct{ name, input, warning string }{
+		{"oversized with newline", oversized + "\n", "line too long"},
+		{"oversized without newline", oversized, "line too long"},
+		{"complete JSON with invalid schema", `{"schema":"unsupported"}`, "unsupported schema"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := archive.Open(t.TempDir() + "/brigade-evidence.db")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if err := archive.Migrate(db); err != nil {
+				t.Fatal(err)
+			}
+			res, err := ImportAdapterReader(db, strings.NewReader(tc.input), "reader://fixture", "")
+			if err != nil || res.Status != "complete" || len(res.Warnings) != 1 ||
+				!strings.Contains(res.Warnings[0], tc.warning) {
+				t.Fatalf("expected a complete import with %q warning, got %+v, %v", tc.warning, res, err)
+			}
+		})
+	}
+}
+
+func TestImportAdapterReaderTruncationAfterBatch(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/brigade-evidence.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	var stream strings.Builder
+	for i := 0; i <= importBatchSize; i++ {
+		stream.WriteString(adapterRecord("reader-test", "item:"+strconv.Itoa(i), "record", "fixture.jsonl", i+1))
+	}
+	last := adapterRecord("reader-test", "item:last", "final record", "fixture.jsonl", importBatchSize+2)
+	res, err := ImportAdapterReader(db, strings.NewReader(stream.String()+last[:len(last)/2]), "reader://fixture", "")
+	if err == nil || res.Status != "partial" || res.Inserted != importBatchSize ||
+		!strings.Contains(strings.Join(res.Errors, " "), "truncated final record") {
+		t.Fatalf("expected partial import of one committed batch, got %+v, %v", res, err)
+	}
+	var count int
+	if err := db.QueryRow("select count(*) from items").Scan(&count); err != nil || count != importBatchSize {
+		t.Fatalf("items after rollback = %d, error = %v, want %d", count, err, importBatchSize)
+	}
+	res, err = ImportAdapterReader(db, strings.NewReader(stream.String()+last), "reader://fixture", "")
+	if err != nil || res.Status != "complete" || res.Inserted != 2 {
+		t.Fatalf("expected replay to insert only the last two records, got %+v, %v", res, err)
+	}
+	if err := db.QueryRow("select count(*) from items").Scan(&count); err != nil || count != importBatchSize+2 {
+		t.Fatalf("items after replay = %d, error = %v, want %d", count, err, importBatchSize+2)
+	}
+}
+
 func TestImportAdapterReaderIdempotent(t *testing.T) {
 	db, err := archive.Open(t.TempDir() + "/miseledger.db")
 	if err != nil {
