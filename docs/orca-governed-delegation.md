@@ -43,10 +43,33 @@ preflight if the executable, PATH, or roster changes before launch.
 The registry confirms command and flag availability. Brigade still validates
 the returned worker receipts against the existing wire contract.
 
+## Launch the workers
+
+After `open`, the coordinator may run the launch chains concurrently across
+tasks. Within each task, run `claim`, run the exact worker-start argv it prints,
+then report the full receipt and exit code to `accepted`. Keep each task's
+argv and receipt separate. Preserve the printed `--retry-request` so a lost
+reply can be recovered against the same Orca Run and Task.
+
+`claim` and `accepted` wait up to five seconds for the workspace run lock.
+If either returns `run-busy`, let the other chains continue and retry just
+that Brigade command with the same arguments. When retrying `accepted`, use
+the saved receipt and exit code. `claim` also waits up to ten seconds for
+the shared capacity lock. Retry the same claim on `capacity-lock` after
+contention clears. If a claim is refused, stop that chain before worker-start.
+On `capacity-denied`, retry only once capacity is available. Investigate other
+refusals through `status` and the recovery rules.
+
+Join the launch chains before closeout. Report every attempted start to
+`accepted` and acknowledge any definite start refusal. A refused claim has
+no worker-start receipt to report. An ambiguous start keeps its slot and
+follows the recovery procedure below. Once the ambiguous receipt has been
+reported, correlated siblings can close out while recovery continues.
+
 ## Observe and acknowledge
 
-After accepting all worker starts in the batch, the coordinator may run the
-closeout chains for different tasks concurrently. Within each task, follow
+After the launch chains have joined, the coordinator may run the closeout
+chains for different tasks concurrently. Within each task, follow
 the proof steps in order and use that task's own evidence files. Per-task
 verbs such as `observe`, `ack`, and `hold-resolve` may wait up to five
 seconds for the workspace run lock and return `run-busy` if it is still held.

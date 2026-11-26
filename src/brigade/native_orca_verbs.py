@@ -100,7 +100,7 @@ def claim(*, workspace: Path, run_id: str, task_id: str, orca_run: str, orca_tas
         capacity_lock=capacity.capacity_lock,
         governed_occupancy=lambda ws: capacity.governed_occupancy(HOST, ws),
         assess=lambda roster, seat, live: capacity.assess(HOST, roster, seat, live),
-        owned_run=owned_run,
+        owned_run=owned_task_run,
         load_roster=admission.load_roster,
         run_meta=lambda ws, directory: journal.run_meta(HOST, ws, directory),
         read_events=journal.read_events,

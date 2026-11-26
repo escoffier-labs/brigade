@@ -601,10 +601,22 @@ def _set_transcript_page(reply, messages, cursor):
     reply["cursor"] = cursor
 
 
-def test_observe_waits_for_the_workspace_run_lock(coordinator, monkeypatch):
+@pytest.mark.parametrize("verb", ["claim", "observe", "accepted"])
+def test_task_verb_waits_for_the_workspace_run_lock(coordinator, monkeypatch, verb):
     run_id = coordinator.open()
-    coordinator.accept(coordinator.start())
-    path = coordinator.payload("show", _fixture("worker-show-structured"))
+    if verb == "claim":
+        args = ("claim", run_id, "two", "--orca-run", RUN, "--orca-task", SECOND_TASK)
+        field, expected = "state", "claimed"
+    else:
+        start = coordinator.start()
+        if verb == "accepted":
+            args = ("accepted", run_id, "one", "--native-json", coordinator.payload("start", start), "--exit-code", 0)
+            field, expected = "dispatch_id", DISPATCH
+        else:
+            coordinator.accept(start)
+            path = coordinator.payload("show", _fixture("worker-show-structured"))
+            args = ("observe", run_id, "one", "--native-json", path)
+            field, expected = "reason", "result-transfer-missing"
     workspace = coordinator.workspace
     contended = Event()
     acquire = runguard._acquire_lock
@@ -619,30 +631,86 @@ def test_observe_waits_for_the_workspace_run_lock(coordinator, monkeypatch):
     monkeypatch.setattr(runguard, "_acquire_lock", signal_contention)
     with ThreadPoolExecutor(max_workers=1) as pool:
         with runguard.run_lock(workspace, run_dir=_run_dir(workspace, run_id)):
-            pending = pool.submit(coordinator.invoke, "observe", run_id, "one", "--native-json", path)
+            pending = pool.submit(coordinator.invoke, *args)
             assert contended.wait(timeout=5)
-        assert pending.result(timeout=10)["reason"] == "result-transfer-missing"
+        assert pending.result(timeout=10)[field] == expected
 
 
-def test_orca_1_4_271_concurrent_closeout(coordinator):
+@pytest.mark.parametrize("case", ["ready", "capacity", "ambiguous", "circuit"])
+def test_orca_1_4_271_concurrent_launch_and_closeout(coordinator, case):
     roster = coordinator.workspace / ".brigade" / "roster.toml"
-    roster.write_text(roster.read_text().replace(VERSION, "1.4.271"))
+    max_workers = 2 if case == "capacity" else 3
+    roster.write_text(roster.read_text().replace(VERSION, "1.4.271") + f"\n[limits]\nmax_workers = {max_workers}\n")
     tasks = ("one", "two", "three")
     coordinator.batch = _batch(coordinator.home, tasks)
     run_id = coordinator.open()
-    start_closeout = Barrier(len(tasks), timeout=10)
-    receipts = {}
+    start_launch = Barrier(len(tasks), timeout=10)
 
-    for index, task in enumerate(tasks, 1):
+    def invoke(task, verb, *args, error=None, allow_capacity_denied=False):
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "brigade",
+                "orca",
+                verb,
+                run_id,
+                task,
+                *map(str, args),
+                "--target",
+                str(coordinator.workspace),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+        if allow_capacity_denied and result.returncode == 2:
+            error = "capacity-denied"
+        if error is not None:
+            assert result.returncode == 2 and not result.stdout, result.stderr
+            assert f"[{error}]" in result.stderr
+            return None
+        assert result.returncode == 0 and not result.stderr, result.stderr
+        return json.loads(result.stdout)
+
+    def launch(item):
+        index, task = item
         orca_task = f"task_{index:012d}"
         dispatch = f"ctx_{index:012d}"
-        grant = coordinator.claim(task, orca_task)
+        start_launch.wait()
+        # The capacity race has no predetermined winner.
+        claim_args = ("--orca-run", RUN, "--orca-task", orca_task)
+        grant = invoke(task, "claim", *claim_args, allow_capacity_denied=case == "capacity")
+        if grant is None:
+            return task, "capacity-denied", None
+        assert grant["argv"][5:11] == ["--retry-request", grant["retry_request"], "--run", RUN, "--task", orca_task]
         start = _fixture("worker-start")
         start["result"].update(taskId=orca_task, dispatchId=dispatch)
         start["result"]["mutation"]["requestId"] = grant["retry_request"]
-        accepted = coordinator.invoke(
-            "accepted", run_id, task, "--native-json", coordinator.payload(f"{task}-start", start), "--exit-code", 0
+        exit_code = 0
+        error = None
+        if task == "one" and case == "ambiguous":
+            start["result"]["state"] = "outcome_unknown"
+            exit_code, error = 1, "start-unknown"
+        elif task == "one" and case == "circuit":
+            start = _fixture("task-not-startable")
+            start["error"]["data"].update(taskId=orca_task, retryOf=dispatch, failureCount=3)
+            exit_code = 1
+        accepted = invoke(
+            task,
+            "accepted",
+            "--native-json",
+            coordinator.payload(f"{task}-start", start),
+            "--exit-code",
+            exit_code,
+            error=error,
         )
+        if error:
+            return task, error, None
+        if exit_code:
+            assert accepted["reason"] == "circuit-broken"
+            return task, "circuit-broken", accepted["result_id"]
         assert accepted["observe_argv"] == (
             f"orca-ide orchestration worker-show --environment local --dispatch {dispatch} --json --full".split()
         )
@@ -662,38 +730,37 @@ def test_orca_1_4_271_concurrent_closeout(coordinator):
             "inbox": _fixture("worker-done"),
             "transcript": [_recovery_fixture(f"worker-read-page-{page}") for page in (1, 2)],
         }
-        receipts[task] = {
+        evidence = {
             name: coordinator.payload(
                 f"{task}-{name}", json.loads(json.dumps(payload).replace(TASK, orca_task).replace(DISPATCH, dispatch))
             )
             for name, payload in payloads.items()
         }
 
+        return task, "ready", evidence
+
+    with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
+        launched = list(pool.map(launch, enumerate(tasks, 1)))
+
+    expected = {"capacity": "capacity-denied", "ambiguous": "start-unknown", "circuit": "circuit-broken"}
+    assert sorted(state for _, state, _ in launched) == sorted(["ready", "ready", expected.get(case, "ready")])
+    assert coordinator.status()["capacity"]["live"] == max_workers
+    events = _events(coordinator.workspace, run_id)
+    claims = [event for event in events if event.event_type == "task.launch-claimed"]
+    assert sorted(event.payload["task_id"] for event in claims) == sorted(
+        task for task, state, _ in launched if state != "capacity-denied"
+    )
+    assert sum(event.event_type == "run.dispatch.requested" for event in events) == len(claims)
+    for task, state, result in launched:
+        if state == "circuit-broken":
+            assert invoke(task, "ack", "--result-id", result)["acknowledged"]
+            invoke(task, "claim", "--orca-run", RUN, "--orca-task", "task_000000000001", error="already-claimed")
+
+    receipts = {task: evidence for task, state, evidence in launched if state == "ready"}
+    start_closeout = Barrier(len(receipts), timeout=10)
     before = _events(coordinator.workspace, run_id)
 
     def closeout(task):
-        def invoke(verb, *args):
-            result = subprocess.run(
-                [
-                    sys.executable,
-                    "-m",
-                    "brigade",
-                    "orca",
-                    verb,
-                    run_id,
-                    task,
-                    *map(str, args),
-                    "--target",
-                    str(coordinator.workspace),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=20,
-                check=False,
-            )
-            assert result.returncode == 0, result.stderr
-            return json.loads(result.stdout)
-
         evidence = receipts[task]
         start_closeout.wait()
         proof = (
@@ -704,24 +771,24 @@ def test_orca_1_4_271_concurrent_closeout(coordinator):
             "--transcript-json",
             evidence["transcript"],
         )
-        observed = invoke("observe", *proof)
+        observed = invoke(task, "observe", *proof)
         assert observed["reason"] == "terminal-evidence-complete"
         assert observed["transcript_clipped"] is True
         result_id = observed["result_id"]
         assert isinstance(result_id, str) and result_id
-        assert invoke("ack", "--result-id", result_id)["acknowledged"]
-        assert invoke("observe", *proof)["result_id"] == result_id
+        assert invoke(task, "ack", "--result-id", result_id)["acknowledged"]
+        assert invoke(task, "observe", *proof)["result_id"] == result_id
 
-    with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
-        list(pool.map(closeout, tasks))
+    with ThreadPoolExecutor(max_workers=len(receipts)) as pool:
+        list(pool.map(closeout, receipts))
 
     after = _events(coordinator.workspace, run_id)
     assert after[: len(before)] == before
     closeout_events = after[len(before) :]
-    assert [event.event_type for event in closeout_events[::2]] == ["run.snapshot.checkpointed"] * (3 * len(tasks))
+    assert [event.event_type for event in closeout_events[::2]] == ["run.snapshot.checkpointed"] * (3 * len(receipts))
     task_events = closeout_events[1::2]
-    assert len(task_events) == 3 * len(tasks)
-    for task in tasks:
+    assert len(task_events) == 3 * len(receipts)
+    for task in receipts:
         assert [
             (event.event_type, event.payload.get("reason"))
             for event in task_events
@@ -731,13 +798,21 @@ def test_orca_1_4_271_concurrent_closeout(coordinator):
             ("task.observed", None),
             ("task.acknowledged", None),
         ]
-    finalized = coordinator.invoke("finalize", run_id)
-    assert finalized["status"] == "completed"
-    assert finalized["tasks"] == finalized["terminals"] == finalized["acknowledged"] == 3
     status = coordinator.status()
-    assert status["status"] == "completed"
-    assert status["capacity"]["live"] == 0
-    assert {row["task_id"] for row in status["tasks"] if row["terminal"] and row["acked"]} == set(tasks)
+    hold_count = int(case == "ambiguous")
+    assert status["capacity"]["live"] == hold_count
+    assert {row["task_id"] for row in status["tasks"] if row["holds_capacity"]} == (
+        {"one"} if case == "ambiguous" else set()
+    )
+    assert {row["task_id"] for row in status["tasks"] if row["correlated"]} == set(receipts)
+    assert {row["task_id"] for row in status["tasks"] if row["terminal"] and row["acked"]} == (
+        set(tasks) if case == "circuit" else set(receipts)
+    )
+    if case in {"ready", "circuit"}:
+        finalized = coordinator.invoke("finalize", run_id)
+        assert finalized["status"] == ("completed" if case == "ready" else "failed")
+        assert finalized["tasks"] == finalized["terminals"] == finalized["acknowledged"] == 3
+        assert coordinator.status()["capacity"]["live"] == 0
 
 
 @pytest.mark.parametrize(

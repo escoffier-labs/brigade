@@ -26,12 +26,22 @@ on the coordinator with the PATH you will use to launch. Proceed only on
 installed version, rerun readiness, and use a fresh enrollment for new work.
 Keep the original enrollment and retry keys for retained work.
 
-For a batch, complete the start and acceptance steps for all tasks first.
-Once all worker starts are accepted, the coordinator may run steps 5 and 6
-concurrently across tasks. Keep those steps in order within each task and
-save the native replies separately for each task. Per-task verbs such as
-`observe`, `ack`, and `hold-resolve` may wait up to five seconds for the
-workspace run lock and return `run-busy` if it is still held.
+After step 1, the coordinator may run steps 2 through 4 concurrently across
+tasks. Keep the steps in order within each task and save each task's argv and
+replies separately. Join the launch chains before starting steps 5 and 6.
+Report every attempted start to `accepted` and acknowledge definite start
+refusals before closeout. A refused claim ends before worker-start. A
+reported ambiguous start keeps its slot and follows the recovery rules
+while correlated siblings proceed to closeout. Steps 5 and 6 can also run
+concurrently across tasks, in order within each task.
+
+`claim`, `accepted`, `observe`, `ack`, and `hold-resolve` wait up to five
+seconds for the workspace run lock. On `run-busy`, let other chains continue
+and retry just the Brigade command with the same arguments. Replay
+`accepted` with the saved receipt and exit code. `claim` also waits up to
+ten seconds for the shared capacity lock. On `capacity-lock`, retry the same
+claim after contention clears. On `capacity-denied`, retry only once capacity
+is available. Use `status` and the recovery rules for other claim refusals.
 
 1. Enroll the batch: `brigade orca open <batch.json> --target <workspace>`. It prints a
    Brigade run and task identity and launches nothing. If it refuses with
