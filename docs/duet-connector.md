@@ -419,6 +419,14 @@ Setting `messaging_enabled` to `true` adds `inbox_list`, `inbox_ack`,
 `inbox_reply` and `message_send`, with existing recipient grants and send limits.
 Dispatch, fleet, event and skill tools are unavailable.
 
+The generic runtime also accepts `tool_grants`. With `messaging_enabled`
+set to `true`, this example keeps read and messaging tools available and denies
+`handoff_write`.
+
+```json
+"tool_grants": {"classes": ["read", "messaging"], "deny": ["handoff_write"]}
+```
+
 Use runtime schema `brigade.cloud-agent.runtime.v1` with hosted `paths` and
 `hub` sections as above. Set `hub.principal` to `agent:cloud-agent`. Use a
 separate state directory and hub principal credential. The default listener

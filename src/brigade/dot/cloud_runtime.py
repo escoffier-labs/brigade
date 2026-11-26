@@ -11,6 +11,7 @@ from .runtime_config import (
     _parse_hosted_paths,
     _parse_hub,
     _parse_notify,
+    _parse_tool_grants,
     _boolean,
     _absolute_path,
 )
@@ -21,7 +22,9 @@ CLOUD_AGENT_PRINCIPAL = "agent:cloud-agent"
 
 
 def parse_cloud_runtime(payload: object, *, planned_token: bool = False) -> Runtime:
-    root = _object(payload, {"schema", "auth", "paths", "hub"}, optional={"notify_command", "messaging_enabled"})
+    root = _object(
+        payload, {"schema", "auth", "paths", "hub"}, optional={"notify_command", "messaging_enabled", "tool_grants"}
+    )
     if root["schema"] != CLOUD_AGENT_RUNTIME_SCHEMA:
         raise _invalid()
     raw = root["auth"]
@@ -57,4 +60,5 @@ def parse_cloud_runtime(payload: object, *, planned_token: bool = False) -> Runt
         messaging_enabled=_boolean(root.get("messaging_enabled", False)),
         schema=CLOUD_AGENT_RUNTIME_SCHEMA,
         memory_push=False,
+        tool_grants=_parse_tool_grants(root),
     )
