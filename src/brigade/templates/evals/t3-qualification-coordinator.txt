@@ -10,7 +10,7 @@ the expected base. Call T3 tools yourself. Keep the raw replies in this
 directory. Edit only the evidence files named here. Wait for completion wakes
 and let the operator handle worker approvals.
 
-## Launch in one turn
+## Launch
 
 1. Use the exact orchestrator_capabilities reply for this parent thread.
    Call it if this thread has not already captured it. Otherwise copy its
@@ -34,28 +34,65 @@ and let the operator handle worker approvals.
 
        $mark delegate-start
 
-4. For each task ID in sorted order, substitute
-   TASK in the commands below. Check the run, task, seat and request identities
-   in the claim receipt. Call delegate_task with exactly the JSON object at
-   delegate_task in claim-TASK.json. Save the exact tool result to
-   delegate-TASK.json, then record acceptance.
+4. For each task ID in sorted order, substitute that task ID for TASK and
+   complete these steps in order.
 
-       $claim TASK > claim-TASK.json
-       $accepted TASK --native-json delegate-TASK.json > accepted-TASK.json
+   a. Claim the task and check the run, task, seat and request identities in
+      the claim receipt.
 
-5. Mark the last accepted delegate reply and end the turn.
+          $claim TASK > claim-TASK.json
+
+   b. Call delegate_task with exactly the JSON object at delegate_task in
+      claim-TASK.json. Save the exact tool reply to delegate-TASK.json.
+
+   c. Mark the reply immediately after saving it. If that task's wake arrives
+      while saving the reply, finish saving it and writing this mark before
+      handling the wake.
+
+          $mark delegate-reply-TASK
+
+   d. Record acceptance.
+
+          $accepted TASK --native-json delegate-TASK.json > accepted-TASK.json
+
+5. After recording all acceptances, mark launch complete if
+   delegate-replies.json is missing.
 
        $mark delegate-replies
 
+   Mark launch complete before finalizing, even if all tasks are already
+   acknowledged. Once delegate-replies.json exists, finalize using the
+   commands in the wake section if all tasks are acknowledged. Otherwise
+   end the turn and wait for the remaining wakes.
+
+### Resume launch
+
+On resuming, continue at the first unfinished sub-step for each task. A
+sub-step is finished when its output file exists. Check claim-TASK.json,
+delegate-TASK.json, delegate-reply-TASK.json, and accepted-TASK.json in
+that order. Never re-run a sub-step whose output file exists. Apply the
+same rule to single marks. Skip a mark only when its own file already
+exists. Check opened.json for opened, delegate-start.json for delegate-start,
+delegate-replies.json for delegate-replies, and wake-TASK.json for wake-TASK.
+
 ## Each completion wake
 
+Wakes can arrive while the launch turn is still running. Handle each wake
+after saving that task's delegate reply and its per-task reply mark, even
+when other tasks have yet to launch. When returning to launch, continue
+at the first unfinished sub-step for each task. Use the saved output files
+to skip completed sub-steps and marks as described in the launch section.
+
 1. Check the waking task ID against its saved delegate reply. If it was already
-   acknowledged, check the task and run IDs, then end the turn. For a new wake,
-   record its clock mark immediately. Run only the command for that task:
+   acknowledged, check the task and run IDs. Resume launch if needed or end
+   the turn. For a new wake, skip the wake mark if wake-TASK.json already
+   exists. Otherwise record the mark immediately.
+   Substitute the waking task ID for TASK and run:
 
-       $wake_marks
+       $mark wake-TASK
 
-2. Call task_status once for the delegate reply's taskId. Save the exact
+2. Ensure the waking task's acceptance is recorded before observing it.
+   Call task_status once for the delegate reply's taskId. Save the exact
    reply to status-TASK.json. Call t3_thread_read for its childThreadId with
    view=activity and limit=100. Save the exact reply to activity-TASK.json.
    Require hasMore=false. The child run in recentRuns matching the terminal
@@ -69,9 +106,12 @@ and let the operator handle worker approvals.
        $observe TASK --native-json status-TASK.json > observe-TASK.json
        $ack TASK --result-id RESULT_ID > ack-TASK.json
 
-4. End the turn when work remains. When all three tasks are acknowledged,
-   finalize, check the completed status, then run the independent evidence
-   check. The finish command writes measurements.json atomically.
+4. Never finalize before delegate-replies.json exists. If it is missing,
+   resume launch and complete the launch mark in step 5. Once that file
+   exists, end the turn if any acknowledgements are outstanding. When all
+   three tasks are acknowledged, finalize, check the completed status, then
+   run the independent evidence check. The finish command writes
+   measurements.json atomically.
 
        $finalize > finalize.json
        $finish
