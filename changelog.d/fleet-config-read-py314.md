@@ -1,0 +1,1 @@
+- Report unreadable or non-regular fleet configuration files as configuration errors during required claim admission.
