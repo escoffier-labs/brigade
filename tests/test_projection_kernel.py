@@ -31,6 +31,15 @@ def _snapshot(root: Path) -> dict[str, tuple[str, int | None]]:
     return records
 
 
+@pytest.mark.parametrize("parent", [Path("relative"), Path()])
+def test_walk_existing_parent_rejects_non_absolute_paths(
+    parent: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(projection.PlanError):
+        projection._walk_existing_parent(parent)
+
+
 def test_mixed_plan_commits_create_replace_and_remove(tmp_path: Path) -> None:
     workspace, plan = mixed_workspace(tmp_path)
     receipt = projection.execute(plan, target=workspace)

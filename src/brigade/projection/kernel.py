@@ -606,6 +606,10 @@ def _walk_existing_parent(parent: Path, *, mutable: bool = True) -> _HeldParent:
     which on Windows means reopening the final handle with write rights.
     """
     parts = parent.parts
+    if not parts:
+        raise PlanError("unsafe destination path")
+    if not parent.is_absolute():
+        raise PlanError("destination must be absolute")
     flags = 0 if _nt_handles() else _directory_flags()
     fd = _open_walk_root(parts[0])
     remaining: list[str] = []
