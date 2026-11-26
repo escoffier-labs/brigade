@@ -1,6 +1,9 @@
 import json
+import shlex
 import sys
 from pathlib import Path
+
+import pytest
 
 from brigade import cli
 from brigade import work_cmd
@@ -730,17 +733,18 @@ def test_work_review_cli(tmp_path, monkeypatch):
     ]
 
 
-def test_review_defaults_brigade_commands_parse(monkeypatch):
-    import shlex
-
-    from brigade.work_cmd import constants
-
+def test_review_defaults_brigade_commands_parse(tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+    assert work_cmd.review_init(target=tmp_path, update_gitignore=False) == 0
+    capsys.readouterr()
+    assert work_cmd.review_plan(target=tmp_path, json_output=True) == 0
+    planned = json.loads(capsys.readouterr().out)["planned"]
+
     parser = cli._build_parser()
     checked = 0
-    for reviewer in constants.REVIEW_DEFAULTS:
-        argv = shlex.split(reviewer["command"])
-        if argv[0] != "brigade":
+    for reviewer in planned:
+        argv = reviewer["argv"]
+        if not argv or argv[0] != "brigade":
             continue
         checked += 1
         try:
@@ -748,3 +752,112 @@ def test_review_defaults_brigade_commands_parse(monkeypatch):
         except SystemExit as exc:
             raise AssertionError(f"{reviewer['id']} starter does not parse: {reviewer['command']}") from exc
     assert checked >= 1
+
+
+def _write_review_command(target: Path, command_toml: str) -> None:
+    config = target / ".brigade" / "reviews.toml"
+    config.parent.mkdir(exist_ok=True)
+    config.write_text(
+        f"""
+[[reviewer]]
+id = "custom"
+name = "Custom review"
+command = {command_toml}
+output_path = ".brigade/reviews/output.json"
+findings_path = ".brigade/reviews/findings.json"
+privacy_mode = "safe-summary"
+""",
+        encoding="utf-8",
+    )
+
+
+@pytest.mark.parametrize("script_directory", ["review scripts", "reviewer's scripts"])
+def test_review_array_command_preserves_argv_and_receipt(tmp_path, capsys, script_directory):
+    _init_git_repo(tmp_path)
+    script = tmp_path / script_directory / "review.py"
+    script.parent.mkdir()
+    script.write_text("import json, sys\nprint(json.dumps(sys.argv))\n", encoding="utf-8")
+    argv = [
+        sys.executable,
+        str(script),
+        "--flag",
+        " two words ",
+        r"C:\Program Files\Tools",
+        r"C:\Example's Review\review.py",
+    ]
+    _write_review_command(tmp_path, json.dumps(argv))
+    label = shlex.join(argv)
+
+    assert work_cmd.review_plan(target=tmp_path, json_output=True) == 0
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["reviewers"][0]["command"] == argv
+    assert plan["planned"][0]["command"] == label
+    assert plan["planned"][0]["argv"] == argv
+    assert plan["planned"][0]["blocker"] is None
+
+    assert work_cmd.review_plan(target=tmp_path) == 0
+    assert f"  command: {label}\n" in capsys.readouterr().out
+
+    assert work_cmd.review_run(target=tmp_path, reviewer_id="custom", json_output=True) == 0
+    run = json.loads(capsys.readouterr().out)["runs"][0]
+    assert json.loads(Path(run["stdout_path"]).read_text(encoding="utf-8")) == argv[1:]
+    receipt = json.loads((Path(run["path"]) / "receipt.json").read_text(encoding="utf-8"))
+    assert receipt["argv"] == argv
+    assert receipt["command_label"] == label
+
+    assert work_cmd.review_show(target=tmp_path, run_id=run["run_id"], json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["run"]["command_label"] == label
+
+
+def test_review_string_command_preserves_posix_argv_and_label(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    command = f"{shlex.quote(sys.executable)}  -c 'import sys'  \"two words\" 'one\\two'"
+    _write_review_command(tmp_path, json.dumps(command))
+    argv = [sys.executable, "-c", "import sys", "two words", r"one\two"]
+
+    assert work_cmd.review_plan(target=tmp_path, json_output=True) == 0
+    plan = json.loads(capsys.readouterr().out)["planned"][0]
+    assert plan["command"] == command
+    assert plan["argv"] == argv
+
+    assert work_cmd.review_run(target=tmp_path, reviewer_id="custom", json_output=True) == 0
+    run = json.loads(capsys.readouterr().out)["runs"][0]
+    assert run["command_label"] == command
+    assert run["argv"] == argv
+
+
+@pytest.mark.parametrize(
+    ("command_toml", "message"),
+    [
+        ("[]", "command must be a non-empty array"),
+        ('["python", 42]', "command[2] must be a non-empty string"),
+        ('["python", ""]', "command[2] must be a non-empty string"),
+        ('["python", ["review.py"]]', "command[2] must be a non-empty string"),
+        ("42", "command must be a non-empty string or an array of non-empty strings"),
+        ('{ executable = "python" }', "command must be a non-empty string or an array of non-empty strings"),
+    ],
+)
+def test_review_invalid_command_config_blocks_execution(tmp_path, capsys, command_toml, message):
+    _write_review_command(tmp_path, command_toml)
+    expected = [f"reviewer 1: {message}"]
+
+    assert work_cmd.review_plan(target=tmp_path, json_output=True) == 1
+    assert json.loads(capsys.readouterr().out)["errors"] == expected
+
+    assert work_cmd.review_run(target=tmp_path, reviewer_id="custom", json_output=True) == 2
+    run = json.loads(capsys.readouterr().out)
+    assert run["errors"] == expected
+    assert run["runs"] == []
+    assert not (tmp_path / ".brigade" / "reviews" / "runs").exists()
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows can launch batch files through a shell")
+def test_review_array_command_blocks_windows_batch_files(tmp_path, capsys):
+    script = tmp_path / "review.CmD"
+    script.write_text("@exit /b 0\n", encoding="utf-8")
+    _write_review_command(tmp_path, json.dumps([str(script)]))
+
+    assert work_cmd.review_plan(target=tmp_path, json_output=True) == 0
+    planned = json.loads(capsys.readouterr().out)["planned"][0]
+    assert planned["blocker"] == "review array command cannot launch a Windows batch file"
+    assert planned["argv"] == []
