@@ -1,0 +1,1 @@
+- Enable automatic handoff filing on Windows with an owner-only signing key.

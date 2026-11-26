@@ -15,6 +15,15 @@ from . import dirfd, localio
 
 KEY_ENV = "BRIGADE_RECEIPT_SIGNING_KEY_FILE"
 KEY_NAME = "receipt-signing-key"
+_WINDOWS_KEY_REPAIR = (
+    "Windows requires an owner-only workspace signing key. "
+    "Move .brigade/receipt-signing-key aside and run brigade receipts keygen in the workspace "
+    "with BRIGADE_RECEIPT_SIGNING_KEY_FILE unset."
+)
+
+
+class WindowsKeyRefused(OSError):
+    """The fixed Windows key could not be opened or written owner-only."""
 
 
 def key_path(target: Path) -> Path:
@@ -47,12 +56,14 @@ def workspace_key(target: Path) -> bytes | None:
     """Fixed-path authority key. Never honor overrides or provision a key here.
 
     Match origin-stamp confinement: no linked parents, single-link regular file,
-    current owner and private mode. Windows awaits an ACL confinement proof.
+    current owner and private permissions.
     """
     from . import dirfd
     from .run_dirfd import bound_run_dir
 
-    if sys.platform == "win32" or not dirfd.posix_available() or not hasattr(os, "getuid"):
+    if sys.platform == "win32":
+        return _windows_workspace_key(target)
+    if not dirfd.posix_available() or not hasattr(os, "getuid"):
         return None
     try:
         with bound_run_dir(target.expanduser().resolve()) as bound:
@@ -95,8 +106,75 @@ def workspace_key(target: Path) -> bytes | None:
         return None
 
 
+def _windows_workspace_key(target: Path) -> bytes | None:
+    from .work_cmd import nt_private
+
+    try:
+        parent = dirfd.open_directory_chain(target.expanduser().resolve() / ".brigade", writable=False)
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        print(_WINDOWS_KEY_REPAIR, file=sys.stderr)
+        return None
+    try:
+        # Distinguish an absent key from a failure in an API that verifies it.
+        try:
+            dirfd.stat_child(parent, KEY_NAME, allow_reparse=True)
+        except FileNotFoundError:
+            return None
+        fd = nt_private.open_file(parent, KEY_NAME, os.O_RDONLY, share_write=False)
+        with os.fdopen(fd, "rb") as handle:
+            nt_private.verify_fd(fd, directory=False)
+            raw = handle.read(257)
+            nt_private.verify_fd(fd, directory=False)
+            held = os.fstat(fd)
+            named = dirfd.stat_child(parent, KEY_NAME)
+            if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino) or len(raw) != held.st_size or len(raw) > 256:
+                raise ValueError("unstable or oversized workspace signing key")
+            key = bytes.fromhex(raw.decode("ascii").strip())
+            if len(key) != 32:
+                raise ValueError("invalid workspace signing key length")
+            return key
+    except (OSError, ValueError):
+        print(_WINDOWS_KEY_REPAIR, file=sys.stderr)
+        return None
+    finally:
+        os.close(parent)
+
+
+def _write_windows_key(path: Path, key: bytes, *, force: bool) -> None:
+    from .work_cmd import nt_private
+
+    try:
+        parent = dirfd.open_directory_chain(path.parent, create=True)
+        try:
+            try:
+                fd = nt_private.open_file(parent, path.name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, share_write=False)
+            except FileExistsError:
+                if not force:
+                    raise
+                fd = nt_private.open_file(parent, path.name, os.O_WRONLY, share_write=False)
+            with os.fdopen(fd, "wb") as handle:
+                nt_private.verify_fd(fd, directory=False)
+                handle.write(key.hex().encode("ascii") + b"\n")
+                handle.flush()
+                if force:
+                    handle.truncate()
+                os.fsync(fd)
+        finally:
+            os.close(parent)
+    except FileExistsError:
+        raise
+    except (OSError, ValueError):
+        raise WindowsKeyRefused(_WINDOWS_KEY_REPAIR) from None
+
+
 def generate_key(target: Path, *, force: bool = False) -> tuple[Path, str]:
     path = key_path(target)
+    if sys.platform == "win32" and path.absolute() == target.expanduser().resolve() / ".brigade" / KEY_NAME:
+        key = secrets.token_bytes(32)
+        _write_windows_key(path.absolute(), key, force=force)
+        return path, key_id(key)
     path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT
     flags |= os.O_TRUNC if force else os.O_EXCL
@@ -113,9 +191,11 @@ def load_workspace_key(target: Path) -> tuple[bytes, str] | None:
 
     Never create a key or honor the receipt-only environment override. This
     authenticates tooling against text forgery, not an agent with shell access.
-    Windows remains review-only until an ACL confinement proof exists (#2588).
     """
-    if sys.platform == "win32" or not dirfd.posix_available() or not hasattr(os, "getuid"):
+    if sys.platform == "win32":
+        key = _windows_workspace_key(target)
+        return (key, key_id(key)) if key is not None else None
+    if not dirfd.posix_available() or not hasattr(os, "getuid"):
         return None
     try:
         path = target.expanduser().resolve() / ".brigade" / KEY_NAME

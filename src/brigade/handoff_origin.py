@@ -113,12 +113,12 @@ def read_handoff(path: Path, *, max_bytes: int, private_key: bool = False) -> by
 
 def _key(target: Path) -> bytes | None:
     # Origin authority never honors the receipt-only environment override.
-    # Read with the portable regular-file, reparse-point and link checks first.
-    # Windows still needs the Win32 ACL confinement proof tracked in #2588.
+    if sys.platform == "win32":
+        return receipt_signing.workspace_key(target)
     try:
         path = target.expanduser().resolve() / ".brigade" / receipt_signing.KEY_NAME
         data = read_handoff(path, max_bytes=256, private_key=True)
-        if sys.platform == "win32" or not dirfd.posix_available() or not hasattr(os, "getuid"):
+        if not dirfd.posix_available() or not hasattr(os, "getuid"):
             return None
         key = bytes.fromhex(data.decode("ascii").strip())
     except (OSError, ValueError, UnicodeError):
@@ -206,10 +206,64 @@ def _resume_claim(parent: int, name: str, data: bytes) -> bool:
         os.close(fd)
 
 
+def _windows_claim(consumed: Path, decision_id: str, *, create: bool) -> bool:
+    """Publish a complete marker with a held-directory, no-replace rename."""
+    try:
+        data = decision_id.encode("ascii")
+        state = dirfd.open_directory_chain(consumed.parent.parent, writable=create)
+        try:
+            if create:
+                try:
+                    dirfd.mkdir_child(state, consumed.parent.name)
+                except FileExistsError:
+                    pass
+            parent = dirfd.open_child_directory(state, consumed.parent.name, writable=create)
+            try:
+                if create:
+                    temporary = _temporary_name(secrets.token_hex(16))
+                    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+                    fd = dirfd.open_child_file(parent, temporary, flags)
+                    try:
+                        with os.fdopen(fd, "wb") as handle:
+                            handle.write(data)
+                            handle.flush()
+                            os.fsync(handle.fileno())
+                        try:
+                            dirfd.replace_children(parent, temporary, consumed.name, replace=False)
+                        except FileExistsError:
+                            pass
+                        else:
+                            dirfd.fsync_directory(parent)
+                            dirfd.fsync_directory(state)
+                            return True
+                    finally:
+                        try:
+                            dirfd.unlink_child(parent, temporary)
+                        except FileNotFoundError:
+                            pass
+                if not decision_id:
+                    return False
+                fd = dirfd.open_child_file(parent, consumed.name, os.O_RDONLY, share_write=False)
+                try:
+                    info = os.fstat(fd)
+                    return stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and os.read(fd, 257) == data
+                finally:
+                    os.close(fd)
+            finally:
+                os.close(parent)
+        finally:
+            os.close(state)
+    except (OSError, ValueError):
+        return False
+
+
 def owns_review_claim(target: Path, mac: str, decision_id: str) -> bool:
     """Recovery must already own a durable marker, never mint one from journal metadata."""
     if not isinstance(mac, str) or re.fullmatch(r"[0-9a-f]{64}", mac) is None or not decision_id:
         return False
+    if sys.platform == "win32":
+        consumed = target.resolve() / ".brigade/handoffs/consumed-stamps" / mac
+        return _windows_claim(consumed, decision_id, create=False)
     if not dirfd.posix_available():
         return False
     import fcntl
@@ -230,6 +284,8 @@ def owns_review_claim(target: Path, mac: str, decision_id: str) -> bool:
 
 def _claim(consumed: Path, *, decision_id: str = "") -> bool:
     """Consume before canonical writes. Only the same journal decision can resume."""
+    if sys.platform == "win32":
+        return _windows_claim(consumed, decision_id, create=True)
     if not dirfd.posix_available():
         return False
     import fcntl

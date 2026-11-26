@@ -1159,8 +1159,9 @@ with the proposed content hash. Patch evidence can support updates to existing
 cards. Unsigned receipts and receipts from another work session do not qualify.
 The workspace signature uses only the existing operator-owned, private,
 single-link `.brigade/receipt-signing-key`, read through no-follow descriptors.
-It ignores `BRIGADE_RECEIPT_SIGNING_KEY_FILE` and never creates a key. Windows
-cannot supply this authority until the ACL confinement work in #2588 lands.
+It ignores `BRIGADE_RECEIPT_SIGNING_KEY_FILE` and never creates a key. On Windows,
+use a key with a protected, owner-only access control list. See the
+[key setup and repair steps](handoff-promotion.md#origin-gate-for-automatic-filing).
 The existing configurable audit signature remains separate. This MAC boundary
 prevents text-only receipt forgery. It does not isolate the key from an agent
 with shell access. Verifier session labels are caller-controlled and default

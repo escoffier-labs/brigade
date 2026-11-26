@@ -281,7 +281,13 @@ def dispatch(args) -> int:
 
         return receipts_lineage.command(target=args.target, subject=args.subject, json_output=args.json)
     if args.receipts_command == "keygen":
-        return receipts_cmd.keygen(target=args.target, force=args.force)
+        from ..receipt_signing import WindowsKeyRefused
+
+        try:
+            return receipts_cmd.keygen(target=args.target, force=args.force)
+        except WindowsKeyRefused as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 1
     if args.receipts_command == "export" and args.receipts_export_command == "attestation":
         from .. import attestation_cmd
 
