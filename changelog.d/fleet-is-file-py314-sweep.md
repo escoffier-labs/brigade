@@ -1,1 +1,1 @@
-- Report unreadable message spools, refuse unreadable principal retry state and node identities, and preserve event delivery and session discovery results on Python 3.14.
+- Report unreadable message spools and reject unreadable principal retry state and node identities on Python 3.14. Stop workspace discovery at unreadable markers and preserve event delivery results.

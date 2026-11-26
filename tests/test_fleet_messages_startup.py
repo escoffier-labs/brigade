@@ -141,6 +141,28 @@ def test_principal_retry_distinguishes_unreadable_and_missing_spool_directory(tm
         fleet_client_messages._require_no_legacy_principal_requests("fixture-principal", "fixture-admin-token", active)
 
 
+def test_principal_retry_refuses_unreadable_node_prefixed_history(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path))
+    name, token, hub = "fixture-principal", "fixture-admin-token", "https://hub.invalid"
+    active = fleet_client_messages._principal_pending_path(name, token, hub_url=hub)
+    iterdir, glob = Path.iterdir, Path.glob
+    scans = 0
+
+    def fail_second_scan(path):
+        nonlocal scans
+        if path == active.parent:
+            scans += 1
+            if scans == 2:
+                raise PermissionError("node-prefixed retry directory unavailable")
+        return iterdir(path)
+
+    monkeypatch.setattr(Path, "iterdir", fail_second_scan)
+    monkeypatch.setattr(Path, "glob", lambda path, *args: iter(()) if path == active.parent else glob(path, *args))
+    with pytest.raises(PermissionError, match="node-prefixed retry directory unavailable"):
+        fleet_client_messages._pending_principal_request(name, token, None, hub_url=hub)
+    assert not active.exists()
+
+
 @pytest.mark.skipif(os.name != "posix", reason="POSIX symlinks and directory modes")
 @pytest.mark.parametrize("existing_database", [False, True])
 def test_hub_initializes_through_symlinked_database_parent(tmp_path, existing_database):

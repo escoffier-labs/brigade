@@ -299,10 +299,12 @@ def find_workspace_for_path(start: Path) -> Path | None:
 
     for candidate in workspace_identity_ancestors(start):
         try:
-            if node_mod.node_path(candidate).is_file():
+            if stat.S_ISREG(node_mod.node_path(candidate).stat().st_mode):
                 return candidate
-        except OSError:
+        except (FileNotFoundError, NotADirectoryError):
             continue
+        except OSError:
+            return None
     return None
 
 

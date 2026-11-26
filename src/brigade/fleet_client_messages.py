@@ -1124,7 +1124,12 @@ def _pending_principal_request(
     _require_no_legacy_principal_requests(name, admin_token, path)
     # An interrupted migration can leave a copy of an already finalized request.
     # Even origin-bearing filenames cannot prove that this history is pending.
-    if any(path.parent.glob(f"*.{path.name}")):
+    pattern = f"*.{path.name}"
+    try:
+        has_prefixed_history = any(fnmatch(candidate.name, pattern) for candidate in path.parent.iterdir())
+    except (FileNotFoundError, NotADirectoryError):
+        has_prefixed_history = False
+    if has_prefixed_history:
         raise fleet_client.FleetClientError("node-prefixed principal retry requires reconciliation; left untouched")
     if not pending:
         with fleet_client._spool_lock(path) as dir_fd:
