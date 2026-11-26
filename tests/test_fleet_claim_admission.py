@@ -131,20 +131,40 @@ def test_required_claim_distinguishes_real_configuration_read_failures(tmp_path,
         config.chmod(0o600)
 
 
+@pytest.mark.parametrize("error", [PermissionError, FileNotFoundError, NotADirectoryError])
+def test_strict_fleet_section_distinguishes_unreadable_and_missing_paths(tmp_path, monkeypatch, error):
+    config = tmp_path / "parent" / "fleet.toml"
+    open_file = os.open
+
+    def fail_open(path, *args, **kwargs):
+        if path == config:
+            raise error
+        return open_file(path, *args, **kwargs)
+
+    # Python 3.14 reports False even when permission blocked the lookup.
+    monkeypatch.setattr(Path, "is_file", lambda self: False)
+    monkeypatch.setattr(os, "open", fail_open)
+    if error is PermissionError:
+        with pytest.raises(fleet_client.FleetClientError, match="^fleet configuration could not be read$"):
+            fleet_client._read_fleet_section(config, strict=True)
+    else:
+        assert fleet_client._read_fleet_section(config, strict=True) == {}
+
+
 def test_strict_loader_treats_config_disappearance_as_missing(tmp_path, monkeypatch):
     monkeypatch.setenv("BRIGADE_HOME", str(tmp_path))
     for name in ("BRIGADE_FLEET_HUB_URL", "BRIGADE_FLEET_TOKEN", "BRIGADE_FLEET_NODE_TOKEN"):
         monkeypatch.delenv(name, raising=False)
     config = tmp_path / "fleet.toml"
     config.write_text("[fleet]\n", encoding="utf-8")
-    read_text = Path.read_text
+    open_file = os.open
 
     def disappear(path, *args, **kwargs):
         if path == config:
             path.unlink()
-        return read_text(path, *args, **kwargs)
+        return open_file(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", disappear)
+    monkeypatch.setattr(os, "open", disappear)
     assert fleet_client.load_fleet_config(strict=True) == {"hub_url": "", "token": ""}
     assert not config.exists()
 

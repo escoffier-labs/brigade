@@ -1,0 +1,1 @@
+- Report unreadable fleet configuration as a configuration error during required claim admission on Python 3.14.
