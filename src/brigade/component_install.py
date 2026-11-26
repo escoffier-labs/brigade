@@ -37,7 +37,7 @@ from brigade import (
 )
 
 if TYPE_CHECKING:
-    from brigade.update_cmd import ResolvedRelease
+    from brigade.update_cmd import ResolvedRelease, UpdateState
 
 _EXPLICIT_ENGINE_REPAIR = "`brigade setup --manifest <verified manifest> --allow-compatible-stable-manifest <version>`"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -1230,6 +1230,56 @@ def release_version_tuple(value: str) -> tuple[int, ...] | None:
     return release + (0,) * max(0, 3 - len(release))
 
 
+def _packaged_exact_release() -> ResolvedRelease | None:
+    """Read the installed package manifest for a release without a separate package pin."""
+    from brigade import update_cmd
+
+    tag = f"v{brigade.__version__}"
+    version = update_cmd._parse_tag(tag)
+    if version is None or any(revision.startswith(f"{tag}+") for revision in component_release_pins.MANIFEST_DIGESTS):
+        return None
+    path = templates.template_root() / "components" / "manifest-v1.json"
+    try:
+        content = path.read_bytes()
+        manifest = component_manifest.load_bytes(content, source=path)
+        manifest_tag, _, commit = manifest.manifest_revision.partition("+")
+        if manifest_tag != tag or not update_cmd._SHA.fullmatch(commit):
+            return None
+        release = update_cmd.ResolvedRelease(
+            0, tag, version, commit, "", len(content), hashlib.sha256(content).hexdigest(), content
+        )
+        update_cmd._validate_manifest_coordinates(release, manifest)
+    except (OSError, ValueError, update_cmd.UpdateError):
+        return None  # Source and development builds can carry a compatibility manifest.
+    return release
+
+
+def _offline_packaged_release(roots: SetupRoots, state: UpdateState | None) -> ResolvedRelease | None:
+    packaged = _packaged_exact_release()
+    if packaged is None:
+        return None
+    if (
+        state is not None
+        and state.component_tag == packaged.tag
+        and (
+            state.component_target_commit != packaged.target_commit
+            or state.component_manifest_sha256 != packaged.manifest_sha256
+        )
+    ):
+        # A different saved exact manifest still has to pass normal authentication.
+        return None
+    cache_path = Path(component_paths.verified_manifest_path(roots.cache_root, packaged.manifest_sha256))
+    try:
+        cached = cache_path.read_bytes()
+    except FileNotFoundError:
+        return packaged
+    if cached != packaged.manifest_bytes:
+        raise ComponentInstallError(
+            f"cached manifest digest does not match the packaged exact-release manifest: {cache_path}"
+        )
+    return packaged
+
+
 def _authenticate_release_manifest(content: bytes, tag: str, *, offline: bool) -> ResolvedRelease:
     from brigade import update_cmd
 
@@ -1242,6 +1292,10 @@ def _authenticate_release_manifest(content: bytes, tag: str, *, offline: bool) -
                 raise ComponentInstallError(f"manifest for {tag} does not match the package-pinned SHA-256 digest")
             return update_cmd.ResolvedRelease(0, tag, version, commit, "", len(content), digest, content)
     if offline:
+        if version == brigade.__version__ and (packaged := _packaged_exact_release()) is not None:
+            if content != packaged.manifest_bytes:
+                raise ComponentInstallError(f"manifest for {tag} does not match the packaged exact-release manifest")
+            return packaged
         raise ComponentInstallError(f"network access is needed to authenticate the manifest for {tag}")
     return update_cmd.resolve_release(update_cmd._DefaultHttp(), latest=False, tag=tag, manifest_bytes=content)
 
@@ -1367,9 +1421,10 @@ def _load_setup_manifest(
 
     The narrowly named ``allow_compatible_stable_manifest`` mode only applies
     to the ``--manifest`` branch used by the beta handoff, which reuses the
-    verified last-stable release manifest. The auto branch resolves the exact
-    release for the installed Brigade version and stays strict, except that a
-    compatible persisted beta-handoff state can supply a verified cached manifest.
+    verified last-stable release manifest. Stable auto setup resolves the
+    exact running release online. Offline it can use the package's exact
+    manifest or a verified cache. A compatible persisted beta handoff still
+    selects the stable release it recorded.
     """
     from brigade import update_cmd
 
@@ -1412,6 +1467,10 @@ def _load_setup_manifest(
         # beta paths stay fail-closed.
         state = update_cmd.load_update_state(Path(component_paths.update_state_path(roots.data_root)))
         beta = state is not None and state.channel == "beta"
+        if offline and not beta:
+            packaged = _offline_packaged_release(roots, state)
+            if packaged is not None:
+                return update_cmd.validate_release_manifest_bytes(packaged), None, None
         cached_manifest = load_verified_exact_release_manifest(
             roots, online_stable_cache_repair=not offline, authenticate_for_setup=offline or beta
         )
@@ -1422,10 +1481,8 @@ def _load_setup_manifest(
                 return cached_manifest_obj, None, cached_manifest_obj.brigade_version
 
         if offline:
-            # Offline setup must reuse any verified cache: the exact-release
-            # stable cache (state.component_tag == v{brigade.__version__}) or
-            # the beta handoff cache, which persists the verified last-stable
-            # release manifest coordinates and would otherwise fail offline.
+            # Without a usable package manifest, offline setup needs the
+            # authenticated exact-release cache.
             if cached_manifest is not None:
                 cached_manifest_obj, _cached_path = cached_manifest
                 auto_compatible = (
