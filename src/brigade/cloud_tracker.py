@@ -32,7 +32,8 @@ CLOUD_BRANCH_PREFIXES = ("codex/", "cursor/", "grokbot/", "claude/")
 # The work brief's GitHub observation shares this budget across its reads and
 # fits inside the brief's own section deadline.
 BRIEF_GITHUB_BUDGET_SECONDS = 4.0
-TRACKER_PROVIDERS = frozenset({"codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud"})
+TRACKER_PROVIDERS = frozenset({"codex-cloud", "cursor-cloud", "claude-cloud"})
+_REGISTRY_PROVIDERS = TRACKER_PROVIDERS | {"grokbot-cloud"}
 
 READY_STATES = frozenset({"ready", "completed", "succeeded", "applied"})
 FAILED_STATES = frozenset({"failed", "errored", "error", "cancelled", "canceled", "expired"})
@@ -343,8 +344,11 @@ def register(
     issue: str | None = None,
     session_url: str | None = None,
     observed_status: str | None = None,
+    launch_tag: str | None = None,
+    launch_lease_id: str | None = None,
+    launch_repo: str | None = None,
 ) -> dict[str, Any]:
-    if provider not in TRACKER_PROVIDERS:
+    if provider not in _REGISTRY_PROVIDERS:
         raise ValueError("provider must be one of: codex-cloud, cursor-cloud, grokbot-cloud, claude-cloud")
     if not label.strip():
         raise ValueError("label must not be empty")
@@ -368,9 +372,11 @@ def register(
         )
         task_id = binding["task_id"]
         source = "adopt-session"
-    if source == "dispatch" and not task_id:
+    if launch_tag is not None and (provider != "codex-cloud" or source != "dispatch" or task_id is not None):
+        raise ValueError("Codex Cloud launch intents require an unassigned dispatch")
+    if source == "dispatch" and not task_id and launch_tag is None:
         raise ValueError("dispatch registration requires task_id")
-    entry = {
+    entry: dict[str, Any] = {
         "id": _new_id(),
         "provider": provider,
         "task_id": task_id,
@@ -390,6 +396,14 @@ def register(
                 entry[key] = value
     if isinstance(lease_holder, str) and lease_holder:
         entry["lease_holder"] = lease_holder
+    if launch_tag is not None:
+        entry.update(
+            launch_tag=launch_tag,
+            launch_state="needs-reconcile",
+            launch_lease_id=launch_lease_id,
+            launch_requires_lease=launch_lease_id is not None,
+            launch_repo=launch_repo,
+        )
     if binding is not None:
         entry.update(binding)
         digest = hashlib.sha256(f"claude-cloud\0{entry['session_id']}".encode()).hexdigest()[:24]
@@ -403,7 +417,8 @@ def register(
                 matches = [
                     row
                     for row in registry["entries"]
-                    if row.get("provider") == provider and row.get("task_id") == task_id
+                    if row.get("provider") == provider
+                    and (row.get("task_id") == task_id or row.get("launch_candidate_id") == task_id)
                 ]
                 if len(matches) > 1:
                     raise ValueError("Codex Cloud task not uniquely registered")
@@ -548,6 +563,9 @@ def _classify_entry(
     provider = str(entry.get("provider") or "")
     task_id = entry.get("task_id")
     branch = entry.get("branch") if isinstance(entry.get("branch"), str) else None
+    launch_state = entry.get("launch_state") if provider == "codex-cloud" else None
+    if launch_state in ("needs-reconcile", "not-launched"):
+        branch = None
     observation = provider_observations.get(provider) if provider_observations else None
     provider_info = observation.tasks.get(str(task_id)) if observation and task_id else None
     if provider_info is None:
@@ -686,6 +704,12 @@ def _classify_entry(
     if entry.get("landing_state"):
         for key in ("landing_state", "landing_commit", "landing_branch"):
             row[key] = entry.get(key)
+    if launch_state:
+        row["launch_state"] = launch_state
+        row["launch_tag"] = entry.get("launch_tag")
+        if launch_state == "needs-reconcile":
+            row["classification"] = "needs-investigation"
+            row["launch_candidate_id"] = entry.get("launch_candidate_id")
     if claude_lifecycle is not None:
         row["provider_lifecycle"] = claude_lifecycle
         row["artifact_state"] = "landed" if merged else "pr-open" if routine_row and open_pr else "unobserved"
@@ -846,20 +870,13 @@ def _provider_for_branch(branch: str) -> str:
 def _grokbot_rows(
     target: Path, *, github: dict[str, Any], now: datetime, stale_ready_hours: int
 ) -> list[dict[str, Any]]:
-    """Project queue jobs into tracker rows without reading private envelopes."""
-    try:
-        from . import grokbot_jobs
+    """Project retained local queue jobs into tracker rows."""
+    from . import grokbot_jobs
 
+    try:
         queue_rows = grokbot_jobs.tracker_rows(target)
     except Exception:  # noqa: BLE001 - tracker remains available when queue storage is unavailable
-        from . import grokbot_jobs
-
-        if grokbot_jobs.hub_authority(target):
-            return [_grokbot_hub_unavailable_row()]
         return []
-
-    if any(isinstance(job, dict) and job.get("degraded") for job in queue_rows):
-        return [_grokbot_hub_unavailable_row()]
 
     rows: list[dict[str, Any]] = []
     for job in queue_rows:
@@ -891,7 +908,7 @@ def _grokbot_rows(
                 "label": job.get("label"),
                 "branch": branch,
                 "dispatched_at": job.get("queued_at"),
-                "source": "grokbot-hub" if grokbot_jobs.hub_authority(target) else "grokbot-queue",
+                "source": "grokbot-queue",
                 "expected_artifact": artifact,
             },
             provider_tasks={job_id: {"state": job.get("state"), "ready_at": job.get("updated_at")}},
@@ -909,27 +926,13 @@ def _grokbot_rows(
             "state": job.get("state"),
             "classification": classification_row["classification"],
             "artifact_refs": refs,
-            "source": "grokbot-hub" if grokbot_jobs.hub_authority(target) else "grokbot-queue",
+            "source": "grokbot-queue",
         }
         for key in ("created_at", "updated_at", "queued_at", "claimed_at"):
             if isinstance(job.get(key), str):
                 row[key] = job[key]
         rows.append(row)
     return rows
-
-
-def _grokbot_hub_unavailable_row() -> dict[str, Any]:
-    return {
-        "id": "grokbot:hub-unavailable",
-        "provider": "grokbot-cloud",
-        "job_id": "grokbot-hub-unavailable",
-        "label": "Grok Bot hub unavailable",
-        "state": "unavailable",
-        "classification": "needs-investigation",
-        "degraded": True,
-        "artifact_refs": {"kind": "report"},
-        "source": "grokbot-hub",
-    }
 
 
 def _grokbot_artifact_refs(
@@ -997,10 +1000,9 @@ def status_payload(
             provider_observations=provider_observations,
         )
         for entry in registry["entries"]
-        if entry.get("provider") in TRACKER_PROVIDERS
+        if entry.get("provider") in _REGISTRY_PROVIDERS
     ]
     grokbot_rows = _grokbot_rows(target, github=github, now=observed, stale_ready_hours=stale_ready_hours)
-    grokbot_degraded = any(row.get("degraded") for row in grokbot_rows)
     entries.extend(grokbot_rows)
     known_queue_branches = {
         refs["branch"]
@@ -1028,13 +1030,10 @@ def status_payload(
             "authority": claude_cloud_routine.OBSERVATION_REASON,
             "detail": claude_cloud_routine.SOURCE_DETAIL,
         },
-        "grokbot-cloud": {
-            "wired": True,
-            "authority": "hub" if grokbot_jobs.hub_authority(target) else "local-queue",
-            **({"degraded": True, "detail": "hub unavailable"} if grokbot_degraded else {}),
-        },
         "github": {"wired": True, "authority": "ground-truth"},
     }
+    if not grokbot_jobs.hub_authority(target):
+        sources["grokbot-cloud"] = {"wired": True, "authority": "local-queue"}
     if provider_observations:
         for provider, observation in provider_observations.items():
             source = sources.get(provider)
@@ -1709,34 +1708,12 @@ def observe_cursor_cloud_tasks(target: Path) -> dict[str, Any]:
     return _cursor_cloud_observation(target).tasks
 
 
-def _grokbot_cloud_observation() -> ProviderObservation:
-    from . import fleet_client_grokbot
-
-    try:
-        decision = fleet_client_grokbot.whoami()
-    except Exception:  # noqa: BLE001 - provider health must stay bounded
-        return ProviderObservation(True, False, "transport-failure", {})
-    if decision.granted:
-        return ProviderObservation(True, True, None, {})
-    if decision.reason == "no-hub":
-        return ProviderObservation(False, False, "unconfigured", {})
-    if decision.reason == "no-identity":
-        return ProviderObservation(True, False, "actor-not-enrolled", {})
-    if decision.reason == "auth-failed":
-        return ProviderObservation(True, False, "auth-failure", {})
-    if decision.reason == "hub-unavailable":
-        return ProviderObservation(True, False, "transport-failure", {})
-    return ProviderObservation(True, True, decision.reason, {})
-
-
 def observe_provider(provider: str, target: Path, *, codex_max_items: int | None = None) -> ProviderObservation:
     """Observe exactly one provider without exposing credentials or bodies."""
     if provider == "codex-cloud":
         return _codex_cloud_observation(target, codex_max_items=codex_max_items)
     if provider == "cursor-cloud":
         return _cursor_cloud_observation(target)
-    if provider == "grokbot-cloud":
-        return _grokbot_cloud_observation()
     if provider == "claude-cloud":
         # No provider wire exists in Brigade. The conductor launches and reads
         # routine runs, and reports what it saw through register or adopt.

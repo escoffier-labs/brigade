@@ -281,9 +281,11 @@ unexpired adopted lease.
 
 ## Public contracts
 
-- `brigade run cloud status --json` reports all four providers (Cursor, Codex,
-  Claude and Grok Bot), admission limits, active counts, circuit state,
-  and normalized task rows.
+- `brigade run cloud status --json` reports the Cursor, Codex and Claude
+  providers, admission limits, active counts, circuit state, and normalized
+  task rows. Grok Bot is retired: status shows only its retained local history
+  and never probes the service. `brigade run cloud doctor` and `canary` with
+  `--provider grokbot-cloud` still probe it on request.
 - `brigade run cloud register` and `adopt` accept `claude-cloud`.
 - Cloud launchers fail with a stable capacity or disabled-provider result before
   provider mutation when admission is denied.

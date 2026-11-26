@@ -1303,8 +1303,16 @@ def test_run_classifies_launch_errors_without_absolute_paths(monkeypatch, launch
     result = proc.run(["/private/bin/worker"])
 
     assert result.code == expected_code
+    assert result.launch_failed
     assert result.stderr == expected_stderr
     assert "/private/bin/worker" not in result.stderr
+
+
+def test_run_child_exit_127_is_not_a_launch_failure():
+    result = proc.run([sys.executable, "-c", "raise SystemExit(127)"])
+
+    assert result.code == 127
+    assert not result.launch_failed
 
 
 def test_run_preserves_partial_output_on_timeout(monkeypatch, tmp_path):
