@@ -146,7 +146,7 @@ def test_hostile_stdin_fails_open_without_record(target, capsys, raw):
     assert capsys.readouterr().err == ""
 
 
-@pytest.mark.parametrize("tool_input", [None, [], "pytest", {"command": []}, {"command": "pytest " * 20000}])
+@pytest.mark.parametrize("tool_input", [None, [], "pytest", {"command": []}])
 def test_wrong_tool_input_has_no_record(target, tool_input):
     runtime.handle_payload("PostToolUse", _payload(target, "PostToolUse", tool_name="Bash", tool_input=tool_input))
     assert observed_checks.read_checks(target)[0] == []

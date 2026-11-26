@@ -12,17 +12,17 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from io import StringIO
 from itertools import chain
 from queue import Empty
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Iterator
+from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Generator, Iterator, Literal
 
 from .. import handoff_worktrees, localio, work_mode
 from ..component_paths import cache_root
 from ..isolated_exec import module_argv, trusted_cwd
-from ..wiring import expand_user_path, resolve_wired_target
 from . import (
     anchored_io,
     check_events,
@@ -38,6 +38,29 @@ from . import (
     skill_invocations,
     verification_mode,
     write_attribution,
+)
+from .command_tokens import (
+    EVENT_BUDGET,
+    MAX_COMMAND_CHARS,
+    Recognition,
+    RecognitionBudget,
+    RecognitionLimit,
+    TokenTail,
+    TokenView,
+    UnreadableCommand,
+    charge_event,
+    command_event,
+    command_step_limit,
+    event_wired_target as resolve_wired_target,
+    resolve_command_path as _resolve_command_path,
+    split_posix,
+    _is_env_assignment,
+    _package_runner_script as _package_runner_script,
+    _strip_env,
+    _strip_make_global_options,
+    _strip_npx_options,
+    _strip_runner_global_options,
+    _strip_runner_run_options,
 )
 from .fingerprint import repo_worktree_fingerprint
 from .handoff_close import (
@@ -269,7 +292,7 @@ def _strip_shell_comment_suffix(line: str) -> str:
     return line
 
 
-def _parse_heredoc_delimiter(text: str, start: int) -> tuple[str, bool, int] | None:
+def _parse_heredoc_delimiter(text: str, start: int, double_quotes: list[int]) -> tuple[str, bool, int] | None:
     index = start + 2
     strip_tabs = False
     while index < len(text) and text[index] in " \t":
@@ -288,18 +311,18 @@ def _parse_heredoc_delimiter(text: str, start: int) -> tuple[str, bool, int] | N
             return None
         return text[index + 1 : end], strip_tabs, end + 1
     if char == '"':
-        end = index + 1
-        value: list[str] = []
-        while end < len(text):
-            if text[end] == "\\" and end + 1 < len(text):
-                value.append(text[end + 1])
-                end += 2
-                continue
-            if text[end] == '"':
-                return "".join(value), strip_tabs, end + 1
-            value.append(text[end])
-            end += 1
-        return None
+        if not double_quotes:
+            double_quotes.extend([-1] * (len(text) + 2))
+            for offset in range(len(text) - 1, -1, -1):
+                char = text[offset]
+                if char == '"':
+                    double_quotes[offset] = offset
+                else:
+                    double_quotes[offset] = double_quotes[offset + (2 if char == "\\" else 1)]
+        end = double_quotes[index + 1]
+        if end < 0:
+            return None
+        return re.sub(r"\\(.)", r"\1", text[index + 1 : end]), strip_tabs, end + 1
     if char == "\\":
         match = _HEREDOC_DELIMITER.match(text, index + 1)
         if not match:
@@ -313,6 +336,7 @@ def _parse_heredoc_delimiter(text: str, start: int) -> tuple[str, bool, int] | N
 
 def _heredoc_delimiters_on_line(line: str) -> list[tuple[str, bool]]:
     tags: list[tuple[str, bool]] = []
+    double_quotes: list[int] = []
     quote: str | None = None
     index = 0
     while index < len(line):
@@ -341,7 +365,7 @@ def _heredoc_delimiters_on_line(line: str) -> list[tuple[str, bool]]:
         if char == "#" and quote is None and (index == 0 or line[index - 1] in " \t"):
             break
         if line.startswith("<<", index) and quote is None:
-            parsed = _parse_heredoc_delimiter(line, index)
+            parsed = _parse_heredoc_delimiter(line, index, double_quotes)
             if parsed is None:
                 index += 2
                 continue
@@ -355,16 +379,22 @@ def _heredoc_delimiters_on_line(line: str) -> list[tuple[str, bool]]:
 
 def _strip_heredoc_bodies(command: str) -> str:
     """Drop heredoc document lines so their content is data, not commands."""
+    budget = EVENT_BUDGET.get()
+    if budget is not None:
+        cached = budget.heredocs.get(command)
+        if cached is not None:
+            return cached
+        budget.charge(3 * len(command))
     lines = command.split("\n")
     kept: list[str] = []
-    terminators: list[tuple[str, bool]] = []
+    terminators: deque[tuple[str, bool]] = deque()
     quote: str | None = None
     for line in lines:
         if terminators:
             tag, strip_tabs = terminators[0]
             body = line.lstrip("\t") if strip_tabs else line
             if body == tag or (not strip_tabs and line.rstrip("\r") == tag):
-                terminators.pop(0)
+                terminators.popleft()
             continue
         if quote is not None:
             kept.append(line)
@@ -375,34 +405,35 @@ def _strip_heredoc_bodies(command: str) -> str:
         if quote is not None:
             continue
         terminators.extend(_heredoc_delimiters_on_line(line))
-    return "\n".join(kept)
+    stripped = "\n".join(kept)
+    if budget is not None:
+        budget.heredocs[command] = stripped
+    return stripped
 
 
-def _resolve_command_path(raw: str, cwd: Path) -> Path:
-    expanded = expand_user_path(Path(os.path.expandvars(raw)))
-    if not expanded.is_absolute():
-        return (cwd / expanded).resolve(strict=False)
-    return expanded.resolve(strict=False)
+def _strip_command_prefixes(tokens: list[str], *, keywords: frozenset[str] | set[str] = frozenset()) -> list[str]:
+    index = _command_prefix_end(tokens, 0)
+    while index < len(tokens) and tokens[index] in keywords:
+        index = _command_prefix_end(tokens, index + 1)
+    charge_event(len(tokens) - index)
+    return tokens[index:]
 
 
-def _unwrap_command_tokens(tokens: list[str]) -> list[str]:
-    result = list(tokens)
-    while result and Path(result[0]).name in {"tokenjuice", "token-glace"} and "--" in result:
-        result = result[result.index("--") + 1 :]
-    return result
-
-
-def _strip_command_prefixes(tokens: list[str]) -> list[str]:
-    result = _unwrap_command_tokens(tokens)
-    while result and _is_env_assignment(result[0]):
-        result.pop(0)
-    while result and Path(result[0]).name in {"command", "env", "nice", "sudo", "time"}:
-        result.pop(0)
-        while result and result[0].startswith("-"):
-            result.pop(0)
-        while result and _is_env_assignment(result[0]):
-            result.pop(0)
-    return result
+def _command_prefix_end(tokens: list[str], index: int) -> int:
+    while index < len(tokens) and Path(tokens[index]).name in {"tokenjuice", "token-glace"}:
+        try:
+            index = tokens.index("--", index) + 1
+        except ValueError:
+            break
+    while index < len(tokens) and _is_env_assignment(tokens[index]):
+        index += 1
+    while index < len(tokens) and Path(tokens[index]).name in {"command", "env", "nice", "sudo", "time"}:
+        index += 1
+        while index < len(tokens) and tokens[index].startswith("-"):
+            index += 1
+        while index < len(tokens) and _is_env_assignment(tokens[index]):
+            index += 1
+    return index
 
 
 def _nested_shell_script(tokens: list[str]) -> str | None:
@@ -411,23 +442,13 @@ def _nested_shell_script(tokens: list[str]) -> str | None:
 
 def _command_segment_groups(command: str) -> tuple[bool, list[tuple[str | None, list[str]]]]:
     try:
-        tokens = _shell_tokens(command)
+        _, segments, separators = _segmented_command(command)
     except ValueError:
         return False, []
-    groups: list[tuple[str | None, list[str]]] = []
-    current: list[str] = []
-    separator: str | None = None
-    for token in tokens:
-        if token in _SHELL_SEPARATORS:
-            if current:
-                groups.append((separator, current))
-                current = []
-            separator = token
-        else:
-            current.append(token)
-    if current:
-        groups.append((separator, current))
-    return True, groups
+    charge_event(len(segments))
+    return True, [
+        (separators[index - 1] if index else None, segment) for index, segment in enumerate(segments) if segment
+    ]
 
 
 def _segment_effective_cwd(segment: list[str], cwd: Path) -> Path:
@@ -481,15 +502,32 @@ def _verifier_target_from_tokens(tokens: list[str], cwd: Path) -> Path | None:
     return cwd.resolve(strict=False)
 
 
-def _verifier_target_from_command(command: str, cwd: Path, *, depth: int = 0) -> Path | None:
+def _verifier_target_from_command(
+    command: str, cwd: Path, *, depth: int = 0, budget: RecognitionBudget | None = None
+) -> Path | None:
+    active = EVENT_BUDGET.get()
+    if active is None:
+        return _scan_verifier_target(command, cwd, depth=depth, budget=budget)
+    key = command, cwd, depth
+    if key not in active.verifier_targets:
+        active.verifier_targets[key] = _scan_verifier_target(command, cwd, depth=depth, budget=active)
+    return active.verifier_targets[key]
+
+
+def _scan_verifier_target(
+    command: str, cwd: Path, *, depth: int = 0, budget: RecognitionBudget | None = None
+) -> Path | None:
+    active = EVENT_BUDGET.get()
+    budget = budget if budget is not None else (active if active is not None else RecognitionBudget())
+    budget.charge(len(command) if active is not None else 5 * len(command))
     stripped_command = _strip_heredoc_bodies(command)
     try:
-        tokens = shlex.split(stripped_command, posix=True)
+        tokens = _cached_lex(stripped_command, "words", split_posix)
     except ValueError:
         tokens = []
     nested = _nested_shell_script(tokens)
     if nested is not None and depth < 4:
-        found = _verifier_target_from_command(nested, cwd, depth=depth + 1)
+        found = _verifier_target_from_command(nested, cwd, depth=depth + 1, budget=budget)
         if found is not None:
             return found
     tokenized, groups = _command_segment_groups(stripped_command)
@@ -497,10 +535,15 @@ def _verifier_target_from_command(command: str, cwd: Path, *, depth: int = 0) ->
         return None
     if depth < 4:
         for position, nested in _nested_shell_command_spans(stripped_command):
-            nested_cwd = _effective_cwd_at_position(stripped_command, cwd, position)
-            found = _verifier_target_from_command(nested, nested_cwd, depth=depth + 1)
+            found = _verifier_target_from_command(nested, cwd, depth=depth + 1, budget=budget)
             if found is not None:
-                return found
+                budget.charge(position)
+                nested_cwd = _effective_cwd_at_position(stripped_command, cwd, position)
+                return (
+                    found
+                    if nested_cwd == cwd
+                    else _verifier_target_from_command(nested, nested_cwd, depth=depth + 1, budget=budget)
+                )
     effective = cwd
     for separator, segment in groups:
         if separator in _PIPELINE_SEPARATORS:
@@ -508,7 +551,7 @@ def _verifier_target_from_command(command: str, cwd: Path, *, depth: int = 0) ->
         effective = _segment_effective_cwd(segment, effective)
         nested_segment = _nested_shell_script(_strip_command_prefixes(segment))
         if nested_segment is not None and depth < 4:
-            found = _verifier_target_from_command(nested_segment, effective, depth=depth + 1)
+            found = _verifier_target_from_command(nested_segment, effective, depth=depth + 1, budget=budget)
             if found is not None:
                 return found
         target = _verifier_target_from_tokens(segment, effective)
@@ -518,16 +561,29 @@ def _verifier_target_from_command(command: str, cwd: Path, *, depth: int = 0) ->
 
 
 def _command_candidate_paths(command: str, cwd: Path, *, depth: int = 0, include_cwd: bool = False) -> list[Path]:
+    budget = EVENT_BUDGET.get()
+    if budget is None:
+        return _scan_candidate_paths(command, cwd, depth=depth, include_cwd=include_cwd)
+    key = command, cwd, depth, include_cwd
+    if key not in budget.candidates:
+        budget.candidates[key] = _scan_candidate_paths(command, cwd, depth=depth, include_cwd=include_cwd)
+    return budget.candidates[key]
+
+
+def _scan_candidate_paths(command: str, cwd: Path, *, depth: int = 0, include_cwd: bool = False) -> list[Path]:
+    charge_event(len(command))
     command = _strip_heredoc_bodies(command)
     candidates: list[Path] = []
     tokenized, groups = _command_segment_groups(command)
     try:
-        tokens = shlex.split(command, posix=True)
+        tokens = _cached_lex(command, "words", split_posix)
     except ValueError:
         tokens = []
     nested = _nested_shell_script(tokens)
     if nested is not None and depth < 4:
         candidates.extend(_command_candidate_paths(nested, cwd, depth=depth + 1, include_cwd=include_cwd))
+    # Resolve shell words, so an attached redirection cannot become a filename.
+    tokens = _shell_tokens(command) if tokenized else []
     if tokenized:
         effective = cwd
         for separator, segment in groups:
@@ -563,20 +619,26 @@ def _as_tool_input(value: object) -> dict[str, Any]:
 
 def wired_target_from_payload(payload: dict[str, Any], *, attribute_writes: bool = True) -> Path | None:
     try:
-        cwd = expand_user_path(Path(str(payload.get("cwd") or "."))).resolve(strict=False)
+        cwd = _resolve_command_path(str(payload.get("cwd") or "."), Path.cwd(), expand_vars=False)
     except (OSError, RuntimeError):
         return resolve_wired_target(payload.get("cwd"))
     has_cwd = bool(payload.get("cwd"))
     tool_name = str(payload.get("tool_name") or "")
     tool_input = _as_tool_input(payload.get("tool_input"))
     if tool_name == "Bash":
+        budget = EVENT_BUDGET.get()
         command = str(tool_input.get("command") or "")
+        if budget is not None and (budget.attribution_incomplete or len(command) > MAX_COMMAND_CHARS):
+            return _bash_fallback_target(payload, None)
         for written_target, confident in (
             write_attribution.bash_scopes(command, cwd).items() if attribute_writes else ()
         ):
             if confident:
                 return written_target
-        verifier_target = _verifier_target_from_command(command, cwd)
+        try:
+            verifier_target = _verifier_target_from_command(command, cwd)
+        except RecognitionLimit:
+            verifier_target = None
         if verifier_target is not None:
             wired = resolve_wired_target(str(verifier_target))
             if wired is not None:
@@ -639,11 +701,14 @@ def effective_hook_target(
     work to that wired workspace and no-ops everywhere else.
     """
     derived = wired_target_from_payload(payload, attribute_writes=attribute_writes)
+    return _pinned_hook_target(derived, payload.get("cwd"), pin)
+
+
+def _pinned_hook_target(derived: Path | None, raw_cwd: object, pin: Path | None) -> Path | None:
     resolved_pin = _resolve_pin(pin)
     if resolved_pin is not None:
         if derived is not None and _path_is_within(derived, resolved_pin):
             return None if is_operator_home(derived) else derived
-        raw_cwd = payload.get("cwd")
         if isinstance(raw_cwd, str) and raw_cwd.strip():
             cwd = resolved_path(Path(raw_cwd))
             if cwd is not None and _path_is_within(cwd, resolved_pin) and not is_operator_home(resolved_pin):
@@ -774,372 +839,12 @@ def _brief_records(text: str) -> list[str]:
     return records if records else [text]
 
 
-def _is_env_assignment(token: str) -> bool:
-    if "=" not in token:
-        return False
-    key = token.split("=", 1)[0]
-    return bool(key and (key[0].isalpha() or key[0] == "_") and all(char.isalnum() or char == "_" for char in key))
-
-
-def _strip_env(tokens: list[str]) -> list[str]:
-    remaining = list(tokens)
-    while remaining and _is_env_assignment(remaining[0]):
-        remaining.pop(0)
-
-    if remaining and Path(remaining[0]).name == "env":
-        remaining.pop(0)
-        while remaining:
-            option = remaining[0]
-            if option == "--":
-                remaining.pop(0)
-                break
-            if _is_env_assignment(option):
-                remaining.pop(0)
-                continue
-            if option in {
-                "-i",
-                "--ignore-environment",
-                "-0",
-                "--null",
-                "-v",
-                "--debug",
-                "--block-signal",
-                "--default-signal",
-                "--ignore-signal",
-                "--list-signal-handling",
-            }:
-                remaining.pop(0)
-                continue
-            if (
-                len(option) > 1
-                and option.startswith("-")
-                and not option.startswith("--")
-                and all(flag in {"i", "0", "v"} for flag in option[1:])
-            ):
-                remaining.pop(0)
-                continue
-            if option in {"-u", "--unset", "-C", "--chdir", "-a", "--argv0"}:
-                if len(remaining) < 2:
-                    return []
-                del remaining[:2]
-                continue
-            if option.startswith(
-                (
-                    "--unset=",
-                    "--chdir=",
-                    "--argv0=",
-                    "--block-signal=",
-                    "--default-signal=",
-                    "--ignore-signal=",
-                )
-            ) or (option.startswith(("-a", "-C", "-u")) and option not in {"-a", "-C", "-u"}):
-                remaining.pop(0)
-                continue
-            if option in {"-S", "--split-string"}:
-                if len(remaining) < 2:
-                    return []
-                try:
-                    split = shlex.split(remaining[1], posix=os.name != "nt")
-                except ValueError:
-                    return []
-                return _strip_env([*split, *remaining[2:]])
-            if option.startswith("--split-string=") or (option.startswith("-S") and option != "-S"):
-                value = option.split("=", 1)[1] if option.startswith("--split-string=") else option[2:]
-                try:
-                    split = shlex.split(value, posix=os.name != "nt")
-                except ValueError:
-                    return []
-                return _strip_env([*split, *remaining[1:]])
-            if option.startswith("-"):
-                return []
-            break
-
-    while remaining and _is_env_assignment(remaining[0]):
-        remaining.pop(0)
-
-    if remaining and Path(remaining[0]).name == "command":
-        remaining.pop(0)
-        if remaining[:1] == ["-p"]:
-            remaining.pop(0)
-        elif remaining[:1] in (["-v"], ["-V"]):
-            return []
-        if remaining[:1] == ["--"]:
-            remaining.pop(0)
-        elif remaining and remaining[0].startswith("-"):
-            return []
-    return remaining
-
-
-def _strip_npx_options(tokens: list[str]) -> tuple[list[str], bool]:
-    remaining = list(tokens)
-    no_value = {
-        "-y",
-        "--yes",
-        "--no-install",
-        "--ignore-existing",
-        "--prefer-offline",
-        "--prefer-online",
-        "--offline",
-        "--foreground-scripts",
-        "--ignore-scripts",
-        "-q",
-        "--quiet",
-    }
-    with_value = {"-p", "--package", "--shell", "--prefix", "--node-options"}
-    while remaining:
-        option = remaining[0]
-        if option == "--":
-            remaining.pop(0)
-            break
-        if option in no_value:
-            remaining.pop(0)
-            continue
-        if option in with_value:
-            if len(remaining) < 2:
-                return [], True
-            del remaining[:2]
-            continue
-        if option.startswith(("--package=", "--shell=", "--prefix=", "--node-options=")):
-            remaining.pop(0)
-            continue
-        if option.startswith("-"):
-            return remaining, True
-        break
-    return remaining, False
-
-
-def _package_runner_script(tokens: list[str]) -> str | None:
-    remaining = [Path(token).name for token in tokens]
-    if remaining[:1] == ["test"]:
-        return "test"
-    if remaining[:1] != ["run"]:
-        return None
-    remaining.pop(0)
-    no_value = {"-s", "--silent", "--if-present", "--ignore-scripts", "--foreground-scripts"}
-    while remaining:
-        option = remaining[0]
-        if option == "--":
-            remaining.pop(0)
-            continue
-        if option in no_value:
-            remaining.pop(0)
-            continue
-        if option.startswith("-"):
-            return None
-        break
-    return remaining[0] if remaining else None
-
-
-def _strip_make_global_options(tokens: list[str]) -> tuple[list[str], bool]:
-    remaining = list(tokens)
-    no_value = {
-        "-k",
-        "-n",
-        "-q",
-        "-s",
-        "-t",
-        "--always-make",
-        "--dry-run",
-        "--ignore-errors",
-        "--just-print",
-        "--keep-going",
-        "--no-builtin-rules",
-        "--no-print-directory",
-        "--print-directory",
-        "--question",
-        "--quiet",
-        "--recon",
-        "--silent",
-        "--touch",
-        "--version",
-        "-v",
-        "-w",
-        "-p",
-    }
-    with_value = {
-        "-I",
-        "--include-dir",
-        "-C",
-        "--directory",
-        "-j",
-        "--jobs",
-        "-o",
-        "--old-file",
-        "-W",
-        "--what-if",
-        "--load-average",
-    }
-    while remaining:
-        option = remaining[0]
-        if option == "--":
-            remaining.pop(0)
-            break
-        if option in no_value:
-            remaining.pop(0)
-            continue
-        if option in with_value:
-            if len(remaining) < 2:
-                return [], True
-            del remaining[:2]
-            continue
-        if any(option.startswith(f"{known}=") for known in with_value):
-            remaining.pop(0)
-            continue
-        if option.startswith("-j") and len(option) > 2 and option[2:].isdigit():
-            remaining.pop(0)
-            continue
-        if option.startswith(("-C", "-I", "-o", "-W")) and len(option) > 2:
-            remaining.pop(0)
-            continue
-        if option.startswith("-"):
-            return remaining, True
-        break
-    return remaining, False
-
-
-def _strip_runner_global_options(command: str, tokens: list[str]) -> tuple[list[str], bool]:
-    no_value: dict[str, set[str]] = {
-        "uv": {"-q", "--quiet", "-v", "--verbose", "--no-config", "--offline", "--no-cache"},
-        "poetry": {"-n", "--no-interaction", "--no-ansi", "-v", "-vv", "-vvv"},
-        "npm": {"-s", "--silent"},
-        "pnpm": {"-s", "--silent", "-r", "--recursive"},
-        "yarn": {"-s", "--silent"},
-        "bun": {"--silent"},
-    }
-    with_value: dict[str, set[str]] = {
-        "uv": {"--directory", "--project", "--config-file", "--cache-dir", "--color"},
-        "poetry": {"-C", "--directory", "-P", "--project"},
-        "npm": {"-w", "--workspace", "--prefix"},
-        "pnpm": {"-F", "--filter", "-C", "--dir", "--workspace-dir"},
-        "yarn": {"--cwd"},
-        "bun": {"--cwd"},
-    }
-    remaining = list(tokens)
-    command_no_value = no_value.get(command, set())
-    command_with_value = with_value.get(command, set())
-    while remaining:
-        option = remaining[0]
-        if option == "--":
-            remaining.pop(0)
-            break
-        if option in command_no_value:
-            remaining.pop(0)
-            continue
-        if option in command_with_value:
-            if len(remaining) < 2:
-                return [], True
-            del remaining[:2]
-            continue
-        if any(
-            option.startswith(f"{known}=")
-            or (
-                known.startswith("-")
-                and not known.startswith("--")
-                and option.startswith(known)
-                and len(option) > len(known)
-            )
-            for known in command_with_value
-        ):
-            remaining.pop(0)
-            continue
-        if option.startswith("-"):
-            return remaining, True
-        break
-    return remaining, False
-
-
-def _strip_runner_run_options(command: str, tokens: list[str]) -> tuple[list[str], bool]:
-    no_value: dict[str, set[str]] = {
-        "uv": {
-            "--no-sync",
-            "--locked",
-            "--frozen",
-            "--isolated",
-            "--active",
-            "--no-project",
-            "--exact",
-            "--inexact",
-            "--no-editable",
-            "--compile-bytecode",
-            "--no-compile-bytecode",
-            "--no-sources",
-        },
-        "poetry": {"-n", "--no-interaction", "--no-ansi", "-v", "-vv", "-vvv"},
-    }
-    with_value: dict[str, set[str]] = {
-        "uv": {
-            "--python",
-            "--with",
-            "--with-editable",
-            "--with-requirements",
-            "--project",
-            "--directory",
-            "--env-file",
-        },
-        "poetry": {"-C", "--directory", "-P", "--project"},
-    }
-    remaining = list(tokens)
-    command_no_value = no_value.get(command, set())
-    command_with_value = with_value.get(command, set())
-    while remaining:
-        option = remaining[0]
-        if option == "--":
-            remaining.pop(0)
-            break
-        if option in command_no_value:
-            remaining.pop(0)
-            continue
-        if option in command_with_value:
-            if len(remaining) < 2:
-                return [], True
-            del remaining[:2]
-            continue
-        if any(
-            option.startswith(f"{known}=")
-            or (
-                known.startswith("-")
-                and not known.startswith("--")
-                and option.startswith(known)
-                and len(option) > len(known)
-            )
-            for known in command_with_value
-        ):
-            remaining.pop(0)
-            continue
-        if option.startswith("-"):
-            return remaining, True
-        break
-    return remaining, False
-
-
-def _ambiguous_tail_contains_verifier(tokens: list[str], *, depth: int) -> bool:
-    return any(_segment_is_verifier(tokens[index:], depth=depth + 1) for index in range(1, len(tokens)))
-
-
 def _runner_options_ambiguous(command: str, tokens: list[str]) -> bool:
     tail, global_ambiguous = _strip_runner_global_options(command, tokens)
     if global_ambiguous:
         return True
     if command in {"uv", "poetry"} and tail[:1] == ["run"]:
         return _strip_runner_run_options(command, tail[1:])[1]
-    return False
-
-
-def _ambiguous_runner_contains_verifier(command: str, tokens: list[str], *, depth: int) -> bool:
-    names = [Path(token).name for token in tokens]
-    for index, name in enumerate(names):
-        if name != "run":
-            continue
-        tail = tokens[index + 1 :]
-        if tail[:1] == ["--"]:
-            tail = tail[1:]
-        if command in {"uv", "poetry"}:
-            if _segment_is_verifier(tail, depth=depth + 1):
-                return True
-        else:
-            script = _package_runner_script(tokens[index:])
-            if script and (script in {"test", "check"} or script.startswith(("test:", "check:"))):
-                return True
     return False
 
 
@@ -1152,33 +857,66 @@ def _shell_lexer(command: str | StringIO) -> shlex.shlex:
     return lexer
 
 
+def _cached_lex(command: str, kind: str, parse: Callable[[str], list[str]]) -> list[str]:
+    budget = EVENT_BUDGET.get()
+    if budget is None:
+        return parse(command)
+    key = kind, command
+    if key not in budget.tokens:
+        budget.charge(1 + len(command))
+        budget.tokens[key] = parse(command)
+    return budget.tokens[key]
+
+
 def _shell_tokens(command: str) -> list[str]:
-    return list(_shell_lexer(command))
+    return _cached_lex(command, "shell", lambda text: split_posix(text, whitespace=" \t\r", punctuation=";&|<>\n"))
+
+
+def _segmented_command(command: str) -> tuple[list[str], list[list[str]], list[str]]:
+    budget = EVENT_BUDGET.get()
+    if budget is not None and command in budget.segments:
+        return budget.segments[command]
+    tokens = _shell_tokens(command)
+    charge_event(len(tokens))
+    segments: list[list[str]] = [[]]
+    separators: list[str] = []
+    for token in tokens:
+        if token in _SHELL_SEPARATORS:
+            separators.append(token)
+            segments.append([])
+        else:
+            segments[-1].append(token)
+    result = tokens, segments, separators
+    if budget is not None:
+        budget.segments[command] = result
+    return result
 
 
 def _shell_path_tokens(command: str) -> list[str]:
+    return _cached_lex(command, "paths", _scan_shell_path_tokens)
+
+
+def _scan_shell_path_tokens(command: str) -> list[str]:
     """Drop only unquoted IO numbers adjacent to a shell redirection.
 
     The lexer consumes the first punctuation character when ending a word.
     Inspect that consumed source so ``2>`` is a descriptor, while ``2 >``
     and ``'2'>`` keep the numeric file operand.
     """
-    stream = StringIO(command)
-    lexer = _shell_lexer(stream)
-    tokens: list[str] = []
+    ends: list[int] = []
+    tokens = split_posix(command, whitespace=" \t\r", punctuation=";&|<>\n", ends=ends)
     offset = 0
-    for token in lexer:
-        end = stream.tell()
-        consumed = command[offset:end]
+    kept: list[str] = []
+    for token, end in zip(tokens, ends, strict=True):
+        if not (token.isascii() and token.isdecimal() and command[offset:end].lstrip() in (token + "<", token + ">")):
+            kept.append(token)
         offset = end
-        if token.isascii() and token.isdecimal() and re.fullmatch(rf"\s*{token}[<>]", consumed):
-            continue
-        tokens.append(token)
-    return tokens
+    return kept
 
 
 def _read_parenthesized(command: str, start: int) -> tuple[str, int] | None:
     depth = 1
+    suspended: list[tuple[int, str]] = []
     quote: str | None = None
     escaped = False
     index = start
@@ -1196,11 +934,10 @@ def _read_parenthesized(command: str, start: int) -> tuple[str, int] | None:
             if char == quote:
                 quote = None
             elif quote == '"' and char == "$" and command[index + 1 : index + 2] == "(":
-                nested = _read_parenthesized(command, index + 2)
-                if nested is None:
-                    return None
-                _, end = nested
-                index = end + 1
+                suspended.append((depth, quote))
+                quote = None
+                depth = 1
+                index += 2
                 continue
             index += 1
             continue
@@ -1211,12 +948,24 @@ def _read_parenthesized(command: str, start: int) -> tuple[str, int] | None:
         elif char == ")":
             depth -= 1
             if depth == 0:
-                return command[start:index], index
+                if not suspended:
+                    return command[start:index], index
+                depth, quote = suspended.pop()
         index += 1
     return None
 
 
 def _nested_shell_command_spans(command: str) -> list[tuple[int, str]]:
+    budget = EVENT_BUDGET.get()
+    if budget is None:
+        return _scan_nested_shell_command_spans(command)
+    if command not in budget.nested:
+        budget.charge(1 + len(command))
+        budget.nested[command] = _scan_nested_shell_command_spans(command)
+    return budget.nested[command]
+
+
+def _scan_nested_shell_command_spans(command: str) -> list[tuple[int, str]]:
     spans: list[tuple[int, str]] = []
     quote: str | None = None
     escaped = False
@@ -1279,38 +1028,46 @@ def _nested_shell_commands(command: str) -> list[str]:
     return [text for _, text in _nested_shell_command_spans(command)]
 
 
-def _python_module_invocation(tokens: list[str]) -> tuple[str, list[str]] | None:
+def _after_options(tokens: TokenTail, kind: str, option_length: Callable[[str], int]) -> TokenTail:
+    if isinstance(tokens, TokenView):
+
+        def advance(view: TokenView) -> TokenView | None:
+            count = option_length(view[0])
+            return view.drop(count) if 0 < count <= len(view) else None
+
+        return tokens.skip(kind, advance)
+    index = 0
+    while index < len(tokens):
+        count = option_length(tokens[index])
+        if not 0 < count <= len(tokens) - index:
+            break
+        index += count
+    return tokens[index:]
+
+
+def _python_option_length(option: str) -> int:
+    if option in {"-W", "-X", "--check-hash-based-pycs"}:
+        return 2
+    if option.startswith(("-W", "-X")) and len(option) > 2:
+        return 1
+    if option.startswith("--check-hash-based-pycs="):
+        return 1
+    return int(
+        option.startswith("-") and not option.startswith("--") and all(flag in "bBdEiIOPqRsSuvx" for flag in option[1:])
+    )
+
+
+def _python_module_invocation(tokens: TokenTail) -> tuple[str, TokenTail] | None:
     if not tokens or not Path(tokens[0]).name.startswith("python"):
         return None
-    index = 1
-    simple_flags = set("bBdEiIOPqRsSuvx")
-    while index < len(tokens):
-        option = tokens[index]
-        if option == "-m":
-            if index + 1 >= len(tokens):
-                return None
-            return tokens[index + 1], tokens[index + 2 :]
-        if option in {"-W", "-X", "--check-hash-based-pycs"}:
-            if index + 1 >= len(tokens):
-                return None
-            index += 2
-            continue
-        if option.startswith(("-W", "-X")) and len(option) > 2:
-            index += 1
-            continue
-        if option.startswith("--check-hash-based-pycs="):
-            index += 1
-            continue
-        if option.startswith("-") and not option.startswith("--") and all(flag in simple_flags for flag in option[1:]):
-            index += 1
-            continue
-        return None
+    tail = _after_options(tokens[1:], "python options", _python_option_length)
+    if len(tail) >= 2 and tail[0] == "-m":
+        return tail[1], tail[2:]
     return None
 
 
 def _is_brigade_verify(tokens: list[str]) -> bool:
-    names = [Path(token).name for token in tokens]
-    if names[:3] == ["brigade", "work", "verify"]:
+    if [Path(token).name for token in tokens[:3]] == ["brigade", "work", "verify"]:
         return True
     invocation = _python_module_invocation(tokens)
     return bool(invocation and invocation[0] == "brigade" and invocation[1][:2] == ["work", "verify"])
@@ -1327,6 +1084,7 @@ def _is_brigade_run_tokens(tokens: list[str]) -> bool:
 def _is_brigade_run(command: object) -> bool:
     if not isinstance(command, str) or not command.strip():
         return False
+    charge_event(len(command))
     try:
         tokens = _shell_tokens(command)
     except ValueError:
@@ -1400,116 +1158,239 @@ def _bash_confident_write_touches_worktree(target: Path, command: object) -> boo
     return write_attribution.touches_worktree(target, command)
 
 
-def _shell_wrapper_payload(tokens: list[str]) -> str | None:
+def _is_shell_command_option(option: str) -> bool:
+    return option == "--command" or (option.startswith("-") and not option.startswith("--") and "c" in option[1:])
+
+
+def _shell_option_length(option: str) -> int:
+    if _is_shell_command_option(option) or option == "--" or not option.startswith(("-", "+")):
+        return 0
+    return 2 if option in {"-o", "+o", "-O", "+O", "--init-file", "--rcfile"} else 1
+
+
+def _shell_wrapper_payload(tokens: TokenTail) -> str | None:
     if not tokens or Path(tokens[0]).name not in _SHELL_WRAPPERS:
         return None
-    index = 1
-    while index < len(tokens):
-        option = tokens[index]
-        if option == "--command" or (option.startswith("-") and not option.startswith("--") and "c" in option[1:]):
-            return tokens[index + 1] if index + 1 < len(tokens) else None
-        if option in {"-o", "+o", "-O", "+O", "--init-file", "--rcfile"}:
-            if index + 1 >= len(tokens):
-                return None
-            index += 2
-            continue
-        if option.startswith(("-o", "+o", "-O", "+O")) and len(option) > 2:
-            index += 1
-            continue
-        if option == "--" or not option.startswith(("-", "+")):
-            return None
-        index += 1
-    return None
+    tail = _after_options(tokens[1:], "shell options", _shell_option_length)
+    return tail[1] if len(tail) >= 2 and _is_shell_command_option(tail[0]) else None
 
 
-def _segment_is_verifier(segment: list[str], *, depth: int = 0) -> bool:
-    tokens = _strip_env(segment)
-    while tokens and tokens[0] in _SHELL_CONTROL_PREFIXES:
-        tokens = tokens[1:]
-    if not tokens or _is_brigade_verify(tokens):
+def _classify_segment(segment: list[str], depth: int, budget: RecognitionBudget) -> bool:
+    key = id(segment), depth
+    cached = budget.segment_results.get(key)
+    if cached is not None:
+        return cached[1]
+    pending = len(budget.shell_pending)
+    result = _scan_verifier(TokenView(segment, budget), depth=depth)
+    if pending == len(budget.shell_pending):
+        budget.segment_results[key] = segment, result
+    return result
+
+
+def _segment_is_verifier(segment: list[str]) -> bool:
+    active = EVENT_BUDGET.get()
+    with command_event() as budget:
+        try:
+            if _classify_segment(segment, 0, budget):
+                return True
+            return bool(budget.shell_pending) and _is_raw_verification_text(
+                budget.shell_pending.pop(), depth=0, budget=budget
+            )
+        except RecognitionLimit:
+            if active is not None:
+                raise
+            return False
+        finally:
+            budget.shell_pending.clear()
+
+
+_ScanKind = Literal["command", "tail", "run", "package"]
+_ScanRequest = tuple[TokenView, int, _ScanKind]
+_ScanGenerator = Generator[_ScanRequest, bool, bool]
+
+
+def _scan_verifier(segment: TokenView, *, depth: int) -> bool:
+    """Evaluate suffix dependencies once without using Python's call stack."""
+    results: dict[tuple[object, int, int, _ScanKind], bool] = {}
+    stack: list[tuple[tuple[object, int, int, _ScanKind], _ScanGenerator, bool]] = []
+
+    def push(request: _ScanRequest) -> bool:
+        tokens, count, kind = request
+        storage, index = tokens.position
+        key = (storage, index, count, kind)
+        if key in results:
+            return results[key]
+        tokens.budget.charge(1)
+        evaluate = _scan_position(tokens, depth=count) if kind == "command" else _scan_candidates(tokens, count, kind)
+        stack.append((key, evaluate, False))
         return False
-    names = [Path(token).name for token in tokens]
-    command = names[0]
+
+    answer = push((segment, depth, "command"))
+    while stack:
+        key, evaluate, started = stack[-1]
+        stack[-1] = key, evaluate, True
+        try:
+            answer = push(evaluate.send(answer) if started else next(evaluate))
+        except StopIteration as done:
+            answer = bool(done.value)
+            results[key] = answer
+            stack.pop()
+    return answer
+
+
+def _scan_candidates(tokens: TokenView, depth: int, kind: _ScanKind) -> _ScanGenerator:
+    if not tokens:
+        return False
+    if kind == "tail":
+        if (yield tokens, depth, "command"):
+            return True
+    elif Path(tokens[0]).name == "run":
+        if kind == "package":
+            if _test_script(_package_runner_script(tokens)):
+                return True
+        else:
+            tail = tokens.drop(1)
+            if tail and tail[0] == "--":
+                tail = tail.drop(1)
+            if (yield tail, depth, "command"):
+                return True
+    return (yield tokens.drop(1), depth, kind)
+
+
+def _test_script(script: str | None) -> bool:
+    return bool(script and (script in {"test", "check"} or script.startswith(("test:", "check:"))))
+
+
+def _scan_position(segment: TokenView, *, depth: int) -> _ScanGenerator:
+    if not segment:
+        return False
+    tokens = segment
+    head = tokens[0]
+    command = Path(head).name
+    if "=" in head or command in {"env", "command"}:
+        tokens = _strip_env(tokens)
+        if not tokens:
+            return False
+        head = tokens[0]
+        command = Path(head).name
+    if head in _SHELL_CONTROL_PREFIXES:
+        tokens = tokens.skip_while("shell control", _SHELL_CONTROL_PREFIXES.__contains__)
+        if not tokens:
+            return False
+        head = tokens[0]
+        command = Path(head).name
+    next_depth = depth
     if command in {"pytest", "py.test", "nose2", "tox", "nox", "vitest", "jest", "mocha", "rspec", "phpunit", "ctest"}:
         return True
-    python_invocation = _python_module_invocation(tokens)
-    if python_invocation and python_invocation[0] in {"pytest", "unittest", "nose", "nose2"}:
-        return True
+    if command.startswith("python"):
+        python_invocation = _python_module_invocation(tokens)
+        if python_invocation and python_invocation[0] in {"pytest", "unittest", "nose", "nose2"}:
+            return True
     if command in {"npm", "pnpm", "yarn", "bun"}:
         tail, ambiguous = _strip_runner_global_options(command, tokens[1:])
-        script = _package_runner_script(tail)
-        if script and (script in {"test", "check"} or script.startswith(("test:", "check:"))):
-            return True
-        return ambiguous and _ambiguous_runner_contains_verifier(command, tail, depth=depth)
+        return _test_script(_package_runner_script(tail)) or (ambiguous and (yield tail, next_depth, "package"))
     if command in {"uv", "poetry"}:
         tail, ambiguous = _strip_runner_global_options(command, tokens[1:])
-        if tail[:1] != ["run"]:
-            return ambiguous and _ambiguous_runner_contains_verifier(command, tail, depth=depth)
-        tail, run_ambiguous = _strip_runner_run_options(command, tail[1:])
-        if _segment_is_verifier(tail, depth=depth + 1):
-            return True
-        return run_ambiguous and _ambiguous_tail_contains_verifier(tail, depth=depth)
+        if not tail or tail[0] != "run":
+            return ambiguous and (yield tail, next_depth, "run")
+        tail, ambiguous = _strip_runner_run_options(command, tail[1:])
+        return (yield tail, next_depth, "command") or (ambiguous and (yield tail[1:], next_depth, "tail"))
     if command == "npx":
         tail, ambiguous = _strip_npx_options(tokens[1:])
-        if _segment_is_verifier(tail, depth=depth + 1):
-            return True
-        return ambiguous and any(_segment_is_verifier(tail[index:], depth=depth + 1) for index in range(1, len(tail)))
-    shell_payload = _shell_wrapper_payload(tokens)
-    if shell_payload is not None:
-        return depth < 4 and _is_raw_verification_text(shell_payload, depth=depth + 1)
-    if command == "go" and names[1:2] in (["test"], ["vet"]):
-        return True
-    if command == "cargo" and names[1:2] in (["test"], ["clippy"]):
-        return True
+        return (yield tail, next_depth, "command") or (ambiguous and (yield tail[1:], next_depth, "tail"))
+    if command in _SHELL_WRAPPERS:
+        shell_payload = _shell_wrapper_payload(tokens)
+        if shell_payload is not None:
+            tokens.budget.shell_pending.append(shell_payload)
+            return False
+    if command == "go":
+        return len(tokens) > 1 and Path(tokens[1]).name in {"test", "vet"}
+    if command == "cargo":
+        return len(tokens) > 1 and Path(tokens[1]).name in {"test", "clippy"}
     if command == "make":
         tail, ambiguous = _strip_make_global_options(tokens[1:])
         if ambiguous:
-            return _ambiguous_tail_contains_verifier(tokens[1:], depth=depth)
-        tail_names = [Path(token).name for token in tail]
-        return bool(tail_names and tail_names[0] in {"test", "check", "verify"})
-    if command == "ruff":
-        tail = names[1:]
-        return tail[:1] == ["check"] or (tail[:1] == ["format"] and "--check" in tail[1:])
+            return (yield tokens[2:], next_depth, "tail")
+        return bool(tail and Path(tail[0]).name in {"test", "check", "verify"})
+    if command == "ruff" and len(tokens) > 1:
+        subcommand = Path(tokens[1]).name
+        return subcommand == "check" or (
+            subcommand == "format"
+            and bool(tokens[2:].skip_while("ruff check", lambda token: Path(token).name != "--check"))
+        )
     if command in {"mypy", "pyright", "eslint", "tsc"}:
         return True
-    if command == "pre-commit" and names[1:2] == ["run"]:
+    if command == "pre-commit" and len(tokens) > 1 and Path(tokens[1]).name == "run":
         return True
-    normalized = tokens[0].replace("\\", "/")
+    normalized = head.replace("\\", "/")
     return normalized in {"scripts/verify", "scripts/verify-focused"} or normalized.endswith(
         ("/scripts/verify", "/scripts/verify-focused")
     )
 
 
-def _is_raw_verification_text(command: str, *, depth: int) -> bool:
-    command = _strip_heredoc_bodies(command)
+def _is_raw_verification_text(command: str, *, depth: int, budget: RecognitionBudget) -> bool:
+    pending = budget.shell_pending
+    pending.append(command)
+    seen: set[str] = set()
     try:
-        tokens = _shell_tokens(command)
-    except ValueError:
+        while pending:
+            text = pending.pop()
+            if text in seen:
+                continue
+            seen.add(text)
+            if EVENT_BUDGET.get() is None:
+                budget.charge(1 + 5 * len(text))
+            text = _strip_heredoc_bodies(text)
+            try:
+                tokens, segments, _ = _segmented_command(text)
+            except ValueError:
+                continue
+            if EVENT_BUDGET.get() is None:
+                budget.charge(len(tokens))
+            if any(_classify_segment(segment, depth, budget) for segment in segments):
+                return True
+            pending.extend(_nested_shell_commands(text))
         return False
-    segments: list[list[str]] = [[]]
-    for token in tokens:
-        if token in _SHELL_SEPARATORS:
-            segments.append([])
-        else:
-            segments[-1].append(token)
-    if any(_segment_is_verifier(segment, depth=depth) for segment in segments):
-        return True
-    if depth >= 4:
-        return False
-    return any(_is_raw_verification_text(nested, depth=depth + 1) for nested in _nested_shell_commands(command))
+    finally:
+        pending.clear()
+
+
+def _recognize(command: object, budget: RecognitionBudget | None = None) -> Recognition:
+    if not isinstance(command, str):
+        return Recognition.NO
+    if len(command) > MAX_COMMAND_CHARS:
+        return Recognition.UNDECIDED
+    if not command.strip():
+        return Recognition.NO
+    active = EVENT_BUDGET.get()
+    budget = budget if budget is not None else (active if active is not None else RecognitionBudget())
+    with budget.in_phase("classification"):
+        if command not in budget.verdicts:
+            try:
+                budget.charge(len(command))
+                budget.unreadable |= bool(re.search(r"[\x00\ud800-\udfff]", command))
+                yes = _is_raw_verification_text(command, depth=0, budget=budget)
+                budget.verdicts[command] = (
+                    Recognition.YES if yes else Recognition.UNDECIDED if budget.unreadable else Recognition.NO
+                )
+            except (RecognitionLimit, UnreadableCommand):
+                budget.verdicts[command] = Recognition.UNDECIDED
+        verdict = budget.verdicts[command]
+    if active is None:
+        budget.release()
+    return verdict
 
 
 def is_raw_verification(command: object) -> bool:
-    if not isinstance(command, str) or not command.strip():
-        return False
-    return _is_raw_verification_text(command, depth=0)
+    return _recognize(command) is Recognition.YES
 
 
 def _has_unsupported_verifier_structure(command: str) -> bool:
     if _nested_shell_commands(command):
         return True
+    charge_event(len(command))
     try:
-        tokens = _shell_tokens(command)
+        tokens, segments, _ = _segmented_command(command)
     except ValueError:
         return False
     if any(
@@ -1517,12 +1398,6 @@ def _has_unsupported_verifier_structure(command: str) -> bool:
         for token in tokens
     ):
         return True
-    segments: list[list[str]] = [[]]
-    for token in tokens:
-        if token in _SHELL_SEPARATORS:
-            segments.append([])
-        else:
-            segments[-1].append(token)
     if any(segment and segment[0] in _SHELL_CONTROL_TOKENS for segment in segments):
         return True
     for index, segment in enumerate(segments):
@@ -1545,16 +1420,11 @@ def _has_unsupported_verifier_structure(command: str) -> bool:
 
 
 def _first_verifier_command(command: str) -> str:
+    charge_event(len(command))
     try:
-        tokens = _shell_tokens(command)
+        _, segments, _ = _segmented_command(command)
     except ValueError:
         return command
-    segments: list[list[str]] = [[]]
-    for token in tokens:
-        if token in _SHELL_SEPARATORS:
-            segments.append([])
-        else:
-            segments[-1].append(token)
     for segment in segments:
         if _segment_is_verifier(segment):
             runnable = list(segment)
@@ -1572,6 +1442,7 @@ def _first_verifier_command(command: str) -> str:
 def _is_routed_verify(command: object) -> bool:
     if not isinstance(command, str) or not command.strip():
         return False
+    charge_event(len(command))
     try:
         return _is_brigade_verify(_strip_env(_shell_tokens(command)))
     except ValueError:
@@ -1581,6 +1452,7 @@ def _is_routed_verify(command: object) -> bool:
 def _is_confident_bash_write(command: object) -> bool:
     if not isinstance(command, str) or not command.strip():
         return False
+    charge_event(len(command))
     try:
         tokens = _shell_tokens(command)
     except ValueError:
@@ -1613,6 +1485,7 @@ def _is_confident_bash_write(command: object) -> bool:
 def _bash_write_targets_handoffs(target: Path, command: object) -> bool:
     if not isinstance(command, str) or not command.strip():
         return False
+    charge_event(len(command))
     try:
         tokens = _shell_path_tokens(command)
     except ValueError:
@@ -2219,24 +2092,111 @@ def _handle_user_prompt_submit(payload: dict[str, Any], *, pin: Path | None = No
 
 
 def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = None) -> dict[str, Any] | None:
+    if payload.get("tool_name") != "Bash" or event not in {"PreToolUse", "PostToolUse", "PostToolUseFailure"}:
+        return _handle_payload(event, payload, pin=pin)
+    with command_event() as budget:
+        command = _as_tool_input(payload.get("tool_input")).get("command")
+        if event != "PreToolUse":
+            try:
+                _recognize(command)
+            except Exception as exc:  # noqa: BLE001 - state updates are outside this handler
+                write_attribution.mark_analysis_failure(event, exc)
+            with budget.in_phase("attribution"):
+                return _handle_payload(event, payload, pin=pin)
+        verdict = Recognition.UNDECIDED
+        try:
+            verdict = _recognize(command)
+            with budget.in_phase("attribution"):
+                return _handle_payload(event, payload, pin=pin)
+        except anchored_io.SessionIntegrityError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - strict returns a permission decision on analysis errors
+            target = budget.target or _bash_fallback_target(payload, pin)
+            return _bash_analysis_refusal(target, verdict, command, unreadable=not isinstance(exc, RecognitionLimit))
+
+
+_BASH_FILE_ADVICE = "Split the command, or move the long content into a file and run the command using that file."
+
+
+def _bash_analysis_refusal(
+    target: Path | None, verdict: Recognition, command: object, *, unreadable: bool
+) -> dict[str, Any] | None:
+    if target is None or not work_mode.is_strict(target):
+        return None
+    if verdict is Recognition.YES:
+        if unreadable:
+            return _bash_permission(
+                "The hook recognized a verification command but could not read it completely. "
+                f"Run the verification through `brigade work verify run`. {_BASH_FILE_ADVICE}"
+            )
+        return _bash_permission("Split the command or run the verification through `brigade work verify run`.")
+    if unreadable:
+        return _bash_permission(f"The hook could not read this command. {_BASH_FILE_ADVICE}")
+    return _undecided_pretooluse(target, command) if verdict is Recognition.UNDECIDED else None
+
+
+def _bash_fallback_target(payload: dict[str, Any], pin: Path | None) -> Path | None:
+    budget = EVENT_BUDGET.get()
+    cwd = payload.get("cwd")
+    context = EVENT_BUDGET.set(None)
+    try:
+        derived = resolve_wired_target(cwd)
+        if budget is not None and isinstance(cwd, str):
+            budget.wired[cwd, "claude"] = derived
+        return _pinned_hook_target(derived, cwd, pin)
+    finally:
+        EVENT_BUDGET.reset(context)
+
+
+def _bash_permission(reason: str) -> dict[str, Any]:
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "PreToolUse",
+            "permissionDecision": "deny",
+            "permissionDecisionReason": reason,
+        }
+    }
+
+
+def _undecided_pretooluse(target: Path | None, command: object) -> dict[str, Any] | None:
+    if target is None or not work_mode.is_strict(target):
+        return None
+    limit = (
+        f"{MAX_COMMAND_CHARS:,}-character"
+        if isinstance(command, str) and len(command) > MAX_COMMAND_CHARS
+        else f"{command_step_limit():,}-step"
+    )
+    return _bash_permission(f"This command exceeds the {limit} classification limit. {_BASH_FILE_ADVICE}")
+
+
+def _handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None) -> dict[str, Any] | None:
     started = _monotonic()
     hub_recall.start_event(_hook_timeout_seconds())  # recall gets only what the brief leaves (S24)
     pin = pin if pin is not None else _hook_pin_from_env()
     result = write_attribution.handle_event(event, payload, pin=pin)
-    check_events.after_handling(event, payload, pin=pin)
-    # Live Fleet Hub inbox delivery rides on prompt and tool events of wired sessions.
-    # It only gets what the event left of the hook budget, so a slow brief still
-    # returns its claim path to the parent before the outer timeout kills the worker.
-    result = fleet_inbox.attach(
-        event,
-        payload,
-        result,
-        wired=lambda: effective_hook_target(payload, pin=pin) is not None,
-        budget=_hook_timeout_seconds() - (_monotonic() - started),
-    )
-    # S24: card reads and the Stop capture, within what is left of the budget.
-    remaining = _hook_timeout_seconds() - (_monotonic() - started)
-    hub_recall.after_event(event, payload, lambda: effective_hook_target(payload, pin=pin), budget=remaining)
+    budget = EVENT_BUDGET.get()
+    try:
+        if budget is None:
+            check_events.after_handling(event, payload, pin=pin)
+        else:
+            with budget.in_phase("observation"):
+                check_events.after_handling(event, payload, pin=pin)
+        # Live Fleet Hub inbox delivery rides on prompt and tool events of wired sessions.
+        # It only gets what the event left of the hook budget, so a slow brief still
+        # returns its claim path to the parent before the outer timeout kills the worker.
+        result = fleet_inbox.attach(
+            event,
+            payload,
+            result,
+            wired=lambda: effective_hook_target(payload, pin=pin) is not None,
+            budget=_hook_timeout_seconds() - (_monotonic() - started),
+        )
+        # S24: card reads and the Stop capture, within what is left of the budget.
+        remaining = _hook_timeout_seconds() - (_monotonic() - started)
+        hub_recall.after_event(event, payload, lambda: effective_hook_target(payload, pin=pin), budget=remaining)
+    except (RecognitionLimit, UnreadableCommand):
+        # Advisory work cannot replace the permission decision already made.
+        pass
     return result
 
 
@@ -2343,13 +2303,19 @@ def _handle_event(
         raw_tool_input = payload.get("tool_input")
         tool_input: dict[str, Any] = raw_tool_input if isinstance(raw_tool_input, dict) else {}
         command = tool_input.get("command")
+        budget = EVENT_BUDGET.get()
         baseline = event_fingerprint(target)
         state["pending_bash_fingerprint"] = baseline or _UNAVAILABLE_FINGERPRINT
         state["pending_bash_started_at"] = localio.utc_now_iso()
         _write_session_state_preserving_latch(target, session_id, state, log_target=target)
-        if not is_raw_verification(command) or not verification_mode.verification_enforced(
-            command, payload.get("cwd"), target
-        ):
+        recognition = _recognize(command)
+        if recognition is Recognition.UNDECIDED or (budget is not None and budget.unreadable):
+            return _bash_analysis_refusal(
+                target, recognition, command, unreadable=budget is not None and budget.unreadable
+            )
+        if recognition is Recognition.NO:
+            return None
+        if not verification_mode.verification_enforced(command, payload.get("cwd"), target):
             return None
         state["verify_denied_count"] = int(state.get("verify_denied_count") or 0) + 1
         _write_session_state_preserving_latch(target, session_id, state, log_target=target)
@@ -2358,7 +2324,11 @@ def _handle_event(
             capture_artifact_id = None
         # The replacement runs the verifier with cwd=target, so it names the
         # verifier's checkout, not a worktree a later segment writes to.
-        verify_target = effective_hook_target(payload, pin=pin, attribute_writes=False) or target
+        verify_target = (
+            target
+            if budget is not None and budget.attribution_incomplete
+            else (effective_hook_target(payload, pin=pin, attribute_writes=False) or target)
+        )
         if _has_unsupported_verifier_structure(str(command)):
             from .. import outcome_attribution
 
@@ -2391,11 +2361,11 @@ def _handle_event(
             }
         }
 
-    if event == "PostToolUse":
+    budget = EVENT_BUDGET.get()
+    if event == "PostToolUse" or (event == "PostToolUseFailure" and payload.get("tool_name") == "Bash"):
         tool_name = payload.get("tool_name")
         raw_post_tool_input = payload.get("tool_input")
         post_tool_input: dict[str, Any] = raw_post_tool_input if isinstance(raw_post_tool_input, dict) else {}
-        command = post_tool_input.get("command")
         if tool_name == "Skill":
             skill_invocations.handle(target, session_id, state, post_tool_input, payload.get("tool_response"))
             return None
@@ -2409,42 +2379,29 @@ def _handle_event(
                     target, session_id, state, log_target=target, patch_fields=("read_files",)
                 )
             return None
-        wrote = tool_name in _WRITE_TOOLS or (
-            tool_name == "Bash" and write_attribution.touches_worktree(target, command, cwd=payload.get("cwd"))
-        )
+        wrote = tool_name in _WRITE_TOOLS
+        handoff_write = wrote and _is_handoff_tool_write(target, post_tool_input)
         capture_artifact_id = None
-        if tool_name == "Bash" and (_is_routed_verify(command) or _is_brigade_run(command)):
-            capture_artifact_id = _parse_capture_flag(command) if _is_routed_verify(command) else None
-            # Brigade's own metadata must not re-arm closeout, but an explicit
-            # source write elsewhere in the same Bash call still belongs to
-            # this session, including edits after a completed verification.
-            if not wrote:
+        updated_fp = event_fingerprint(target) if wrote else None
+        if tool_name == "Bash":
+            wrote, capture_artifact_id, handoff_write, metadata_only, updated_fp = write_attribution.post_bash_write(
+                event, target, payload, state, session_id, event_fingerprint
+            )
+            if metadata_only and event == "PostToolUse":
                 state.pop("pending_bash_fingerprint", None)
                 state.pop("pending_bash_started_at", None)
                 _write_session_state_preserving_latch(
                     target, session_id, state, log_target=target, capture_artifact_id=capture_artifact_id
                 )
                 return None
-        if not wrote and tool_name == "Bash":
-            wrote = _bash_write_detected(
-                target,
-                state.get("pending_bash_fingerprint"),
-                session_id=session_id,
-                started_at=state.get("pending_bash_started_at"),
-                fingerprint=event_fingerprint,
-            )
         if wrote:
             state["write_observed"] = True
             written_at = localio.utc_now_iso()
             producer_session.record_write(state, target, payload, written_at)
             state["last_write_at"] = written_at
             state["last_attributed_write_at"] = written_at
-            handoff_write = (tool_name in _WRITE_TOOLS and _is_handoff_tool_write(target, post_tool_input)) or (
-                tool_name == "Bash" and _bash_write_targets_handoffs(target, post_tool_input.get("command"))
-            )
             if not handoff_write:
                 state["last_verification_write_at"] = written_at
-            updated_fp = event_fingerprint(target)
             if updated_fp is not None:
                 state["repo_fingerprint"] = updated_fp
             state.pop("pending_bash_fingerprint", None)
@@ -2453,13 +2410,14 @@ def _handle_event(
             _write_session_state_preserving_latch(
                 target, session_id, state, log_target=target, capture_artifact_id=capture_artifact_id
             )
-            if presence_target is not None:
+            if presence_target is not None and event == "PostToolUse":
                 presence.emit_presence("PostToolUse", presence_target, session_id)
         elif state.get("pending_bash_fingerprint") is not None:
             state.pop("pending_bash_fingerprint", None)
             state.pop("pending_bash_started_at", None)
             _write_session_state_preserving_latch(target, session_id, state, log_target=target)
-        return None
+        if event == "PostToolUse" or (budget is not None and budget.attribution_incomplete):
+            return None
 
     if event == "PostToolUseFailure":
         return check_events.failure_followup(payload, target, session_id, state)
@@ -2770,7 +2728,17 @@ def _hook_run_body_unchecked(
     """
     pin = _resolve_pin(pin_target)
     session_id = _session_id_from_payload(payload)
-    log_target = _resolve_log_target(payload, pin=pin)
+    log_probe_failed = False
+    try:
+        log_target = _resolve_log_target(payload, pin=pin)
+    except anchored_io.SessionIntegrityError:
+        raise
+    except Exception:  # noqa: BLE001 - command-derived target errors must reach the Bash boundary
+        if payload.get("tool_name") != "Bash" or event not in {"PreToolUse", "PostToolUse", "PostToolUseFailure"}:
+            raise
+        log_probe_failed = True
+        log_target = _bash_fallback_target(payload, pin)
+
     latched = False
     announce = False
     if log_target is not None:
@@ -2802,7 +2770,19 @@ def _hook_run_body_unchecked(
             "session_id": session_id,
         }
 
-    result = _isolated_handle_payload(event, payload, pin=pin)
+    if log_probe_failed and event == "PreToolUse":
+        command = _as_tool_input(payload.get("tool_input")).get("command")
+        try:
+            verdict = _recognize(command)
+        except Exception:  # noqa: BLE001 - fall back to unreadable-command refusal
+            verdict = Recognition.UNDECIDED
+        result = _bash_analysis_refusal(log_target, verdict, command, unreadable=True)
+    elif log_probe_failed:
+        with command_event() as budget:
+            budget.attribution_incomplete = budget.unreadable = True
+            result = _isolated_handle_payload(event, payload, pin=pin)
+    else:
+        result = _isolated_handle_payload(event, payload, pin=pin)
     result, claim_path = _strip_claim(result)
     if log_target is not None:
         _clear_hook_timeouts(log_target, session_id)

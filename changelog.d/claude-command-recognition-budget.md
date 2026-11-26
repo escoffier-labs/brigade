@@ -1,0 +1,1 @@
+- Bound Claude hook command recognition time on long shell commands.

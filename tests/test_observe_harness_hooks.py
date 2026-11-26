@@ -11,6 +11,15 @@ import pytest
 from brigade import fleet_session_presence as presence, observed_checks
 from tests._home import set_home
 from tests._posix import requires_dirfd
+from tests.test_claude_hooks_runtime import (
+    _BOUNDED_HOOK_COMMANDS,
+    _HOOK_TIME_BACKSTOP_SECONDS,
+    _assert_hook_scaling,
+    _assert_hook_steps,
+    _hook_commands_at_both_sizes,
+    _measure_event_budget,
+    _mock_command_path_error,
+)
 from tests.test_work_mode import _wired, _set_mode
 
 
@@ -96,7 +105,6 @@ def test_no_process_or_snapshot(target, monkeypatch, harness):
         [],
         {"tool_input": []},
         {"session_id": []},
-        {"tool_input": {"command": "x" * 70000}},
     ],
 )
 def test_malformed(target, monkeypatch, capsys, harness, bad):
@@ -434,3 +442,63 @@ def test_lesson_contention_preserves_existing_capture(target, monkeypatch, tool)
         assert len(observed_checks.read_checks(target)[0]) == 1
     else:
         assert observe_session_path(target, "private-session").exists()
+
+
+@pytest.mark.parametrize("mode", ["observe", "off"])
+def test_unclassified_capture_has_an_explicit_marker(target, monkeypatch, capsys, mode):
+    _set_mode(target, mode, capsys)
+    command = "echo " + "x" * 70_000
+    assert run(monkeypatch, "codex", payload(target, "codex", tool_input={"command": command})) == 0
+    (record,) = observed_checks.read_checks(target)[0]
+    assert record.tool == "unclassified"
+    assert observed_checks.check_kind(record.tool) == "unclassified"
+    assert record.status == "unknown"
+    assert record.command_digest == observed_checks.DIGEST_UNAVAILABLE
+
+
+@pytest.mark.parametrize("shape", _BOUNDED_HOOK_COMMANDS)
+def test_codex_bash_event_work_bound(target, monkeypatch, shape):
+    budgets = _measure_event_budget(monkeypatch)
+    steps = []
+    for index, (command, _) in enumerate(_hook_commands_at_both_sizes(shape)):
+        data = payload(target, "codex", session_id=f"event-{index}", tool_input={"command": command})
+        started = time.perf_counter()
+        assert run(monkeypatch, "codex", data) == 0
+        elapsed = time.perf_counter() - started
+        if index == 1:
+            assert elapsed < _HOOK_TIME_BACKSTOP_SECONDS
+        steps.append(_assert_hook_steps(command, budgets, shape=shape).steps)
+    _assert_hook_scaling(*steps)
+
+
+@pytest.mark.parametrize("mode", ["strict", "observe", "off"])
+@pytest.mark.parametrize(
+    "case",
+    ["surrogate", "null", "long-component", "windows-missing-component", "windows-invalid-component", "attribution"],
+)
+def test_codex_observation_does_not_classify_unreadable_commands(target, monkeypatch, capsys, mode, case):
+    from brigade.claude_hooks import command_tokens, verification_mode
+
+    _set_mode(target, mode, capsys)
+    if case == "attribution":
+
+        def unavailable(*_args, **_kwargs):
+            raise RuntimeError("fixture attribution error")
+
+        monkeypatch.setattr(verification_mode, "governing_modes", unavailable)
+    if case == "windows-missing-component":
+        monkeypatch.setattr(command_tokens, "_WINDOWS", True)
+    if case == "windows-invalid-component":
+        _mock_command_path_error(monkeypatch, winerror=123)
+    long_component = "cd ./" + "x" * 300 + " && pytest"
+    command = {
+        "surrogate": "pytest /\ud800",
+        "null": "echo a\x00b",
+        "long-component": long_component,
+        "windows-missing-component": long_component,
+        "windows-invalid-component": "cd ./unreadable.py && pytest",
+        "attribution": "pytest -q",
+    }[case]
+    assert run(monkeypatch, "codex", payload(target, "codex", tool_input={"command": command})) == 0
+    assert capsys.readouterr() == ("{}\n", "")
+    assert all(record.tool == "unclassified" for record in observed_checks.read_checks(target)[0])
