@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 from pathlib import Path
@@ -81,12 +82,30 @@ def _project(target: Path, vault: Path, capsys) -> dict:
 def test_project_vault_with_more_notes_than_available_descriptors(tmp_path: Path, vault: Path, capsys) -> None:
     import resource
 
-    card_count = 96
     soft_limit, hard_limit = resource.getrlimit(resource.RLIMIT_NOFILE)
-    lowered_limit = 48
-    if soft_limit != resource.RLIM_INFINITY and soft_limit < lowered_limit:
-        pytest.skip("requires at least 48 available descriptor slots")
+    fd_dir = Path("/proc/self/fd")
+    if fd_dir.is_dir():
+        open_fds = len(os.listdir(fd_dir))
+    else:
+        scan_limit = os.sysconf("SC_OPEN_MAX") if soft_limit == resource.RLIM_INFINITY else soft_limit
+        if scan_limit < 0:
+            pytest.skip("requires a finite descriptor scan limit")
+        open_fds = 0
+        for fd in range(scan_limit):
+            try:
+                os.fstat(fd)
+            except OSError as exc:
+                if exc.errno != errno.EBADF:
+                    raise
+            else:
+                open_fds += 1
 
+    # Leave room for the directory walks, SQLite, and pytest's own I/O.
+    lowered_limit = open_fds + 48
+    if soft_limit != resource.RLIM_INFINITY and soft_limit < lowered_limit:
+        pytest.skip("requires at least 48 additional descriptor slots")
+
+    card_count = lowered_limit * 2
     _write_cards(tmp_path, card_count, category="operations", tags=[])
     (tmp_path / "rules").mkdir()
     (tmp_path / "rules" / "retention.md").write_text("# Retention\nKeep records.\n", encoding="utf-8")
