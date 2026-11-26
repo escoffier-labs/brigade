@@ -3722,3 +3722,83 @@ def test_manifest_probe_git_calls_stay_inside_the_hook_budget(tmp_path: Path, mo
     assert manifest_loop.changed_paths(target) == [_MANIFEST_SUBJECT]
     assert timeouts and max(timeouts) <= 2.0  # one shared deadline, not 2 s per call
     assert manifest_loop._GIT_TIMEOUT_SECONDS <= 2.0
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        ("pytest -q", True),
+        ("uv run pytest", True),
+        ("npx jest", True),
+        ("npx --prefix /tmp jest", True),
+        ("env -S 'pytest -q'", True),
+        ("bash -lc 'pytest -q'", True),
+        ("command -p pytest", True),
+        ("make -j 4 check", True),
+        ("cd x && pytest", True),
+        ("npx --unknown option-value jest", True),
+        ("uv --unknown option-value run pytest", True),
+        ("poetry run --unknown option-value pytest", True),
+        ("npm --unknown option-value run check:types", True),
+        ("npx --package jest echo done", False),
+        ("npm run build", False),
+        ("uv run python -V", False),
+        ("echo pytest", False),
+        ("command -v pytest", False),
+        ("python -m brigade work verify run", False),
+        ("printf '%s' 'pytest -q'", False),
+    ],
+)
+def test_recognizer_matches_main(command, expected):
+    # Captured by running the recognizer at 41780bb5579c before editing it.
+    assert runtime.is_raw_verification(command) is expected
+
+
+def _recognition_input(shape, count):
+    words = " ".join(["arg"] * count)
+    if shape in {"npx", "uv", "poetry"}:
+        runner = shape if shape == "npx" else f"{shape} run"
+        return f"{runner} --unknown {words}"
+    if shape == "shell":
+        return shlex.join(["bash", "-lc", shlex.join(["bash", "-lc", f"echo {words}"])])
+    if shape == "chain":
+        return "true && " * count + "true"
+    assert shape == "env"
+    return "env " + "KEY=arg " * count + "echo"
+
+
+@pytest.mark.parametrize("shape", ["npx", "uv", "poetry", "shell", "chain", "env"])
+def test_recognizer_work_bound(shape):
+    from brigade.claude_hooks import command_tokens
+
+    for count in (1000, 2000, 4000, 8000):
+        command = _recognition_input(shape, count)
+        budget = command_tokens.RecognitionBudget()
+        assert not runtime._is_raw_verification_text(command, depth=0, budget=budget)
+        assert 0 < budget.steps <= 80 * count
+
+    unit = len(_recognition_input(shape, 2)) - len(_recognition_input(shape, 1))
+    count = 1 + (65535 - len(_recognition_input(shape, 1))) // unit
+    command = _recognition_input(shape, count).ljust(65535)
+    budget = command_tokens.RecognitionBudget()
+    assert not runtime._is_raw_verification_text(command, depth=0, budget=budget)
+    assert 0 < budget.steps <= 24 * len(command)
+
+
+def test_recognizer_budget_exhaustion_returns_false(monkeypatch):
+    from brigade.claude_hooks import command_tokens
+
+    command = "cd src && env -S 'pytest -q'"
+    assert runtime.is_raw_verification(command)
+    monkeypatch.setattr(command_tokens, "MAX_RECOGNITION_STEPS", 5 * len(command) + 1)
+    assert not runtime.is_raw_verification(command)
+
+
+def test_long_runner_command_through_pre_and_post_tool_use(target):
+    command = _recognition_input("npx", 8000)
+    for event in ("PreToolUse", "PostToolUse"):
+        payload = _payload(target, event, tool_name="Bash", tool_input={"command": command})
+        assert runtime.handle_payload(event, payload) is None
+        state = runtime.read_session_state(target, "session-1")
+        assert state is not None
+        assert state.get("hook_timeout_count", 0) == 0

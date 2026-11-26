@@ -12,6 +12,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import deque
 from datetime import datetime
 from io import StringIO
 from itertools import chain
@@ -38,6 +39,19 @@ from . import (
     skill_invocations,
     verification_mode,
     write_attribution,
+)
+from .command_tokens import (
+    RecognitionBudget,
+    RecognitionLimit,
+    TokenTail,
+    TokenView,
+    _is_env_assignment,
+    _package_runner_script as _package_runner_script,
+    _strip_env,
+    _strip_make_global_options,
+    _strip_npx_options,
+    _strip_runner_global_options,
+    _strip_runner_run_options,
 )
 from .fingerprint import repo_worktree_fingerprint
 from .handoff_close import (
@@ -357,14 +371,14 @@ def _strip_heredoc_bodies(command: str) -> str:
     """Drop heredoc document lines so their content is data, not commands."""
     lines = command.split("\n")
     kept: list[str] = []
-    terminators: list[tuple[str, bool]] = []
+    terminators: deque[tuple[str, bool]] = deque()
     quote: str | None = None
     for line in lines:
         if terminators:
             tag, strip_tabs = terminators[0]
             body = line.lstrip("\t") if strip_tabs else line
             if body == tag or (not strip_tabs and line.rstrip("\r") == tag):
-                terminators.pop(0)
+                terminators.popleft()
             continue
         if quote is not None:
             kept.append(line)
@@ -385,24 +399,22 @@ def _resolve_command_path(raw: str, cwd: Path) -> Path:
     return expanded.resolve(strict=False)
 
 
-def _unwrap_command_tokens(tokens: list[str]) -> list[str]:
-    result = list(tokens)
-    while result and Path(result[0]).name in {"tokenjuice", "token-glace"} and "--" in result:
-        result = result[result.index("--") + 1 :]
-    return result
-
-
 def _strip_command_prefixes(tokens: list[str]) -> list[str]:
-    result = _unwrap_command_tokens(tokens)
-    while result and _is_env_assignment(result[0]):
-        result.pop(0)
-    while result and Path(result[0]).name in {"command", "env", "nice", "sudo", "time"}:
-        result.pop(0)
-        while result and result[0].startswith("-"):
-            result.pop(0)
-        while result and _is_env_assignment(result[0]):
-            result.pop(0)
-    return result
+    index = 0
+    while index < len(tokens) and Path(tokens[index]).name in {"tokenjuice", "token-glace"}:
+        try:
+            index = tokens.index("--", index) + 1
+        except ValueError:
+            break
+    while index < len(tokens) and _is_env_assignment(tokens[index]):
+        index += 1
+    while index < len(tokens) and Path(tokens[index]).name in {"command", "env", "nice", "sudo", "time"}:
+        index += 1
+        while index < len(tokens) and tokens[index].startswith("-"):
+            index += 1
+        while index < len(tokens) and _is_env_assignment(tokens[index]):
+            index += 1
+    return tokens[index:]
 
 
 def _nested_shell_script(tokens: list[str]) -> str | None:
@@ -774,346 +786,8 @@ def _brief_records(text: str) -> list[str]:
     return records if records else [text]
 
 
-def _is_env_assignment(token: str) -> bool:
-    if "=" not in token:
-        return False
-    key = token.split("=", 1)[0]
-    return bool(key and (key[0].isalpha() or key[0] == "_") and all(char.isalnum() or char == "_" for char in key))
-
-
-def _strip_env(tokens: list[str]) -> list[str]:
-    remaining = list(tokens)
-    while remaining and _is_env_assignment(remaining[0]):
-        remaining.pop(0)
-
-    if remaining and Path(remaining[0]).name == "env":
-        remaining.pop(0)
-        while remaining:
-            option = remaining[0]
-            if option == "--":
-                remaining.pop(0)
-                break
-            if _is_env_assignment(option):
-                remaining.pop(0)
-                continue
-            if option in {
-                "-i",
-                "--ignore-environment",
-                "-0",
-                "--null",
-                "-v",
-                "--debug",
-                "--block-signal",
-                "--default-signal",
-                "--ignore-signal",
-                "--list-signal-handling",
-            }:
-                remaining.pop(0)
-                continue
-            if (
-                len(option) > 1
-                and option.startswith("-")
-                and not option.startswith("--")
-                and all(flag in {"i", "0", "v"} for flag in option[1:])
-            ):
-                remaining.pop(0)
-                continue
-            if option in {"-u", "--unset", "-C", "--chdir", "-a", "--argv0"}:
-                if len(remaining) < 2:
-                    return []
-                del remaining[:2]
-                continue
-            if option.startswith(
-                (
-                    "--unset=",
-                    "--chdir=",
-                    "--argv0=",
-                    "--block-signal=",
-                    "--default-signal=",
-                    "--ignore-signal=",
-                )
-            ) or (option.startswith(("-a", "-C", "-u")) and option not in {"-a", "-C", "-u"}):
-                remaining.pop(0)
-                continue
-            if option in {"-S", "--split-string"}:
-                if len(remaining) < 2:
-                    return []
-                try:
-                    split = shlex.split(remaining[1], posix=os.name != "nt")
-                except ValueError:
-                    return []
-                return _strip_env([*split, *remaining[2:]])
-            if option.startswith("--split-string=") or (option.startswith("-S") and option != "-S"):
-                value = option.split("=", 1)[1] if option.startswith("--split-string=") else option[2:]
-                try:
-                    split = shlex.split(value, posix=os.name != "nt")
-                except ValueError:
-                    return []
-                return _strip_env([*split, *remaining[1:]])
-            if option.startswith("-"):
-                return []
-            break
-
-    while remaining and _is_env_assignment(remaining[0]):
-        remaining.pop(0)
-
-    if remaining and Path(remaining[0]).name == "command":
-        remaining.pop(0)
-        if remaining[:1] == ["-p"]:
-            remaining.pop(0)
-        elif remaining[:1] in (["-v"], ["-V"]):
-            return []
-        if remaining[:1] == ["--"]:
-            remaining.pop(0)
-        elif remaining and remaining[0].startswith("-"):
-            return []
-    return remaining
-
-
-def _strip_npx_options(tokens: list[str]) -> tuple[list[str], bool]:
-    remaining = list(tokens)
-    no_value = {
-        "-y",
-        "--yes",
-        "--no-install",
-        "--ignore-existing",
-        "--prefer-offline",
-        "--prefer-online",
-        "--offline",
-        "--foreground-scripts",
-        "--ignore-scripts",
-        "-q",
-        "--quiet",
-    }
-    with_value = {"-p", "--package", "--shell", "--prefix", "--node-options"}
-    while remaining:
-        option = remaining[0]
-        if option == "--":
-            remaining.pop(0)
-            break
-        if option in no_value:
-            remaining.pop(0)
-            continue
-        if option in with_value:
-            if len(remaining) < 2:
-                return [], True
-            del remaining[:2]
-            continue
-        if option.startswith(("--package=", "--shell=", "--prefix=", "--node-options=")):
-            remaining.pop(0)
-            continue
-        if option.startswith("-"):
-            return remaining, True
-        break
-    return remaining, False
-
-
-def _package_runner_script(tokens: list[str]) -> str | None:
-    remaining = [Path(token).name for token in tokens]
-    if remaining[:1] == ["test"]:
-        return "test"
-    if remaining[:1] != ["run"]:
-        return None
-    remaining.pop(0)
-    no_value = {"-s", "--silent", "--if-present", "--ignore-scripts", "--foreground-scripts"}
-    while remaining:
-        option = remaining[0]
-        if option == "--":
-            remaining.pop(0)
-            continue
-        if option in no_value:
-            remaining.pop(0)
-            continue
-        if option.startswith("-"):
-            return None
-        break
-    return remaining[0] if remaining else None
-
-
-def _strip_make_global_options(tokens: list[str]) -> tuple[list[str], bool]:
-    remaining = list(tokens)
-    no_value = {
-        "-k",
-        "-n",
-        "-q",
-        "-s",
-        "-t",
-        "--always-make",
-        "--dry-run",
-        "--ignore-errors",
-        "--just-print",
-        "--keep-going",
-        "--no-builtin-rules",
-        "--no-print-directory",
-        "--print-directory",
-        "--question",
-        "--quiet",
-        "--recon",
-        "--silent",
-        "--touch",
-        "--version",
-        "-v",
-        "-w",
-        "-p",
-    }
-    with_value = {
-        "-I",
-        "--include-dir",
-        "-C",
-        "--directory",
-        "-j",
-        "--jobs",
-        "-o",
-        "--old-file",
-        "-W",
-        "--what-if",
-        "--load-average",
-    }
-    while remaining:
-        option = remaining[0]
-        if option == "--":
-            remaining.pop(0)
-            break
-        if option in no_value:
-            remaining.pop(0)
-            continue
-        if option in with_value:
-            if len(remaining) < 2:
-                return [], True
-            del remaining[:2]
-            continue
-        if any(option.startswith(f"{known}=") for known in with_value):
-            remaining.pop(0)
-            continue
-        if option.startswith("-j") and len(option) > 2 and option[2:].isdigit():
-            remaining.pop(0)
-            continue
-        if option.startswith(("-C", "-I", "-o", "-W")) and len(option) > 2:
-            remaining.pop(0)
-            continue
-        if option.startswith("-"):
-            return remaining, True
-        break
-    return remaining, False
-
-
-def _strip_runner_global_options(command: str, tokens: list[str]) -> tuple[list[str], bool]:
-    no_value: dict[str, set[str]] = {
-        "uv": {"-q", "--quiet", "-v", "--verbose", "--no-config", "--offline", "--no-cache"},
-        "poetry": {"-n", "--no-interaction", "--no-ansi", "-v", "-vv", "-vvv"},
-        "npm": {"-s", "--silent"},
-        "pnpm": {"-s", "--silent", "-r", "--recursive"},
-        "yarn": {"-s", "--silent"},
-        "bun": {"--silent"},
-    }
-    with_value: dict[str, set[str]] = {
-        "uv": {"--directory", "--project", "--config-file", "--cache-dir", "--color"},
-        "poetry": {"-C", "--directory", "-P", "--project"},
-        "npm": {"-w", "--workspace", "--prefix"},
-        "pnpm": {"-F", "--filter", "-C", "--dir", "--workspace-dir"},
-        "yarn": {"--cwd"},
-        "bun": {"--cwd"},
-    }
-    remaining = list(tokens)
-    command_no_value = no_value.get(command, set())
-    command_with_value = with_value.get(command, set())
-    while remaining:
-        option = remaining[0]
-        if option == "--":
-            remaining.pop(0)
-            break
-        if option in command_no_value:
-            remaining.pop(0)
-            continue
-        if option in command_with_value:
-            if len(remaining) < 2:
-                return [], True
-            del remaining[:2]
-            continue
-        if any(
-            option.startswith(f"{known}=")
-            or (
-                known.startswith("-")
-                and not known.startswith("--")
-                and option.startswith(known)
-                and len(option) > len(known)
-            )
-            for known in command_with_value
-        ):
-            remaining.pop(0)
-            continue
-        if option.startswith("-"):
-            return remaining, True
-        break
-    return remaining, False
-
-
-def _strip_runner_run_options(command: str, tokens: list[str]) -> tuple[list[str], bool]:
-    no_value: dict[str, set[str]] = {
-        "uv": {
-            "--no-sync",
-            "--locked",
-            "--frozen",
-            "--isolated",
-            "--active",
-            "--no-project",
-            "--exact",
-            "--inexact",
-            "--no-editable",
-            "--compile-bytecode",
-            "--no-compile-bytecode",
-            "--no-sources",
-        },
-        "poetry": {"-n", "--no-interaction", "--no-ansi", "-v", "-vv", "-vvv"},
-    }
-    with_value: dict[str, set[str]] = {
-        "uv": {
-            "--python",
-            "--with",
-            "--with-editable",
-            "--with-requirements",
-            "--project",
-            "--directory",
-            "--env-file",
-        },
-        "poetry": {"-C", "--directory", "-P", "--project"},
-    }
-    remaining = list(tokens)
-    command_no_value = no_value.get(command, set())
-    command_with_value = with_value.get(command, set())
-    while remaining:
-        option = remaining[0]
-        if option == "--":
-            remaining.pop(0)
-            break
-        if option in command_no_value:
-            remaining.pop(0)
-            continue
-        if option in command_with_value:
-            if len(remaining) < 2:
-                return [], True
-            del remaining[:2]
-            continue
-        if any(
-            option.startswith(f"{known}=")
-            or (
-                known.startswith("-")
-                and not known.startswith("--")
-                and option.startswith(known)
-                and len(option) > len(known)
-            )
-            for known in command_with_value
-        ):
-            remaining.pop(0)
-            continue
-        if option.startswith("-"):
-            return remaining, True
-        break
-    return remaining, False
-
-
-def _ambiguous_tail_contains_verifier(tokens: list[str], *, depth: int) -> bool:
-    return any(_segment_is_verifier(tokens[index:], depth=depth + 1) for index in range(1, len(tokens)))
+def _ambiguous_tail_contains_verifier(tokens: TokenView, *, depth: int) -> bool:
+    return any(_scan_verifier(tokens[index:], depth=depth + 1) for index in range(1, len(tokens)))
 
 
 def _runner_options_ambiguous(command: str, tokens: list[str]) -> bool:
@@ -1125,16 +799,15 @@ def _runner_options_ambiguous(command: str, tokens: list[str]) -> bool:
     return False
 
 
-def _ambiguous_runner_contains_verifier(command: str, tokens: list[str], *, depth: int) -> bool:
-    names = [Path(token).name for token in tokens]
-    for index, name in enumerate(names):
-        if name != "run":
+def _ambiguous_runner_contains_verifier(command: str, tokens: TokenView, *, depth: int) -> bool:
+    for index, token in enumerate(tokens):
+        if Path(token).name != "run":
             continue
-        tail = tokens[index + 1 :]
-        if tail[:1] == ["--"]:
-            tail = tail[1:]
         if command in {"uv", "poetry"}:
-            if _segment_is_verifier(tail, depth=depth + 1):
+            tail = tokens[index + 1 :]
+            if tail and tail[0] == "--":
+                tail = tail[1:]
+            if _scan_verifier(tail, depth=depth + 1):
                 return True
         else:
             script = _package_runner_script(tokens[index:])
@@ -1179,6 +852,7 @@ def _shell_path_tokens(command: str) -> list[str]:
 
 def _read_parenthesized(command: str, start: int) -> tuple[str, int] | None:
     depth = 1
+    suspended: list[tuple[int, str]] = []
     quote: str | None = None
     escaped = False
     index = start
@@ -1196,11 +870,10 @@ def _read_parenthesized(command: str, start: int) -> tuple[str, int] | None:
             if char == quote:
                 quote = None
             elif quote == '"' and char == "$" and command[index + 1 : index + 2] == "(":
-                nested = _read_parenthesized(command, index + 2)
-                if nested is None:
-                    return None
-                _, end = nested
-                index = end + 1
+                suspended.append((depth, quote))
+                quote = None
+                depth = 1
+                index += 2
                 continue
             index += 1
             continue
@@ -1211,7 +884,9 @@ def _read_parenthesized(command: str, start: int) -> tuple[str, int] | None:
         elif char == ")":
             depth -= 1
             if depth == 0:
-                return command[start:index], index
+                if not suspended:
+                    return command[start:index], index
+                depth, quote = suspended.pop()
         index += 1
     return None
 
@@ -1279,7 +954,7 @@ def _nested_shell_commands(command: str) -> list[str]:
     return [text for _, text in _nested_shell_command_spans(command)]
 
 
-def _python_module_invocation(tokens: list[str]) -> tuple[str, list[str]] | None:
+def _python_module_invocation(tokens: TokenTail) -> tuple[str, TokenTail] | None:
     if not tokens or not Path(tokens[0]).name.startswith("python"):
         return None
     index = 1
@@ -1309,8 +984,7 @@ def _python_module_invocation(tokens: list[str]) -> tuple[str, list[str]] | None
 
 
 def _is_brigade_verify(tokens: list[str]) -> bool:
-    names = [Path(token).name for token in tokens]
-    if names[:3] == ["brigade", "work", "verify"]:
+    if [Path(token).name for token in tokens[:3]] == ["brigade", "work", "verify"]:
         return True
     invocation = _python_module_invocation(tokens)
     return bool(invocation and invocation[0] == "brigade" and invocation[1][:2] == ["work", "verify"])
@@ -1400,7 +1074,7 @@ def _bash_confident_write_touches_worktree(target: Path, command: object) -> boo
     return write_attribution.touches_worktree(target, command)
 
 
-def _shell_wrapper_payload(tokens: list[str]) -> str | None:
+def _shell_wrapper_payload(tokens: list[str] | TokenView) -> str | None:
     if not tokens or Path(tokens[0]).name not in _SHELL_WRAPPERS:
         return None
     index = 1
@@ -1422,19 +1096,33 @@ def _shell_wrapper_payload(tokens: list[str]) -> str | None:
     return None
 
 
-def _segment_is_verifier(segment: list[str], *, depth: int = 0) -> bool:
-    tokens = _strip_env(segment)
-    while tokens and tokens[0] in _SHELL_CONTROL_PREFIXES:
-        tokens = tokens[1:]
-    if not tokens or _is_brigade_verify(tokens):
+def _segment_is_verifier(segment: list[str]) -> bool:
+    try:
+        return _scan_verifier(TokenView(segment, RecognitionBudget()), depth=0)
+    except RecognitionLimit:
         return False
-    names = [Path(token).name for token in tokens]
-    command = names[0]
+
+
+def _scan_verifier(segment: TokenView, *, depth: int) -> bool:
+    # Shell text keeps its existing depth limit. Runner recursion also needs
+    # a stack bound because each runner may add multiple Python call frames.
+    if depth > 64:
+        raise RecognitionLimit
+    tokens = _strip_env(segment)
+    index = 0
+    while index < len(tokens) and tokens[index] in _SHELL_CONTROL_PREFIXES:
+        index += 1
+    if index == len(tokens):
+        return False
+    tokens = tokens[index:]
+    head = tokens[0]
+    command = Path(head).name
     if command in {"pytest", "py.test", "nose2", "tox", "nox", "vitest", "jest", "mocha", "rspec", "phpunit", "ctest"}:
         return True
-    python_invocation = _python_module_invocation(tokens)
-    if python_invocation and python_invocation[0] in {"pytest", "unittest", "nose", "nose2"}:
-        return True
+    if command.startswith("python"):
+        python_invocation = _python_module_invocation(tokens)
+        if python_invocation and python_invocation[0] in {"pytest", "unittest", "nose", "nose2"}:
+            return True
     if command in {"npm", "pnpm", "yarn", "bun"}:
         tail, ambiguous = _strip_runner_global_options(command, tokens[1:])
         script = _package_runner_script(tail)
@@ -1443,44 +1131,48 @@ def _segment_is_verifier(segment: list[str], *, depth: int = 0) -> bool:
         return ambiguous and _ambiguous_runner_contains_verifier(command, tail, depth=depth)
     if command in {"uv", "poetry"}:
         tail, ambiguous = _strip_runner_global_options(command, tokens[1:])
-        if tail[:1] != ["run"]:
+        if not tail or tail[0] != "run":
             return ambiguous and _ambiguous_runner_contains_verifier(command, tail, depth=depth)
         tail, run_ambiguous = _strip_runner_run_options(command, tail[1:])
-        if _segment_is_verifier(tail, depth=depth + 1):
+        if _scan_verifier(tail, depth=depth + 1):
             return True
         return run_ambiguous and _ambiguous_tail_contains_verifier(tail, depth=depth)
     if command == "npx":
         tail, ambiguous = _strip_npx_options(tokens[1:])
-        if _segment_is_verifier(tail, depth=depth + 1):
+        if _scan_verifier(tail, depth=depth + 1):
             return True
-        return ambiguous and any(_segment_is_verifier(tail[index:], depth=depth + 1) for index in range(1, len(tail)))
-    shell_payload = _shell_wrapper_payload(tokens)
-    if shell_payload is not None:
-        return depth < 4 and _is_raw_verification_text(shell_payload, depth=depth + 1)
-    if command == "go" and names[1:2] in (["test"], ["vet"]):
-        return True
-    if command == "cargo" and names[1:2] in (["test"], ["clippy"]):
-        return True
+        return ambiguous and _ambiguous_tail_contains_verifier(tail, depth=depth)
+    if command in _SHELL_WRAPPERS:
+        shell_payload = _shell_wrapper_payload(tokens)
+        if shell_payload is not None:
+            return depth < 4 and _is_raw_verification_text(shell_payload, depth=depth + 1, budget=tokens.budget)
+    if command == "go":
+        return len(tokens) > 1 and Path(tokens[1]).name in {"test", "vet"}
+    if command == "cargo":
+        return len(tokens) > 1 and Path(tokens[1]).name in {"test", "clippy"}
     if command == "make":
         tail, ambiguous = _strip_make_global_options(tokens[1:])
         if ambiguous:
             return _ambiguous_tail_contains_verifier(tokens[1:], depth=depth)
-        tail_names = [Path(token).name for token in tail]
-        return bool(tail_names and tail_names[0] in {"test", "check", "verify"})
-    if command == "ruff":
-        tail = names[1:]
-        return tail[:1] == ["check"] or (tail[:1] == ["format"] and "--check" in tail[1:])
+        return bool(tail and Path(tail[0]).name in {"test", "check", "verify"})
+    if command == "ruff" and len(tokens) > 1:
+        subcommand = Path(tokens[1]).name
+        return subcommand == "check" or (
+            subcommand == "format" and any(Path(token).name == "--check" for token in tokens[2:])
+        )
     if command in {"mypy", "pyright", "eslint", "tsc"}:
         return True
-    if command == "pre-commit" and names[1:2] == ["run"]:
+    if command == "pre-commit" and len(tokens) > 1 and Path(tokens[1]).name == "run":
         return True
-    normalized = tokens[0].replace("\\", "/")
+    normalized = head.replace("\\", "/")
     return normalized in {"scripts/verify", "scripts/verify-focused"} or normalized.endswith(
         ("/scripts/verify", "/scripts/verify-focused")
     )
 
 
-def _is_raw_verification_text(command: str, *, depth: int) -> bool:
+def _is_raw_verification_text(command: str, *, depth: int, budget: RecognitionBudget) -> bool:
+    # Charge the character passes together before scanning or tokenizing.
+    budget.charge(1 + 5 * len(command))
     command = _strip_heredoc_bodies(command)
     try:
         tokens = _shell_tokens(command)
@@ -1492,17 +1184,26 @@ def _is_raw_verification_text(command: str, *, depth: int) -> bool:
             segments.append([])
         else:
             segments[-1].append(token)
-    if any(_segment_is_verifier(segment, depth=depth) for segment in segments):
+    if any(_scan_verifier(TokenView(segment, budget), depth=depth) for segment in segments):
         return True
     if depth >= 4:
         return False
-    return any(_is_raw_verification_text(nested, depth=depth + 1) for nested in _nested_shell_commands(command))
+    return any(
+        _is_raw_verification_text(nested, depth=depth + 1, budget=budget) for nested in _nested_shell_commands(command)
+    )
+
+
+def _recognize(command: str, budget: RecognitionBudget) -> bool:
+    try:
+        return _is_raw_verification_text(command, depth=0, budget=budget)
+    except RecognitionLimit:
+        return False
 
 
 def is_raw_verification(command: object) -> bool:
-    if not isinstance(command, str) or not command.strip():
+    if not isinstance(command, str) or len(command) > 65_536 or not command.strip():
         return False
-    return _is_raw_verification_text(command, depth=0)
+    return _recognize(command, RecognitionBudget())
 
 
 def _has_unsupported_verifier_structure(command: str) -> bool:
