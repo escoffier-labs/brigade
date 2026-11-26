@@ -2,6 +2,18 @@
 
 A message sent to a node shows up in a running Claude Code or Codex session on that node without the agent calling `fleet_inbox`. This is slice 3 of #1887. The pull side (`fleet_inbox`, `fleet_ack`, the rest of the [Fleet MCP station](runbooks/fleet-hub-proxmox.md)) is unchanged.
 
+## Capability table
+
+Connector tools depend on runtime settings and grants. For a ChatGPT dot, `hosted-subscription` means an enabled [MCP Events](fleet-mcp-events.md) subscription can wake a task that checks its inbox. `next-start` means the agent can check its inbox when a task starts.
+
+| Agent kind | Principal source | Connector profile | Send | Read | Ack | Reply | Status | Live delivery hook events | Wake | Limits | Evidence |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| `local-claude-code` | `node` | - | `fleet_send` | `fleet_inbox` | `fleet_ack` | `fleet_reply` | `fleet_sent` | `PostToolUse`, `UserPromptSubmit` | `next-event` | Tool-event polls are at least 20 seconds apart. | [Observed](https://github.com/escoffier-labs/brigadestack/issues/1887#issuecomment-7179649896) |
+| `local-codex` | `node` | - | `fleet_send` | `fleet_inbox` | `fleet_ack` | `fleet_reply` | `fleet_sent` | `PostToolUse`, `UserPromptSubmit` | `next-event` | Tool-event polls are at least 20 seconds apart. | [Observed](https://github.com/escoffier-labs/brigadestack/issues/1887#issuecomment-7179839383) |
+| `duet` | `agent:duet` | `duet` | `message_send` | `inbox_list` | `inbox_ack` | `inbox_reply` | `message_status` | - | `next-start` | `messaging_enabled` required for send and reply. Send and reply share 20 messages per hour. | [Observed](https://github.com/escoffier-labs/brigadestack/issues/2592#issuecomment-7180093019) |
+| `dot` | `agent:miller` | `dot` | `message_send` | `inbox_list` | `inbox_ack` | `inbox_reply` | `message_status` | - | `hosted-subscription` | Send follows `messaging_enabled`, or `dispatch_enabled` when unset. Subscription requires `events_enabled`. | - |
+| `cloud-agent` | `agent:cloud-agent` | `cloud-agent` | `message_send` | `inbox_list` | `inbox_ack` | `inbox_reply` | - | - | `next-start` | `messaging_enabled: true` required for all messaging tools. Send and reply share 20 messages per hour. | - |
+
 ## What the session sees
 
 On a prompt, and on tool use at most every 20 seconds, a hook reads the node's unacknowledged mail that this session has not been shown. Up to three messages go into the session as additional context:
