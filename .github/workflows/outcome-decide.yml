@@ -54,7 +54,6 @@ jobs:
           # Omitting owner and repositories scopes the token to this repository.
           permission-contents: write
           permission-pull-requests: write
-          permission-actions: write
       - name: Check out with the ledger writer token
         if: vars.LEDGER_APP_ID != ''
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -79,4 +78,5 @@ jobs:
       - name: Verify and publish ledger pull requests
         env:
           GH_TOKEN: ${{ vars.LEDGER_APP_ID == '' && github.token || steps.ledger-app-token.outputs.token }}
+          GH_ACTIONS_TOKEN: ${{ github.token }}
         run: python3 -I -S scripts/ledger_decide.py publish --artifact "$RUNNER_TEMP/ledger-plan"
