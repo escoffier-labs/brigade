@@ -29,7 +29,24 @@ cd "$REPO_ROOT"
 
 STDIN_REFS="$(cat)"
 # BEGIN Brigade push gate v2
-gate_mode="$(git config --local --get brigade.pushGate 2>/dev/null || true)"
+gate_config_rc=0
+gate_mode="$(git config --local --includes --get brigade.pushGate 2>/dev/null)" || gate_config_rc=$?
+if [[ "$gate_config_rc" -gt 1 ]]; then
+  printf '%s\n' "push gate: could not read brigade.pushGate from Git config. Run brigade work verify push-gate status." >&2
+  gate_mode=""
+fi
+gate_mode="${gate_mode#"${gate_mode%%[![:space:]]*}"}"
+gate_mode="${gate_mode%"${gate_mode##*[![:space:]]}"}"
+case "$gate_mode" in
+  [wW][aA][rR][nN]) gate_mode=warn ;;
+  [eE][nN][fF][oO][rR][cC][eE]) gate_mode=enforce ;;
+  ""|[oO][fF][fF]) gate_mode=off ;;
+  *)
+    gate_display="${gate_mode//$'\n'/\\n}"
+    gate_display="${gate_display//$'\r'/\\r}"
+    printf "push gate: unrecognised brigade.pushGate value '%s'; the gate is not running\n" "$gate_display" >&2
+    ;;
+esac
 case "$gate_mode" in
   warn|enforce)
     gate_rc=0
@@ -41,9 +58,9 @@ case "$gate_mode" in
     elif ! command -v timeout >/dev/null 2>&1; then
       gate_error="GNU coreutils timeout is missing from Git's PATH"
       gate_repair="Restore GNU coreutils timeout on Git's PATH, then run brigade work verify push-gate status and retry."
-      if [[ "$gate_mode" == warn ]]; then
-        echo "pre-push: push gate skipped: no timeout command" >&2
-      fi
+    elif ! timeout -k 1 1 true >/dev/null 2>&1; then
+      gate_error="timeout on Git's PATH does not support the required -k invocation"
+      gate_repair="Put GNU coreutils timeout on Git's PATH, then run brigade work verify push-gate status and retry."
     else
       gate_args=()
       # Require a CLI that understands enforcement before trusting a zero exit.
@@ -55,9 +72,6 @@ case "$gate_mode" in
         0|3) ;;
         124|137)
           gate_error="the push gate process timed out"
-          if [[ "$gate_mode" == warn ]]; then
-            echo "pre-push: push gate timed out; push continues" >&2
-          fi
           ;;
         *)
           gate_error="the push gate could not finish (exit $gate_rc)"
@@ -65,7 +79,9 @@ case "$gate_mode" in
           ;;
       esac
     fi
-    if [[ "$gate_mode" == enforce ]]; then
+    if [[ "$gate_mode" == warn && -n "$gate_error" ]]; then
+      printf 'push gate: %s. %s\n' "$gate_error" "$gate_repair" >&2
+    elif [[ "$gate_mode" == enforce ]]; then
       if [[ -n "$gate_error" ]]; then
         gate_blocked=0
         while read -r _gate_local gate_tip gate_ref gate_old; do

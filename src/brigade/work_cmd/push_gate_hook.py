@@ -12,7 +12,7 @@ from time import monotonic
 from .. import __version__
 from ..verify_manifest_git import _git
 from . import push_gate_log, verify_push
-from .push_gate import _mode
+from .push_gate import ENFORCE_V1_NOTICE, _mode, _normalized_mode
 from .verify_push_input import branch_updates
 
 _WOULD_BLOCK = {"missing_receipt", "rejected"}
@@ -26,18 +26,30 @@ _REASONS = {
 }
 
 
-def run() -> int:
+def run(*, hook_v2: bool = False) -> int:
     started = monotonic()
     deadline = started + verify_push._BUDGET_SECONDS
     target = Path.cwd()
     try:
-        mode = _mode(target)
+        configured = _mode(target)
+        mode = _normalized_mode(configured)
     except Exception:
-        print("push gate: could not read brigade.pushGate from Git config", file=sys.stderr)
-        return 2
+        print(
+            "push gate: could not read brigade.pushGate from Git config. Run brigade work verify push-gate status.",
+            file=sys.stderr,
+        )
+        return 2 if hook_v2 else 0
     if mode not in {"warn", "enforce"}:
+        if mode not in {"", "off"}:
+            print(
+                f"push gate: unrecognised brigade.pushGate value {configured!r}; the gate is not running",
+                file=sys.stderr,
+            )
         return 0
-    enforce = mode == "enforce"
+    legacy_enforce = mode == "enforce" and not hook_v2
+    enforce = mode == "enforce" and hook_v2
+    if legacy_enforce:
+        print(ENFORCE_V1_NOTICE, file=sys.stderr)
     try:
         updates = branch_updates(verify_push._read_stdin(deadline))
         if not updates:
@@ -46,7 +58,11 @@ def run() -> int:
         if common.returncode:
             raise OSError("could not locate the common Git directory")
     except Exception:
-        print("push gate: could not read Git's pre-push updates or common directory", file=sys.stderr)
+        print(
+            "push gate: could not read Git's pre-push updates or common directory. "
+            "Run brigade work verify push-gate status and check the repository.",
+            file=sys.stderr,
+        )
         return 2 if enforce else 0
 
     log = push_gate_log.log_path(Path(os.fsdecode(common.stdout.rstrip(b"\r\n"))))
@@ -77,22 +93,21 @@ def run() -> int:
         would_block = verdict in _WOULD_BLOCK
         refused = enforce and (would_block or verdict == "indeterminate")
         blocked |= refused
-        if refused or would_block:
-            print(f"push gate: {item['ref']} ({verdict})", file=sys.stderr)
-            if refused or code == verify_push._MASKED_PASS:
-                print(item["reason"], file=sys.stderr)
+        if not legacy_enforce and (would_block or verdict == "indeterminate"):
             remedy = item["remedy"]
-            if refused:
-                tip = item["tip"]
-                if remedy:
+            tip = item["tip"]
+            if not remedy:
+                remedy = f"brigade work verify push-check --target {shlex.quote(str(target))} --ref {tip}"
+            label = f"push gate: {item['ref']} ({verdict})"
+            if not refused and verdict == "indeterminate":
+                print(f"{label} {item['reason']} Run: {' '.join(remedy.splitlines())}", file=sys.stderr)
+            else:
+                print(label, file=sys.stderr)
+                if refused or code == verify_push._MASKED_PASS:
+                    print(item["reason"], file=sys.stderr)
+                if refused and remedy.startswith("brigade work verify run "):
                     print(f"Verify commit {tip} in this worktree, then retry the push.", file=sys.stderr)
-                else:
-                    print(
-                        "Run this command to diagnose the pushed commit, then retry the push after the check works:",
-                        file=sys.stderr,
-                    )
-                    remedy = f"brigade work verify push-check --target {shlex.quote(str(target))} --ref {tip}"
-            print(remedy, file=sys.stderr)
+                print(remedy, file=sys.stderr)
         rows.append(
             {
                 "schema": push_gate_log.SCHEMA,
@@ -102,14 +117,14 @@ def run() -> int:
                 "tip": item["tip"],
                 "tree": item["tree"],
                 "result": "gate_error" if failed else verdict,
-                "reason": code if failed else _REASONS[verdict],
+                "reason": "hook_too_old" if legacy_enforce else code if failed else _REASONS[verdict],
                 "would_block": would_block,
                 "duration_ms": duration,
                 "brigade_version": __version__,
                 "worktree": str(target),
             }
         )
-    if enforce:
+    if mode == "enforce":
         for row in rows:
             row["blocked"] = blocked
     try:

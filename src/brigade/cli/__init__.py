@@ -156,7 +156,7 @@ def main(argv=None) -> int:
         # avoid building the work command tree or checking for CLI updates.
         from ..work_cmd.push_gate_hook import run
 
-        return run()
+        return run(hook_v2=len(raw_argv) > len(push_gate_run))
 
     from .removed_commands import compatibility
 

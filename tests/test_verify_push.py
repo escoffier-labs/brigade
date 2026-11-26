@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import shlex
 import subprocess
 import sys
 import time
@@ -560,7 +561,7 @@ def test_malformed_receipt_only_blocks_when_it_could_decide(push_repo, capsys, n
     code, result = _single(push_repo, capsys)
     assert (code, result["status"]) == ((3, "indeterminate") if newer else (0, "ok"))
     if newer:
-        assert "malformed" in result["reason"] and "--no-reuse" in result["remedy"]
+        assert "malformed" in result["reason"] and result["remedy"].startswith("mv -- ")
 
 
 def test_run_directory_without_receipt_is_not_evidence(push_repo, capsys, monkeypatch):
@@ -662,3 +663,77 @@ def test_invalid_input_is_usage_error(push_repo, capsys, monkeypatch):
     monkeypatch.setattr(sys, "stdin", io.StringIO("invalid pre-push input"))
     assert main(["work", "verify", "push-check", "--target", str(push_repo)]) == 2
     assert "four fields" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("problem", ["symlink", "malformed", "bad-name", "mismatch", "future"])
+def test_exact_store_remedy_restores_verdict(push_repo, capsys, monkeypatch, problem):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    good = _receipt(push_repo, tree)
+    if problem == "symlink":
+        offending = good.parent.with_name("20260101-120002-work-verify-abc123")
+        offending.symlink_to(good.parent, target_is_directory=True)
+    else:
+        bad = _receipt(push_repo, tree, second=2, started_at="2099-01-01T12:00:02Z" if problem == "future" else None)
+        if problem == "malformed":
+            bad.write_text("{", encoding="utf-8")
+            offending = bad
+        else:
+            name = {
+                "bad-name": "backup-old",
+                "mismatch": "20260101-120000-work-verify-abc123",
+                "future": "20990101-120002-work-verify-abc123",
+            }[problem]
+            offending = bad.parent.with_name(name)
+            bad.parent.rename(offending)
+    sandbox = push_repo / "scratch folder"
+    sandbox.mkdir()
+    monkeypatch.setenv("TMPDIR", str(sandbox))
+    code, result = _single(push_repo, capsys)
+    assert (code, result["status"]) == (3, "indeterminate")
+    assert str(offending) in result["reason"] and result["remedy"].startswith("mv -- ")
+    subprocess.run(["bash", "-c", result["remedy"]], cwd=push_repo, check=True)
+    assert not offending.exists()
+    assert _single(push_repo, capsys)[0] == 0
+
+
+def test_cap_remedy_uses_configured_archive_and_restores_verdict(push_repo, capsys, monkeypatch):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    old = _receipt(push_repo, tree)
+    _receipt(push_repo, tree, second=2)
+    gate_config = push_repo / ".brigade" / "config.json"
+    gate_config.write_text(
+        '{"version": 1, "depth": "workspace", "harnesses": ["codex"], '
+        '"verify_runs_keep": 1, "verify_archive_dir": ".brigade/custom-archive"}',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(verify_push, "_RECEIPT_LIMIT", 1)
+    code, result = _single(push_repo, capsys)
+    assert (code, result["status"]) == (3, "indeterminate")
+    assert all(
+        value in result["reason"]
+        for value in ("verify_runs_keep", str(gate_config), ".brigade/custom-archive", str(old.parent.parent))
+    )
+    archive = push_repo / ".brigade" / "custom-archive"
+    archive.write_text("fixture archive path conflict", encoding="utf-8")
+    assert main(shlex.split(result["remedy"])[1:]) == 1
+    assert old.is_file()
+    archive.unlink()
+    assert main(shlex.split(result["remedy"])[1:]) == 0
+    assert (archive / old.parent.name / "receipt.json").is_file()
+    assert "Pruned 1 local verify run(s)." in capsys.readouterr().out
+    assert _single(push_repo, capsys)[0] == 0
+
+
+def test_stray_malformed_receipt_warns_without_masking_pass(push_repo, capsys):
+    _policy(push_repo)
+    receipt = _receipt(push_repo, _tree(push_repo))
+    stray = receipt.parent.with_name("backup-old")
+    stray.mkdir()
+    (stray / "receipt.json").write_text("{", encoding="utf-8")
+    code = main(["work", "verify", "push-check", "--target", str(push_repo), "--ref", "HEAD", "--json"])
+    output = capsys.readouterr()
+    assert (code, json.loads(output.out)["refs"][0]["status"]) == (0, "ok")
+    assert "ignoring malformed receipt in a non-run directory" in output.err and str(stray) in output.err
+    assert stray.is_dir()

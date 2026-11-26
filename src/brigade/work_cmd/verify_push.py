@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -20,7 +21,7 @@ from threading import Thread
 from time import monotonic
 from typing import Any
 
-from .. import localio, verify_manifest_git
+from .. import config, localio, verify_manifest_git
 from . import verify_gate
 from .verify_push_input import INPUT_BYTES, branch_updates
 
@@ -28,10 +29,6 @@ _BUDGET_SECONDS = 2.0
 _RECEIPT_LIMIT = 128
 _RECEIPT_BYTES = 4 * 1024 * 1024
 _TIMEOUT = "The push check reached its two-second time limit."
-_SCAN_LIMIT = (
-    "The local receipt scan reached its limit. Restore verify-run retention to at most 128 receipts "
-    "and run verification for the pushed tree."
-)
 _RUN_NAME = re.compile(r"[0-9]{8}-[0-9]{6}-work-verify-[0-9a-f]{6}")
 _OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _UNFINISHED = {"running", "busy", "canceled"}
@@ -62,9 +59,10 @@ class _Candidate:
 
 
 class _Indeterminate(Exception):
-    def __init__(self, message: str, reason_code: str | None = None) -> None:
+    def __init__(self, message: str, reason_code: str | None = None, *, remedy: str | None = None) -> None:
         super().__init__(message)
         self.reason_code = reason_code
+        self.remedy = remedy
 
 
 def _remaining(deadline: float) -> float:
@@ -167,6 +165,7 @@ def _name_second(name: str) -> datetime | None:
 
 class _Receipts:
     def __init__(self, target: Path, deadline: float) -> None:
+        self.target = target
         self.root = target / ".brigade" / "work" / "verify-runs"
         self.deadline = deadline
 
@@ -176,7 +175,7 @@ class _Receipts:
                 for entry in dirs:
                     _remaining(self.deadline)
                     if entry.is_symlink():
-                        raise _Indeterminate("The local verification run directory contains a symbolic link.")
+                        raise self._entry_problem(entry.name, "is a symbolic link")
                     if entry.is_dir(follow_symlinks=False):
                         try:
                             (self.root / entry.name / "receipt.json").lstat()
@@ -186,37 +185,68 @@ class _Receipts:
         except FileNotFoundError:
             return
 
+    def _entry_problem(self, name: str, description: str, *, receipt: bool = False) -> _Indeterminate:
+        directory = self.root / name
+        entry = directory / "receipt.json" if receipt else directory
+        move = f'mv -- {shlex.quote(str(directory))} "$(mktemp -d)"'
+        return _Indeterminate(
+            f"Verification entry {str(entry)!r} {description}. Move the run out of the receipt store.", remedy=move
+        )
+
     @cached_property
-    def entries(self) -> list[tuple[str, datetime | None, dict[str, Any] | str | None]]:
+    def names(self) -> list[str]:
         names = list(islice(self._names(), _RECEIPT_LIMIT + 1))
         if len(names) > _RECEIPT_LIMIT:
-            raise _Indeterminate(_SCAN_LIMIT)
-        return [(name, _name_second(name), self._load(name)) for name in sorted(names, reverse=True)]
+            try:
+                _, archive = config.resolve_verify_archive(self.target)
+            except (OSError, ValueError):
+                archive = self.target / config.DEFAULT_VERIFY_ARCHIVE_DIR
+            raise _Indeterminate(
+                f"The local receipt scan reached its limit of {_RECEIPT_LIMIT} in {str(self.root)!r}. "
+                f"Set verify_runs_keep in {str(self.target / config.CONFIG_REL_PATH)!r} to at most {_RECEIPT_LIMIT} "
+                f"and check that the verify archive {str(archive)!r} is writable and has space.",
+                remedy=f"brigade work verify push-gate prune --target {shlex.quote(str(self.target))}",
+            )
+        return sorted(names, reverse=True)
 
-    def _load(self, name: str) -> dict[str, Any] | str | None:
+    @cached_property
+    def entries(self) -> list[tuple[str, datetime | None, dict[str, Any] | _Indeterminate | None]]:
+        entries = []
+        for name in self.names:
+            second, receipt = _name_second(name), self._load(name)
+            if second is None and isinstance(receipt, _Indeterminate):
+                print(
+                    f"push gate: ignoring malformed receipt in a non-run directory {str(self.root / name)!r}",
+                    file=sys.stderr,
+                )
+                continue
+            entries.append((name, second, receipt))
+        return entries
+
+    def _load(self, name: str) -> dict[str, Any] | _Indeterminate | None:
         _remaining(self.deadline)
         path = self.root / name / "receipt.json"
         try:
             if not stat.S_ISREG(path.lstat().st_mode):
-                return f"Verification receipt {name} is not a regular file."
+                return self._entry_problem(name, "is not a regular file", receipt=True)
             with path.open("rb") as stream:
                 _remaining(self.deadline)
                 raw = stream.read(_RECEIPT_BYTES + 1)
             _remaining(self.deadline)
             if len(raw) > _RECEIPT_BYTES:
-                return f"Verification receipt {name} exceeds the size limit."
+                return self._entry_problem(name, "exceeds the size limit", receipt=True)
             data = json.loads(raw)
         except FileNotFoundError:
             return None
         except (ValueError, RecursionError):
             _remaining(self.deadline)
-            return f"Verification receipt {name} is malformed."
+            return self._entry_problem(name, "is malformed", receipt=True)
         except OSError:
-            return f"Verification receipt {name} could not be read."
+            return self._entry_problem(name, "could not be read", receipt=True)
         valid = _valid_receipt(data)
         _remaining(self.deadline)
         if not valid:
-            return f"Verification receipt {name} is malformed."
+            return self._entry_problem(name, "is malformed", receipt=True)
         return {
             **{
                 key: data[key]
@@ -231,14 +261,14 @@ class _Receipts:
     def matching(self, tree: str) -> Iterator[Iterator[dict[str, Any]]]:
         entries = self.entries
         now = datetime.now(UTC)
-        ordered: list[tuple[datetime, dict[str, Any] | str]] = []
+        ordered: list[tuple[datetime, dict[str, Any] | _Indeterminate]] = []
         for name, second, receipt in entries:
             _remaining(self.deadline)
             if receipt is None:
                 continue
-            if isinstance(receipt, str):
+            if isinstance(receipt, _Indeterminate):
                 if second is None or second > now:
-                    raise _Indeterminate(receipt)
+                    raise receipt
                 ordered.append((second, receipt))
                 continue
             stamp = receipt.get("gating") or {}
@@ -247,9 +277,9 @@ class _Receipts:
                 continue
             started = _receipt_started_at(receipt)
             if second is None or started is None or started.replace(microsecond=0) != second:
-                raise _Indeterminate(f"Verification run {name} has an invalid or mismatched start timestamp.")
+                raise self._entry_problem(name, "has an invalid or mismatched start timestamp")
             if started > now:
-                raise _Indeterminate(f"Verification run {name} has a start timestamp in the future.")
+                raise self._entry_problem(name, "has a start timestamp in the future")
             if receipt["status"] not in _UNFINISHED:
                 ordered.append((second, receipt))
 
@@ -257,10 +287,10 @@ class _Receipts:
             yield self._group(group)
 
     @staticmethod
-    def _group(group: Iterator[tuple[datetime, dict[str, Any] | str]]) -> Iterator[dict[str, Any]]:
+    def _group(group: Iterator[tuple[datetime, dict[str, Any] | _Indeterminate]]) -> Iterator[dict[str, Any]]:
         for _, receipt in group:
-            if isinstance(receipt, str):
-                raise _Indeterminate(receipt)
+            if isinstance(receipt, _Indeterminate):
+                raise receipt
             yield receipt
 
 
@@ -488,7 +518,8 @@ def _check(
         except (subprocess.TimeoutExpired, _Indeterminate) as exc:
             reason = _TIMEOUT if isinstance(exc, subprocess.TimeoutExpired) else str(exc)
             code = "check_timeout" if isinstance(exc, subprocess.TimeoutExpired) else exc.reason_code
-            return _Verdict("indeterminate", reason, _remedy(target, policy, {}, fresh=True), code, tree)
+            recovery = exc.remedy if isinstance(exc, _Indeterminate) else None
+            return _Verdict("indeterminate", reason, recovery or _remedy(target, policy, {}, fresh=True), code, tree)
         return replace(by_tree[key], tree=tree)
 
     results = []

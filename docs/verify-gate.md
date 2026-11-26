@@ -160,11 +160,14 @@ second, with up to just under one second of fractional precision in
 `started_at`. A future timestamp makes the verdict indeterminate. Within a
 second the check orders runs by their full recorded start times.
 
-An unreadable or malformed receipt makes the verdict indeterminate if its
-run could affect the decision. Invalid test counts, including negative
-numbers and booleans, make a receipt malformed. A symbolic link in the
-receipt directory also makes the verdict indeterminate. If more than 128
-receipt files exist, the result is indeterminate even if a pass is present.
+An unreadable or malformed receipt in a directory with a valid run name
+makes the verdict indeterminate if that run could affect the decision.
+An unreadable or malformed receipt in another directory generates a warning
+because the writer could never use that directory as a run. Invalid test
+counts, including negative numbers and booleans, make a receipt malformed.
+A symbolic link in the receipt directory makes the verdict indeterminate.
+If more than 128 receipt files exist, the result is indeterminate even if
+a pass is present.
 
 | Result | Meaning |
 | --- | --- |
@@ -175,9 +178,11 @@ receipt files exist, the result is indeterminate even if a pass is present.
 | `base_predates_policy` | Update the branch from the default branch to pick up the declaration. |
 | `indeterminate` | The check could not reach a verdict, for example because the base is unresolved, the declaration is malformed, or a limit was reached. |
 
-If the scan limit leaves the verdict indeterminate, restore normal
-verify-run retention and rerun the required check for the pushed tree.
-The default retention is 50 runs. A fresh run also resolves an unordered
+If the scan limit leaves the verdict indeterminate, set `verify_runs_keep`
+in `.brigade/config.json` to at most 128 and check the configured archive.
+The default retention is 50 runs, and the default archive is
+`.brigade/work/verify-archive`. Run `brigade work verify push-gate prune`
+to apply retention. A fresh verification run resolves an unordered
 pass and failure in the same second. If the base or declaration is the
 problem, fetch the default branch or correct the declaration as indicated
 by the reason, then run the push check again.
@@ -200,13 +205,16 @@ Run `brigade work verify push-gate install --mode enforce` to opt this clone
 into refusing a push if any branch tip has a missing receipt, a rejected
 receipt, or an indeterminate verdict. The receipt scan limit and the
 two-second check deadline both produce indeterminate verdicts. A refusal
-names the affected ref and prints the reason and recovery command. Run
-verification in the pushing worktree with the named commit's tree, then
-retry the push. A valid receipt or a trusted base with no required check
+names the affected ref and prints the reason and a recovery action. If
+the action is to verify a commit, do it in the pushing worktree with the
+named commit's tree. A valid receipt or a trusted base with no required check
 allows the push. The gate ignores deletions and updates to non-branch refs.
 
 Use `install --mode off` to turn off checking and recording. An unset mode
-also means `off`. Git reads the mode from the clone's local config.
+also means `off`. Git reads the mode from the clone's local config and
+its includes. Global, system, and worktree-scoped values do not select
+the mode. The gate trims whitespace and ignores letter case. A different
+nonempty value produces a warning and leaves the gate idle.
 
 The effective Git pre-push hook must carry the gate's marked block, and
 `brigade` must be on the `PATH` Git uses. The shipped Brigade content-guard
@@ -221,7 +229,9 @@ marked block with the v2 block printed by install. The v1 hook discards
 the gate's exit status, so it still allows the push with `enforce` set.
 
 `brigade work verify push-gate status` shows the effective hook, its version,
-and whether it can run. `brigade work verify push-gate uninstall` clears the
+whether it can run, and whether enforcement is effective. Install refuses
+to enable enforce mode until the current hook block, `brigade`, and a usable
+`timeout` are available. `brigade work verify push-gate uninstall` clears the
 clone's mode and removes an unmodified minimal hook if present. It keeps
 the records.
 
@@ -234,9 +244,12 @@ Use `brigade work verify push-gate report` for branch-tip counts and timings, op
 with `--since YYYY-MM-DD` for an inclusive UTC date filter or `--json`.
 The log records outcomes only when the gate can start and write the log.
 
-The gate requires GNU coreutils `timeout` on Git's `PATH`. The hook asks the
+The gate requires a `timeout` command that supports the GNU coreutils `-k`
+option. Stock macOS and Git for Windows may lack that command. Windows'
+own `timeout.exe` does not support this invocation. The hook asks the
 gate process to stop after five seconds and kills it one second later if
-needed. A gate error lets a warn-mode push continue. In enforce mode it blocks
+needed. Warn mode reports indeterminate verdicts and gate errors and lets
+the push continue. In enforce mode a gate error blocks
 branch updates because Brigade could not decide whether they have a valid
 receipt. Restore `brigade` and GNU coreutils `timeout` on Git's `PATH` if
 either is missing, then run `brigade work verify push-gate status`. For an
@@ -249,9 +262,15 @@ evaluation error before Brigade can read the policy, use the printed
   Brigade adds no bypass and cannot detect that Git skipped the hook.
 - A clone opts in through `push-gate install` and needs the current hook.
   The older v1 block allows the push even when the clone is set to enforce.
-- Verify receipts are local files. The gate checks their consistency.
-  Required CI supplies independent evidence on the pushed commit.
+- Verify receipts are local files. The gate checks their shape, the agreement
+  between the run name and start time, and the exact tree IDs. It does not
+  authenticate receipts. Required CI supplies independent evidence on the
+  pushed commit.
 - An indeterminate verdict blocks in enforce mode. Follow the printed
-  recovery guidance, run the required check on the pushed tree, and retry.
-  For an unresolved policy or a receipt-store problem, restore the policy
-  or repair the store first.
+  recovery guidance. For a receipt-store problem, repair the named entry
+  or prune as indicated before retrying. The 128-file cap depends on
+  `verify_runs_keep` and a working verify archive. A failed archive copy
+  leaves the original receipt in place.
+- A broken required-check declaration on the trusted base cannot be repaired
+  by a push through this gate. Restore the declaration on the trusted base
+  or fetch the corrected default branch before retrying.
