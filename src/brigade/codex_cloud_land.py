@@ -740,7 +740,7 @@ def _resume_without_workspace(entry: dict[str, Any]) -> bool:
     return False
 
 
-def land(target: Path, task_id: str, issue: int | None = None, *, closes: bool = False) -> dict[str, str]:
+def land(target: Path, task_id: str, issue: int | None = None, *, closes: bool | None = None) -> dict[str, str]:
     """Apply one pinned attempt in isolation, then publish its verified commit for review."""
     if os.name != "posix":
         raise LandError("unsupported-platform")
@@ -759,10 +759,19 @@ def land(target: Path, task_id: str, issue: int | None = None, *, closes: bool =
                 if len(entries) != 1:
                     raise LandError("task-not-uniquely-registered")
                 entry = dict(entries[0])
-            if issue is None and isinstance(saved_branch := entry.get("landing_branch"), str):
+            if "landing_issue" in entry:
+                saved_issue = entry["landing_issue"]
+                if saved_issue is not None and (type(saved_issue) is not int or saved_issue < 1):
+                    raise LandError("invalid-landing-issue")
+                if issue is not None and issue != saved_issue:
+                    raise LandError("issue-mismatch")
+                issue = saved_issue
+            elif issue is None and isinstance(saved_branch := entry.get("landing_branch"), str):
                 match = _LANDING_BRANCH.fullmatch(saved_branch)
                 if match and match["issue"]:
                     issue = int(match["issue"])
+            if closes is None:
+                closes = entry.get("landing_closes") is True
             if closes and issue is None:
                 raise LandError("closes-requires-issue")
             if entry.get("pr_url"):
@@ -816,18 +825,21 @@ def land(target: Path, task_id: str, issue: int | None = None, *, closes: bool =
         raise LandError("landing-busy") from exc
 
 
-def _land_command(task_id: str, issue: int | None = None, *, target: Path | None = None) -> str:
+def _land_command(task_id: str, issue: int | None = None, *, closes: bool = False, target: Path | None = None) -> str:
     """The exact CLI command that resumes this landing."""
     argv = ["brigade", "run", "cloud", "land", "--provider", "codex-cloud", "--task-id", task_id]
     if issue is not None:
         argv.extend(("--issue", str(issue)))
+    if closes:
+        argv.append("--closes")
     if target is not None:
         argv.extend(("--target", str(target.resolve())))
     return shlex.join(argv)
 
 
-def add_landing_commands(target: Path, entries: list[dict[str, Any]]) -> None:
-    for row in entries:
+def add_landing_commands(target: Path, rows: list[dict[str, Any]], entries: list[dict[str, Any]]) -> None:
+    close_on_merge = {entry.get("id") for entry in entries if entry.get("landing_closes") is True}
+    for row in rows:
         task_id = row.get("task_id")
         if (
             row.get("provider") == "codex-cloud"
@@ -835,9 +847,10 @@ def add_landing_commands(target: Path, entries: list[dict[str, Any]]) -> None:
             and _TASK_ID.fullmatch(task_id)
             and row.get("launch_state") not in {"needs-reconcile", "not-launched"}
             and not (row.get("pr") or row.get("pr_url"))
+            and row.get("classification") in {"ready-to-land", "stale"}
             and row.get("provider_state") in cloud_tracker.FINISHED_STATES
         ):
-            row["next_command"] = _land_command(task_id, target=target)
+            row["next_command"] = _land_command(task_id, closes=row.get("id") in close_on_merge, target=target)
 
 
 def _missing_ref_message(canonical: str, branch: str, commit: str, task_id: str, issue: int | None) -> str:
@@ -995,6 +1008,8 @@ def _land_locked(
         # Unrecorded preparation refs belong only to this private repository.
         git.git(["branch", "-D", branch], git.repository, "branch-cleanup-failed")
     body = root / "pr-body.md"
+    if "landing_issue" not in entry or entry.get("landing_closes") is not closes:
+        _update(target, entry, landing_issue=issue, landing_closes=closes)
     issue_ref = f"{'Closes' if closes else 'Refs'} #{issue}.\n\n" if issue is not None else ""
     body.write_text(
         f"{issue_ref}Codex Cloud task {entry['task_id']}.\n\n"

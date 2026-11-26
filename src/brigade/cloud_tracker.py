@@ -1008,7 +1008,7 @@ def status_payload(
         for entry in registry["entries"]
         if entry.get("provider") in _REGISTRY_PROVIDERS
     ]
-    codex_cloud_land.add_landing_commands(target, entries)
+    codex_cloud_land.add_landing_commands(target, entries, registry["entries"])
     grokbot_rows = _grokbot_rows(target, github=github, now=observed, stale_ready_hours=stale_ready_hours)
     entries.extend(grokbot_rows)
     known_queue_branches = {

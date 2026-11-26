@@ -279,7 +279,101 @@ def test_collect_ready_task_from_registry(landing, monkeypatch, capsys, surface,
     assert re.fullmatch(r"codex/task-[a-f0-9]{12}", cloud_tracker.load_registry(caller)["entries"][0]["branch"])
     assert any(argv[:5] == ["codex", "cloud", "diff", "--attempt", "1"] for argv, _ in calls)
     assert cli.main([*argv, "--json"]) == 0
-    assert "next_command" not in capsys.readouterr().out
+    payload = json.loads(capsys.readouterr().out)
+    if surface == "status":
+        assert "next_command" not in payload["entries"][0]
+    else:
+        assert payload["ready_landings"] == []
+
+
+@pytest.mark.parametrize(
+    ("provider_state", "entry_updates", "classification"),
+    [
+        (
+            "ready",
+            {"branch": "codex/missing", "expected_artifact": {"kind": "branch"}},
+            "needs-investigation",
+        ),
+        ("running", {}, "pending"),
+        ("ready", {"launch_state": "needs-reconcile"}, "needs-investigation"),
+    ],
+    ids=["missing-branch", "running", "needs-reconcile"],
+)
+def test_collection_command_requires_landable_task(tmp_path, provider_state, entry_updates, classification):
+    entry = cloud_tracker.register(tmp_path, provider="codex-cloud", task_id="task_example", label="example")
+    if entry_updates:
+        codex_cloud_land._update(tmp_path, entry, **entry_updates)
+    observations = {
+        "provider_tasks": {"task_example": {"state": provider_state}},
+        "github": {"branches_complete": True, "prs_complete": True},
+    }
+    payload = cloud_tracker.status_payload(tmp_path, **observations)
+    row = payload["entries"][0]
+    assert row["classification"] == classification
+    assert "next_command" not in row
+    sync = cloud_tracker.sync_payload(tmp_path, **observations)
+    assert sync["ready_landings"] == []
+    assert sync["needs_investigation"] == ([row] if classification == "needs-investigation" else [])
+
+
+def test_land_retry_preserves_closes_after_pr_create_failure(landing, capsys):
+    caller, state, _ = landing
+    argv = ["run", "cloud", "land", "--provider", "codex-cloud", "--task-id", "task_example", "--target", str(caller)]
+    state["failure"] = "pr"
+    assert cli.main([*argv, "--issue", "2473", "--closes"]) == 2
+    assert capsys.readouterr().err == "error: pr-create-failed\n"
+    assert state["body"].startswith("Closes #2473.")
+
+    state["failure"] = None
+    assert cli.main(argv) == 0
+    assert state["body"].startswith("Closes #2473.")
+    entry = cloud_tracker.load_registry(caller)["entries"][0]
+    assert entry["landing_issue"] == 2473
+    assert entry["landing_closes"] is True
+
+
+def test_collection_command_includes_recorded_closes(tmp_path):
+    entry = cloud_tracker.register(tmp_path, provider="codex-cloud", task_id="task_example", label="example")
+    codex_cloud_land._update(tmp_path, entry, landing_issue=2473, landing_closes=True)
+    payload = cloud_tracker.status_payload(tmp_path, provider_tasks={"task_example": {"state": "ready"}})
+    assert "--closes" in shlex.split(payload["entries"][0]["next_command"])
+
+
+def test_cloud_sync_text_tolerates_missing_ready_landings(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(
+        cloud_tracker,
+        "observe_provider_details",
+        lambda _: ({"cursor-cloud": cloud_tracker.ProviderObservation(False, False, None, {})}, {}),
+    )
+    monkeypatch.setattr(codex_cloud, "reconcile_launches", lambda _: [])
+    monkeypatch.setattr(fleet_client, "fetch_cloud", lambda: {"leases": []})
+    payload = cloud_tracker.sync_payload(tmp_path)
+    del payload["ready_landings"]
+    monkeypatch.setattr(cloud_tracker, "sync_payload", lambda *args, **kwargs: payload)
+    assert cli.main(["run", "cloud", "sync", "--target", str(tmp_path)]) == 0
+    assert "ready to collect" not in capsys.readouterr().out
+
+
+def test_land_retry_refuses_conflicting_issue(landing):
+    caller, state, calls = landing
+    state["failure"] = "pr"
+    with pytest.raises(codex_cloud_land.LandError, match="^pr-create-failed$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    calls.clear()
+    with pytest.raises(codex_cloud_land.LandError, match="^issue-mismatch$"):
+        codex_cloud_land.land(caller, "task_example", 9999)
+    assert calls == []
+
+
+def test_land_issue_recovery_ignores_registered_branch(landing):
+    caller, state, _ = landing
+    entry = cloud_tracker.load_registry(caller)["entries"][0]
+    assert "landing_branch" not in entry
+    codex_cloud_land._update(caller, entry, branch="codex/issue-9999-0123456789ab")
+    state["expected_issue"] = None
+    result = codex_cloud_land.land(caller, "task_example")
+    assert re.fullmatch(r"codex/task-[a-f0-9]{12}", result["branch"])
+    assert state["body"].startswith("Codex Cloud task task_example.")
 
 
 @pytest.mark.parametrize(
@@ -2065,9 +2159,15 @@ def _expire_private_workspace(caller, state):
     return entry
 
 
-def test_r4_expired_workspace_resumes_pr_creation(landing):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_r4_expired_workspace_resumes_pr_creation(landing, legacy):
     caller, state, calls = landing
     entry = _expire_private_workspace(caller, state)
+    if legacy:
+        registry = cloud_tracker.load_registry(caller)
+        del registry["entries"][0]["landing_issue"]
+        del registry["entries"][0]["landing_closes"]
+        cloud_tracker.save_registry(caller, registry)
     calls.clear()
     result = codex_cloud_land.land(caller, "task_example")
     assert result == {

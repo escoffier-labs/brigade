@@ -652,7 +652,7 @@ def dispatch(args) -> int:
             print(
                 f"  landing: task={row.get('task_id')} state={row.get('landing_state')} commit={row.get('landing_commit')}"
             )
-        for row in payload["ready_landings"]:
+        for row in payload.get("ready_landings", []):
             print(f"  ready to collect: {row['next_command']}")
         for row in payload.get("needs_investigation", []):
             print(f"  needs-investigation: task={row.get('task_id')} label={row.get('label')}")

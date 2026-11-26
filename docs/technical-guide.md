@@ -904,7 +904,7 @@ brigade run cloud land --provider codex-cloud --task-id task_example
 Landing fetches the pinned diff, applies it in an isolated worktree, and opens
 a pull request for review. Add `--issue 123` to reference an issue and
 `--closes` to request closing it on merge. A retry reuses the recorded landing
-branch and its issue number, if present. Regular `cloud status` and
+branch and keeps the issue reference or close-on-merge request. Regular `cloud status` and
 `cloud sync` print the landing command for finished Codex tasks awaiting
 collection. In JSON it is the row's `next_command`, under `entries` for
 status and `ready_landings` for sync.
