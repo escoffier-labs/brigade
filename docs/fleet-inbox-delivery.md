@@ -14,7 +14,7 @@ Connector tools depend on runtime settings and grants. For a ChatGPT dot, `hoste
 | `local-codex` | `node` | - | `fleet_send` | `fleet_inbox` | `fleet_ack` | `fleet_reply` | `fleet_sent` | `PostToolUse`, `UserPromptSubmit` | `next-event` | Tool-event polls are at least 20 seconds apart. | [Observed](https://github.com/escoffier-labs/brigadestack/issues/1887#issuecomment-7179839383) |
 | `duet` | `agent:duet` | `duet` | `message_send` | `inbox_list` | `inbox_ack` | `inbox_reply` | `message_status` | - | `next-start` | `messaging_enabled` required for send and reply. Send and reply share 20 messages per hour. | [Observed](https://github.com/escoffier-labs/brigadestack/issues/2592#issuecomment-7180093019) |
 | `dot` | `agent:miller` | `dot` | `message_send` | `inbox_list` | `inbox_ack` | `inbox_reply` | `message_status` | - | `hosted-subscription` | Send follows `messaging_enabled`, or `dispatch_enabled` when unset. Subscription requires `events_enabled`. | - |
-| `cloud-agent` | `agent:cloud-agent` | `cloud-agent` | `message_send` | `inbox_list` | `inbox_ack` | `inbox_reply` | - | - | `next-start` | `messaging_enabled: true` required for all messaging tools. All cloud workers share one principal, so the Hub cannot tell one cloud run from another. The deployed `tool_grants` deny `handoff_write`. Send and reply share 20 messages per hour. | - |
+| `cloud-agent` | `agent:cloud-agent` | `cloud-agent` | `message_send` | `inbox_list` | `inbox_ack` | `inbox_reply` | - | - | `next-start` | `messaging_enabled: true` required for all messaging tools. All cloud workers share one principal, so the Hub cannot tell one cloud run from another. Credentials reach a task as Codex Cloud HTTP network secrets, which the environment proxy substitutes in requests to the connector host. Tasks start by hand from the Codex app's cloud environment, because `brigade run cloud launch` reads only the legacy environment store (#2995). The deployed `tool_grants` deny `handoff_write`. Send and reply share 20 messages per hour. | [Observed](https://github.com/escoffier-labs/brigadestack/issues/2592#issuecomment-7203762111) |
 
 ### Memory and work visibility
 
@@ -26,7 +26,7 @@ The connector columns list tools the profile can expose. The status and limits c
 | `local-codex` | `configured memory Hub credential` | `brigade memory search` | `brigade handoff draft` | `brigade fleet work list`, `brigade fleet sessions`, `brigade fleet claims` | Only local cards are searched when `[hub] mode` is `off`. Handoff drafts go to a local inbox. | - |
 | `duet` | `host [memory_hub] read credential` | `memory_search`, `memory_card` | `handoff_write` | `fleet_work_list`, `fleet_sessions`, `fleet_overview` | - | - |
 | `dot` | `host [memory_hub] read credential` | `memory_search`, `memory_card` | `handoff_write` | `fleet_work_list`, `fleet_sessions`, `fleet_overview` | - | - |
-| `cloud-agent` | `agent:cloud-agent` | `memory_search`, `memory_card` | `handoff_write` | - | not yet: the connector has no memory scope granted. Read access to the shared fleet scope only (never private scopes) is a pending decision. The deployed `tool_grants` deny `handoff_write`. | not yet: the cloud-agent profile has no work view |
+| `cloud-agent` | `agent:cloud-agent` | `memory_search`, `memory_card` | `handoff_write` | - | not yet: the connector has no memory scope granted. Read access to the shared fleet scope only (never private scopes) waits on Brigade-launched cloud workers (#2995). The deployed `tool_grants` deny `handoff_write`. | not yet: the cloud-agent profile has no work view |
 
 ## Wake limits
 
@@ -71,6 +71,16 @@ The connector columns list tools the profile can expose. The status and limits c
   [tool gates](../src/brigade/dot/profile.py),
   [wake capability](../src/brigade/fleet_agent_capabilities.py)).
   Workers share `agent:cloud-agent` and its hourly send limit, so the Hub cannot distinguish runs. Use an untrusted, sender-chosen `ref` or `thread` as a run reference.
+  The connector's Cloudflare Access service token and listener bearer reach the
+  task as Codex Cloud HTTP network secrets. The task sees placeholder values,
+  and the environment proxy substitutes the real ones in requests to
+  `cloud-agent-mcp.brigade.tools`. A client in the task must trust the proxy CA
+  in `CODEX_PROXY_CERT` and send its own `User-Agent`, because Cloudflare blocks
+  Python urllib's default one (error 1010). Tasks start by hand from the Codex
+  app's cloud environment for now. `brigade run cloud launch` reads only the
+  legacy Codex Cloud environment store, which cannot hold network secrets
+  ([#2995](https://github.com/escoffier-labs/brigadestack/issues/2995)).
+  [Observed round trip](https://github.com/escoffier-labs/brigadestack/issues/2592#issuecomment-7203762111).
 
 In the 2026-11-26 Dot test, the next hub sync queued the event about 15 seconds
 after the send, and the first webhook attempt succeeded. The first tool calls
