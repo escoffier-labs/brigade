@@ -57,17 +57,38 @@ def _tree(target):
     return _git(target, "rev-parse", "HEAD^{tree}")
 
 
-def _receipt(target, tree, *, second=1, status="completed", plan=None, argv=None, passed=1):
+def _receipt(
+    target,
+    tree,
+    *,
+    second=1,
+    status="completed",
+    plan=None,
+    argv=None,
+    passed=1,
+    command_status=None,
+    failed=0,
+    errors=0,
+    started_at=None,
+    extra_commands=(),
+):
     receipt = {
         "status": status,
-        "started_at": f"2026-01-01T12:00:{second:02d}+00:00",
+        "started_at": started_at if started_at is not None else f"2026-01-01T12:00:{second:02d}+00:00",
         "tree_stable": True,
         "tree_fingerprint": tree,
         "commands": [
             {
                 "argv": [*PREFIX, SELECTOR] if argv is None else argv,
-                "test_outcomes": {"passed": passed, "failed": 0, "errors": 0, "no_tests_ran": passed == 0},
-            }
+                "test_outcomes": {
+                    "passed": passed,
+                    "failed": failed,
+                    "errors": errors,
+                    "no_tests_ran": passed == failed == errors == 0,
+                },
+                **({"status": command_status} if command_status else {}),
+            },
+            *extra_commands,
         ],
     }
     if plan is None:
@@ -149,13 +170,102 @@ def test_accepts_required_check_with_an_unrelated_run(push_repo, capsys, passing
     assert (code, result["status"]) == (0, "ok")
 
 
-def test_newer_failure_does_not_discard_same_tree_pass(push_repo, capsys):
+@pytest.mark.parametrize(("failure_second", "expected"), [(1, (0, "ok")), (2, (1, "rejected"))])
+def test_latest_required_failure_or_pass_governs(push_repo, capsys, failure_second, expected):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree, second=3 - failure_second)
+    _receipt(push_repo, tree, second=failure_second, status="failed", command_status="failed")
+    code, result = _single(push_repo, capsys)
+    assert (code, result["status"]) == expected
+    if code:
+        assert "A newer run of the required check failed on this tree" in result["reason"]
+        assert "An earlier run had passed" in result["reason"]
+
+
+@pytest.mark.parametrize(
+    "later",
+    [
+        {"status": "failed", "command_status": "failed", "passed": 0},
+        {"status": "rejected", "command_status": "rejected"},
+        {"status": "canceled", "command_status": "failed"},
+        {"status": "failed", "command_status": "failed", "argv": PREFIX},
+        {
+            "status": "failed",
+            "command_status": "completed",
+            "extra_commands": [{"argv": ["git", "status"], "status": "failed"}],
+        },
+    ],
+    ids=["no-tests", "rejected", "canceled", "no-selector", "unrelated-command-failed"],
+)
+def test_ineligible_run_without_required_failure_keeps_pass(push_repo, capsys, later):
     _policy(push_repo)
     tree = _tree(push_repo)
     _receipt(push_repo, tree)
-    _receipt(push_repo, tree, second=2, status="failed")
+    _receipt(push_repo, tree, second=2, **later)
+    assert _single(push_repo, capsys) == (0, {"ref": "HEAD", "status": "ok", "reason": None, "remedy": None})
+
+
+@pytest.mark.parametrize("status", ["failed", "rejected"])
+def test_sole_unsuccessful_receipt_reports_not_completed(push_repo, capsys, status):
+    _policy(push_repo)
+    _receipt(push_repo, _tree(push_repo), status=status, command_status=status)
     code, result = _single(push_repo, capsys)
-    assert (code, result["status"]) == (0, "ok")
+    assert (code, result["status"]) == (1, "rejected")
+    assert result["reason"].startswith(("The selected run", "The most recent run"))
+    assert result["reason"].endswith("of the required check did not complete successfully.")
+
+
+def test_eligible_receipt_for_another_tree_is_missing(push_repo, capsys):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, "f" * len(tree))
+    code, result = _single(push_repo, capsys)
+    assert (code, result["status"]) == (1, "missing_receipt")
+    assert result["reason"] == "No local verification receipt matches this tree."
+
+
+@pytest.mark.parametrize("outcome", [{"failed": 1}, {"errors": 1}, {"command_status": "timed_out"}])
+def test_required_failure_uses_recorded_outcomes_and_timeout(push_repo, capsys, outcome):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree)
+    status = "failed" if outcome.get("command_status") else "completed"
+    _receipt(push_repo, tree, second=2, status=status, passed=0, **outcome)
+    code, result = _single(push_repo, capsys)
+    assert (code, result["status"]) == (1, "rejected")
+    assert "An earlier run had passed" in result["reason"]
+
+
+@pytest.mark.parametrize("failure_is_newer", [False, True])
+def test_same_second_pass_and_failure_follow_start_time(push_repo, capsys, failure_is_newer):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    passed = "2026-01-01T12:00:01Z"
+    fractional = "2026-01-01T12:00:01.500000+00:00"
+    _receipt(push_repo, tree, started_at=passed if failure_is_newer else fractional)
+    _receipt(
+        push_repo,
+        tree,
+        second=2,
+        started_at=fractional if failure_is_newer else passed,
+        status="failed",
+        command_status="failed",
+    )
+    root = push_repo / ".brigade" / "work" / "verify-runs"
+    failed_run = root / "20260101-120002-work-verify-fixture"
+    failed_run.rename(root / "20260101-120001-work-verify-aaa")
+    code, result = _single(push_repo, capsys)
+    assert (code, result["status"]) == ((1, "rejected") if failure_is_newer else (0, "ok"))
+
+
+def test_audit_policy_keeps_any_eligible_receipt(push_repo, monkeypatch, capsys):
+    policy = verify_gate._GatePolicy("audit_only", "audit_only")
+    monkeypatch.setattr(verify_gate, "_committed_policy", lambda *args, **kwargs: policy)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree)
+    _receipt(push_repo, tree, second=2, status="failed", command_status="failed")
+    assert _single(push_repo, capsys)[0] == 0
 
 
 @pytest.mark.parametrize(
@@ -178,9 +288,20 @@ def test_rejects_ineligible_command(push_repo, capsys, argv, passed, reason):
 def test_rejection_prefers_latest_required_check(push_repo, capsys):
     _policy(push_repo)
     tree = _tree(push_repo)
-    _receipt(push_repo, tree, status="failed")
+    _receipt(push_repo, tree, status="rejected")
     _receipt(push_repo, tree, second=2, passed=0)
     _receipt(push_repo, tree, second=3, argv=["git", "status"])
+    code, result = _single(push_repo, capsys)
+    assert (code, result["status"]) == (1, "rejected")
+    assert result["reason"].startswith("The most recent run of the required check passed no tests")
+
+
+@pytest.mark.parametrize("older", ["2026-01-01T12:00:01Z", "invalid", "0001-01-01T00:00:00+01:00"])
+def test_rejection_ranks_parsed_start_times(push_repo, capsys, older):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree, started_at=older, argv=PREFIX)
+    _receipt(push_repo, tree, second=2, started_at="2026-01-01T12:00:01.500000+00:00", passed=0)
     code, result = _single(push_repo, capsys)
     assert (code, result["status"]) == (1, "rejected")
     assert "passed no tests" in result["reason"]
@@ -273,26 +394,30 @@ def test_slow_git_shares_the_deadline(push_repo, capsys, monkeypatch):
     assert len(deadlines) > 2 and 0 < deadlines[-1] < deadlines[0] <= 2
 
 
-@pytest.mark.parametrize("missing", [[], [EXTRA_SELECTOR]])
-def test_plan_snapshot_and_remedy(push_repo, capsys, missing):
+@pytest.mark.parametrize(("missing", "prior_pass"), [([], False), ([EXTRA_SELECTOR], False), ([EXTRA_SELECTOR], True)])
+def test_plan_snapshot_and_remedy(push_repo, capsys, missing, prior_pass):
     base = _policy(push_repo, coverage=True)
     files = [SELECTOR, EXTRA_SELECTOR]
+    plan = {
+        "schema_version": 1,
+        "snapshot_tree": _tree(push_repo),
+        "base_commit": base,
+        "mode": "selective",
+        "missing_files": missing,
+        "required_files": files,
+        "run_argv": [*PREFIX, *files],
+    }
+    if prior_pass:
+        _receipt(push_repo, _tree(push_repo), plan={**plan, "missing_files": []})
     _receipt(
         push_repo,
         "f" * len(_tree(push_repo)),
-        plan={
-            "schema_version": 1,
-            "snapshot_tree": _tree(push_repo),
-            "base_commit": base,
-            "mode": "selective",
-            "missing_files": missing,
-            "required_files": files,
-            "run_argv": [*PREFIX, *files],
-        },
+        second=2,
+        plan=plan,
     )
     code, result = _single(push_repo, capsys)
-    assert (code, result["status"]) == ((1, "rejected") if missing else (0, "ok"))
-    if missing:
+    assert (code, result["status"]) == ((1, "rejected") if missing and not prior_pass else (0, "ok"))
+    if missing and not prior_pass:
         assert EXTRA_SELECTOR in result["reason"]
         assert json.dumps([*PREFIX, *files]) in result["remedy"]
         assert "--worktree" not in result["remedy"]
@@ -332,6 +457,18 @@ def test_bounded_scan_reports_indeterminate(push_repo, capsys, monkeypatch, matc
     code, result = _single(push_repo, capsys)
     assert (code, result["status"]) == (3, "indeterminate")
     assert "scan reached its limit" in result["reason"]
+
+
+def test_scan_cap_does_not_decide_using_partial_second(push_repo, capsys, monkeypatch):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree)
+    _receipt(push_repo, tree, second=2, status="failed")
+    root = push_repo / ".brigade" / "work" / "verify-runs"
+    (root / "20260101-120002-work-verify-fixture").rename(root / "20260101-120001-work-verify-aaa")
+    monkeypatch.setattr(verify_push, "_RECEIPT_LIMIT", 1)
+    code, result = _single(push_repo, capsys)
+    assert (code, result["status"]) == (3, "indeterminate")
 
 
 def test_invalid_input_is_usage_error(push_repo, capsys, monkeypatch):

@@ -57,7 +57,10 @@ def run() -> int:
         failed = code in {"check_timeout", "check_failed"}
         would_block = verdict in _WOULD_BLOCK
         if would_block:
-            print(f"push gate: {item['ref']} ({verdict})\n{item['remedy']}", file=sys.stderr)
+            print(f"push gate: {item['ref']} ({verdict})", file=sys.stderr)
+            if code == verify_push._MASKED_PASS:
+                print(item["reason"], file=sys.stderr)
+            print(item["remedy"], file=sys.stderr)
         rows.append(
             {
                 "schema": push_gate_log.SCHEMA,

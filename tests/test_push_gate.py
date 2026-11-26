@@ -16,7 +16,7 @@ import pytest
 
 from brigade import doctor
 from brigade.cli import main
-from brigade.work_cmd import push_gate_hook
+from brigade.work_cmd import push_gate_hook, verify_push
 
 from tests.test_verify_push import _commit, _git, _line, _policy, _receipt, _single, _tree
 from tests.test_verify_push import push_repo as push_repo
@@ -177,6 +177,45 @@ def test_hook_matches_push_check_with_newer_unrelated_run(
     assert row["would_block"] is (not has_pass)
     if not has_pass:
         assert result["remedy"] in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("at_cap", [False, True], ids=["newer-failure", "scan-cap"])
+def test_hook_matches_push_check_for_failure_or_scan_cap(push_repo, capsys, monkeypatch, at_cap):
+    tip = _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree)
+    if at_cap:
+        _receipt(push_repo, tree, second=2, argv=["git", "status"])
+        monkeypatch.setattr(verify_push, "_RECEIPT_LIMIT", 1)
+    else:
+        _receipt(push_repo, tree, second=2, status="failed", command_status="failed")
+    code, result = _single(push_repo, capsys)
+
+    monkeypatch.chdir(push_repo)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(_line(tip, "refs/heads/topic") + "\n"))
+    assert push_gate_hook.run() == 0
+    (row,) = _log_rows(push_repo)
+    output = capsys.readouterr()
+    if at_cap:
+        assert (code, result["status"], row["result"], row["reason"]) == (
+            3,
+            "indeterminate",
+            "indeterminate",
+            "verdict_unavailable",
+        )
+        assert row["would_block"] is False
+        assert output.out == output.err == ""
+    else:
+        assert (code, result["status"], row["result"], row["reason"]) == (
+            1,
+            "rejected",
+            "rejected",
+            "receipt_ineligible",
+        )
+        assert row["would_block"] is True
+        assert "An earlier run had passed" in result["reason"]
+        assert result["reason"] in output.err
+        assert result["remedy"] in output.err
 
 
 def _bare_remote(repo):
@@ -354,8 +393,6 @@ def test_doctor_reports_claude_latch(tmp_path):
 
 @pytest.mark.parametrize("failure", ["timeout", "crash"])
 def test_evaluator_failure_is_a_gate_error(push_repo, monkeypatch, failure):
-    from brigade.work_cmd import verify_push
-
     tip = _git(push_repo, "rev-parse", "HEAD")
     _policy(push_repo)
     monkeypatch.chdir(push_repo)

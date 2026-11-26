@@ -11,14 +11,16 @@ import subprocess
 import sys
 from collections.abc import Iterator
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime
 from functools import cache, cached_property, partial
+from itertools import groupby
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
 from time import monotonic
 from typing import Any
 
-from .. import verify_manifest_git
+from .. import localio, verify_manifest_git
 from . import verify_gate
 from .verify_push_input import INPUT_BYTES, branch_updates
 
@@ -26,6 +28,9 @@ _BUDGET_SECONDS = 2.0
 _RECEIPT_LIMIT = 128
 _RECEIPT_BYTES = 4 * 1024 * 1024
 _TIMEOUT = "The push check reached its two-second time limit."
+_SCAN_LIMIT = "The local receipt scan reached its limit. Run verification for the pushed tree."
+_EARLIEST = datetime.min.replace(tzinfo=UTC)
+_MASKED_PASS = "newer_required_failure"
 
 
 @dataclass(frozen=True)
@@ -51,6 +56,13 @@ def _remaining(deadline: float) -> float:
     if remaining <= 0:
         raise _Indeterminate(_TIMEOUT, "check_timeout")
     return remaining
+
+
+def _receipt_started_at(receipt: dict[str, Any]) -> datetime:
+    try:
+        return localio.parse_iso_datetime(receipt.get("started_at")) or _EARLIEST
+    except OverflowError:
+        return _EARLIEST
 
 
 def _read_stdin(deadline: float) -> str:
@@ -125,34 +137,46 @@ class _Receipts:
         return {
             **{
                 key: data[key]
-                for key in ("status", "tree_stable", "tree_fingerprint", "started_at", "gating")
+                for key in ("status", "tree_stable", "tree_fingerprint", "started_at", "gating", "bookkeeping_error")
                 if key in data
             },
-            "command_argv": [
-                record["argv"]
+            "commands": [
+                {key: record.get(key) for key in ("argv", "status", "test_outcomes")}
+                if isinstance(record, dict)
+                else {}
                 for record in data["commands"]
-                if isinstance(record, dict) and isinstance(record.get("argv"), list)
             ],
         }
 
-    def matching(self, tree: str) -> Iterator[dict[str, Any]]:
-        for name in self.names[:_RECEIPT_LIMIT]:
-            if name not in self.loaded:
-                self.loaded[name] = self._load(name)
-            receipt = self.loaded[name]
-            if receipt is None or receipt.get("status") in ("running", "busy", "canceled"):
-                continue
-            stamp = receipt.get("gating")
-            plan = stamp.get("plan") if isinstance(stamp, dict) else None
-            # Closeout's comparison allows changes under .brigade/ and uses a
-            # separate Git timeout. Push receipts must identify the exact committed tree.
-            if receipt.get("tree_fingerprint") != tree and (
-                not isinstance(plan, dict) or plan.get("snapshot_tree") != tree
-            ):
-                continue
-            yield receipt
-        if len(self.names) > _RECEIPT_LIMIT:
-            raise _Indeterminate("The local receipt scan reached its limit. Run verification for the pushed tree.")
+    def _matching(self, name: str, tree: str) -> dict[str, Any] | None:
+        if name not in self.loaded:
+            self.loaded[name] = self._load(name)
+        receipt = self.loaded[name]
+        if receipt is None or receipt.get("status") in ("running", "busy", "canceled"):
+            return None
+        stamp = receipt.get("gating")
+        plan = stamp.get("plan") if isinstance(stamp, dict) else None
+        # Closeout's comparison allows changes under .brigade/ and uses a
+        # separate Git timeout. Push receipts must identify the exact committed tree.
+        if receipt.get("tree_fingerprint") == tree or (isinstance(plan, dict) and plan.get("snapshot_tree") == tree):
+            return receipt
+        return None
+
+    def matching(self, tree: str, *, required_order: bool) -> Iterator[tuple[dict[str, Any], datetime]]:
+        overflow = len(self.names) > _RECEIPT_LIMIT
+        for second, names in groupby(self.names[:_RECEIPT_LIMIT], key=lambda name: name[:15]):
+            # Random run-ID suffixes do not order runs started in the same second.
+            # An omitted run in that second could supersede an observed pass or failure.
+            if required_order and overflow and self.names[-1][:15] == second:
+                raise _Indeterminate(_SCAN_LIMIT)
+            matches = (
+                (receipt, _receipt_started_at(receipt))
+                for name in names
+                if (receipt := self._matching(name, tree)) is not None
+            )
+            yield from sorted(matches, key=lambda match: match[1], reverse=True) if required_order else matches
+        if overflow:
+            raise _Indeterminate(_SCAN_LIMIT)
 
 
 def _remedy(target: Path, policy: verify_gate._GatePolicy, receipt: dict[str, Any]) -> str:
@@ -177,28 +201,89 @@ def _tree_verdict(
     target: Path, policy: verify_gate._GatePolicy, tree: str, receipts: _Receipts, deadline: float
 ) -> _Verdict:
     prefix = list(policy.argv_prefix)
-    rejection: tuple[tuple[bool, str], dict[str, Any], str] | None = None
-    for receipt in receipts.matching(tree):
-        eligible, reason = verify_gate.evaluate_receipt(policy, receipt, tree, deadline=deadline)
-        if eligible:
-            return _Verdict("ok")
-        if reason == "policy_timeout":
-            raise _Indeterminate(_TIMEOUT, "check_timeout")
-        ran_required = bool(prefix) and any(argv[: len(prefix)] == prefix for argv in receipt["command_argv"])
-        rank = (ran_required, str(receipt.get("started_at") or ""))
-        if rejection is None or rank > rejection[0]:
-            rejection = rank, receipt, reason
+    rejection: tuple[tuple[bool, datetime], dict[str, Any], str] | None = None
+    failure: _Verdict | None = None
+    try:
+        for receipt, started_at in receipts.matching(tree, required_order=bool(prefix)):
+            eligible, reason = verify_gate.evaluate_receipt(policy, receipt, tree, deadline=deadline)
+            if reason == "policy_timeout":
+                raise _Indeterminate(_TIMEOUT, "check_timeout")
+            required = [
+                command
+                for command in receipt["commands"]
+                if prefix and isinstance(command["argv"], list) and command["argv"][: len(prefix)] == prefix
+            ]
+            checked = [
+                command for command in required if not policy.needs_arguments or len(command["argv"]) > len(prefix)
+            ]
+            failed = _failed_required_check(receipt, checked)
+            if eligible and (required or not prefix) and not failed:
+                if failure is None:
+                    return _Verdict("ok")
+                return replace(
+                    failure,
+                    reason=f"A newer run of the required check failed on this tree. An earlier run had passed. {failure.reason}",
+                    reason_code=_MASKED_PASS,
+                )
+            if failure is not None:
+                continue  # The remaining scan can only confirm whether an earlier pass existed.
+            if eligible:
+                reason = "no_tests_passed" if failed else "not_the_required_check"
+            if failed:
+                failure = _rejected(target, policy, receipt, reason, "The selected run of the required check")
+            rank = (bool(required), started_at)
+            if rejection is None or rank > rejection[0]:
+                rejection = rank, receipt, reason
+    except _Indeterminate:
+        if failure is None:
+            raise
 
+    if failure is not None:
+        return failure
     _remaining(deadline)
     if rejection is None:
         return _Verdict(
             "missing_receipt", "No local verification receipt matches this tree.", _remedy(target, policy, {})
         )
-    _, receipt, reason = rejection
+    (ran_required, _), receipt, reason = rejection
+    run_label = "The most recent run of the required check" if ran_required else "The last run"
+    return _rejected(target, policy, receipt, reason, run_label)
+
+
+def _failed_required_check(receipt: dict[str, Any], commands: list[dict[str, Any]]) -> bool:
+    """Recognize required command failure, timeout, or recorded test failures and errors."""
+    if receipt.get("tree_stable") is False:
+        return False
+    for command in commands:
+        outcomes = command.get("test_outcomes")
+        status = command.get("status")
+        if status is None and len(receipt["commands"]) == 1 and not receipt.get("bookkeeping_error"):
+            status = receipt.get("status")  # Older receipts may only have the overall status.
+        if isinstance(outcomes, dict):
+            for count in (outcomes.get("failed"), outcomes.get("errors")):
+                if type(count) is int and count > 0:
+                    return True
+            if outcomes.get("no_tests_ran") is True and status == "failed":
+                continue
+        if status in ("failed", "timed_out"):
+            return True
+    return False
+
+
+def _rejected(
+    target: Path,
+    policy: verify_gate._GatePolicy,
+    receipt: dict[str, Any],
+    reason: str,
+    run_label: str,
+) -> _Verdict:
     explanation, _ = verify_gate._plan_guidance(receipt, reason)
+    explanation = explanation or f"The last run has an ineligible verdict ({reason.replace('_', ' ')})."
+    if explanation.startswith("The last run"):
+        explanation = run_label + explanation.removeprefix("The last run")
     return _Verdict(
         "rejected",
-        explanation or f"The last run has an ineligible verdict ({reason.replace('_', ' ')}).",
+        explanation,
         _remedy(target, policy, receipt),
     )
 

@@ -1,1 +1,1 @@
-- The push gate accepts any eligible verification receipt for the exact pushed tree, even when a later run is ineligible.
+- The push gate looks for an eligible receipt for the exact pushed tree. A later failure of the required check takes precedence, and unrelated runs leave an earlier eligible receipt valid.
