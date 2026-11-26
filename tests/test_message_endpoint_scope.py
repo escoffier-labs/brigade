@@ -16,7 +16,7 @@ from tests import test_dot_inbox_tools as dot_support
 def test_spool_origin_survives_endpoint_switch(tmp_path, monkeypatch, caplog, interrupted):
     settings = dict(hub_url="https://a.invalid", node_token="fixture-node", admin_token="fixture-admin")
     monkeypatch.setenv("BRIGADE_HOME", str(tmp_path))
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(settings))
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: dict(settings))
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: dict(settings))
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: "node-a")
     calls = []
@@ -84,7 +84,7 @@ def test_spool_origin_survives_endpoint_switch(tmp_path, monkeypatch, caplog, in
 def test_admin_retry_state_endpoint_walk(tmp_path, monkeypatch):
     settings = dict(hub_url="https://a.invalid", node_token="", admin_token="fixture-admin")
     monkeypatch.setenv("BRIGADE_HOME", str(tmp_path))
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(settings))
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: dict(settings))
     first = messages._pending_principal_request(
         "fixture", "fixture-admin", None, hub_url=fleet_client.load_fleet_settings()["hub_url"]
     )
@@ -362,7 +362,7 @@ def test_drain_rejects_mismatched_origin_before_lookup_or_replay(tmp_path, monke
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: dict(hub_url="https://b.invalid", node_token="fixture-node", admin_token=""),
+        lambda **_kwargs: dict(hub_url="https://b.invalid", node_token="fixture-node", admin_token=""),
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: "node-a")
     message_authority = MessageAuthority.capture()
@@ -383,7 +383,7 @@ def test_drain_rejects_mismatched_origin_before_lookup_or_replay(tmp_path, monke
 @pytest.mark.parametrize("node_prefix", [False, True])
 def test_unknown_admin_retry_is_preserved_and_never_adopted(tmp_path, monkeypatch, node_prefix):
     monkeypatch.setenv("BRIGADE_HOME", str(tmp_path))
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(hub_url="https://b.invalid"))
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: dict(hub_url="https://b.invalid"))
     directory = tmp_path / fleet_client.SPOOL_DIRNAME
     directory.mkdir()
     name_hash = hashlib.sha256(b"fixture").hexdigest()[:16]

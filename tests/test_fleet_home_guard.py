@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import logging
+import os
+import threading
+import json
 import urllib.request
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
@@ -29,6 +32,7 @@ FLEET_ENV = ("BRIGADE_FLEET_HUB_URL", "BRIGADE_FLEET_TOKEN", "BRIGADE_FLEET_NODE
 
 def _token(path: Path, value: str) -> Path:
     path.write_text(value, encoding="utf-8")
+    path.chmod(0o600)
     return path
 
 
@@ -476,3 +480,251 @@ def test_an_operator_release_by_node_sends_nothing_under_a_relative_home(
     assert cli.main(["fleet", "claims", "--release", "stored-key", "--node", "node-a"]) != 0
     assert "Traceback" not in capsys.readouterr().err
     assert sent == [] and not no_requests
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX token permissions")
+@pytest.mark.parametrize("mode", [0o600, 0o640, 0o644, 0o606])
+def test_fleet_token_file_mode(tmp_path, mode):
+    path = _token(tmp_path / "node.token", "fixture-token\n")
+    path.chmod(mode)
+    if mode == 0o600:
+        assert fleet_home_guard.read_token_file(path.name, tmp_path / "fleet.toml") == "fixture-token"
+    else:
+        with pytest.raises(fleet_client.FleetClientError, match=rf"node\.token.*{mode:04o}.*chmod 600"):
+            fleet_home_guard.read_token_file(path.name, tmp_path / "fleet.toml")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX token ownership")
+def test_fleet_token_file_wrong_owner(tmp_path, monkeypatch):
+    path = _token(tmp_path / "node.token", "fixture-token")
+    monkeypatch.setattr(os, "geteuid", lambda: path.stat().st_uid + 1)
+    with pytest.raises(fleet_client.FleetClientError, match=r"node\.token.*wrong owner.*chown"):
+        fleet_home_guard.read_token_file(path.name, tmp_path / "fleet.toml")
+
+
+def test_fleet_token_file_missing(tmp_path):
+    assert fleet_home_guard.read_token_file("missing.token", tmp_path / "fleet.toml") == ""
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlink and permissions")
+def test_fleet_token_file_symlink_checks_target(tmp_path):
+    target = _token(tmp_path / "target.token", "fixture-token")
+    link = tmp_path / "node.token"
+    link.symlink_to(target.name)
+    assert fleet_home_guard.read_token_file(link.name, tmp_path / "fleet.toml") == "fixture-token"
+    target.chmod(0o644)
+    with pytest.raises(fleet_client.FleetClientError, match=r"node\.token.*target\.token.*0644"):
+        fleet_home_guard.read_token_file(link.name, tmp_path / "fleet.toml")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="Simulate Windows permission checks on POSIX")
+def test_fleet_token_file_skips_posix_checks_on_windows(tmp_path, monkeypatch):
+    path = _token(tmp_path / "node.token", "fixture-token")
+    path.chmod(0o644)
+    monkeypatch.setattr(os, "geteuid", lambda: path.stat().st_uid + 1)
+    monkeypatch.setattr(fleet_home_guard, "_checks_posix_permissions", lambda: False)
+    assert fleet_home_guard.read_token_file(path.name, tmp_path / "fleet.toml") == "fixture-token"
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX token permissions")
+@pytest.mark.parametrize(
+    ("state", "status", "hint"),
+    [
+        ("ok", "OK", "0600"),
+        ("wrong owner", "FAIL", "chown"),
+        ("too permissive", "FAIL", "0640"),
+        ("missing", "WARN", "Supply"),
+    ],
+)
+def test_doctor_reports_fleet_token_files(tmp_path, monkeypatch, capsys, state, status, hint):
+    from brigade import doctor
+
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path))
+    (tmp_path / "fleet.toml").write_text(
+        '[fleet]\ntoken_file = "admin.token"\nnode_token_file = "node.token"\n', encoding="utf-8"
+    )
+    if state != "missing":
+        path = _token(tmp_path / "node.token", "fixture-token")
+        if state == "wrong owner":
+            monkeypatch.setattr(os, "geteuid", lambda: path.stat().st_uid + 1)
+        elif state == "too permissive":
+            path.chmod(0o640)
+    doctor.run(tmp_path, json_output=True)
+    checks = {check["name"]: check for check in json.loads(capsys.readouterr().out)["checks"]}
+    admin = checks["fleet token file: token_file"]
+    node = checks["fleet token file: node_token_file"]
+    assert admin["status"] == "WARN" and "admin.token" in admin["detail"] and "missing" in admin["detail"]
+    assert node["status"] == status
+    assert "node.token" in node["detail"] and hint in node["detail"]
+    assert state in node["detail"]
+    assert "fixture-token" not in node["detail"]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX token permissions")
+@pytest.mark.parametrize("key", ["token_file", "node_token_file"])
+def test_fleet_callers_report_token_file_refusals(tmp_path, monkeypatch, no_fleet_env, key):
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path))
+    path = _token(tmp_path / "fleet.token", "fixture-token")
+    (tmp_path / "fleet.toml").write_text(f'[fleet]\nhub_url = "{USER_HUB}"\n{key} = "{path.name}"\n', encoding="utf-8")
+    bound = fleet_claim_lifecycle._bound_connection(USER_HUB, "fixture-token")
+    path.chmod(0o640)
+
+    for read in (fleet_client.load_fleet_settings, fleet_claim_lifecycle._token_snapshot, bound):
+        with pytest.raises(fleet_client.FleetClientError, match=r"fleet\.token.*0640.*chmod 600"):
+            read()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX token permissions")
+def test_claim_refusal_retains_repair_hint(tmp_path, monkeypatch, no_fleet_env, caplog):
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path))
+    path = _token(tmp_path / "node.token", "fixture-token")
+    path.chmod(0o640)
+    (tmp_path / "fleet.toml").write_text(f'[fleet]\nhub_url = "{USER_HUB}"\nnode_token_file = "node.token"\n')
+    with pytest.raises(fleet_client.FleetClaimRequiredError, match=r"node\.token.*chmod 600"):
+        with fleet_client.repo_claim("fixture", require_claim=True):
+            pytest.fail("claim admitted")
+    with fleet_client.repo_claim("fixture") as decision:
+        assert decision.reason == "token-file-refused"
+    assert sum("chmod 600" in record.message for record in caplog.records) == 1
+    decision = fleet_client.acquire_claim("fixture")
+    assert decision.reason == "token-file-refused" and "chmod 600" in (decision.detail or "")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX token permissions")
+def test_message_credential_works_with_refused_admin_file(tmp_path, monkeypatch, no_fleet_env):
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path))
+    admin = _token(tmp_path / "admin.token", "fixture-admin")
+    admin.chmod(0o640)
+    message = _token(tmp_path / "message.token", "a" * 40)
+    (tmp_path / "fleet.toml").write_text(f'[fleet]\nhub_url = "{USER_HUB}"\ntoken_file = "admin.token"\n')
+    assert credentials.MessageAuthority.capture(str(message)).hub == USER_HUB
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX token permissions")
+def test_doctor_reports_overridden_and_unresolvable_files(tmp_path, monkeypatch):
+    from brigade import doctor
+
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path))
+    monkeypatch.setenv("BRIGADE_FLEET_TOKEN", "fixture-override")
+    admin = _token(tmp_path / "admin.token", "fixture-token")
+    admin.chmod(0o640)
+    node = tmp_path / "node.token"
+    node.symlink_to(node.name)
+    (tmp_path / "fleet.toml").write_text('[fleet]\ntoken_file = "admin.token"\nnode_token_file = "node.token"\n')
+    checks = {
+        name: (status, detail)
+        for status, name, detail, _ in doctor._gather_checks(doctor.build_context(tmp_path, "generic"))
+    }
+    status, detail = checks["fleet token file: token_file"]
+    assert status in {"INFO", "WARN"} and "overridden by environment" in detail
+    status, detail = checks["fleet token file: node_token_file"]
+    assert status == "FAIL" and "unresolvable" in detail
+
+
+def test_unreadable_replacement_stops_using_bound_credential(tmp_path, monkeypatch, no_fleet_env):
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path))
+    path = _token(tmp_path / "node.token", "fixture-token")
+    (tmp_path / "fleet.toml").write_text(f'[fleet]\nhub_url = "{USER_HUB}"\nnode_token_file = "node.token"\n')
+    bound = fleet_claim_lifecycle._bound_connection(USER_HUB, "fixture-token", shared=False)
+    path.write_bytes(b"\xff")
+    with pytest.raises(fleet_home_guard.FleetTokenFileError, match=r"node\.token.*UTF-8"):
+        bound()
+    path.unlink()
+    with pytest.raises(fleet_home_guard.FleetTokenFileError, match=r"node\.token.*UTF-8"):
+        bound()
+
+
+def test_claim_release_schedules_retry_when_token_file_is_refused(monkeypatch, caplog):
+    scheduled = []
+    monkeypatch.setattr(fleet_client, "_schedule_orphan_release", lambda *args, **kwargs: scheduled.append(kwargs))
+
+    def connect():
+        raise fleet_home_guard.FleetTokenFileError("node.token: cannot read token file. Check UTF-8 encoding.")
+
+    fleet_claim_lifecycle.release_confirmed_claim(
+        "fixture",
+        node_id="fixture-node",
+        holder="fixture-holder",
+        conductor=None,
+        ttl_seconds=60,
+        connect=connect,
+        initial_acquire_uncertain=False,
+        reacquire_uncertain=False,
+    )
+    assert len(scheduled) == 1 and scheduled[0]["connect"] is connect
+    assert sum("node.token" in record.message and "UTF-8" in record.message for record in caplog.records) == 1
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX token permissions")
+def test_message_authority_retains_node_token_refusal(tmp_path, monkeypatch, no_fleet_env):
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path))
+    path = _token(tmp_path / "node.token", "fixture-node")
+    path.chmod(0o640)
+    (tmp_path / "fleet.toml").write_text(f'[fleet]\nhub_url = "{USER_HUB}"\nnode_token_file = "node.token"\n')
+    with pytest.raises(credentials.MessageAuthorityError, match=r"node\.token.*chmod 600"):
+        credentials.MessageAuthority.capture(node_credential=True)
+
+
+def test_claim_renewal_routes_unreadable_token_through_credential_failure(tmp_path, monkeypatch, no_fleet_env):
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path))
+    path = _token(tmp_path / "node.token", "fixture-token")
+    (tmp_path / "fleet.toml").write_text(f'[fleet]\nhub_url = "{USER_HUB}"\nnode_token_file = "node.token"\n')
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda *args: "fixture-node")
+    monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda _: 0.02)
+    monkeypatch.setattr(fleet_client, "_schedule_orphan_release", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        fleet_client,
+        "_post_claim_blocking",
+        lambda *args, **kwargs: (200, {"granted": True, "renewed": True, "claim": {"generation": 1}}),
+    )
+    observed = threading.Event()
+    details = []
+
+    def credential_failure(detail):
+        details.append(detail)
+        observed.set()
+
+    with fleet_client.repo_claim("fixture", on_credential_failure=credential_failure) as claim:
+        assert claim.granted
+        path.write_bytes(b"\xff")
+        assert observed.wait(3)
+    assert len(details) == 1 and "node.token" in details[0] and "UTF-8" in details[0]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX token permissions")
+def test_best_effort_fleet_operations_log_token_refusals(tmp_path, monkeypatch, no_fleet_env, caplog):
+    from brigade import fleet_client_cloud, fleet_event_report
+    from brigade.fleet_session_presence import SessionSnapshot
+
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path))
+    path = _token(tmp_path / "node.token", "fixture-token")
+    path.chmod(0o640)
+    (tmp_path / "fleet.toml").write_text(f'[fleet]\nhub_url = "{USER_HUB}"\nnode_token_file = "node.token"\n')
+    snapshot = SessionSnapshot("claude", "fixture-session", None, "fleet", "project", str(tmp_path), "main", (), False)
+
+    assert fleet_client.publish_session(snapshot).reason == "token-file-refused"
+    assert fleet_event_report.report({}) == "failed"
+    assert fleet_client_cloud._cloud_op("admit").reason == "token-file-refused"
+    assert sum("node.token" in record.message and "chmod 600" in record.message for record in caplog.records) == 3
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX token permissions")
+@pytest.mark.parametrize("operation", ["journal", "presence", "grokbot", "model-lease"])
+def test_token_file_refusal_is_reported_by_best_effort_callers(tmp_path, monkeypatch, no_fleet_env, caplog, operation):
+    from brigade import fleet_client_cloud, fleet_client_grokbot, fleet_session_presence
+
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path))
+    path = _token(tmp_path / "node.token", "fixture-token")
+    path.chmod(0o640)
+    (tmp_path / "fleet.toml").write_text(f'[fleet]\nhub_url = "{USER_HUB}"\nnode_token_file = "node.token"\n')
+    calls = {
+        "journal": lambda: fleet_client.report_journal_event({}),
+        "presence": lambda: fleet_session_presence._publish_presence("SessionStart", tmp_path, "fixture"),
+        "grokbot": fleet_client_grokbot.list_jobs,
+        "model-lease": lambda: fleet_client_cloud._model_lease_op("release"),
+    }
+    result = calls[operation]()
+    assert result.reason == "token-file-refused"
+    assert "node.token" in result.detail and "chmod 600" in result.detail
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING and "node.token" in r.message]
+    assert len(warnings) == 1 and "chmod 600" in warnings[0].message

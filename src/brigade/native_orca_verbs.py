@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
@@ -23,6 +23,12 @@ from .native_orca_host import HOST
 CORRELATION_EVENT = "task.native-correlated"
 CORRELATION_SCHEMA = "brigade.orca_correlation.v1"
 _INTENT_DOMAIN = "brigade.native-orca.intent.v1"
+_TASK_LOCK_WAIT_SECONDS = 5.0
+
+
+def owned_task_run(workspace: Path, run_dir: Path) -> AbstractContextManager[None]:
+    """Allow concurrent Orca task verbs to queue for the shared journal."""
+    return owned_run(workspace, run_dir, wait_seconds=_TASK_LOCK_WAIT_SECONDS)
 
 
 def _intent(
@@ -173,7 +179,7 @@ class ClaimedTask:
 def claimed_task(workspace: Path, run_id: str, task_id: str, *, resolving: bool = False) -> Iterator[ClaimedTask]:
     workspace = workspace.expanduser().resolve()
     run_dir = journal.context(workspace, run_id, task_id)
-    with owned_run(workspace, run_dir):
+    with owned_task_run(workspace, run_dir):
         journal.run_meta(HOST, workspace, run_dir)
         events = journal.read_events(run_dir)
         result = journal.find_task(journal.read_tasks(run_dir), task_id)
@@ -240,6 +246,8 @@ def _correlate(task: ClaimedTask, worker: dispatch.WorkerReference, *, mode: str
         "orca_task_id": worker.task_id,
         "dispatch_id": worker.dispatch_id,
         "observe_argv": observations.observe_argv(worker),
+        "inbox_argv": observations.inbox_argv(worker),
+        "transcript_argv": observations.result_argv(worker),
         "replayed": prior is not None and held is None,
     }
 

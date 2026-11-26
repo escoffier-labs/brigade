@@ -84,6 +84,9 @@ def require_credential_isolation(
         for key in ("node_token", "admin_token"):
             if value is not None and settings.get(key) and hmac.compare_digest(value, settings[key].encode("utf-8")):
                 raise ValueError
+    except fleet_home_guard.FleetTokenFileError as exc:
+        refusal = fleet_home_guard.report_token_file_refusal("dot credential validation", exc)
+        raise DotError("invalid_config", reason=refusal.detail) from None
     except Exception:
         raise DotError("invalid_config") from None
 

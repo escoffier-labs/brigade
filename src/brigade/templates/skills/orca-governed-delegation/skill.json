@@ -1,7 +1,7 @@
 {
   "id": "orca-governed-delegation",
   "title": "orca-governed-delegation",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "description": "Governed local Orca delegation through Brigade, including replay-safe worker starts, receipt reporting, observation, acknowledgement and recovery for Orca 1.4.269.",
   "required_tools": [
     "Read",

@@ -69,6 +69,7 @@ class ModelLeaseDecision:
     reason: str
     lease_id: str | None = None
     holder: str | None = None
+    detail: str | None = None
 
 
 _CLOUD_OK_KEYS = {"admit": "admitted", "bind": "bound", "renew": "renewed", "release": "released"}
@@ -263,10 +264,12 @@ def _cloud_op(
     **fields: Any,
 ) -> CloudDecision:
     """One bounded cloud operation that fails closed on every uncertainty."""
+    from .fleet_home_guard import FleetTokenFileError, report_token_file_refusal
+
     lease = lease_id or uuid4().hex
     fence = holder or uuid4().hex
     try:
-        config = load_fleet_config()
+        config = {} if hub_url and token else load_fleet_config()
         hub = hub_url or config["hub_url"]
         if not hub:
             return CloudDecision(False, "no-hub", holder=fence)
@@ -284,6 +287,9 @@ def _cloud_op(
             lambda: _client._post_cloud_blocking(hub, token or config["token"], body, timeout=CLOUD_TIMEOUT_SECONDS),
             timeout=CLOUD_TIMEOUT_SECONDS,
         )
+    except FleetTokenFileError as exc:
+        report_token_file_refusal(f"fleet cloud {action}", exc)
+        return CloudDecision(False, exc.code, detail=str(exc), holder=fence)
     except Exception:
         return CloudDecision(False, "hub-unavailable", holder=fence)
     payload = payload if isinstance(payload, dict) else {}
@@ -531,6 +537,8 @@ def set_model_policy(
     expected_revision: int,
 ) -> dict[str, Any]:
     """Set one seat's provider/model policy with the configured admin token."""
+    from .fleet_home_guard import FleetTokenFileError
+
     try:
         settings = load_fleet_settings()
         hub = settings["hub_url"]
@@ -575,6 +583,8 @@ def set_model_policy(
             lambda: _client._post_model_policy_blocking(hub, admin_token, body, timeout=CLOUD_TIMEOUT_SECONDS),
             timeout=CLOUD_TIMEOUT_SECONDS,
         )
+    except FleetTokenFileError:
+        raise
     except Exception as exc:
         raise FleetClientError("fleet hub model policy update failed") from exc
     payload = payload if isinstance(payload, dict) else {}
@@ -605,6 +615,8 @@ def _model_lease_op(
     policy_context_hash: str | None = None,
     consumer: str | None = None,
 ) -> ModelLeaseDecision:
+    from .fleet_home_guard import FleetTokenFileError, report_token_file_refusal
+
     lease = lease_id or uuid4().hex
     fence = holder or uuid4().hex
     try:
@@ -643,6 +655,9 @@ def _model_lease_op(
             ),
             timeout=CLOUD_TIMEOUT_SECONDS,
         )
+    except FleetTokenFileError as exc:
+        refusal = report_token_file_refusal(f"fleet model lease {action}", exc)
+        return ModelLeaseDecision(False, refusal.reason, lease, fence, detail=refusal.detail)
     except Exception:
         return ModelLeaseDecision(False, "hub-unavailable", lease, fence)
     if status in (401, 403):

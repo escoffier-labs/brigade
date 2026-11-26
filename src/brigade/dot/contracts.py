@@ -1,4 +1,5 @@
 from dataclasses import dataclass, field
+from enum import Enum
 import re
 import unicodedata
 from typing import Any, Callable
@@ -15,6 +16,7 @@ MAX_HANDOFF_BYTES = 16384
 
 
 ERROR_MESSAGES = {
+    "tool_not_permitted": "This tool is outside the connector's configured grants.",
     "recipient_not_permitted": "The recipient is outside the dot's send grants. Nothing was sent or queued, "
     "and retrying will not help.",
     "recipient_quota": "The dot's send quota for this recipient is exhausted. Nothing was sent or queued; "
@@ -181,8 +183,16 @@ class Field:
     default: Any = None
 
 
+class ToolClass(str, Enum):
+    READ = "read"
+    MESSAGING = "messaging"
+    DISPATCH = "dispatch"
+    MEMORY_WRITE = "memory_write"
+
+
 @dataclass(frozen=True)
 class ToolSchema:
+    tool_class: ToolClass
     fields: dict[str, Field] = field(default_factory=dict)
     gated: bool = False
     read_only: bool = True
@@ -209,10 +219,11 @@ WORK_STATUS = _pattern(r"[a-z][a-z_-]{0,31}")
 BURN_CURSOR = _pattern(r"[A-Za-z0-9_-]{1,2048}={0,2}")
 
 TOOL_SCHEMAS = {
-    "dot_t3_capabilities": ToolSchema(),
-    "fleet_capacity": ToolSchema({"host": _optional(HOST)}),
-    "fleet_doctor": ToolSchema({"host": _optional(HOST), "repository": _optional(REPOSITORY)}),
+    "dot_t3_capabilities": ToolSchema(ToolClass.READ),
+    "fleet_capacity": ToolSchema(ToolClass.READ, {"host": _optional(HOST)}),
+    "fleet_doctor": ToolSchema(ToolClass.READ, {"host": _optional(HOST), "repository": _optional(REPOSITORY)}),
     "fleet_submit": ToolSchema(
+        ToolClass.DISPATCH,
         {
             "repository": _required(REPOSITORY),
             "title": _required(TITLE),
@@ -228,25 +239,31 @@ TOOL_SCHEMAS = {
         gated=True,
         read_only=False,
     ),
-    "fleet_status": ToolSchema({"request_id": _required(REQUEST_ID), "include_output": _optional(_boolean, False)}),
+    "fleet_status": ToolSchema(
+        ToolClass.READ, {"request_id": _required(REQUEST_ID), "include_output": _optional(_boolean, False)}
+    ),
     "fleet_wait": ToolSchema(
+        ToolClass.READ,
         {
             "request_id": _required(REQUEST_ID),
             "timeout_seconds": _optional(_integer(1, 60), 30),
             "include_output": _optional(_boolean, False),
-        }
+        },
     ),
     "fleet_followup": ToolSchema(
+        ToolClass.DISPATCH,
         {"request_id": _required(REQUEST_ID), "message": _required(PROMPT), "read_only": _optional(_boolean, False)},
         gated=True,
         read_only=False,
     ),
     "fleet_answer": ToolSchema(
+        ToolClass.DISPATCH,
         {"request_id": _required(REQUEST_ID), "input_id": _required(CONTROL_ID), "answers": _required(answers_value)},
         gated=True,
         read_only=False,
     ),
     "fleet_approve": ToolSchema(
+        ToolClass.DISPATCH,
         {
             "request_id": _required(REQUEST_ID),
             "approval_id": _required(CONTROL_ID),
@@ -255,21 +272,29 @@ TOOL_SCHEMAS = {
         gated=True,
         read_only=False,
     ),
-    "fleet_interrupt": ToolSchema({"request_id": _required(REQUEST_ID)}, gated=True, read_only=False),
-    "fleet_recent": ToolSchema({"limit": _optional(_integer(1, 50), 20)}),
-    "fleet_overview": ToolSchema({"include_terminal": _optional(_boolean, False)}),
-    "memory_search": ToolSchema({"query": _required(QUERY), "limit": _optional(_integer(1, 20), 10)}),
+    "fleet_interrupt": ToolSchema(
+        ToolClass.DISPATCH, {"request_id": _required(REQUEST_ID)}, gated=True, read_only=False
+    ),
+    "fleet_recent": ToolSchema(ToolClass.READ, {"limit": _optional(_integer(1, 50), 20)}),
+    "fleet_overview": ToolSchema(ToolClass.READ, {"include_terminal": _optional(_boolean, False)}),
+    "memory_search": ToolSchema(ToolClass.READ, {"query": _required(QUERY), "limit": _optional(_integer(1, 20), 10)}),
     "memory_card": ToolSchema(
+        ToolClass.READ,
         {
             "name": _required(card_name),
             "offset": _optional(_integer(0, MAX_CARD_FILE_BYTES), 0),
             "scope": _optional(memory_scope),
-        }
+        },
     ),
-    "handoff_write": ToolSchema({"slug": _required(SLUG), "content": _required(handoff_content)}, read_only=False),
-    "inbox_list": ToolSchema({"unacked_only": _optional(_boolean, True), "limit": _optional(_integer(1, 50), 20)}),
-    "inbox_ack": ToolSchema({"ids": _required(message_ids)}, read_only=False),
+    "handoff_write": ToolSchema(
+        ToolClass.MEMORY_WRITE, {"slug": _required(SLUG), "content": _required(handoff_content)}, read_only=False
+    ),
+    "inbox_list": ToolSchema(
+        ToolClass.READ, {"unacked_only": _optional(_boolean, True), "limit": _optional(_integer(1, 50), 20)}
+    ),
+    "inbox_ack": ToolSchema(ToolClass.MESSAGING, {"ids": _required(message_ids)}, read_only=False),
     "message_send": ToolSchema(
+        ToolClass.MESSAGING,
         {
             "to": _required(_pattern(r"agent:[a-z][a-z0-9._-]{0,62}|[A-Za-z0-9._-]{1,128}")),
             "subject": _required(_text(max_bytes=200)),
@@ -283,41 +308,50 @@ TOOL_SCHEMAS = {
         gated=True,
         read_only=False,
     ),
-    "message_status": ToolSchema({"ids": _required(status_message_ids)}),
-    "fleet_policy": ToolSchema({"since_hash": _optional(_pattern(r"[0-9a-f]{64}"))}),
-    "skill_search": ToolSchema({"query": _required(QUERY), "limit": _optional(_integer(1, 50), 20)}),
+    "message_status": ToolSchema(ToolClass.READ, {"ids": _required(status_message_ids)}),
+    "fleet_policy": ToolSchema(ToolClass.READ, {"since_hash": _optional(_pattern(r"[0-9a-f]{64}"))}),
+    "skill_search": ToolSchema(ToolClass.READ, {"query": _required(QUERY), "limit": _optional(_integer(1, 50), 20)}),
     "skill_get": ToolSchema(
+        ToolClass.READ,
         {
             "name": _required(SLUG),
             "resource": _optional(_pattern(r"(?:SKILL\.md|[A-Za-z0-9_-]+(?:/[A-Za-z0-9_.-]+)+)"), "SKILL.md"),
             "offset": _optional(_integer(0, 1048576), 0),
-        }
+        },
     ),
     "inbox_reply": ToolSchema(
-        {"msg_id": _required(_integer(1, 2**63 - 1)), "body": _required(MESSAGE_BODY)}, read_only=False
+        ToolClass.MESSAGING,
+        {"msg_id": _required(_integer(1, 2**63 - 1)), "body": _required(MESSAGE_BODY)},
+        read_only=False,
     ),
     "fleet_report_session": ToolSchema(
-        {"report": _required(task_report), "publish": _optional(_boolean, False)}, gated=True, read_only=False
+        ToolClass.DISPATCH,
+        {"report": _required(task_report), "publish": _optional(_boolean, False)},
+        gated=True,
+        read_only=False,
     ),
     "fleet_sessions": ToolSchema(
-        {"include_ended": _optional(_boolean, False), "limit": _optional(_integer(1, 100), 50)}
+        ToolClass.READ, {"include_ended": _optional(_boolean, False), "limit": _optional(_integer(1, 100), 50)}
     ),
     "fleet_work_list": ToolSchema(
+        ToolClass.READ,
         {
             "source": _optional(_choice("github", "brigade", "native")),
             "status": _optional(WORK_STATUS),
             "limit": _optional(_integer(1, 50), 25),
-        }
+        },
     ),
-    "fleet_work_show": ToolSchema({"work_id": _required(WORK_ID)}),
-    "fleet_work_next": ToolSchema({"consumer": _optional(CONSUMER), "workload": _optional(WORKLOAD)}),
-    "fleet_work_burn": ToolSchema({"cursor": _optional(BURN_CURSOR), "limit": _optional(_integer(1, 50), 20)}),
-    "fleet_models": ToolSchema({"consumer": _optional(CONSUMER, "brigade-run")}),
+    "fleet_work_show": ToolSchema(ToolClass.READ, {"work_id": _required(WORK_ID)}),
+    "fleet_work_next": ToolSchema(ToolClass.READ, {"consumer": _optional(CONSUMER), "workload": _optional(WORKLOAD)}),
+    "fleet_work_burn": ToolSchema(
+        ToolClass.READ, {"cursor": _optional(BURN_CURSOR), "limit": _optional(_integer(1, 50), 20)}
+    ),
+    "fleet_models": ToolSchema(ToolClass.READ, {"consumer": _optional(CONSUMER, "brigade-run")}),
     "fleet_cloud": ToolSchema(
-        {"include_released": _optional(_boolean, False), "limit": _optional(_integer(1, 100), 50)}
+        ToolClass.READ, {"include_released": _optional(_boolean, False), "limit": _optional(_integer(1, 100), 50)}
     ),
-    "fleet_hub_policy": ToolSchema(),
-    "fleet_digest": ToolSchema(),
+    "fleet_hub_policy": ToolSchema(ToolClass.READ),
+    "fleet_digest": ToolSchema(ToolClass.READ),
 }
 
 TOOLS = frozenset(TOOL_SCHEMAS)
@@ -325,10 +359,22 @@ TOOLS = frozenset(TOOL_SCHEMAS)
 DISPATCH_GATED_TOOLS = frozenset(
     {"fleet_submit", "fleet_followup", "fleet_answer", "fleet_approve", "fleet_interrupt", "fleet_report_session"}
 )
+# The Duet dispatch bundle also includes reads for work submitted through Duet.
+DUET_DISPATCH_TOOLS = frozenset(
+    {
+        "fleet_submit",
+        "fleet_status",
+        "fleet_wait",
+        "fleet_recent",
+        "fleet_capacity",
+        "fleet_followup",
+        "fleet_interrupt",
+    }
+)
 # Hub messaging has its own gate, so a profile can send messages without dispatch.
 MESSAGING_GATED_TOOLS = frozenset({"message_send"})
 GATED_TOOLS = DISPATCH_GATED_TOOLS | MESSAGING_GATED_TOOLS
 
 # Capability tools owned by a connector profile other than Dot. Dot's TOOL_SCHEMAS stays fixed.
-PROFILE_TOOL_SCHEMAS = {"duet_capabilities": ToolSchema()}
+PROFILE_TOOL_SCHEMAS = {"duet_capabilities": ToolSchema(ToolClass.READ)}
 ALL_TOOL_SCHEMAS = {**TOOL_SCHEMAS, **PROFILE_TOOL_SCHEMAS}

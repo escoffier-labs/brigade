@@ -1,11 +1,11 @@
 # Governed Orca delegation
 
 Brigade governs coordinator-mediated launches to local Orca workers. The
-coordinator runs Orca; Brigade records enrollment, launch claims, native
+coordinator runs Orca. Brigade records enrollment, launch claims, native
 receipts, observations, acknowledgements and final state. This procedure was
 checked against Orca 1.4.269.
 
-On Linux, invoke Orca as `orca-ide`; `/usr/bin/orca` is the screen reader.
+On Linux, invoke Orca as `orca-ide`. `/usr/bin/orca` is the screen reader.
 Follow the bundled [orca-governed-delegation skill](../src/brigade/templates/skills/orca-governed-delegation/SKILL.md)
 for all recovery rules.
 
@@ -15,15 +15,14 @@ flowchart TD
     A --> B[brigade orca claim]
     B --> C[Run printed orca-ide worker-start argv]
     C --> D[brigade orca accepted]
-    D --> E[brigade orca observe with full worker-show]
-    E --> F[Run printed inbox_argv and transcript_argv]
-    F --> G[brigade orca observe with all evidence]
+    D --> E[Run printed observe_argv until worker terminal]
+    E --> F[Collect inbox, released show and transcript]
+    F --> G[brigade orca observe with all three replies]
     G --> H[brigade orca ack]
-    H --> I[Fresh post-release worker-show and observe]
-    I --> J[brigade orca finalize]
+    H --> J[brigade orca finalize]
     B -. recovery .-> K[cancel or hold-resolve]
     K --> E
-    A -. capacity .-> L[brigade orca status]
+    J --> L[brigade orca status]
 ```
 
 ## Before the first claim
@@ -46,13 +45,28 @@ the returned worker receipts against the existing wire contract.
 
 ## Observe and acknowledge
 
-After `accepted`, run its exact printed `observe_argv` to collect full
-`worker-show --json --full` evidence. Submit the show with
+After accepting all worker starts in the batch, the coordinator may run the
+closeout chains for different tasks concurrently. Within each task, follow
+the proof steps in order and use that task's own evidence files. Per-task
+verbs such as `observe`, `ack`, and `hold-resolve` may wait up to five
+seconds for the workspace run lock and return `run-busy` if it is still held.
+`finalize` fails immediately if the lock is held. Once every chain finishes,
+run `brigade orca finalize <run> --target <workspace>` once, then run
+`brigade orca status <run> --json --target <workspace>` once to confirm
+that the run closed with zero live capacity.
+
+After a successful correlation, `accepted` prints `observe_argv`,
+`inbox_argv` and `transcript_argv`. Run the printed Orca argv as given.
+Use `observe_argv` to collect a full `worker-show --json --full` snapshot.
+If the worker is still active, poll for a terminal snapshot. To record an
+interim state in Brigade, submit the snapshot with
 `brigade orca observe <run> <task> --native-json <show.json> --target <workspace>`.
-That result prints the exact `observe_argv`, `inbox_argv` and
-`transcript_argv`. Run those printed Orca argv without reconstructing them.
-The inbox argv carries `--run` and `--limit`; a hand-built
-`orca-ide orchestration inbox --full --json` omits them. The transcript argv
+Once the dispatch is completed or failed, read the inbox with `inbox_argv`.
+After Orca releases the worker, collect a fresh full show with `observe_argv`
+and read the transcript with `transcript_argv`. If the first show already
+proves release, reuse it.
+
+The inbox argv carries the required `--run` and `--limit` arguments. The transcript argv
 uses `orca-ide orchestration worker-read --environment local --dispatch <id> --source transcript --json`.
 If `result.transcript.limited` is true, run the same transcript argv with
 `--cursor` and the page's `result.transcript.nextCursor` as one argument.
@@ -61,11 +75,17 @@ JSON array in read order, including an empty final page. `--transcript-json`
 accepts one full reply or an array of up to eight full replies. Restart from
 the first page if the transcript source changes.
 
-Then submit all evidence with
+Submit the released show, inbox and transcript together with
 `brigade orca observe <run> <task> --native-json <show.json> --worker-done-json <inbox.json> --transcript-json <transcript.json> --target <workspace>`.
 Without both the matching worker_done report and a complete transcript,
 observation remains `result-transfer-missing`, no terminal result is available
 to acknowledge, and the slot stays occupied.
+
+Use the returned `result_id` with
+`brigade orca ack <run> <task> --result-id <result-id> --target <workspace>`.
+The slot is free once Brigade records both the acknowledgement and proof of
+release. Brigade can record release during the terminal observation or from
+a later full show once it has a terminal result.
 
 Orca can clip oversized transcript text as `transcript_payload`. Brigade
 accepts that clipping when the exact transcript ends with a non-empty assistant
@@ -81,12 +101,11 @@ Each definite start refusal (`start-refused`, `circuit-broken` or
 `brigade orca ack <run> <task> --result-id <result-id> --target <workspace>`.
 Until ack, it holds capacity as `awaiting-ack`.
 
-After acknowledging a terminal result, wait for Orca to release its worker.
-For a normally completed or failed worker, run a fresh full `worker-show`
-using the printed `observe_argv`, then repeat `observe` with the fresh show
-and the matching worker_done report and transcript. For a cancelled worker,
-after a confirmed stop, use the fresh full show alone to verify release with
+If Brigade recorded a terminal result before release, wait for Orca to release
+the worker. For a cancelled worker, after a confirmed stop, use the fresh full
+show alone to verify release. Submit the fresh show with
 `brigade orca observe <run> <task> --native-json <show.json> --target <workspace>`.
+The retained terminal result lets Brigade check release with the show alone.
 A cancelled worker may not produce a worker_done report or transcript.
 Finalization is blocked by `release-unverified` until the post-release
 observation proves release.
@@ -104,7 +123,7 @@ alone does not prove cancellation. `hold-resolve` cannot settle a stop.
 After a lost start reply, reuse the same `--retry-request` id and exact printed
 worker-start argv. Never start a new Orca Run or Task to get around the circuit
 breaker. For `outcome_unknown`, recover the original start receipt and use
-`hold-resolve`; it can also clear an `accept-conflict` hold when evidence
+`hold-resolve`. It can also clear an `accept-conflict` hold when evidence
 matches the retained worker. `hold-resolve --abandon` writes a permanent
 `abandoned-unknown` hold: it frees no slot, `finalize` refuses it, and an
 operator must follow up. `stop_unknown` and `outcome_unknown` both keep tasks

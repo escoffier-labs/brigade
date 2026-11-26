@@ -143,6 +143,13 @@ class RunLockError(RunGuardError):
     pass
 
 
+class ForeignRunLockError(RunLockError):
+    """A stale lock cannot be claimed by the requesting run."""
+
+    def __init__(self, path: Path) -> None:
+        super().__init__(f"stale run lock does not belong to this run: {path}. Refusing to claim it.")
+
+
 @dataclass(frozen=True)
 class PatchSummary:
     path: Path
@@ -385,10 +392,13 @@ def _owner_with_workspace(owner: dict[str, object] | None, path: Path) -> dict[s
     return enriched
 
 
-def _claim_stale_lock_patiently(path: Path) -> tuple[Path, dict[str, object] | None] | None:
+def _claim_stale_lock_patiently(
+    path: Path, *, expected_run_dir: Path | None = None
+) -> tuple[Path, dict[str, object] | None] | None:
     """``_claim_stale_lock``, waiting a bounded time while another recoverer holds the gate."""
     deadline: float | None = None  # read the clock only once the gate is busy
-    while (result := _claim_stale_lock(path)) is _RecoveryGate.BUSY:
+    claim_options = {"expected_run_dir": expected_run_dir} if expected_run_dir is not None else {}
+    while (result := _claim_stale_lock(path, **claim_options)) is _RecoveryGate.BUSY:
         now = time.monotonic()
         deadline = now + _RECOVERY_GATE_BUSY_RETRY_SECONDS if deadline is None else deadline
         if now >= deadline:
@@ -397,7 +407,9 @@ def _claim_stale_lock_patiently(path: Path) -> tuple[Path, dict[str, object] | N
     return result
 
 
-def _claim_stale_lock(path: Path) -> tuple[Path, dict[str, object] | None] | None | _RecoveryGate:
+def _claim_stale_lock(
+    path: Path, *, expected_run_dir: Path | None = None
+) -> tuple[Path, dict[str, object] | None] | None | _RecoveryGate:
     # Renaming ``path`` takes whatever directory is there at that instant, so a
     # stale verdict is only safe to act on if nothing can replace the judged
     # lock before the rename. Two things move a lock directory off ``path``: its
@@ -419,6 +431,8 @@ def _claim_stale_lock(path: Path) -> tuple[Path, dict[str, object] | None] | Non
         # all need ``path`` empty, so none can displace a judged lock.
         if _lock_snapshot(path) != judged:
             return None
+        if expected_run_dir is not None and not _owner_matches_run(_read_lock_owner(path), expected_run_dir):
+            raise ForeignRunLockError(path)
         claimed = _recovery_claim_path(path)
         try:
             path.rename(claimed)
@@ -1362,26 +1376,17 @@ def _wait_to_acquire_lock(
     try:
         while True:
             timed_out_acquire_exc: RunLockError | None = None
-            immediately_retryable = False
             if _is_wait_queue_head(ticket, queue_dir):
                 try:
                     return _acquire()
+                except ForeignRunLockError:
+                    raise
                 except RunLockError as exc:
                     retained_error = _retained_claim_wait_error(path)
                     if retained_error is not None:
                         raise retained_error from exc
-                    if _wait_retry_after_acquire_error(path):
-                        immediately_retryable = True
-                    else:
+                    if not _wait_retry_after_acquire_error(path):
                         timed_out_acquire_exc = exc
-            if immediately_retryable:
-                if not unbounded:
-                    remaining = deadline - time.monotonic()
-                    if remaining <= 0:
-                        raise _run_lock_wait_timeout_error(path, wait_seconds)
-                else:
-                    time.sleep(poll_interval)
-                continue
             if not unbounded:
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -1417,7 +1422,10 @@ def _acquire_lock(
         except FileExistsError:
             if _lock_path_is_directory(path) is None:
                 continue
-            stale = _claim_stale_lock_patiently(path)
+            expected_run_dir = (
+                run_dir.expanduser().resolve() if stale_action == "claim" and run_dir is not None else None
+            )
+            stale = _claim_stale_lock_patiently(path, expected_run_dir=expected_run_dir)
             if stale is None:
                 if _lock_path_is_directory(path) is None:
                     continue
@@ -1426,21 +1434,14 @@ def _acquire_lock(
                 ) from None
             claimed, owner = stale
             if stale_action == "claim":
-                # TOCTOU gate: the pre-acquire ``run_lock_state`` verdict was
-                # read before the rename, so the directory now under our
-                # recovery claim may belong to a different run. Re-verify the
-                # claimed dead owner's recorded run_dir inside the atomic
-                # claim path and fail closed on a mismatch: a foreign claim is
-                # restored where possible and never deleted.
-                if run_dir is None or not _owner_matches_run(owner, run_dir.expanduser().resolve()):
+                # Recheck the owner on the claimed directory before deleting it.
+                if expected_run_dir is None or not _owner_matches_run(owner, expected_run_dir):
                     if not path.exists():
                         try:
                             claimed.rename(path)
                         except OSError:
                             pass
-                    raise RunLockError(
-                        f"stale run lock does not belong to this run: {path}. Refusing to claim it."
-                    ) from None
+                    raise ForeignRunLockError(path) from None
                 shutil.rmtree(claimed, ignore_errors=True)
                 continue
             _invoke_before_terminalize(path, claimed, owner, None)

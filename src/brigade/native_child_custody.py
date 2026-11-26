@@ -27,18 +27,20 @@ from .native_child_host import NativeChildCustodyError as EnrollmentError
 
 
 @contextmanager
-def owned_run(workspace: Path, run_dir: Path) -> Iterator[None]:
-    """Hold the workspace run lock for exactly one enrollment transaction.
+def owned_run(workspace: Path, run_dir: Path, *, wait_seconds: float = 0) -> Iterator[None]:
+    """Hold the workspace run lock for exactly one lifecycle transaction.
 
     Ownership is per invocation. No token is persisted and no long-lived owner
     process is imitated. Between verbs the run has no live lock holder, which
     is the normal externally controlled state rather than a stale run.
     """
     try:
-        with runguard.run_lock(workspace, run_dir=run_dir, wait_seconds=0, stale_action="claim"):
+        with runguard.run_lock(workspace, run_dir=run_dir, wait_seconds=wait_seconds, stale_action="claim"):
             if not runguard.is_active_run_owner(workspace, run_dir):
                 raise EnrollmentError("run-owner", "run ownership was not established")
             yield
+    except runguard.ForeignRunLockError as exc:
+        raise EnrollmentError("run-owner", "stale run lock does not belong to this run") from exc
     except runguard.RunLockError as exc:
         raise EnrollmentError("run-busy", "another lifecycle holds the workspace run lock") from exc
     except runguard.RunGuardError as exc:

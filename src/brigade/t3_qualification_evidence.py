@@ -295,13 +295,21 @@ def parent_settings(folder: Path, context: dict[str, Any]) -> dict[str, str]:
 
 
 def _validate_t3_marks(folder: Path, opened: dict[str, int], verified: dict[str, int], tasks: set[str]) -> None:
-    names = ("delegate-start", "delegate-replies", *(f"wake-{task}" for task in sorted(tasks)))
-    first, replied, *wakes = [count(read(folder / f"{name}.json")["monotonic_ns"]) for name in names]
+    def mark(name: str) -> int:
+        return count(read(folder / f"{name}.json")["monotonic_ns"])
+
+    start, replies_done = mark("delegate-start"), mark("delegate-replies")
+    end = count(verified["monotonic_ns"])
     require(
-        count(opened["monotonic_ns"]) <= first <= replied <= min(wakes)
-        and max(wakes) <= count(verified["monotonic_ns"]),
+        count(opened["monotonic_ns"]) < start < replies_done <= end,
         "T3 delegate and wake marks are out of order",
     )
+    for task in sorted(tasks):
+        reply, wake = mark(f"delegate-reply-{task}"), mark(f"wake-{task}")
+        require(
+            start < reply < replies_done and reply < wake <= end,
+            f"T3 delegate and wake marks are out of order for {task}",
+        )
 
 
 def _verified_turns(

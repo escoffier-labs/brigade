@@ -115,7 +115,9 @@ def stations(hub, tmp_path, monkeypatch, events_on):
     """Station A is node A, station B is node B (token file); both serve events."""
     base, token_a, token_b, _db = hub
     monkeypatch.setattr(
-        fleet_client, "load_fleet_settings", lambda: {"hub_url": base, "node_token": token_a, "admin_token": ""}
+        fleet_client,
+        "load_fleet_settings",
+        lambda **_kwargs: {"hub_url": base, "node_token": token_a, "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     monkeypatch.setattr(fleet_client, "spool_path", lambda _node: tmp_path / "spool" / "events.jsonl")
@@ -468,7 +470,9 @@ def test_events_are_off_by_default_and_record_nothing(hub, tmp_path, monkeypatch
     token_file.write_text(token_b)
     token_file.chmod(0o600)
     monkeypatch.setattr(
-        fleet_client, "load_fleet_settings", lambda: {"hub_url": base, "node_token": token_a, "admin_token": ""}
+        fleet_client,
+        "load_fleet_settings",
+        lambda **_kwargs: {"hub_url": base, "node_token": token_a, "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     monkeypatch.setattr(fleet_client, "spool_path", lambda _n: tmp_path / "spool" / "events.jsonl")
@@ -1518,7 +1522,9 @@ def test_agent_principal_only_receives_events_for_nodes_its_grants_name(
 ) -> None:
     base, token_a, _tb, db = hub
     monkeypatch.setattr(
-        fleet_client, "load_fleet_settings", lambda: {"hub_url": base, "node_token": token_a, "admin_token": ""}
+        fleet_client,
+        "load_fleet_settings",
+        lambda **_kwargs: {"hub_url": base, "node_token": token_a, "admin_token": ""},
     )
     monkeypatch.delenv("BRIGADE_FLEET_MESSAGE_TOKEN_FILE", raising=False)
     conn = fleet_hub.open_db(db)

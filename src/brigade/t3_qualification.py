@@ -257,7 +257,6 @@ def _write_brief(folder: Path, context: dict[str, Any], roster_path: Path) -> No
             "--json",
         ),
         mark=shell(*prefix, "mark", str(folder)),
-        wake_marks="\n       ".join(shell(*prefix, "mark", str(folder), f"wake-{task}") for task in WORKLOAD),
         open=shell(
             *CLI, "t3", "open", str(folder.parent / "batch.json"), "--target", workspace, "--roster", str(roster_path)
         ),
@@ -540,7 +539,13 @@ def main() -> None:
         action.add_argument("folder", type=Path)
         if name == "mark":
             action.add_argument(
-                "name", choices=("opened", "delegate-start", "delegate-replies", *(f"wake-{task}" for task in WORKLOAD))
+                "name",
+                choices=(
+                    "opened",
+                    "delegate-start",
+                    "delegate-replies",
+                    *(f"{kind}-{task}" for kind in ("delegate-reply", "wake") for task in WORKLOAD),
+                ),
             )
         elif name == "abort-t3":
             action.add_argument("error")

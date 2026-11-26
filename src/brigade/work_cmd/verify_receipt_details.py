@@ -135,7 +135,9 @@ def stamp_reused_tree(receipt: dict[str, Any], identity: Mapping[str, Any]) -> N
         receipt.pop("inherited_test_env", None)
 
 
-def same_verification_tree(target: Path, before: str, after: str) -> bool | None:
+def same_verification_tree(
+    target: Path, before: str, after: str, *, git_env: dict[str, str] | None = None
+) -> bool | None:
     """Compare Git trees ignoring changes under .brigade/. None means comparison failed."""
     if before == after:
         return True
@@ -163,6 +165,7 @@ def same_verification_tree(target: Path, before: str, after: str) -> bool | None
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=30,
+            env=git_env,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -172,17 +175,25 @@ def same_verification_tree(target: Path, before: str, after: str) -> bool | None
 
 
 def stamp_tree_after(
-    target: Path, receipt: dict[str, Any], *, read_tree: Callable[[], str | None] | None = None
+    target: Path,
+    receipt: dict[str, Any],
+    *,
+    git_env: dict[str, str] | None = None,
+    read_tree: Callable[[], str | None] | None = None,
 ) -> None:
     """Capture post-run tree identity without making stability a gate."""
+    after: str | None
     try:
-        after = read_tree() if read_tree is not None else localio.tree_fingerprint(target)
-    except (OSError, RuntimeError):
+        if git_env is not None:
+            after = _batch_fingerprint(target, git_env)[0]
+        else:
+            after = read_tree() if read_tree is not None else localio.tree_fingerprint(target)
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
         after = None
     receipt["tree_fingerprint_after"] = after
     before = receipt.get("tree_fingerprint")
     receipt["tree_stable"] = (
-        same_verification_tree(target, before, after) is True
+        same_verification_tree(target, before, after, git_env=git_env) is True
         if isinstance(before, str) and isinstance(after, str)
         else None
     )
@@ -256,3 +267,78 @@ def _capture_verify_identity(target: Path, run_dir: Path) -> dict[str, Any]:
         "tree_fingerprint_head": baseline_commit,
         "changes_patch_sha256": hashlib.sha256(patch_bytes).hexdigest(),
     }
+
+
+def _batch_fingerprint(target: Path, git_env: dict[str, str]) -> tuple[str, str]:
+    from time import monotonic
+
+    from .. import run_batch_verify_tree
+
+    return run_batch_verify_tree.fingerprint(target, git_env, deadline=monotonic() + 60)
+
+
+def capture_batch_identity(target: Path, run_dir: Path, git_env: dict[str, str]) -> dict[str, Any]:
+    """Fingerprint the coordinator snapshot and retain its patch with the same Git environment."""
+    tree, head = _batch_fingerprint(target, git_env)
+    patch = run_dir / "changes.patch"
+    with patch.open("wb") as output:
+        subprocess.run(
+            [
+                "git",
+                "--no-replace-objects",
+                "diff",
+                "--cached",
+                "--binary",
+                "--no-ext-diff",
+                "--no-textconv",
+                head,
+                "--",
+            ],
+            cwd=target,
+            env=git_env,
+            stdin=subprocess.DEVNULL,
+            stdout=output,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            check=True,
+        )
+    return {
+        "schema_version": receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION,
+        "baseline_commit": head,
+        "tree_fingerprint": tree,
+        "tree_fingerprint_head": head,
+        "changes_patch_sha256": localio.file_sha256(patch),
+    }
+
+
+def _verify_identity_binding(receipt: dict[str, Any]) -> str | None:
+    baseline = receipt.get("baseline_commit")
+    fingerprint = receipt.get("tree_fingerprint")
+    patch_hash = receipt.get("changes_patch_sha256")
+    if not isinstance(baseline, str) or not baseline:
+        return None
+    if not isinstance(fingerprint, str) or not fingerprint:
+        return None
+    if not isinstance(patch_hash, str) or not patch_hash:
+        return None
+    return f"verified tree {fingerprint} = baseline {baseline} + patch {patch_hash}"
+
+
+def _verify_identity_lines(receipt: dict[str, Any]) -> list[str]:
+    baseline = receipt.get("baseline_commit")
+    fingerprint = receipt.get("tree_fingerprint")
+    patch_hash = receipt.get("changes_patch_sha256")
+    if not isinstance(baseline, str) or not baseline:
+        return []
+    if not isinstance(fingerprint, str) or not fingerprint:
+        return []
+    if not isinstance(patch_hash, str) or not patch_hash:
+        return []
+    binding = _verify_identity_binding(receipt)
+    assert binding is not None
+    return [
+        f"- Baseline commit: `{baseline}`",
+        f"- Tree fingerprint: `{fingerprint}`",
+        f"- Patch hash: `{patch_hash}`",
+        f"- {binding}",
+    ]

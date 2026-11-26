@@ -22,9 +22,10 @@ See [governed Orca delegation](orca-governed-delegation.md).
   "schema": "brigade.run_batch.v1",
   "request_id": "example-request-1",
   "tasks": [
-    {"task_id": "inspect", "text": "Inspect the example", "seat": "coder"},
+    {"task_id": "inspect", "text": "Inspect the example", "seat": "coder", "isolation": "worktree"},
     {"task_id": "review", "text": "Review the findings", "capability": "review.code", "depends_on": ["inspect"]}
   ],
+  "verify": true,
   "synthesis": {"text": "Summarize the results", "seat": "writer"}
 }
 ```
@@ -47,6 +48,8 @@ reported code belongs to the first invalid row. A row error names the row as
 names both selectors, or neither, is refused with `invalid-selection`. A
 `capability` that is not a roster capability tag is refused with
 `invalid-capability`. See [Capability selection](#capability-selection).
+The optional batch-wide `verify` field is a boolean that defaults to false.
+See [Coordinator verification](#coordinator-verification).
 
 The batch admits 1 through 8 tasks, matching the existing durable assignment
 batch bound. Each task or synthesis text is limited to 16,384 UTF-8 bytes.
@@ -67,7 +70,7 @@ optional dependencies, synthesis, isolation, and read-only defaults, and
 preserves exact text. Layers sort ready task IDs lexicographically. The
 fingerprint hashes compact ASCII-escaped canonical JSON, including schema,
 request ID, texts, seats or capabilities, dependencies, non-default isolation
-and read-only values, synthesis, and any pinned `base_sha`. Object key, task,
+and read-only values, synthesis, `verify` when true, and any pinned `base_sha`. Object key, task,
 and dependency ordering do not change the fingerprint. Text changes do.
 Isolation and read-only at their defaults are omitted from the hashed bytes, so
 a batch written before these fields existed keeps its fingerprint. A
@@ -290,6 +293,84 @@ Known limits:
   disposal reads a checkout's state with the same trust it extends to the
   worker.
 
+## Coordinator verification
+
+Set `"verify": true` to run the repository's required tests after local workers
+exit and their isolated worktrees are quiescent. The coordinator computes the
+candidate tree, then uses the planner behind `brigade work verify required
+--worktree` with the configuration and planner files from the pinned batch
+base. It materializes the exact candidate Git tree in a private, temporary
+checkout and removes that checkout after the run. Files outside the candidate
+tree, including an ignored `.venv`, stay in the worker's original checkout.
+
+The selective argv must name a tool in the coordinator's trusted environment
+or the base's regular `scripts/verify-focused` launcher. The launcher and its
+tracked script helpers must match the base. The runner uses the coordinator's
+Python and tools through Linux bubblewrap. It requires working user, mount,
+PID, and network namespaces. The sandbox mounts the toolchain read-only and
+allows writes to the candidate checkout and private temp directory. It has a
+fresh home. The Python and base-interpreter mounts are limited to `bin/` or
+`Scripts/`, `lib/`, `lib32/`, `lib64/`, `libx32/`, and `pyvenv.cfg`, along
+with standard system binaries and libraries. The sandbox masks
+`pipx_metadata.json` and `direct_url.json` anywhere in the mounted paths.
+The coordinator's run directories, store, and credentials stay outside the
+sandbox. The PID namespace contains subprocesses through timeout and cleanup,
+including children that start a new session.
+
+Install the runner and its dependencies in the coordinator environment.
+Python gets the candidate's `src/` directory, when present, and checkout root
+at the start of its import path. The coordinator checks top-level import
+origins in the sandbox before the runner starts. In the base's
+`verify/required-tests.json`, set `"import_packages": ["example_package"]`
+for namespace packages, single-file modules, or projects where the import name
+differs from the distribution name. The coordinator otherwise infers regular
+packages from the base tree's `src/`, or root packages when the base has a
+`pyproject.toml`. Set an empty array when the verifier has no Python package
+to check. Pytest plugin autoload is disabled in the sandbox. Configure any
+required plugins in the trusted runner.
+
+The infrastructure check covers `scripts/`, `verify/`, the configured
+planner files, `conftest.py`, `pyproject.toml`, pytest and tool configuration,
+and Python startup files such as `sitecustomize.py`, `usercustomize.py`, and
+`.pth` files. A recorded failure reflects the coordinator's check. A
+completed verification includes `trust: "candidate-authored-tests"`. Consumers
+may use it as evidence that the base-trusted runner passed on the recorded
+candidate tree and its worker-authored tests. Review the diff before accepting
+or integrating it.
+
+Verification holds the task's existing run lock and finishes before artifact
+collection. The coordinator compares the Git tree and HEAD on both sides of
+the run and supplies the attempt ID in process. It uses the fresh receipt
+returned by the runner. The batch sidecar named by `result_ref` records
+`verification` with the attempt ID, `completed` or `failed`, and the receipt
+SHA-256 when a receipt could be bound. A failed check leaves the worker's
+terminal status and artifact collection independent. Full receipts and their
+logs stay under `batch-verification/` in the local run directory. The existing
+export and served-view projections omit those files and the local sidecar's
+verification fields.
+
+A task with a result sidecar and no eligible run records a
+`verification_skipped` reason:
+
+- `shared-checkout` when the task used the shared checkout.
+- `uncontained-cancel` when cancellation did not confirm that execution stopped.
+- `remote-or-cloud` when another machine or a cloud provider ran the task.
+- `not-launched` when no launch claim exists.
+- `worktree-unlocked` when a fallback observation occurs after the worktree lock is released.
+- `ci-required` when the repository planner calls for CI without a local argv.
+- `workspace-invalid` when the bound checkout cannot be validated.
+- `tree-unavailable` when the candidate tree cannot be captured or materialized faithfully.
+- `tree-changed` when the worker tree changes during planning or snapshot preparation.
+- `planner-unconfigured` when the pinned base has no required-test planner.
+- `plan-unavailable` when required-test planning fails.
+- `verify-infra-modified` when the candidate changes verification infrastructure.
+- `verifier-unavailable` when the coordinator cannot prepare or start the verifier.
+- `sandbox-unavailable` when the Linux sandbox cannot be established.
+- `candidate-symlink-escape` when the candidate contains an absolute link or a link that resolves outside the checkout.
+- `candidate-import-mismatch` when the sandbox cannot resolve an expected import inside the candidate checkout.
+
+An omitted or false `verify` leaves both fields absent.
+
 ## Task artifacts
 
 Successful execution and successful artifact delivery are separate facts. A
@@ -385,6 +466,7 @@ and digests.
 | `invalid-seat` | Missing or malformed seat token |
 | `invalid-isolation` | Isolation is neither `shared` nor `worktree` |
 | `invalid-read-only` | Read-only is not a boolean |
+| `invalid-verify` | Verify is not a boolean |
 | `shared-writable-concurrency` | Multiple shared writable tasks in one layer |
 | `base-unpinned` | Worktree isolation requested without a pinned base revision |
 | `invalid-base-sha` | Base revision is not 40 lowercase hex characters |
@@ -802,9 +884,8 @@ A prepared attempt with no claim stays `queued` and is still never relaunched.
 The batch records `provider_task_id` on the task observation using the
 codex-cloud task ID or the local Codex or Claude session ID when available.
 Original run and result IDs stay empty until a transport documents them.
-Verification evidence for a task attempt requires the coordinator to run the
-check itself in that task's isolated worktree. Batch execution and integration
-currently publish no verification entry.
+Opted-in batches record [coordinator verification](#coordinator-verification)
+in the local task result sidecar.
 
 JSON output uses `brigade.run_batch_result.v1`, with `run_id`, `request_id`, `run_status`, and a
 `tasks` object keyed by task ID. Each member has `status`, `not_run`, `result_id`,
