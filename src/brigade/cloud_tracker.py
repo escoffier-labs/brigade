@@ -659,12 +659,10 @@ def _classify_entry(
                 classification = "stale"
             else:
                 classification = "ready-to-land"
-    elif provider_state in PENDING_STATES or provider_state is None:
-        classification = "pending"
-    elif provider_state in FAILED_STATES:
-        classification = "needs-investigation" if expects_branch and artifact_absent else "pending"
-    else:
-        classification = "pending"
+    elif provider_state in FAILED_STATES and expects_branch:
+        # A local queue failure needs attention even while GitHub is unavailable.
+        if artifact_absent or entry.get("source") == "grokbot-queue":
+            classification = "needs-investigation"
 
     seen = isinstance(provider_info, dict)
     if entry.get("missing_confirmed") is True and not (seen or branch_exists or open_pr or merged):
