@@ -173,9 +173,17 @@ Local receipts can be forged. Required CI on the head commit is the proof.
 
 Run `brigade work verify push-gate install` to set this clone to `warn`.
 The gate advises on missing or rejected receipts and lets the push continue.
-An indeterminate verdict also lets the push continue and prints no advisory.
+Run `brigade work verify push-gate install --mode enforce` to opt this clone
+into refusing a push if any branch tip has a missing receipt, a rejected
+receipt, or an indeterminate verdict. The receipt scan limit and the
+two-second check deadline both produce indeterminate verdicts. A refusal
+names the affected ref and prints the reason and recovery command. Run
+verification in the pushing worktree with the named commit's tree, then
+retry the push. A valid receipt or a trusted base with no required check
+allows the push. The gate ignores deletions and updates to non-branch refs.
+
 Use `install --mode off` to turn off checking and recording. An unset mode
-also means `off`.
+also means `off`. Git reads the mode from the clone's local config.
 
 The effective Git pre-push hook must carry the gate's marked block, and
 `brigade` must be on the `PATH` Git uses. The shipped Brigade content-guard
@@ -184,25 +192,33 @@ and has no pre-push hook, install writes a minimal one. Install prints the
 block and the effective hook path when the hook needs updating. Existing
 hooks are left in place, including tracked hooks and hooks in a global
 `core.hooksPath`. For a global Brigade content guard, refresh that guard
-from the current shipped template or paste the printed block after it reads
-the pre-push input. Each clone still chooses its own mode.
+from the current shipped template. For any existing v1 hook, upgrade
+Brigadestack, rerun install with your chosen mode, and replace the old
+marked block with the v2 block printed by install. The v1 hook discards
+the gate's exit status, so it still allows the push with `enforce` set.
 
 `brigade work verify push-gate status` shows the effective hook, its version,
 and whether it can run. `brigade work verify push-gate uninstall` clears the
 clone's mode and removes an unmodified minimal hook if present. It keeps
 the records.
 
-Warn mode keeps up to 5,000 branch-tip observations and 2 MiB under the common
+The gate keeps up to 5,000 branch-tip observations and 2 MiB under the common
 Git directory at `brigade/push-gate.jsonl`. Entries include the UTC time, ref,
 commit, tree, verdict, reason code, check duration, Brigade version, worktree,
-and whether the declared check would have blocked under enforcement.
-Use `brigade work verify push-gate report` for counts and timings, optionally
+and mode. Enforce entries record whether the push was blocked. When a push
+updates several refs, each row records the same push outcome.
+Use `brigade work verify push-gate report` for branch-tip counts and timings, optionally
 with `--since YYYY-MM-DD` for an inclusive UTC date filter or `--json`.
-A push whose Git environment cannot find `brigade` leaves no observation.
+The log records outcomes only when the gate can start and write the log.
 
 The gate requires GNU coreutils `timeout` on Git's `PATH`. The hook asks the
 gate process to stop after five seconds and kills it one second later if
-needed. Without `timeout`, which macOS and Git for Windows may lack, the hook
-prints a skip notice and continues to the content guard.
+needed. A gate error lets a warn-mode push continue. In enforce mode it blocks
+branch updates because Brigade could not decide whether they have a valid
+receipt. Restore `brigade` and GNU coreutils `timeout` on Git's `PATH` if
+either is missing, then run `brigade work verify push-gate status`. For an
+evaluation error before Brigade can read the policy, use the printed
+`brigade work verify push-check` command to diagnose the pushed commit.
 
-The gate does not defend against `git push --no-verify`.
+Brigade provides no bypass for enforce mode. Git's own `--no-verify` prevents
+the pre-push hook from running. Required CI remains the proof.

@@ -179,7 +179,7 @@ class _Receipts:
             raise _Indeterminate(_SCAN_LIMIT)
 
 
-def _remedy(target: Path, policy: verify_gate._GatePolicy, receipt: dict[str, Any]) -> str:
+def _remedy(target: Path, policy: verify_gate._GatePolicy, receipt: dict[str, Any], *, fresh: bool = False) -> str:
     stamp = receipt.get("gating")
     plan = stamp.get("plan") if isinstance(stamp, dict) else None
     argv = plan.get("run_argv") if isinstance(plan, dict) else None
@@ -192,6 +192,8 @@ def _remedy(target: Path, policy: verify_gate._GatePolicy, receipt: dict[str, An
     ):
         return verify_gate._render_verify_command(target, argv)
     command = verify_gate._render_verify_command(target, verify_gate._suggested_argv(policy))
+    if fresh:
+        command += " --no-reuse"
     if policy.needs_arguments:
         command += "\nFind the required test files with brigade work verify required --worktree."
     return command
@@ -370,10 +372,15 @@ def _check(
             )
         if policy.mode == "unresolved":
             raise _Indeterminate(verify_gate._policy_error(policy))
-        tree = tree if tree is not None else read_tree(commit)
-        key = (policy, tree)
-        if key not in by_tree:
-            by_tree[key] = _tree_verdict(target, policy, tree, receipts, deadline)
+        try:
+            tree = tree if tree is not None else read_tree(commit)
+            key = (policy, tree)
+            if key not in by_tree:
+                by_tree[key] = _tree_verdict(target, policy, tree, receipts, deadline)
+        except (subprocess.TimeoutExpired, _Indeterminate) as exc:
+            reason = _TIMEOUT if isinstance(exc, subprocess.TimeoutExpired) else str(exc)
+            code = "check_timeout" if isinstance(exc, subprocess.TimeoutExpired) else exc.reason_code
+            return _Verdict("indeterminate", reason, _remedy(target, policy, {}, fresh=True), code, tree)
         return replace(by_tree[key], tree=tree)
 
     results = []

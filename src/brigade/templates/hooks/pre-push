@@ -28,23 +28,62 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
 STDIN_REFS="$(cat)"
-# BEGIN Brigade push gate v1
-case "$(git config --get brigade.pushGate 2>/dev/null || true)" in
+# BEGIN Brigade push gate v2
+gate_mode="$(git config --local --get brigade.pushGate 2>/dev/null || true)"
+case "$gate_mode" in
   warn|enforce)
-    if command -v brigade >/dev/null 2>&1; then
-      if command -v timeout >/dev/null 2>&1; then
-        gate_rc=0
-        printf '%s' "$STDIN_REFS" | timeout -k 1 5 brigade work verify push-gate run || gate_rc=$?
-        if [[ "$gate_rc" == 124 || "$gate_rc" == 137 ]]; then
-          echo "pre-push: push gate timed out; push continues" >&2
-        fi
-      else
+    gate_rc=0
+    gate_error=""
+    gate_repair="Run brigade work verify push-gate status, repair the reported problem, then retry."
+    if ! command -v brigade >/dev/null 2>&1; then
+      gate_error="brigade is missing from Git's PATH"
+      gate_repair="Restore brigade on Git's PATH, then run brigade work verify push-gate status and retry."
+    elif ! command -v timeout >/dev/null 2>&1; then
+      gate_error="GNU coreutils timeout is missing from Git's PATH"
+      gate_repair="Restore GNU coreutils timeout on Git's PATH, then run brigade work verify push-gate status and retry."
+      if [[ "$gate_mode" == warn ]]; then
         echo "pre-push: push gate skipped: no timeout command" >&2
+      fi
+    else
+      gate_args=()
+      # Require a CLI that understands enforcement before trusting a zero exit.
+      if [[ "$gate_mode" == enforce ]]; then
+        gate_args=(--hook-v2)
+      fi
+      printf '%s' "$STDIN_REFS" | timeout -k 1 5 brigade work verify push-gate run "${gate_args[@]+"${gate_args[@]}"}" || gate_rc=$?
+      case "$gate_rc" in
+        0|3) ;;
+        124|137)
+          gate_error="the push gate process timed out"
+          if [[ "$gate_mode" == warn ]]; then
+            echo "pre-push: push gate timed out; push continues" >&2
+          fi
+          ;;
+        *)
+          gate_error="the push gate could not finish (exit $gate_rc)"
+          gate_repair="Check that brigade on Git's PATH supports this hook. Run brigade work verify push-gate status, repair the reported problem, then retry."
+          ;;
+      esac
+    fi
+    if [[ "$gate_mode" == enforce ]]; then
+      if [[ -n "$gate_error" ]]; then
+        gate_blocked=0
+        while read -r _gate_local gate_tip gate_ref gate_old; do
+          if [[ "$gate_ref" == refs/heads/* && "$gate_tip" != "$gate_old" && ! "$gate_tip" =~ ^0+$ ]]; then
+            printf 'pre-push: %s: %s\n%s\n' "$gate_ref" "$gate_error" "$gate_repair" >&2
+            gate_blocked=1
+          fi
+        done <<< "$STDIN_REFS"
+        if [[ "$gate_blocked" -eq 1 ]]; then
+          exit 1
+        fi
+      elif [[ "$gate_rc" -ne 0 ]]; then
+        exit "$gate_rc"
       fi
     fi
     ;;
 esac
-# END Brigade push gate v1
+# END Brigade push gate v2
 
 # Safety rails (#2233): `brigade work rails off` skips both scans below
 # without touching guard policies or baselines; `brigade work rails on`

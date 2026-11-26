@@ -1,4 +1,4 @@
-"""Configure and inspect the clone-local advisory Git push gate."""
+"""Configure and inspect the clone-local Git push gate."""
 
 from __future__ import annotations
 
@@ -29,7 +29,7 @@ def _git(target: Path, *args: str) -> subprocess.CompletedProcess[str]:
 
 
 def _mode(target: Path) -> str | None:
-    result = _git(target, "config", "--get", _MODE_KEY)
+    result = _git(target, "config", "--local", "--get", _MODE_KEY)
     if result.returncode not in (0, 1):
         raise OSError(f"could not read Git config key {_MODE_KEY}")
     return result.stdout.removesuffix("\n") if result.returncode == 0 else None
@@ -97,7 +97,7 @@ def status(repo: Repository) -> dict[str, Any]:
     recent = datetime.now(UTC) - timedelta(days=7)
     stamps = [datetime.fromisoformat(row["time"]) for row in rows]
     return {
-        "mode": "warn" if mode in {"warn", "enforce"} else "off",
+        "mode": mode if mode in {"warn", "enforce"} else "off",
         "configured_mode": mode,
         "hook_path": str(repo.hook),
         "hook_exists": raw is not None,
@@ -117,9 +117,7 @@ def status(repo: Repository) -> dict[str, Any]:
 
 def describe(info: dict[str, Any]) -> str:
     mode = info["mode"]
-    if info["configured_mode"] == "enforce":
-        mode += " (enforce does not exist yet)"
-    elif info["configured_mode"] not in {None, "off", "warn"}:
+    if info["configured_mode"] not in {None, "off", "warn", "enforce"}:
         mode += " (unrecognized configuration)"
     active = "wired" if info["wired"] else "not wired"
     path_status = "brigade on PATH" if info["brigade_on_path"] else "cannot run: brigade missing from PATH"
@@ -169,7 +167,8 @@ def _report_text(report: dict[str, Any]) -> None:
     def line(label: str, info: dict[str, Any]) -> None:
         counts = ", ".join(f"{key}={value}" for key, value in sorted(info["results"].items())) or "no results"
         print(
-            f"{label}  {counts} | would block {info['would_block_share']:.1%} | gate errors {info['gate_errors']}"
+            f"{label}  {counts} | would block {info['would_block_share']:.1%} | blocked {info['blocked']}"
+            f" | gate errors {info['gate_errors']}"
             f" | median {info['median_ms']} ms | p95 {info['p95_ms']} ms"
         )
 
@@ -179,14 +178,14 @@ def _report_text(report: dict[str, Any]) -> None:
 
 
 def register(parsers: Any) -> None:
-    gate = parsers.add_parser("push-gate", help="Manage the advisory pre-push verification gate.")
+    gate = parsers.add_parser("push-gate", help="Manage the pre-push verification gate.")
     commands = gate.add_subparsers(dest="push_gate_command", required=True)
-    commands.add_parser("run", help="Run the advisory check from a Git pre-push hook.")
+    commands.add_parser("run", help="Run the configured check from a Git pre-push hook.")
     for name in ("install", "status", "uninstall", "report"):
         parser = commands.add_parser(name)
         parser.add_argument("--target", "-t", type=Path, default=Path("."))
         if name == "install":
-            parser.add_argument("--mode", default="warn", metavar="{warn,off}")
+            parser.add_argument("--mode", default="warn", metavar="{warn,enforce,off}")
         if name in {"status", "report"}:
             parser.add_argument("--json", action="store_true")
         if name == "report":
@@ -199,9 +198,8 @@ def dispatch(args: argparse.Namespace) -> int:
         from .push_gate_hook import run
 
         return run()
-    if command == "install" and args.mode not in {"warn", "off"}:
-        error = "enforce mode does not exist yet" if args.mode == "enforce" else "expected mode warn or off"
-        print(f"push gate: {error}", file=sys.stderr)
+    if command == "install" and args.mode not in {"warn", "enforce", "off"}:
+        print("push gate: expected mode warn, enforce, or off", file=sys.stderr)
         return 2
     try:
         repo = Repository.locate(args.target)

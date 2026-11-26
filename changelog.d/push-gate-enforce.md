@@ -1,0 +1,1 @@
+- Add opt-in enforcement to the Git push gate. Clones in enforce mode refuse branch updates with missing, rejected, or indeterminate verification receipts.

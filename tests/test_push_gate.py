@@ -45,12 +45,10 @@ def _doctor(target):
 def test_install_mode_and_uninstall(push_repo, capsys):
     assert _status(push_repo, capsys)["mode"] == "off"
     assert _doctor(push_repo)[0] == "INFO"
-    assert _gate(push_repo, "install", "--mode", "enforce") == 2
-    assert "does not exist yet" in capsys.readouterr().err
     assert _gate(push_repo, "install", "--mode", "off") == 0
     capsys.readouterr()
     status = _status(push_repo, capsys)
-    assert status["wired"] and status["current"] and status["hook_version"] == 1
+    assert status["wired"] and status["current"] and status["hook_version"] == 2
     assert not status["will_run"]
     assert _doctor(push_repo)[0] == "INFO"
     hook = Path(status["hook_path"])
@@ -58,9 +56,11 @@ def test_install_mode_and_uninstall(push_repo, capsys):
     assert _gate(push_repo, "install") == 0
     capsys.readouterr()
     assert hook.read_bytes() == original
-    _git(push_repo, "config", "brigade.pushGate", "enforce")
+    assert _gate(push_repo, "install", "--mode", "enforce") == 0
+    assert "mode=enforce, wired" in capsys.readouterr().out
+    assert _git(push_repo, "config", "--local", "--get", "brigade.pushGate") == "enforce"
     status = _status(push_repo, capsys)
-    assert status["configured_mode"] == "enforce" and status["mode"] == "warn"
+    assert status["configured_mode"] == status["mode"] == "enforce"
     assert _gate(push_repo, "uninstall") == 0
     capsys.readouterr()
     assert not hook.exists()
@@ -169,6 +169,7 @@ def test_hook_matches_push_check_with_newer_unrelated_run(
     _receipt(push_repo, tree, second=2, argv=["git", "status"])
     code, result = _single(push_repo, capsys)
 
+    _git(push_repo, "config", "brigade.pushGate", "warn")
     monkeypatch.chdir(push_repo)
     monkeypatch.setattr(sys, "stdin", io.StringIO(_line(tip, "refs/heads/topic") + "\n"))
     assert push_gate_hook.run() == 0
@@ -191,6 +192,7 @@ def test_hook_matches_push_check_for_failure_or_scan_cap(push_repo, capsys, monk
         _receipt(push_repo, tree, second=2, status="failed", command_status="failed")
     code, result = _single(push_repo, capsys)
 
+    _git(push_repo, "config", "brigade.pushGate", "warn")
     monkeypatch.chdir(push_repo)
     monkeypatch.setattr(sys, "stdin", io.StringIO(_line(tip, "refs/heads/topic") + "\n"))
     assert push_gate_hook.run() == 0
@@ -395,6 +397,7 @@ def test_doctor_reports_claude_latch(tmp_path):
 def test_evaluator_failure_is_a_gate_error(push_repo, monkeypatch, failure):
     tip = _git(push_repo, "rev-parse", "HEAD")
     _policy(push_repo)
+    _git(push_repo, "config", "brigade.pushGate", "warn")
     monkeypatch.chdir(push_repo)
     monkeypatch.setattr(sys, "stdin", io.StringIO(f"HEAD {tip} refs/heads/topic {'0' * len(tip)}\n"))
     git = verify_push.verify_manifest_git._git
@@ -411,6 +414,175 @@ def test_evaluator_failure_is_a_gate_error(push_repo, monkeypatch, failure):
     (row,) = _log_rows(push_repo)
     assert row["result"] == "gate_error" and row["would_block"] is False
     assert row["reason"] == {"timeout": "check_timeout", "crash": "check_failed"}[failure]
+
+
+@pytest.mark.parametrize("mode", ["warn", "enforce"])
+@pytest.mark.parametrize(
+    ("case", "result", "reason"),
+    [
+        ("missing", "missing_receipt", "No local verification receipt matches this tree."),
+        ("unrelated", "rejected", "required check"),
+        ("empty-pytest", "rejected", "tests"),
+        ("scan-cap", "indeterminate", "receipt scan reached its limit"),
+        ("deadline", "gate_error", "two-second time limit"),
+        ("crash", "gate_error", "could not evaluate verification receipts"),
+        ("ok", "ok", None),
+        ("no-policy", "not_applicable", None),
+    ],
+)
+def test_hook_mode_verdicts(push_repo, monkeypatch, capsys, mode, case, result, reason):
+    tip = _git(push_repo, "rev-parse", "HEAD") if case == "no-policy" else _policy(push_repo)
+    tree = _tree(push_repo)
+    if case == "unrelated":
+        _receipt(push_repo, tree, argv=["git", "status"])
+    if case == "empty-pytest":
+        _receipt(push_repo, tree, passed=0, status="failed", command_status="failed")
+    if case == "scan-cap":
+        root = push_repo / ".brigade" / "work" / "verify-runs"
+        for i in range(verify_push._RECEIPT_LIMIT + 1):
+            (root / f"20260101-120000-unrelated-{i}").mkdir(parents=True)
+    if case == "deadline":
+
+        def timed_out(self, *args, **kwargs):
+            verify_push._remaining(self.deadline)
+            monkeypatch.setattr(verify_push, "monotonic", lambda: self.deadline)
+            verify_push._remaining(self.deadline)
+
+        monkeypatch.setattr(verify_push._Receipts, "matching", timed_out)
+    if case == "crash":
+
+        def crash(*args, **kwargs):
+            raise RuntimeError("fixture crash")
+
+        monkeypatch.setattr(verify_push, "_check", crash)
+    if case == "ok":
+        _receipt(push_repo, tree)
+    _git(push_repo, "config", "brigade.pushGate", mode)
+    monkeypatch.chdir(push_repo)
+    ref = "refs/heads/topic"
+    monkeypatch.setattr(sys, "stdin", io.StringIO(_line(tip, ref) + "\n"))
+    blocked = mode == "enforce" and reason is not None
+    assert push_gate_hook.run() == (3 if blocked else 0)
+    (row,) = _log_rows(push_repo)
+    assert row["mode"] == mode and row["result"] == result
+    if mode == "enforce":
+        assert row["blocked"] is blocked
+    if blocked:
+        err = capsys.readouterr().err
+        assert ref in err and reason in err
+        if case == "crash":
+            assert "brigade work verify push-check" in err
+        else:
+            repair = next(line for line in err.splitlines() if line.startswith("brigade work verify run "))
+            argv = shlex.split(repair)
+            assert argv[:4] == ["brigade", "work", "verify", "run"]
+            assert json.loads(argv[argv.index("--argv-json") + 1])[-1] == "tests/test_example.py"
+
+
+@pytest.mark.parametrize(("mode", "block"), [("warn", False), ("enforce", True)])
+def test_installed_gate_controls_real_push(push_repo, capsys, monkeypatch, mode, block):
+    (push_repo / "focused.py").write_text("print('1 passed in 0.01s')\n", encoding="utf-8")
+    base = _policy(push_repo)
+    _bare_remote(push_repo)
+    remote = _git(push_repo, "remote", "get-url", "origin")
+    _git(push_repo, "push", "origin", "main")
+    monkeypatch.setenv("PATH", _path_with_brigade())
+    assert _gate(push_repo, "install", "--mode", mode) == 0
+    capsys.readouterr()
+    (push_repo / "src.py").write_text("value = 2\n", encoding="utf-8")
+    tip = _commit(push_repo)
+
+    pushed = subprocess.run(["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True)
+    assert (pushed.returncode != 0) is block
+    assert "refs/heads/main" in pushed.stderr and "brigade work verify run" in pushed.stderr
+    assert _git(Path(remote), "rev-parse", "refs/heads/main") == (base if block else tip)
+    assert _gate(push_repo, "report", "--json") == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["blocked"] == int(block)
+    if block:
+        remedy = next(line for line in pushed.stderr.splitlines() if line.startswith("brigade work verify run "))
+        subprocess.run(shlex.split(remedy), cwd=push_repo, capture_output=True, text=True, check=True)
+        _git(push_repo, "push", "origin", "main")
+        assert _git(Path(remote), "rev-parse", "refs/heads/main") == tip
+        assert [(row["mode"], row["blocked"]) for row in _log_rows(push_repo)] == [
+            ("enforce", True),
+            ("enforce", False),
+        ]
+
+
+def test_enforce_names_bad_ref_and_blocks_whole_push(push_repo, monkeypatch, capsys):
+    good = _policy(push_repo)
+    _receipt(push_repo, _tree(push_repo))
+    (push_repo / "src.py").write_text("value = 2\n", encoding="utf-8")
+    bad = _commit(push_repo)
+    _git(push_repo, "config", "brigade.pushGate", "enforce")
+    monkeypatch.chdir(push_repo)
+    refs = [_line(good, "refs/heads/good"), _line(bad, "refs/heads/bad")]
+    monkeypatch.setattr(sys, "stdin", io.StringIO("\n".join(refs) + "\n"))
+    assert push_gate_hook.run() == 3
+    output = capsys.readouterr().err
+    assert "refs/heads/bad" in output and "refs/heads/good" not in output
+    assert [(row["result"], row["blocked"]) for row in _log_rows(push_repo)] == [
+        ("ok", True),
+        ("missing_receipt", True),
+    ]
+
+
+@pytest.mark.parametrize("global_mode", [None, "enforce"])
+def test_unset_hook_never_invokes_gate(push_repo, monkeypatch, global_mode):
+    from brigade.work_cmd.push_gate import _minimal_hook
+
+    tip = _policy(push_repo)
+    if global_mode:
+        config = push_repo / "fake-global-config"
+        _git(push_repo, "config", "--file", str(config), "brigade.pushGate", global_mode)
+        monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(config))
+    hook = push_repo / ".git" / "hooks" / "pre-push"
+    hook.write_bytes(_minimal_hook())
+    hook.chmod(0o755)
+    tools = push_repo / "bin"
+    tools.mkdir()
+    fake = tools / "brigade"
+    fake.write_text("#!/bin/sh\ntouch gate-was-called\nexit 1\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tools) + os.pathsep + _path_with_brigade())
+    subprocess.run([str(hook)], cwd=push_repo, input=_line(tip, "refs/heads/topic"), text=True, check=True)
+    assert not (push_repo / "gate-was-called").exists()
+
+
+@pytest.mark.parametrize("mode", ["warn", "enforce"])
+@pytest.mark.parametrize("failure", ["no-brigade", "no-timeout", "process-crash", "old-cli"])
+def test_installed_gate_startup_error(push_repo, capsys, monkeypatch, mode, failure):
+    tip = _policy(push_repo)
+    assert _gate(push_repo, "install", "--mode", mode) == 0
+    capsys.readouterr()
+    hook = push_repo / ".git" / "hooks" / "pre-push"
+    tools = push_repo / "bin"
+    tools.mkdir()
+    for name in ("git", "bash", "cat", "timeout"):
+        if name == "timeout" and failure == "no-timeout":
+            continue
+        executable = shutil.which(name)
+        assert executable is not None
+        (tools / name).symlink_to(executable)
+    if failure != "no-brigade":
+        fake = tools / "brigade"
+        script = 'if [ "$5" = --hook-v2 ]; then exit 2; fi\nexit 0' if failure == "old-cli" else "exit 1"
+        fake.write_text(f"#!/bin/sh\n{script}\n", encoding="utf-8")
+        fake.chmod(0o755)
+    monkeypatch.setenv("PATH", str(tools))
+    for ref, commit, remote in [
+        ("refs/heads/topic", tip, None),
+        ("refs/tags/topic", tip, None),
+        ("refs/heads/deleted", "0" * len(tip), tip),
+    ]:
+        result = subprocess.run(
+            [str(hook)], cwd=push_repo, input=_line(commit, ref, remote), text=True, capture_output=True
+        )
+        blocked = mode == "enforce" and ref == "refs/heads/topic"
+        assert result.returncode == int(blocked), result.stderr
+        if blocked:
+            assert ref in result.stderr and "brigade work verify push-gate status" in result.stderr
 
 
 def test_log_byte_bound_keeps_newest_records(push_repo, monkeypatch):
@@ -457,7 +629,8 @@ def test_doctor_reads_latch_beyond_recent_state_files(tmp_path, layout):
 
 @pytest.mark.skipif(sys.platform == "win32", reason="POSIX content guard shell hook fixture")
 @pytest.mark.skipif(shutil.which("timeout") is None, reason="requires GNU coreutils timeout on PATH")
-def test_hook_timeout_allows_push_and_preserves_guard_refs(push_repo, monkeypatch):
+@pytest.mark.parametrize("mode", ["warn", "enforce"])
+def test_hook_watchdog_controls_push_and_preserves_guard_refs(push_repo, monkeypatch, mode):
     from time import monotonic
 
     from brigade.work_cmd.push_gate import _guard_bytes
@@ -476,7 +649,7 @@ def test_hook_timeout_allows_push_and_preserves_guard_refs(push_repo, monkeypatc
     )
     fake.chmod(0o755)
     monkeypatch.setenv("PATH", str(tools_dir) + os.pathsep + _path_with_brigade())
-    assert _gate(push_repo, "install") == 0
+    assert _gate(push_repo, "install", "--mode", mode) == 0
     tip = _commit(push_repo)
     start = monotonic()
     pushed = subprocess.run(
@@ -484,12 +657,18 @@ def test_hook_timeout_allows_push_and_preserves_guard_refs(push_repo, monkeypatc
         cwd=push_repo,
         capture_output=True,
         text=True,
-        check=True,
         timeout=8,
     )
     assert monotonic() - start < 8
-    assert pushed.stderr.count("pre-push: push gate timed out; push continues") == 1
-    assert tip in pushed.stdout.splitlines()
+    if mode == "warn":
+        assert pushed.returncode == 0
+        assert pushed.stderr.count("pre-push: push gate timed out; push continues") == 1
+        assert tip in pushed.stdout.splitlines()
+    else:
+        assert pushed.returncode != 0
+        assert "refs/heads/main: the push gate process timed out" in pushed.stderr
+        assert "brigade work verify push-gate status" in pushed.stderr
+        assert tip not in pushed.stdout.splitlines()
 
 
 def test_doctor_reports_latch_scan_cutoff(tmp_path, monkeypatch):
