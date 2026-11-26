@@ -1,0 +1,1 @@
+- On Windows, `brigade work verify run` records committed graph snapshots and lets the background writer finish. `brigade code doctor` shows where a stale lock may be blocking updates and how to recover.

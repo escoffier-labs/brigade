@@ -9,6 +9,7 @@ import sqlite3
 import subprocess
 import tempfile
 import time
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -63,9 +64,32 @@ def capture_before(
             "graphtrail_timeout_seconds": backup_budget,
             "snapshots": {},
         }
-        refresh = code_graph_background.status_or_start(target, db_path) if defer_sync else None
-        ready = code_graph_background.index_ready(db_path) if defer_sync else db_path.is_file()
+        defer_windows = defer_sync and not code_graph_background.may_run_killable_foreground_sync()
         sync_budget = timeout
+        if defer_windows:
+            refresh = code_graph_background.status_or_start(target, db_path, binary, initial_wait=backup_budget)
+            details["background_refresh"] = refresh
+            if refresh and refresh.get("mode") == "in_session":
+                details["foreground_fallback"] = {
+                    "reason": "detached launch refused",
+                    "timeout_seconds": backup_budget,
+                }
+            ready = code_graph_background.index_ready(db_path)
+            if not ready:
+                if refresh and refresh["status"] in ("launch_failed", "completed"):
+                    return _status(
+                        "sync_failed",
+                        "code graph refresh did not create a committed index",
+                        **details,
+                    )
+                return _status(
+                    "sync_deferred",
+                    "code graph delta deferred to background sync",
+                    **details,
+                )
+        else:
+            refresh = code_graph_background.status_or_start(target, db_path) if defer_sync else None
+            ready = code_graph_background.index_ready(db_path) if defer_sync else db_path.is_file()
         if defer_sync and not ready:
             if refresh is None:
                 refresh = _request_background_refresh(target, db_path, binary, details)
@@ -82,7 +106,7 @@ def capture_before(
 
         sync = None
         busy = bool(refresh and refresh["status"] == "busy")
-        if not busy:
+        if not busy and not defer_windows:
             stage = "initial-index" if "foreground_fallback" in details or not db_path.is_file() else "incremental-sync"
             sync = _run_graphtrail(binary, db_path, "sync", timeout=sync_budget, stage=stage, cwd=target)
             if sync["returncode"] != 0 and not sync.get("timed_out"):
@@ -143,6 +167,20 @@ def _timed_snapshot(db: Path, path: Path, timeout: float, timings: dict[str, Any
         timings[stage] = result
 
 
+def _observe_windows_refresh(target: Path, db: Path, before: dict[str, Any]) -> None:
+    refresh = code_graph_background.status_or_start(target, db)
+    previous = before.get("background_refresh") or {}
+    if refresh and refresh["status"] == "busy":
+        before["background_refresh"] = {
+            **refresh,
+            **(previous if previous.get("status") in ("started", "launch_failed") else {}),
+            "in_progress": True,
+        }
+    if refusal := code_graph_background.last_engine_lock_refusal(target, db):
+        before["graph_sync_reason"] = "engine_lock_refused"
+        before["background_refresh_last_exit"] = f"last background refresh exited: {refusal}"
+
+
 def capture_after_and_diff(
     target: Path,
     run_dir: Path,
@@ -158,6 +196,9 @@ def capture_after_and_diff(
         before = before if isinstance(before, dict) else {}
         if before.get("status") == "unavailable":
             return _compact(_status("unavailable", str(before.get("summary") or "code graph delta unavailable")))
+        defer_windows = sync_timeout is not None and not code_graph_background.may_run_killable_foreground_sync()
+        if defer_windows and (db_path_value := before.get("db_path")):
+            _observe_windows_refresh(target, Path(db_path_value), before)
         if before.get("ok") is not True:
             before_sync = before.get("sync")
             db_path_value = before.get("db_path")
@@ -181,8 +222,12 @@ def capture_after_and_diff(
         db_path = Path(str(before.get("db_path") or engine_paths.code_graph_db(target).path))
         snapshot_path = Path(str(before.get("before_snapshot_path") or run_dir / SNAPSHOT_NAME))
         # A live refresh owns the write path. Read the last committed index instead.
-        refresh = code_graph_background.status_or_start(target, db_path) if sync_timeout is not None else None
-        stale_after = bool(refresh and refresh["status"] == "busy")
+        refresh = (
+            code_graph_background.status_or_start(target, db_path)
+            if sync_timeout is not None and not defer_windows
+            else None
+        )
+        stale_after = defer_windows or bool(refresh and refresh["status"] == "busy")
         sync = None
         if not stale_after:
             sync_budget = timeout if sync_timeout is None else sync_timeout
@@ -207,7 +252,7 @@ def capture_after_and_diff(
             elif refresh:
                 before["background_refresh"] = refresh
             if not code_graph_background.index_ready(db_path):
-                if refresh and refresh["status"] in ("started", "busy"):
+                if defer_windows or (refresh and refresh["status"] in ("started", "busy")):
                     payload = _failure_payload(
                         target,
                         before,
@@ -462,7 +507,7 @@ def _command_result(
 def _backup_sqlite(source: Path, destination: Path, *, timeout: float | None = None) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.unlink(missing_ok=True)
-    source_uri = f"file:{source}?mode=ro"
+    source_uri = source.absolute().as_uri() + "?mode=ro"
     started = time.monotonic()
 
     def progress(status: int, _remaining: int, _total: int) -> None:
@@ -473,14 +518,16 @@ def _backup_sqlite(source: Path, destination: Path, *, timeout: float | None = N
 
     try:
         busy_timeout = 5.0 if timeout is None else 0.0
-        with sqlite3.connect(source_uri, uri=True, timeout=busy_timeout) as source_conn:
-            with sqlite3.connect(destination, timeout=busy_timeout) as dest_conn:
-                if timeout is None:
-                    source_conn.backup(dest_conn)
-                else:
-                    source_conn.backup(dest_conn, pages=32, progress=progress)
-                    if time.monotonic() - started >= timeout:
-                        raise TimeoutError(f"timeout after {timeout:g}s")
+        with (
+            closing(sqlite3.connect(source_uri, uri=True, timeout=busy_timeout)) as source_conn,
+            closing(sqlite3.connect(destination, timeout=busy_timeout)) as dest_conn,
+        ):
+            if timeout is None:
+                source_conn.backup(dest_conn)
+            else:
+                source_conn.backup(dest_conn, pages=32, progress=progress)
+                if time.monotonic() - started >= timeout:
+                    raise TimeoutError(f"timeout after {timeout:g}s")
     except Exception:
         destination.unlink(missing_ok=True)
         raise
@@ -551,6 +598,7 @@ def _capture_metadata(payload: dict[str, Any]) -> dict[str, Any]:
             "snapshots",
             "background_refresh",
             "background_refresh_last_exit",
+            "graph_sync_reason",
             "foreground_fallback",
             "stale_after",
         )
