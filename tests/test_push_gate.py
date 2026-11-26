@@ -996,7 +996,7 @@ def test_prune_and_gate_reject_non_directory_store(push_repo, capsys, store_kind
         store.write_text("preserve me", encoding="utf-8")
     assert _gate(push_repo, "prune") == 1
     message = capsys.readouterr().err
-    assert "receipt store" in message and str(store) in message
+    assert "receipt store" in message and repr(str(store)) in message
     assert token.is_file() and os.path.lexists(store)
     assert _single(push_repo, capsys)[1]["status"] == "indeterminate"
 
