@@ -393,7 +393,8 @@ class CardInput:
                 else re.sub(r" \^c-[0-9a-f]{6}(?=[ \t]*(?:\n|$))", "", block.text)
             )
             text.append(value)
-        return "\n".join(text)
+        # A blank line ends the current claim while preserving list containers.
+        return "\n\n".join(text)
 
 
 # --- Prompt -------------------------------------------------------------------------------

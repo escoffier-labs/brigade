@@ -279,7 +279,7 @@ def test_feedback_retains_nested_claim_with_its_markdown_parent(verify_hub, reso
     assert len(saved["cases"]) == 1
     assert saved["cases"][0]["expected"] == "correct"
     assert "Sibling context." not in saved["cases"][0]["card"]["text"]
-    assert "- Parent context.\n    - " in saved["cases"][0]["card"]["text"]
+    assert "- Parent context.\n\n    - " in saved["cases"][0]["card"]["text"]
     replay = evaluation.evaluate(
         saved["cases"],
         propose=FakeSeat(block_entry(replacement=nested_fixed)),
@@ -295,11 +295,11 @@ def test_feedback_retains_nested_claim_with_its_markdown_parent(verify_hub, reso
     [
         (
             f"- Grandparent ^c-111111\n    - Parent ^c-222222\n        - {CLAIM} ^c-abcdef\n",
-            f"- Grandparent\n    - Parent\n        - {CLAIM} ^c-abcdef",
+            f"- Grandparent\n\n    - Parent\n\n        - {CLAIM} ^c-abcdef",
         ),
         (
             f"- Parent\n  - sibling ^c-111111\n  - {CLAIM} ^c-abcdef\n",
-            f"- Parent\n  - {CLAIM} ^c-abcdef",
+            f"- Parent\n\n  - {CLAIM} ^c-abcdef",
         ),
         (
             f"- sibling ^c-111111\n - {CLAIM} ^c-abcdef\n",
@@ -307,15 +307,15 @@ def test_feedback_retains_nested_claim_with_its_markdown_parent(verify_hub, reso
         ),
         (
             f"- Loose parent\n\n  - {CLAIM} ^c-abcdef\n",
-            f"- Loose parent\n  - {CLAIM} ^c-abcdef",
+            f"- Loose parent\n\n  - {CLAIM} ^c-abcdef",
         ),
         (
             f"- Parent first line ^c-111111\n  Parent continuation\n    - {CLAIM} ^c-abcdef\n",
-            f"- Parent first line\n  Parent continuation\n    - {CLAIM} ^c-abcdef",
+            f"- Parent first line\n  Parent continuation\n\n    - {CLAIM} ^c-abcdef",
         ),
         (
             f"- Tab parent\n\t- {CLAIM} ^c-abcdef\n",
-            f"- Tab parent\n\t- {CLAIM} ^c-abcdef",
+            f"- Tab parent\n\n\t- {CLAIM} ^c-abcdef",
         ),
     ],
     ids=[
@@ -354,6 +354,32 @@ def test_evaluation_text_uses_claim_parser_context_without_other_claims(source, 
     assert replay["classes"]["correct"]["recall"] == 1, replay
 
 
+@pytest.mark.parametrize(
+    "first",
+    [
+        "First paragraph. ^c-111111",
+        "- First list item. ^c-111111",
+        "- Parent.\n  - First nested item. ^c-111111",
+    ],
+    ids=["separate-paragraphs", "list-then-paragraph", "nested-list-then-paragraph"],
+)
+def test_evaluation_text_round_trips_selected_claim_ids_and_text(first):
+    value = case()
+    second = "Second paragraph. ^c-abcdef"
+    header = "---\nevidence: []\n---\n"
+    value["card"]["text"] = f"{header}{first}\n\n{second}\n"
+    card, _ = evaluation.inputs(value)
+
+    excerpt = card.evaluation_text({"c-111111", BLOCK})
+    value["card"]["text"] = f"{header}{excerpt}\n"
+    replayed, _ = evaluation.inputs(value)
+
+    assert [(block.block_id, block.text) for block in replayed.blocks] == [
+        ("c-111111", first.splitlines()[-1]),
+        (BLOCK, second),
+    ]
+
+
 def test_evaluation_text_keeps_selected_claims_once_in_source_order():
     value = case()
     value["card"]["text"] = (
@@ -366,7 +392,7 @@ def test_evaluation_text_keeps_selected_claims_once_in_source_order():
 
     text = card.evaluation_text({"c-abcdef", "c-111111"})
 
-    assert text == "- Parent context.\n  - first selected ^c-111111\n  - second selected ^c-abcdef"
+    assert text == "- Parent context.\n\n  - first selected ^c-111111\n\n  - second selected ^c-abcdef"
     assert text.count("Parent context.") == 1
 
 
