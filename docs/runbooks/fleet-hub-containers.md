@@ -295,7 +295,7 @@ the Quadlet with the digest, and copy the volume unit to
 set -euo pipefail
 podman build -f ops/fleet-hub/Containerfile \
   --build-arg BRIGADE_REF=e6009f6969dc6e45db2ab93790aa3e407c791409 \
-  --build-arg BRIGADE_SHA256=68014a8e99c61f5e547d8bf223a5f3ad7ea31f60355a4c30356bffd78e15c168 \
+  --build-arg BRIGADE_SHA256=e85f87a49e1ec92e780a250bee08747efb4c592ac1311733085241761c60f0c3 \
   --build-arg BRIGADE_VERSION=0.28.0 \
   -t localhost/brigade-fleet-hub:0.28.0-e6009f6 .
 image_digest="$(podman image inspect --format '{{.Digest}}' localhost/brigade-fleet-hub:0.28.0-e6009f6)"

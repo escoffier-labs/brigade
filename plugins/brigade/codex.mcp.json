@@ -2,7 +2,7 @@
   "mcpServers": {
     "brigade-memory": {
       "command": "npx",
-      "args": ["-y", "brigadestack@0.32.0", "memory", "serve-mcp", "--stdio", "--inbox", "codex"]
+      "args": ["-y", "brigadestack@0.32.1", "memory", "serve-mcp", "--stdio", "--inbox", "codex"]
     }
   }
 }

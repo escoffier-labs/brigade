@@ -1019,8 +1019,14 @@ def run(
     operator: bool = False,
     agent: bool = False,
 ) -> int:
+    from . import component_report
+
     ctx = build_context(target, harness)
-    checks = _gather_checks(ctx)
+    if operator:
+        checks = [_operator_check(*finding) for finding in component_report.doctor_checks()]
+    else:
+        checks = [_scoped_check(*finding) for finding in component_report.outdated_doctor_checks()]
+    checks.extend(_gather_checks(ctx))
     if operator and "grok" in ctx.harnesses:
         checks.extend(_operator_check(status, name, detail) for status, name, detail in _check_grok_cli())
     if full:
@@ -1083,14 +1089,10 @@ def _replace_recovery_check_with_full(
 
 
 def _gather_checks(ctx: DoctorContext) -> List[ScopedCheckResult]:
-    from . import component_report
     from .registry import all_stations
     from . import managed
 
-    checks: List[ScopedCheckResult] = []
-    for status, name, detail in component_report.doctor_checks():
-        checks.append(_operator_check(status, name, detail))
-    checks.extend(_scoped_check(*finding) for finding in engine_paths.legacy_findings(ctx.target))
+    checks = [_scoped_check(*finding) for finding in engine_paths.legacy_findings(ctx.target)]
     checks.extend(
         _scoped_check(
             INFO,

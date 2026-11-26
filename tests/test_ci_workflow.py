@@ -585,6 +585,7 @@ def test_nightly_windows_observer_preserves_per_file_budgets_and_results():
         ("pull_request", True, "first-parent"),
         ("pull_request", False, "error"),
         ("merge_group", True, "event-base"),
+        ("merge_group", False, "invalid-base"),
         ("push", True, "event-base"),
     ],
 )
@@ -622,7 +623,7 @@ def test_lint_allowlist_base_uses_the_test_merge_first_parent(tmp_path, event, h
         **os.environ,
         "EVENT_NAME": event,
         "PR_HEAD_SHA": pr_head if head_matches else stale_base,
-        "EVENT_BASE_SHA": stale_base,
+        "EVENT_BASE_SHA": "refs/heads/main" if expected == "invalid-base" else stale_base,
         "GITHUB_OUTPUT": str(output),
     }
     result = subprocess.run(_workflow_bash_command(script), cwd=tmp_path, env=env, capture_output=True, text=True)
@@ -631,9 +632,31 @@ def test_lint_allowlist_base_uses_the_test_merge_first_parent(tmp_path, event, h
         assert "HEAD is not the pull request test merge" in result.stdout
         assert not output.exists()
         return
+    if expected == "invalid-base":
+        assert result.returncode != 0
+        assert "Invalid merge group base SHA" in result.stdout
+        assert not output.exists()
+        return
     assert result.returncode == 0, result.stderr
     want = main_tip if expected == "first-parent" else stale_base
     assert output.read_text() == f"sha={want}\n"
+
+
+def test_shipped_file_history_reuses_the_fetched_merge_group_base():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    lint = _workflow_job_section(text, "lint")
+    ratchet = _workflow_step_section(text, "lint", "Windows allowlist ratchet")
+    fetch = _workflow_step_section(text, "lint", "Fetch shipped file history base")
+    check = _workflow_step_section(text, "lint", "Shipped file history")
+
+    assert lint.index(ratchet) < lint.index(fetch) < lint.index(check)
+    assert 'git fetch --no-tags --depth=1 origin "$BASE_SHA"' in ratchet
+    assert "if: ${{ github.event_name != 'merge_group' }}" in fetch
+    assert (
+        "BRIGADE_SHIPPED_HISTORY_BASE_REF: ${{ github.event_name == 'merge_group' && "
+        "steps.allowlist-base.outputs.sha || format('origin/{0}', github.base_ref || 'main') }}"
+    ) in check
+    assert "python scripts/shipped_file_history.py --check --require-provenance" in check
 
 
 @pytest.mark.skipif(os.name == "nt", reason="lint shell step runs on Ubuntu")

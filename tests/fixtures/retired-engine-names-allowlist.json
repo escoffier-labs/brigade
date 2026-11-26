@@ -49,7 +49,15 @@
       "MISELEDGER": 1,
       "MiseLedger": 21,
       "graphtrail": 12,
-      "miseledger": 19
+      "miseledger": 20
+    }
+  },
+  {
+    "path": "README.md",
+    "kind": "history",
+    "reason": "Exact historical indexing output from CLI 0.31.0 and 0.32.0.",
+    "literals": {
+      "miseledger": 1
     }
   },
   {
@@ -390,6 +398,14 @@
     "literals": {
       "graphtrail": 2,
       "miseledger": 14
+    }
+  },
+  {
+    "path": "docs/update-channels.md",
+    "kind": "history",
+    "reason": "Exact historical indexing output from CLI 0.31.0 and 0.32.0.",
+    "literals": {
+      "miseledger": 1
     }
   },
   {
@@ -3010,10 +3026,10 @@
   {
     "path": "src/brigade/receipts_cmd.py",
     "kind": "frozen",
-    "reason": "Persisted schema, receipt or import identity and internal reader names.",
+    "reason": "Persisted schema, receipt or import identity, internal reader names and import diagnostics.",
     "literals": {
       "MISELEDGER": 18,
-      "miseledger": 92
+      "miseledger": 79
     }
   },
   {
@@ -3629,10 +3645,10 @@
   {
     "path": "tests/test_receipts_cmd.py",
     "kind": "fixture",
-    "reason": "Compatibility or persisted-identity fixture and regression coverage.",
+    "reason": "Compatibility, persisted identities and historical importer output regression coverage.",
     "literals": {
-      "MISELEDGER": 3,
-      "miseledger": 142
+      "MISELEDGER": 6,
+      "miseledger": 146
     }
   },
   {

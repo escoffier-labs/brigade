@@ -3,7 +3,7 @@
   "name": "io.github.escoffier-labs/brigade-memory",
   "title": "Brigade Memory",
   "description": "Brigade memory: search and read cards across repo and user stores, and write Memory Handoffs.",
-  "version": "0.32.0",
+  "version": "0.32.1",
   "websiteUrl": "https://brigade.tools",
   "repository": {
     "url": "https://github.com/escoffier-labs/brigade",
@@ -14,7 +14,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "brigadestack",
-      "version": "0.32.0",
+      "version": "0.32.1",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
