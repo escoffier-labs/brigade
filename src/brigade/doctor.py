@@ -1018,8 +1018,14 @@ def run(
     operator: bool = False,
     agent: bool = False,
 ) -> int:
+    from . import component_report
+
     ctx = build_context(target, harness)
-    checks = _gather_checks(ctx)
+    if operator:
+        checks = [_operator_check(*finding) for finding in component_report.doctor_checks()]
+    else:
+        checks = [_scoped_check(*finding) for finding in component_report.outdated_doctor_checks()]
+    checks.extend(_gather_checks(ctx))
     if operator and "grok" in ctx.harnesses:
         checks.extend(_operator_check(status, name, detail) for status, name, detail in _check_grok_cli())
     if full:
@@ -1043,11 +1049,10 @@ def run(
     if ctx.selection is not None:
         sel = ctx.selection
         print(f"  harnesses: {', '.join(sel.harnesses) or '(none)'} (owner={sel.owner}, depth={sel.depth})")
+    elif ctx.harnesses:
+        print(f"  harnesses: (legacy target, no config; declared {', '.join(ctx.harnesses)})")
     else:
-        if ctx.harnesses:
-            print(f"  harnesses: (legacy target, no config; declared {', '.join(ctx.harnesses)})")
-        else:
-            print("  harnesses: (unspecified; no Brigade config and no explicit --harness)")
+        print("  harnesses: (unspecified; no Brigade config and no explicit --harness)")
     if not operator:
         print("  scope: target workspace only (pass --operator for host-global checks)")
     return _report(checks, full=full, target=ctx.target, operator=operator)
@@ -1083,13 +1088,10 @@ def _replace_recovery_check_with_full(
 
 def _gather_checks(ctx: DoctorContext) -> List[ScopedCheckResult]:
     from .claude_hooks import latch_doctor
-    from . import component_report
     from .registry import all_stations
     from . import managed
 
     checks: List[ScopedCheckResult] = []
-    for status, name, detail in component_report.doctor_checks():
-        checks.append(_operator_check(status, name, detail))
     checks.extend(_scoped_check(*finding) for finding in engine_paths.legacy_findings(ctx.target))
     checks.extend(
         _scoped_check(
