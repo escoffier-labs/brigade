@@ -228,3 +228,17 @@ def test_default_observation_keeps_full_inventory(monkeypatch, tmp_path, isolate
 
     assert limits == [(None, None)]
     assert tasks == {"task_inventory": {"state": "running", "ready_at": None}}
+
+
+def test_brief_passes_a_cursor_budget_within_the_section_deadline(tmp_path, monkeypatch):
+    budgets = []
+
+    def observe(target, **kwargs):
+        budgets.append(kwargs.get("cursor_budget_seconds"))
+        return {}, {}, False
+
+    monkeypatch.setattr(cloud_tracker, "observe_providers", observe)
+    result = cloud_tracker.stale_entries_for_brief(tmp_path, now=NOW)
+    assert "error" not in result
+    (budget,) = budgets
+    assert budget is not None and 0 < budget < 5

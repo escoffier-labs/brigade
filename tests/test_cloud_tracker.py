@@ -2410,11 +2410,14 @@ def test_sync_missing_inventory_window_and_later_sighting(tmp_path):
         tmp_path, provider="codex-cloud", task_id="task_missing", label="task", dispatched_at=_iso(NOW)
     )
 
+    github = {"branches": [], "prs": [], "branches_complete": True, "prs_complete": True}
+
     def sync(hours, *, complete, seen=False):
         tasks = {"task_missing": {"state": "running"}} if seen else {}
         payload = cloud_tracker.sync_payload(
             tmp_path,
             now=NOW + timedelta(hours=hours),
+            github=github,
             provider_observations={
                 "codex-cloud": cloud_tracker.ProviderObservation(True, True, None, tasks, complete=complete),
             },
@@ -2441,7 +2444,7 @@ def test_sync_missing_inventory_window_and_later_sighting(tmp_path):
     assert row["last_seen_at"] == _iso(NOW)
     assert payload["sources"]["codex-cloud"]["complete"] is True
     assert sync(23, complete=False)[0]["needs_investigation"]
-    assert cloud_tracker.status_payload(tmp_path)["counts"]["needs-investigation"] == 1
+    assert cloud_tracker.status_payload(tmp_path, github=github)["counts"]["needs-investigation"] == 1
 
     payload, entry = sync(24, complete=False, seen=True)
     assert entry["last_seen_at"] == _iso(NOW + timedelta(hours=24))
@@ -2459,20 +2462,20 @@ def test_github_inventory_keeps_full_pages_and_partial_prs(tmp_path, monkeypatch
             return 0, json.dumps([{"name": f"codex/topic-{i}"} for i in range(100)]), ""
         if endpoint.endswith("/branches?per_page=100&page=2"):
             return 0, '[{"name": "codex/final"}]', ""
-        if endpoint.endswith("/pulls?state=all&per_page=100"):
-            rows = [
-                {"head": {"ref": "codex/final", "sha": "abc"}, "number": i, "state": "closed", "merged_at": "date"}
-                for i in range(100)
-            ]
+        if endpoint.endswith("/pulls?state=open&per_page=100"):
+            rows = [{"head": {"ref": "codex/final"}, "number": i + 1, "state": "open"} for i in range(100)]
             return 0, json.dumps(rows), ""
+        if endpoint.endswith("/pulls?state=closed&per_page=100"):
+            return 0, '[{"head": {"ref": "codex/final"}, "number": 101, "state": "closed", "merged_at": "date"}]', ""
         return 1, "", "failed"
 
     monkeypatch.setattr(cloud_tracker, "_run_text", read)
     result = cloud_tracker.observe_github(tmp_path)
     assert len(result["branches"]) == 101
     assert result["branches_complete"]
-    assert len(result["prs"]) == 100
-    assert result["prs"][0]["state"] == "MERGED"
+    assert len(result["prs"]) == 101
+    assert result["prs"][0]["state"] == "OPEN"
+    assert result["prs"][-1]["state"] == "MERGED"
     assert not result["complete"]
 
 
@@ -2607,3 +2610,133 @@ def test_sync_skips_missing_window_for_task_bound_by_launch_reconcile(tmp_path, 
     assert cli.main(args) == 0
     (entry,) = cloud_tracker.load_registry(tmp_path)["entries"]
     assert entry["missing_since"]
+
+
+def test_missing_task_with_live_branch_is_pending_when_github_times_out(tmp_path):
+    cloud_tracker.register(
+        tmp_path,
+        provider="codex-cloud",
+        task_id="task_missing",
+        label="task",
+        branch="codex/active",
+        dispatched_at=_iso(NOW),
+    )
+    observations = {"codex-cloud": cloud_tracker.ProviderObservation(True, True, None, {}, complete=True)}
+    cloud_tracker.sync_payload(
+        tmp_path,
+        now=NOW,
+        provider_observations=observations,
+        github={"branches": [{"name": "codex/active"}], "prs": [], "branches_complete": True, "prs_complete": True},
+    )
+    result = cloud_tracker.sync_payload(
+        tmp_path,
+        now=NOW + timedelta(hours=8),
+        provider_observations=observations,
+        github={
+            "branches": [],
+            "prs": [],
+            "branches_complete": False,
+            "prs_complete": False,
+            "complete": False,
+            "reason": "observation-timeout",
+        },
+    )
+
+    (entry,) = cloud_tracker.load_registry(tmp_path)["entries"]
+    assert entry["missing_confirmed"]
+    assert result["classification_counts"]["pending"] == 1
+    assert not result["needs_investigation"]
+
+
+def test_ready_task_without_expected_branch_requires_known_pr_coverage(tmp_path, monkeypatch):
+    cloud_tracker.register(
+        tmp_path,
+        provider="codex-cloud",
+        task_id="task_ready",
+        label="task",
+        branch="codex/gone",
+        expected_artifact={"kind": "branch"},
+        dispatched_at=_iso(NOW),
+    )
+
+    def classify(github):
+        (row,) = cloud_tracker.status_payload(
+            tmp_path,
+            now=NOW,
+            provider_tasks={"task_ready": {"state": "ready"}},
+            github=github,
+        )["entries"]
+        return row["classification"]
+
+    assert classify({"branches": [], "prs": [], "branches_complete": True, "prs_complete": False}) == "pending"
+
+    calls = []
+
+    def read(argv, **kwargs):
+        calls.append(argv[-1])
+        endpoint = argv[-1]
+        if "state=closed" in endpoint:
+            rows = [{"head": {"ref": f"feature/topic-{i}"}, "number": i, "state": "closed"} for i in range(100)]
+            return 0, json.dumps(rows), ""
+        if "/branches?" in endpoint or "state=open" in endpoint:
+            return 0, "[]", ""
+        return 1, "", ""
+
+    monkeypatch.setattr(cloud_tracker, "_run_text", read)
+    github = cloud_tracker.observe_github(tmp_path)
+    assert github["prs_complete"]
+    assert classify(github) == "needs-investigation"
+    assert "repos/{owner}/{repo}/pulls?state=open&per_page=100" in calls
+    assert "repos/{owner}/{repo}/pulls?state=closed&per_page=100" in calls
+    assert not any("state=closed" in endpoint and "&page=" in endpoint for endpoint in calls)
+
+
+def test_sighting_clears_missing_state_during_backwards_clock_step(tmp_path):
+    cloud_tracker.register(
+        tmp_path, provider="codex-cloud", task_id="task_shift", label="task", dispatched_at=_iso(NOW)
+    )
+
+    def sync(hours, tasks):
+        cloud_tracker.sync_payload(
+            tmp_path,
+            now=NOW + timedelta(hours=hours),
+            provider_observations={
+                "codex-cloud": cloud_tracker.ProviderObservation(True, True, None, tasks, complete=True)
+            },
+        )
+        return cloud_tracker.load_registry(tmp_path)["entries"][0]
+
+    sync(0, {})
+    assert sync(8, {})["missing_confirmed"]
+    entry = sync(7, {"task_shift": {"state": "running"}})
+    assert entry["inventory_observed_at"] == _iso(NOW + timedelta(hours=7))
+    assert entry["last_seen_at"] == _iso(NOW + timedelta(hours=7))
+    assert "missing_confirmed" not in entry
+    assert "missing_since" not in entry
+
+
+def test_cursor_tracker_prioritizes_registered_agent_run_state(tmp_path, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(cursor_cloud.time, "monotonic", lambda: clock[0])
+    monkeypatch.setenv("CURSOR_API_KEY", "fake-cursor-key")
+    cloud_tracker.register(tmp_path, provider="cursor-cloud", task_id="agent-tracked", label="task")
+    calls = []
+
+    def call(opener, request, deadline):
+        url = request.full_url
+        calls.append(url)
+        if url.endswith("/agents"):
+            return {
+                "items": [
+                    {"id": "agent-untracked", "latestRunId": "run-old"},
+                    {"id": "agent-tracked", "latestRunId": "run-current"},
+                ]
+            }
+        clock[0] += 2
+        return {"status": "RUNNING"}
+
+    monkeypatch.setattr(cursor_cloud, "_call", call)
+    tasks = cloud_tracker.observe_provider("cursor-cloud", tmp_path, deadline=1002.0).tasks
+    assert calls[1].endswith("/agents/agent-tracked/runs/run-current")
+    assert tasks["agent-tracked"]["state"] == "running"
+    assert tasks["agent-untracked"]["state"] is None

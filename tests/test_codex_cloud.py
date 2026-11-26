@@ -3317,3 +3317,17 @@ def test_unlimited_inventory_preserves_completed_pages_on_timeout(monkeypatch):
     assert not result.ok
     assert not result.complete
     assert "14" in calls[-1]
+
+
+@pytest.mark.parametrize("ok", [False, True])
+def test_canary_leaves_environment_unknown_for_incomplete_inventory(tmp_path, monkeypatch, ok):
+    partial = codex_cloud.ListTasksResult(
+        [{"id": "task_example", "environment_id": "env-other"}],
+        ok=ok,
+        reason=None if ok else "provider-timeout",
+        complete=False,
+    )
+    monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: partial)
+    report = codex_cloud.canary(tmp_path, selector="env-fixture")
+    assert report["ok"] is ok
+    assert report["environment_seen"] == "unknown"

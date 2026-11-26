@@ -1233,7 +1233,7 @@ def canary(
         }
     inventory = list_tasks(cwd=target)
     audit = environment_audit_ref(selector, env_id)
-    environment_seen = _environment_seen(env_id, inventory.tasks)
+    environment_seen = _environment_seen(env_id, inventory.tasks) if inventory.ok and inventory.complete else "unknown"
     if not inventory.ok:
         return {
             "ok": False,

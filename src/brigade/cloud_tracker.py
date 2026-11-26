@@ -650,8 +650,9 @@ def _classify_entry(
         classification = "orphaned"
     elif provider_state in READY_STATES or provider_state == "finished":
         # Ready / finished without a merge: landable, stale, or needs investigation.
-        if expects_branch and artifact_absent and not open_pr:
-            classification = "needs-investigation"
+        if expects_branch and not (branch_exists or open_pr):
+            if artifact_absent:
+                classification = "needs-investigation"
         else:
             ready_mark = ready_at or _parse_time(entry.get("dispatched_at"))
             age_hours = _hours_since(ready_mark, now)
@@ -665,7 +666,13 @@ def _classify_entry(
             classification = "needs-investigation"
 
     seen = isinstance(provider_info, dict)
-    if entry.get("missing_confirmed") is True and not (seen or branch_exists or open_pr or merged):
+    complete_github = github.get("branches_complete") is True and github.get("prs_complete") is True
+    if (
+        entry.get("missing_confirmed") is True
+        and complete_github
+        and artifact_absent
+        and not (seen or open_pr or merged)
+    ):
         classification = "needs-investigation"
 
     if claude_lifecycle is not None:
@@ -1111,16 +1118,16 @@ def _record_inventory(
                 continue
             previous = _parse_time(entry.get("inventory_observed_at"))
             dispatched = _parse_time(entry.get("dispatched_at"))
-            if previous is None and dispatched is not None and dispatched > observed:
-                continue
-            if previous is not None and previous > observed:
-                # Restart the clock baseline without counting this sample as an absence.
-                if not entry.get("missing_confirmed"):
-                    entry.pop("missing_since", None)
-            elif task_id in observation.tasks:
+            if task_id in observation.tasks:
                 entry["last_seen_at"] = timestamp
                 entry.pop("missing_since", None)
                 entry.pop("missing_confirmed", None)
+            elif previous is None and dispatched is not None and dispatched > observed:
+                continue
+            elif previous is not None and previous > observed:
+                # Restart the clock baseline without counting this sample as an absence.
+                if not entry.get("missing_confirmed"):
+                    entry.pop("missing_since", None)
             elif entry["provider"] == "codex-cloud" and task_id in reconciled_codex_tasks:
                 continue
             elif (
@@ -1272,6 +1279,7 @@ def stale_entries_for_brief(target: Path, *, now: datetime | None = None) -> dic
             target,
             codex_max_items=codex_cloud.MAX_LIST_LIMIT,
             github_budget_seconds=BRIEF_GITHUB_BUDGET_SECONDS,
+            cursor_budget_seconds=cloud_observation.BRIEF_CURSOR_BUDGET_SECONDS,
         )
         payload = status_payload(
             target,
@@ -1665,9 +1673,7 @@ def observe_github(
     branches, branches_complete = cloud_observation.github_pages(
         read, "repos/{owner}/{repo}/branches?per_page=100", cloud_observation.github_branch, report_branches
     )
-    prs, prs_complete = cloud_observation.github_pages(
-        read, "repos/{owner}/{repo}/pulls?state=all&per_page=100", cloud_observation.github_pr, report_prs
-    )
+    prs, prs_complete = cloud_observation.github_pull_requests(read, report_prs)
     result = snapshot(branches, branches_complete, prs, prs_complete)
     # Local refs still help older rows offline, but cannot prove remote existence for bound sessions.
     if not result["branches"] and not branches_complete:
@@ -1700,15 +1706,6 @@ def _cursor_api_key() -> str | None:
         if value:
             return value
     return None
-
-
-def _provider_error_observation(error: BaseException) -> ProviderObservation:
-    reason = getattr(error, "reason", None)
-    if reason == "auth-failure":
-        return ProviderObservation(True, False, "auth-failure", {})
-    if reason == "transport-failure" or isinstance(error, (OSError, TimeoutError)):
-        return ProviderObservation(True, False, "transport-failure", {})
-    return ProviderObservation(True, True, "provider-error", {})
 
 
 def _cursor_tasks(agents: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
@@ -1767,10 +1764,15 @@ def _cursor_cloud_observation(
             max_items=None,
             include_usage=True,
             inventory_deadline=deadline,
+            priority_agent_ids=frozenset(
+                task_id
+                for entry in load_registry(target)["entries"]
+                if entry.get("provider") == "cursor-cloud" and isinstance(task_id := entry.get("task_id"), str)
+            ),
             on_page=report if publish is not None else None,
         )
     except Exception as exc:  # noqa: BLE001 - observation must stay bounded
-        return _provider_error_observation(exc)
+        return cloud_observation.provider_error_observation(exc)
     tasks = _cursor_tasks(agents)
     reason = getattr(agents, "reason", None)
     return ProviderObservation(True, bool(tasks) or reason is None, reason, tasks, getattr(agents, "complete", False))

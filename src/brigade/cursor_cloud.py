@@ -347,11 +347,13 @@ def list_agents(
     opener=None,
     inventory_deadline: float | None = None,
     on_page: PageReport | None = None,
+    priority_agent_ids: frozenset[str] = frozenset(),
 ) -> AgentInventory:
     """List sanitized agents and indicate whether all list pages were read.
 
     With an absolute monotonic inventory deadline, enumerate pages before
     fetching optional run details. The deadline covers both kinds of reads.
+    Resolve prioritized agents first without changing the inventory row order.
     """
     if inventory_deadline is None and (max_pages is None or max_items is None):
         raise ValueError("Uncapped Cursor inventory requires a deadline")
@@ -417,7 +419,10 @@ def list_agents(
         seen_cursors.add(next_cursor)
         cursor = next_cursor
     if inventory_deadline is not None:
-        for row in agents:
+        prioritized = (
+            sorted(agents, key=lambda row: row["id"] not in priority_agent_ids) if priority_agent_ids else agents
+        )
+        for row in prioritized:
             if remaining() <= 0:
                 break
             _enrich_agent(row, api_key, base_url, opener, include_usage, remaining)

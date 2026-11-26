@@ -150,7 +150,9 @@ def test_observer_retains_explicit_refs_and_scopes_branch_evidence(tmp_path, mon
             return (0, json.dumps({"nameWithOwner": observed_repo}), "")
         if argv[:2] == ["gh", "api"] and "/branches?" in argv[-1]:
             return (0, json.dumps([{"name": branch}]), "")
-        if argv[:2] == ["gh", "api"] and "/pulls?" in argv[-1]:
+        if argv[:2] == ["gh", "api"] and "pulls?state=open" in argv[-1]:
+            return (0, "[]", "")
+        if argv[:2] == ["gh", "api"] and "pulls?state=closed" in argv[-1]:
             return (
                 0,
                 json.dumps(

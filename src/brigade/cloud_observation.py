@@ -13,6 +13,7 @@ from typing import Any, TypeVar
 CODEX_BUDGET_SECONDS = 30.0
 CURSOR_BUDGET_SECONDS = 20.0
 GITHUB_BUDGET_SECONDS = 20.0
+BRIEF_CURSOR_BUDGET_SECONDS = 4.0
 
 T = TypeVar("T")
 PageReport = Callable[[list[dict[str, Any]], bool], None]
@@ -33,6 +34,15 @@ def provider_failure(reason: str, progress: ProviderObservation | None, configur
     if progress is not None:
         return replace(progress, reason=reason, complete=False)
     return ProviderObservation(configured, False, reason, {})
+
+
+def provider_error_observation(error: BaseException) -> ProviderObservation:
+    reason = getattr(error, "reason", None)
+    if reason == "auth-failure":
+        return ProviderObservation(True, False, "auth-failure", {})
+    if reason == "transport-failure" or isinstance(error, (OSError, TimeoutError)):
+        return ProviderObservation(True, False, "transport-failure", {})
+    return ProviderObservation(True, True, "provider-error", {})
 
 
 def start_observation(
@@ -76,6 +86,8 @@ def github_pages(
     endpoint: str,
     parse: Callable[[dict[str, Any]], dict[str, Any] | None],
     on_page: PageReport,
+    *,
+    max_pages: int | None = None,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Keep parsed rows from earlier REST pages when a later page fails."""
     rows: list[dict[str, Any]] = []
@@ -103,8 +115,21 @@ def github_pages(
         on_page(rows, final_page and valid)
         if final_page:
             return rows, valid
+        if page == max_pages:
+            return rows, False
         previous_page = data
         page += 1
+
+
+def github_pull_requests(
+    read: Callable[[list[str]], tuple[int, str, str]], on_page: PageReport
+) -> tuple[list[dict[str, Any]], bool]:
+    """Page open PRs for absence evidence and sample recent closed PRs for merges."""
+    prs, complete = github_pages(read, "repos/{owner}/{repo}/pulls?state=open&per_page=100", github_pr, on_page)
+    closed, _ = github_pages(
+        read, "repos/{owner}/{repo}/pulls?state=closed&per_page=100", github_pr, lambda *_: None, max_pages=1
+    )
+    return prs + closed, complete
 
 
 def github_branch(item: dict[str, Any]) -> dict[str, Any] | None:

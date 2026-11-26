@@ -932,16 +932,18 @@ the tag. `brigade run cloud status` shows the launch state and tag.
 
 Regular sync and status read Codex Cloud, Cursor Cloud, and GitHub in
 parallel, each with its own deadline. Their JSON `sources` report `complete`
-when the reader reaches the final page and returns before its deadline. GitHub also reports separate coverage
-for branches and pull requests. Partial pages can supply positive sightings.
+when the reader reaches the final page and returns before its deadline.
+GitHub reports separate coverage for branches and open pull requests, and
+checks the first page of closed pull requests for merge evidence. Partial
+pages can supply positive sightings.
 
 Regular sync records `last_seen_at` in the registry whenever a tracked task
 appears in its provider's inventory. A complete inventory starts a missing
 window when it omits the task. After six hours (`MISSING_INVENTORY_HOURS`),
 another complete inventory that still omits it classifies the task as
-`needs-investigation` if GitHub shows no known branch, open pull request, or
-merge for the task. A partial or unavailable inventory interrupts an
-unconfirmed window. A later sighting,
+`needs-investigation` when complete GitHub branch and open-PR inventories
+show no live artifact and there is no observed merge. A partial or unavailable
+provider inventory interrupts an unconfirmed window. A later sighting,
 including in a partial inventory, clears the missing state. Status displays
 the saved evidence and any current sightings without writing to the registry.
 
