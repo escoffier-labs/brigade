@@ -1,0 +1,1 @@
+- The push gate accepts any eligible verification receipt for the exact pushed tree, even when a later run is ineligible.

@@ -123,18 +123,20 @@ class _Receipts:
         if not isinstance(data, dict) or not isinstance(data.get("commands"), list) or not data["commands"]:
             return None
         return {
-            key: data.get(key)
-            for key in ("status", "tree_stable", "tree_fingerprint", "started_at", "gating")
-            if key in data
+            **{
+                key: data[key]
+                for key in ("status", "tree_stable", "tree_fingerprint", "started_at", "gating")
+                if key in data
+            },
+            "command_argv": [
+                record["argv"]
+                for record in data["commands"]
+                if isinstance(record, dict) and isinstance(record.get("argv"), list)
+            ],
         }
 
-    def latest(self, tree: str) -> dict[str, Any] | None:
-        latest: dict[str, Any] | None = None
-        latest_second = ""
+    def matching(self, tree: str) -> Iterator[dict[str, Any]]:
         for name in self.names[:_RECEIPT_LIMIT]:
-            second = name[:15]
-            if latest is not None and second != latest_second:
-                return latest
             if name not in self.loaded:
                 self.loaded[name] = self._load(name)
             receipt = self.loaded[name]
@@ -148,12 +150,9 @@ class _Receipts:
                 not isinstance(plan, dict) or plan.get("snapshot_tree") != tree
             ):
                 continue
-            if latest is None or str(receipt.get("started_at") or "") > str(latest.get("started_at") or ""):
-                latest = receipt
-                latest_second = second
-        if len(self.names) > _RECEIPT_LIMIT and (latest is None or self.names[-1][:15] == latest_second):
+            yield receipt
+        if len(self.names) > _RECEIPT_LIMIT:
             raise _Indeterminate("The local receipt scan reached its limit. Run verification for the pushed tree.")
-        return latest
 
 
 def _remedy(target: Path, policy: verify_gate._GatePolicy, receipt: dict[str, Any]) -> str:
@@ -177,17 +176,25 @@ def _remedy(target: Path, policy: verify_gate._GatePolicy, receipt: dict[str, An
 def _tree_verdict(
     target: Path, policy: verify_gate._GatePolicy, tree: str, receipts: _Receipts, deadline: float
 ) -> _Verdict:
-    receipt = receipts.latest(tree)
+    prefix = list(policy.argv_prefix)
+    rejection: tuple[tuple[bool, str], dict[str, Any], str] | None = None
+    for receipt in receipts.matching(tree):
+        eligible, reason = verify_gate.evaluate_receipt(policy, receipt, tree, deadline=deadline)
+        if eligible:
+            return _Verdict("ok")
+        if reason == "policy_timeout":
+            raise _Indeterminate(_TIMEOUT, "check_timeout")
+        ran_required = bool(prefix) and any(argv[: len(prefix)] == prefix for argv in receipt["command_argv"])
+        rank = (ran_required, str(receipt.get("started_at") or ""))
+        if rejection is None or rank > rejection[0]:
+            rejection = rank, receipt, reason
+
     _remaining(deadline)
-    if receipt is None:
+    if rejection is None:
         return _Verdict(
             "missing_receipt", "No local verification receipt matches this tree.", _remedy(target, policy, {})
         )
-    eligible, reason = verify_gate.evaluate_receipt(policy, receipt, tree, deadline=deadline)
-    if eligible:
-        return _Verdict("ok")
-    if reason == "policy_timeout":
-        raise _Indeterminate(_TIMEOUT, "check_timeout")
+    _, receipt, reason = rejection
     explanation, _ = verify_gate._plan_guidance(receipt, reason)
     return _Verdict(
         "rejected",

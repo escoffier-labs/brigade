@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import shlex
 import shutil
 import subprocess
 import sys
-import shlex
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -15,7 +16,9 @@ import pytest
 
 from brigade import doctor
 from brigade.cli import main
-from tests.test_verify_push import _commit, _git, _policy, _tree
+from brigade.work_cmd import push_gate_hook
+
+from tests.test_verify_push import _commit, _git, _line, _policy, _receipt, _single, _tree
 from tests.test_verify_push import push_repo as push_repo
 
 
@@ -150,6 +153,30 @@ def _path_with_brigade():
 def _log_rows(repo):
     log = repo / ".git" / "brigade" / "push-gate.jsonl"
     return [json.loads(line) for line in log.read_text().splitlines()]
+
+
+@pytest.mark.parametrize(
+    ("has_pass", "check_exit", "status", "reason"),
+    [(True, 0, "ok", "receipt_eligible"), (False, 1, "rejected", "receipt_ineligible")],
+)
+def test_hook_matches_push_check_with_newer_unrelated_run(
+    push_repo, capsys, monkeypatch, has_pass, check_exit, status, reason
+):
+    tip = _policy(push_repo)
+    tree = _tree(push_repo)
+    if has_pass:
+        _receipt(push_repo, tree)
+    _receipt(push_repo, tree, second=2, argv=["git", "status"])
+    code, result = _single(push_repo, capsys)
+
+    monkeypatch.chdir(push_repo)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(_line(tip, "refs/heads/topic") + "\n"))
+    assert push_gate_hook.run() == 0
+    (row,) = _log_rows(push_repo)
+    assert (code, result["status"], row["result"], row["reason"]) == (check_exit, status, status, reason)
+    assert row["would_block"] is (not has_pass)
+    if not has_pass:
+        assert result["remedy"] in capsys.readouterr().err
 
 
 def _bare_remote(repo):
@@ -327,9 +354,7 @@ def test_doctor_reports_claude_latch(tmp_path):
 
 @pytest.mark.parametrize("failure", ["timeout", "crash"])
 def test_evaluator_failure_is_a_gate_error(push_repo, monkeypatch, failure):
-    import io
-
-    from brigade.work_cmd import push_gate_hook, verify_push
+    from brigade.work_cmd import verify_push
 
     tip = _git(push_repo, "rev-parse", "HEAD")
     _policy(push_repo)

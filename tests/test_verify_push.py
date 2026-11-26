@@ -57,7 +57,7 @@ def _tree(target):
     return _git(target, "rev-parse", "HEAD^{tree}")
 
 
-def _receipt(target, tree, *, second=1, status="completed", plan=None):
+def _receipt(target, tree, *, second=1, status="completed", plan=None, argv=None, passed=1):
     receipt = {
         "status": status,
         "started_at": f"2026-01-01T12:00:{second:02d}+00:00",
@@ -65,8 +65,8 @@ def _receipt(target, tree, *, second=1, status="completed", plan=None):
         "tree_fingerprint": tree,
         "commands": [
             {
-                "argv": [*PREFIX, SELECTOR],
-                "test_outcomes": {"passed": 1, "failed": 0, "errors": 0, "no_tests_ran": False},
+                "argv": [*PREFIX, SELECTOR] if argv is None else argv,
+                "test_outcomes": {"passed": passed, "failed": 0, "errors": 0, "no_tests_ran": passed == 0},
             }
         ],
     }
@@ -128,16 +128,62 @@ def test_dirty_worktree(push_repo, capsys, committed_receipt):
     assert (code, result["status"]) == ((0, "ok") if committed_receipt else (1, "missing_receipt"))
 
 
-@pytest.mark.parametrize("status", ["failed", "busy", "running", "canceled"])
-def test_latest_tested_receipt(push_repo, capsys, status):
+@pytest.mark.parametrize("status", ["busy", "running", "canceled"])
+def test_ignores_unfinished_receipt(push_repo, capsys, status):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree, status=status)
+    code, result = _single(push_repo, capsys)
+    assert (code, result["status"]) == (1, "missing_receipt")
+    _receipt(push_repo, tree, second=2)
+    assert _single(push_repo, capsys)[0] == 0
+
+
+@pytest.mark.parametrize("passing_second", [1, 2])
+def test_accepts_required_check_with_an_unrelated_run(push_repo, capsys, passing_second):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree, second=passing_second)
+    _receipt(push_repo, tree, second=3 - passing_second, argv=["git", "status"])
+    code, result = _single(push_repo, capsys)
+    assert (code, result["status"]) == (0, "ok")
+
+
+def test_newer_failure_does_not_discard_same_tree_pass(push_repo, capsys):
     _policy(push_repo)
     tree = _tree(push_repo)
     _receipt(push_repo, tree)
-    _receipt(push_repo, tree, second=2, status=status)
+    _receipt(push_repo, tree, second=2, status="failed")
     code, result = _single(push_repo, capsys)
-    assert (code, result["status"]) == ((1, "rejected") if status == "failed" else (0, "ok"))
-    if status == "failed":
-        assert "did not complete" in result["reason"]
+    assert (code, result["status"]) == (0, "ok")
+
+
+@pytest.mark.parametrize(
+    ("argv", "passed", "reason"),
+    [
+        (["git", "status"], 1, "did not run the required check"),
+        ([*PREFIX, SELECTOR], 0, "passed no tests"),
+    ],
+)
+def test_rejects_ineligible_command(push_repo, capsys, argv, passed, reason):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree, argv=argv, passed=passed)
+    code, result = _single(push_repo, capsys)
+    assert (code, result["status"]) == (1, "rejected")
+    assert reason in result["reason"]
+    assert json.dumps([*PREFIX, "tests/test_example.py"]) in result["remedy"]
+
+
+def test_rejection_prefers_latest_required_check(push_repo, capsys):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree, status="failed")
+    _receipt(push_repo, tree, second=2, passed=0)
+    _receipt(push_repo, tree, second=3, argv=["git", "status"])
+    code, result = _single(push_repo, capsys)
+    assert (code, result["status"]) == (1, "rejected")
+    assert "passed no tests" in result["reason"]
 
 
 def test_updates_check_only_distinct_tip_trees(push_repo, capsys, monkeypatch):
@@ -276,10 +322,12 @@ def test_only_offline_git_is_called(push_repo, capsys, monkeypatch):
     assert set(commands) == {"rev-parse", "remote", "symbolic-ref", "merge-base", "ls-tree", "cat-file"}
 
 
-def test_bounded_scan_reports_indeterminate(push_repo, capsys, monkeypatch):
+@pytest.mark.parametrize("matches_tree", [False, True])
+def test_bounded_scan_reports_indeterminate(push_repo, capsys, monkeypatch, matches_tree):
     _policy(push_repo)
-    _receipt(push_repo, _tree(push_repo))
-    _receipt(push_repo, "f" * len(_tree(push_repo)), second=2)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree)
+    _receipt(push_repo, tree if matches_tree else "f" * len(tree), second=2, argv=["git", "status"])
     monkeypatch.setattr(verify_push, "_RECEIPT_LIMIT", 1)
     code, result = _single(push_repo, capsys)
     assert (code, result["status"]) == (3, "indeterminate")
