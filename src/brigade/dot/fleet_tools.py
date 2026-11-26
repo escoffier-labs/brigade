@@ -28,7 +28,7 @@ from brigade.dot.fleet_runner import (
 
 from .contracts import MAX_PROMPT_BYTES, DotError, require
 from .process import CommandRunner, child_environment, child_path
-from .runtime_config import OwnerAuthorization, Runtime
+from .runtime_config import RUNTIME_SCHEMA, OwnerAuthorization, Runtime
 from .safe_state import redact_credentials
 from .state import BridgeState, Clock, utc_now
 
@@ -307,6 +307,12 @@ class FleetTools:
             return revision, f"local refs/remotes/origin/{branch} (ls-remote failed; may be stale)"
         raise DotError("source_revision_unavailable")
 
+    def _prompt_exceeds_dot_limit(self, prompt: str) -> bool:
+        size = len(prompt.encode("utf-8"))
+        require(size <= MAX_PROMPT_BYTES, "prompt_too_large")
+        limits = self.runtime.dispatch_limits
+        return self.runtime.schema == RUNTIME_SCHEMA and limits is not None and size > limits.prompt_max_bytes
+
     def fleet_submit(
         self,
         repository: str,
@@ -321,7 +327,8 @@ class FleetTools:
         read_only: bool = False,
     ) -> dict[str, Any]:
         prompt = authorization_prompt(prompt, self.runtime.owner_authorization, read_only)
-        require(len(prompt.encode("utf-8")) <= MAX_PROMPT_BYTES, "prompt_too_large")
+        if self._prompt_exceeds_dot_limit(prompt):
+            return {"error": "prompt_too_large"}
         config = self._fleet_config()
         if repository not in config.repositories:
             return {"error": "unknown_repository", "repositories": sorted(config.repositories)}
@@ -427,7 +434,8 @@ class FleetTools:
 
     def fleet_followup(self, request_id: str, message: str, read_only: bool = False) -> dict[str, Any]:
         message = authorization_prompt(message, self.runtime.owner_authorization, read_only)
-        require(len(message.encode("utf-8")) <= MAX_PROMPT_BYTES, "prompt_too_large")
+        if self._prompt_exceeds_dot_limit(message):
+            return {"error": "prompt_too_large"}
         return self._control(
             "followup",
             request_id,
