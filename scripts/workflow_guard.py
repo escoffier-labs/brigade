@@ -100,6 +100,7 @@ class PullEvent(NamedTuple):
     head: str
     action: str
     label: object
+    sender: object
     approval_after: str | None
 
 
@@ -150,6 +151,7 @@ def read_event(repo: str, number: int) -> PullEvent:
         head_sha,
         action,
         object_field(event.get("label"), "name"),
+        event.get("sender"),
         approval_after,
     )
 
@@ -232,10 +234,25 @@ def base_scope(base: str) -> str:
     return sha256(base.encode("utf-8")).hexdigest()
 
 
-def approval_history(repo: str, number: int) -> tuple[tuple[str, int, str] | None, bool]:
+def user_login(actor: object) -> str | None:
+    login = object_field(actor, "login")
+    if object_field(actor, "type") != "User" or not isinstance(login, str):
+        return None
+    if login.lower().endswith("[bot]") or not re.fullmatch(r"[A-Za-z0-9_-]+", login):
+        return None
+    return login.lower()
+
+
+def has_maintainer_role(repo: str, login: str) -> bool:
+    permission = gh_api(f"repos/{repo}/collaborators/{login}/permission")
+    return object_field(permission, "role_name") in ("admin", "maintain")
+
+
+def approval_history(repo: str, number: int) -> tuple[tuple[str, int, str] | None, bool, str | None]:
     """Read the latest approval label transition and whether the PR changed since opening."""
     entries = paginated_entries(f"repos/{repo}/issues/{number}/events")
     latest_label = None
+    latest_actor = None
     latest_invalidation = None
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(action := entry.get("event"), str):
@@ -254,13 +271,15 @@ def approval_history(repo: str, number: int) -> tuple[tuple[str, int, str] | Non
         transition = stamp, event_id, action
         if action in APPROVAL_INVALIDATORS:
             latest_invalidation = max(latest_invalidation or transition, transition)
-        else:
-            latest_label = max(latest_label or transition, transition)
+        elif latest_label is None or transition > latest_label:
+            latest_label = transition
+            latest_actor = user_login(entry.get("actor"))
     # Timestamps have second precision. Require the label to follow any lifecycle change
     # unambiguously, regardless of the ordering of pages or event IDs.
     if latest_label is not None and latest_invalidation is not None and latest_label[0] <= latest_invalidation[0]:
         latest_label = None
-    return latest_label, latest_invalidation is not None
+        latest_actor = None
+    return latest_label, latest_invalidation is not None, latest_actor
 
 
 def matching_approval_status(
@@ -314,7 +333,7 @@ def is_success_approval(status: dict[str, object]) -> bool:
 
 def has_approval(event: PullEvent) -> bool:
     history = approval_history(event.repo, event.number)
-    label, invalidated = history
+    label, invalidated, actor = history
     if (
         label is None
         or label[2] != "labeled"
@@ -330,7 +349,7 @@ def has_approval(event: PullEvent) -> bool:
         label_id=label_id,
         allow_legacy=event.base == event.default_branch and not invalidated and event.approval_after is None,
     )
-    if status is None or not is_success_approval(status):
+    if status is None or not is_success_approval(status) or actor is None or not has_maintainer_role(event.repo, actor):
         return False
     description = status["description"]
     if description == f"pull request {event.number} approved":
@@ -345,7 +364,7 @@ def record_approval(endpoint: str, event: PullEvent) -> None:
         raise ValueError("Invalid approval event action.")
     snapshot = read_pull_snapshot(endpoint, event.base, event)
     history = approval_history(event.repo, event.number)
-    label, _ = history
+    label, _, actor = history
     entries = paginated_entries(f"repos/{event.repo}/issues/{event.number}/labels")
     names = [object_field(entry, "name") for entry in entries]
     if any(not isinstance(name, str) for name in names):
@@ -356,7 +375,12 @@ def record_approval(endpoint: str, event: PullEvent) -> None:
     # Apply only the live transition. An out-of-order removal cannot overwrite a re-add.
     if present != (label[2] == "labeled"):
         raise ValueError("Pull request label does not match its event history.")
-    if present and event.action != "labeled":
+    if present and (
+        event.action != "labeled"
+        or actor is None
+        or actor != user_login(event.sender)
+        or not has_maintainer_role(event.repo, actor)
+    ):
         return
     if history != approval_history(event.repo, event.number) or snapshot != read_pull_snapshot(
         endpoint, event.base, event

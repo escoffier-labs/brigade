@@ -1,0 +1,1 @@
+- The workflow approval label counts only when a repository admin or maintainer applied it.
