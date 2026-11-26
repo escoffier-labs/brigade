@@ -44,15 +44,39 @@ jobs:
       pull-requests: write
       actions: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - name: Mint ledger writer token
+        if: vars.LEDGER_APP_ID != ''
+        id: ledger-app-token
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          app-id: ${{ vars.LEDGER_APP_ID }}
+          private-key: ${{ secrets.LEDGER_APP_PRIVATE_KEY }}
+          # Omitting owner and repositories scopes the token to this repository.
+          permission-contents: write
+          permission-pull-requests: write
+          permission-actions: write
+      - name: Check out with the ledger writer token
+        if: vars.LEDGER_APP_ID != ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           ref: main
           fetch-depth: 0
+          token: ${{ steps.ledger-app-token.outputs.token }}
+          # The writer's git push to origin uses this credential.
+          persist-credentials: true
+      - name: Check out with the built-in token
+        if: vars.LEDGER_APP_ID == ''
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ github.token }}
+          persist-credentials: true
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: outcome-ledger-plan
           path: ${{ runner.temp }}/ledger-plan/
       - name: Verify and publish ledger pull requests
         env:
-          GH_TOKEN: ${{ github.token }}
+          GH_TOKEN: ${{ vars.LEDGER_APP_ID == '' && github.token || steps.ledger-app-token.outputs.token }}
         run: python3 -I -S scripts/ledger_decide.py publish --artifact "$RUNNER_TEMP/ledger-plan"

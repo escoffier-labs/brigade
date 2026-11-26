@@ -1,0 +1,1 @@
+- Let the scheduled ledger writer use a repository-scoped GitHub App token so its pull requests can trigger CI without manual workflow approval.

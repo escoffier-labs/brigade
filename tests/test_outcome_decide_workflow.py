@@ -2,7 +2,7 @@
 
 import re
 
-from tests.test_ci_workflow import ROOT, _workflow_job_section
+from tests.test_ci_workflow import ROOT, _workflow_job_section, _workflow_step_section
 
 WORKFLOW = (ROOT / ".github/workflows/outcome-decide.yml").read_text(encoding="utf-8")
 
@@ -31,14 +31,51 @@ def test_outcome_decide_job_permissions_are_exact():
 
 
 def test_outcome_decide_actions_are_pinned_and_shell_runs_are_inert():
-    actions = re.findall(r"^      - uses: (.+)$", WORKFLOW, re.MULTILINE)
-    assert len(actions) == 4
+    actions = re.findall(r"^ {6}(?:- |  )uses: (.+)$", WORKFLOW, re.MULTILINE)
+    assert len(actions) == 6
     assert all(re.fullmatch(r"[\w.-]+/[\w.-]+@[0-9a-f]{40} # v\d+(?:\.\d+)*", action) for action in actions)
     runs = re.findall(r"^        run: (.*(?:\n {10,}[^\n]*)*)", WORKFLOW, re.MULTILINE)
     assert len(runs) == 2 and all("${{" not in command for command in runs)
     assert all("python3 -I -S scripts/ledger_decide.py" in command for command in runs)
     assert "scripts/ledger_decide.py compute" in runs[0]
     assert "scripts/ledger_decide.py publish" in runs[1]
+
+
+def test_outcome_decide_app_token_is_scoped_to_the_writer():
+    compute = _workflow_job_section(WORKFLOW, "compute")
+    assert "GH_TOKEN: ${{ github.token }}" in compute
+    assert "ledger-app-token" not in compute
+    assert "create-github-app-token" not in compute
+
+    mint = _workflow_step_section(WORKFLOW, "publish", "Mint ledger writer token")
+    assert "if: vars.LEDGER_APP_ID != ''" in mint
+    assert "continue-on-error:" not in mint
+    assert "id: ledger-app-token" in mint
+    assert "app-id: ${{ vars.LEDGER_APP_ID }}" in mint
+    assert "private-key: ${{ secrets.LEDGER_APP_PRIVATE_KEY }}" in mint
+    assert "owner:" not in mint and "repositories:" not in mint
+    assert dict(re.findall(r"^          permission-([a-z-]+): (\w+)$", mint, re.MULTILINE)) == {
+        "contents": "write",
+        "pull-requests": "write",
+        "actions": "write",
+    }
+
+
+def test_outcome_decide_publish_uses_the_same_identity_for_git_and_gh():
+    app_output = "steps.ledger-app-token.outputs.token"
+    app_checkout = _workflow_step_section(WORKFLOW, "publish", "Check out with the ledger writer token")
+    assert "if: vars.LEDGER_APP_ID != ''" in app_checkout
+    assert f"token: ${{{{ {app_output} }}}}" in app_checkout
+    assert "persist-credentials: true" in app_checkout
+
+    fallback = _workflow_step_section(WORKFLOW, "publish", "Check out with the built-in token")
+    assert "if: vars.LEDGER_APP_ID == ''" in fallback
+    assert "token: ${{ github.token }}" in fallback
+    assert "persist-credentials: true" in fallback
+
+    publish = _workflow_step_section(WORKFLOW, "publish", "Verify and publish ledger pull requests")
+    assert f"GH_TOKEN: ${{{{ vars.LEDGER_APP_ID == '' && github.token || {app_output} }}}}" in publish
+    assert "if:" not in publish
 
 
 def test_outcome_decide_artifact_handoff_matches():
