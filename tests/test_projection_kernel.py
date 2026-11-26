@@ -31,13 +31,20 @@ def _snapshot(root: Path) -> dict[str, tuple[str, int | None]]:
     return records
 
 
-@pytest.mark.parametrize("parent", [Path("relative"), Path()])
+@pytest.mark.parametrize(
+    ("parent", "message"),
+    [
+        (Path("relative"), "destination must be absolute"),
+        (Path(), "unsafe destination path"),
+    ],
+)
 def test_walk_existing_parent_rejects_non_absolute_paths(
-    parent: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    parent: Path, message: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
-    with pytest.raises(projection.PlanError):
+    with pytest.raises(projection.PlanError) as excinfo:
         projection._walk_existing_parent(parent)
+    assert str(excinfo.value) == message
 
 
 def test_mixed_plan_commits_create_replace_and_remove(tmp_path: Path) -> None:
