@@ -1,1 +1,0 @@
-- Allow offline setup to authenticate an exact release manifest shipped in the installed CLI or a byte-for-byte copy when its component assets are cached.

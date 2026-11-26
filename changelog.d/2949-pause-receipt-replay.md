@@ -1,1 +1,0 @@
-- Pause automatic receipt indexing in a worktree when its evidence engine omits acknowledgement. Keep receipts pending until the engine changes or a manual retry succeeds, and back off after consecutive import timeouts.

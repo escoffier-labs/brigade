@@ -3029,7 +3029,7 @@
     "reason": "Persisted schema, receipt or import identity, internal reader names and import diagnostics.",
     "literals": {
       "MISELEDGER": 18,
-      "miseledger": 90
+      "miseledger": 79
     }
   },
   {
@@ -3648,7 +3648,7 @@
     "reason": "Compatibility, persisted identities and historical importer output regression coverage.",
     "literals": {
       "MISELEDGER": 6,
-      "miseledger": 148
+      "miseledger": 146
     }
   },
   {
