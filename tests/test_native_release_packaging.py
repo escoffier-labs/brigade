@@ -128,45 +128,225 @@ def test_attestation_covers_every_native_asset_and_primary_manifest():
         assert re.search(r"find release-assets[^\n]+-eq 29", _workflow_job_section(workflow(), job))
 
 
-@pytest.mark.parametrize(
-    "mutation", ["none", "missing-engine", "engine-digest", "checksums-digest", "duplicate", "extra"]
-)
-def test_release_resume_validates_full_inventory_digests(tmp_path, mutation):
-    assets_dir = tmp_path / "assets"
+@pytest.fixture
+def release_cli(tmp_path, monkeypatch):
+    if os.name == "nt":
+        pytest.skip("release job uses a POSIX runner and fake gh shebang")
+
+    from scripts import generate_component_manifest
+
+    monkeypatch.setattr(generate_component_manifest, "ACCEPTED_REPOSITORIES", ("fixture/project",))
+
+    assets_dir = tmp_path / "release-assets"
     assets_dir.mkdir()
-    names = native_names() | {"component-manifest-v1.json", "checksums.txt"}
-    assets = []
-    for name in sorted(names):
-        data = name.encode()
-        (assets_dir / name).write_bytes(data)
-        assets.append({"name": name, "digest": "sha256:" + hashlib.sha256(data).hexdigest()})
-    engine = "brigade-evidence-windows-amd64.exe"
-    if mutation == "missing-engine":
-        assets = [asset for asset in assets if asset["name"] != engine]
-    elif mutation.endswith("-digest"):
-        name = engine if mutation == "engine-digest" else "checksums.txt"
-        next(asset for asset in assets if asset["name"] == name)["digest"] = "sha256:" + "0" * 64
-    elif mutation == "duplicate":
-        assets.append(assets[0])
-    elif mutation == "extra":
+    for name in native_names():
+        (assets_dir / name).write_bytes(name.encode())
+    generate_component_manifest.generate_manifest(
+        tag="v1.2.3",
+        commit="a" * 40,
+        assets_dir=assets_dir,
+        output=assets_dir / "component-manifest-v1.json",
+        checksums_output=assets_dir / "checksums.txt",
+        repository="fixture/project",
+    )
+    expected = [
+        {"name": path.name, "digest": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()}
+        for path in sorted(assets_dir.iterdir())
+    ]
+    gh = tmp_path / "gh"
+    gh.write_text(
+        f"#!{sys.executable}\n"
+        + textwrap.dedent(r"""
+            import hashlib
+            import json
+            import sys
+            from pathlib import Path
+            from urllib.parse import parse_qs, urlsplit
+
+            state_file = Path("state.json")
+            state = json.loads(state_file.read_text())
+            args = sys.argv[1:]
+            with Path("calls.jsonl").open("a") as log:
+                log.write(json.dumps(args) + "\n")
+            releases = state["releases"]
+            base = "repos/fixture/project/releases"
+            if args[:2] == ["release", "create"]:
+                assert args[2:] == [
+                    "v1.2.3", "--repo", "fixture/project", "--verify-tag", "--draft",
+                    "--title", "v1.2.3", "--notes", "Fixture release",
+                ]
+                assert not releases
+                releases.append({"id": 42, "tag_name": "v1.2.3", "draft": True, "assets": []})
+                state_file.write_text(json.dumps(state))
+                sys.exit(0)
+            assert args[0] == "api"
+            endpoint = args[1]
+            if endpoint == base + "/tags/v1.2.3":
+                assert "--include" in args
+                published = next((r for r in releases if not r["draft"]), None)
+                status = state.get("status", 200 if published else 404)
+                if status == "network":
+                    sys.exit("connection failed (message includes HTTP 404)")
+                print(f"HTTP/2.0 {status} Fixture\nContent-Type: application/json\n")
+                print(json.dumps(published if status == 200 else {"message": "Fixture error"}))
+                if status != 200:
+                    sys.exit(1)
+            elif endpoint == base + "?per_page=100":
+                assert args[2:] == ["--paginate", "--slurp"]
+                if state.get("deny_list"):
+                    sys.exit("gh: Forbidden (HTTP 403)")
+                print(json.dumps([[{"id": 8, "tag_name": "v0.0.1", "draft": True}], *([r] for r in releases)]))
+            else:
+                release = releases[0]
+                if endpoint == base + "/42":
+                    if "--method" in args:
+                        assert args[2:] == ["--method", "PATCH", "-F", "draft=false", "-f", "make_latest=true"]
+                        assert release["draft"]
+                        release["draft"] = False
+                        state_file.write_text(json.dumps(state))
+                        if state.get("interrupt"):
+                            sys.exit("interrupted after publish")
+                    if state.get("omit_last_on_verify"):
+                        state["rechecking"] = True
+                        state_file.write_text(json.dumps(state))
+                    print(json.dumps(release))
+                elif endpoint == base + "/42/assets?per_page=100":
+                    assert args[2:] == ["--paginate", "--slurp"]
+                    assets = release["assets"]
+                    if state.get("rechecking"):
+                        assets = assets[:-1]
+                    print(json.dumps([[asset] for asset in assets] or [[]]))
+                else:
+                    url = urlsplit(endpoint)
+                    assert url.netloc == "uploads.github.com"
+                    assert url.path == f"/{base}/42/assets"
+                    assert args[2:6] == ["--method", "POST", "-H", "Content-Type: application/octet-stream"]
+                    assert args[6] == "--input" and len(args) == 8
+                    name = parse_qs(url.query)["name"][0]
+                    assert release["draft"] and name not in [asset["name"] for asset in release["assets"]]
+                    path = Path(args[7])
+                    assert path.name == name
+                    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+                    release["assets"].append({"name": name, "digest": "sha256:" + digest})
+                    state_file.write_text(json.dumps(state))
+            """).lstrip()
+    )
+    gh.chmod(0o755)
+    git = tmp_path / "git"
+    git.write_text("#!/bin/sh\nexit 99\n")
+    git.chmod(0o755)
+
+    def run(releases, **state):
+        (tmp_path / "state.json").write_text(json.dumps({"releases": releases, **state}))
+        log = tmp_path / "calls.jsonl"
+        log.unlink(missing_ok=True)
+        result = subprocess.run(
+            [sys.executable, "-I", str(ROOT / "scripts/publish_github_release.py"), "Fixture release"],
+            cwd=tmp_path,
+            env={"PATH": str(tmp_path), "GITHUB_REPOSITORY": "fixture/project", "TAG": "v1.2.3"},
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+        calls = [json.loads(line) for line in log.read_text().splitlines()] if log.exists() else []
+        return result, calls, json.loads((tmp_path / "state.json").read_text())["releases"]
+
+    return expected, run
+
+
+def _release(assets, *, draft):
+    return {"id": 42, "tag_name": "v1.2.3", "draft": draft, "assets": assets}
+
+
+def _mutations(calls):
+    return [call for call in calls if call[:2] == ["release", "create"] or "--method" in call]
+
+
+@pytest.mark.parametrize("case", ["fresh", "partial-draft", "complete-draft", "published", "interrupted"])
+def test_release_publish_and_resume(release_cli, case):
+    assets, run = release_cli
+    missing = {"fresh": assets, "partial-draft": assets[1:]}.get(case, [])
+    existing = (
+        []
+        if case == "fresh"
+        else [_release(assets[:1] if case == "partial-draft" else assets, draft=case != "published")]
+    )
+    result, calls, releases = run(existing, interrupt=case == "interrupted")
+    if case == "interrupted":
+        assert "interrupted after publish" in result.stderr
+        result, retry_calls, _ = run(releases)
+        assert _mutations(retry_calls) == []
+    assert result.returncode == 0, result.stderr
+    assert releases == [_release(assets, draft=False)]
+    mutations = _mutations(calls)
+    assert sum(call[:2] == ["release", "create"] for call in mutations) == (case == "fresh")
+    assert [Path(call[-1]).name for call in mutations if "POST" in call] == [asset["name"] for asset in missing]
+    if case == "published":
+        assert mutations == []
+    else:
+        assert "PATCH" in calls[-1]
+        assert calls[-2][1].endswith("/42/assets?per_page=100")
+        assert calls[-3] == ["api", "repos/fixture/project/releases/42"]
+
+
+@pytest.mark.parametrize("case", ["missing", "unexpected", "duplicate", "engine-digest", "checksums-digest"])
+def test_bad_published_inventory_never_mutates_release(release_cli, case):
+    assets, run = release_cli
+    if case == "missing":
+        assets.pop()
+    elif case == "unexpected":
         assets.append({"name": "unexpected", "digest": "sha256:" + "0" * 64})
-    release = tmp_path / "release.json"
-    release.write_text(json.dumps({"assets": assets}))
-    missing = tmp_path / "missing.txt"
-    step = _workflow_step_section(
-        workflow(), "create-release", "Create or strictly resume the one immutable Brigade release"
-    )
-    program = textwrap.dedent(step.split("<<'PY'\n", 1)[1].split("\n          PY", 1)[0])
-    result = subprocess.run(
-        [sys.executable, "-", str(assets_dir), str(release), str(missing)],
-        input=program,
-        capture_output=True,
-        text=True,
-        env=os.environ,
-    )
-    assert (result.returncode == 0) == (mutation in {"none", "missing-engine"}), result.stderr
-    if result.returncode == 0:
-        assert missing.read_text().strip() == (engine if mutation == "missing-engine" else "")
+    elif case == "duplicate":
+        assets.append(assets[0])
+    else:
+        name = "checksums.txt" if case == "checksums-digest" else "brigade-evidence-windows-amd64.exe"
+        next(asset for asset in assets if asset["name"] == name)["digest"] = "sha256:" + "0" * 64
+    result, calls, _ = run([_release(assets, draft=False)])
+    assert result.returncode != 0
+    assert case.split("-")[-1] in result.stderr
+    assert calls and _mutations(calls) == []
+
+
+@pytest.mark.parametrize("status", [401, 403, 429, "network"])
+def test_release_lookup_failure_never_creates_a_draft(release_cli, status):
+    _, run = release_cli
+    result, calls, _ = run([], status=status)
+    assert result.returncode != 0
+    assert len(calls) == 1 and _mutations(calls) == []
+
+
+def test_release_list_failure_after_tag_404_never_creates_a_draft(release_cli):
+    _, run = release_cli
+    result, calls, _ = run([], deny_list=True)
+    assert result.returncode != 0
+    assert "HTTP 403" in result.stderr
+    assert len(calls) == 2 and _mutations(calls) == []
+
+
+def test_draft_with_mismatched_asset_stops_before_upload(release_cli):
+    assets, run = release_cli
+    asset = {**assets[0], "digest": "sha256:" + "0" * 64}
+    result, calls, _ = run([_release([asset], draft=True)])
+    assert result.returncode != 0
+    assert "digest differs" in result.stderr
+    assert calls and _mutations(calls) == []
+
+
+def test_draft_stays_unpublished_if_final_inventory_is_incomplete(release_cli):
+    assets, run = release_cli
+    result, calls, releases = run([_release(assets[:-1], draft=True)], omit_last_on_verify=True)
+    assert result.returncode != 0
+    assert "missing assets" in result.stderr
+    assert [call[3] for call in _mutations(calls)] == ["POST"]
+    assert releases[0]["draft"] is True
+
+
+def test_release_lookup_rejects_two_drafts_for_same_tag(release_cli):
+    _, run = release_cli
+    result, calls, _ = run([_release([], draft=True), {**_release([], draft=True), "id": 43}])
+    assert result.returncode != 0
+    assert "multiple releases" in result.stderr
+    assert calls and _mutations(calls) == []
 
 
 def test_release_gate_binds_every_attestation_to_source_commit_and_ref(tmp_path):
