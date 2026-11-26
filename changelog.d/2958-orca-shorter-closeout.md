@@ -1,0 +1,1 @@
+- Print the inbox and transcript commands when Brigade accepts an Orca worker, so one observation can record terminal and release evidence before acknowledgement.

@@ -640,8 +640,17 @@ def test_orca_1_4_271_concurrent_closeout(coordinator):
         start = _fixture("worker-start")
         start["result"].update(taskId=orca_task, dispatchId=dispatch)
         start["result"]["mutation"]["requestId"] = grant["retry_request"]
-        coordinator.invoke(
+        accepted = coordinator.invoke(
             "accepted", run_id, task, "--native-json", coordinator.payload(f"{task}-start", start), "--exit-code", 0
+        )
+        assert accepted["observe_argv"] == (
+            f"orca-ide orchestration worker-show --environment local --dispatch {dispatch} --json --full".split()
+        )
+        assert accepted["inbox_argv"] == (
+            f"orca-ide orchestration inbox --full --environment local --run {RUN} --limit 100 --json".split()
+        )
+        assert accepted["transcript_argv"] == (
+            f"orca-ide orchestration worker-read --environment local --dispatch {dispatch} --source transcript --json".split()
         )
 
         released = _recovery_fixture("worker-show-released-exited")
@@ -649,7 +658,6 @@ def test_orca_1_4_271_concurrent_closeout(coordinator):
         released["result"]["dispatch"]["status"] = "completed"
         released["result"]["worker"]["state"] = "succeeded"
         payloads = {
-            "show": _fixture("worker-show-structured"),
             "released": released,
             "inbox": _fixture("worker-done"),
             "transcript": [_recovery_fixture(f"worker-read-page-{page}") for page in (1, 2)],
@@ -688,9 +696,8 @@ def test_orca_1_4_271_concurrent_closeout(coordinator):
 
         evidence = receipts[task]
         start_closeout.wait()
-        partial = invoke("observe", "--native-json", evidence["show"])
-        assert partial["reason"] == "result-transfer-missing" and partial["result_id"] is None
-        proof = (
+        observed = invoke(
+            "observe",
             "--native-json",
             evidence["released"],
             "--worker-done-json",
@@ -698,15 +705,11 @@ def test_orca_1_4_271_concurrent_closeout(coordinator):
             "--transcript-json",
             evidence["transcript"],
         )
-        observed = invoke("observe", *proof)
         assert observed["reason"] == "terminal-evidence-complete"
         assert observed["transcript_clipped"] is True
         result_id = observed["result_id"]
         assert isinstance(result_id, str) and result_id
         assert invoke("ack", "--result-id", result_id)["acknowledged"]
-        confirmed = invoke("observe", *proof)
-        assert confirmed["reason"] == "terminal-evidence-complete"
-        assert confirmed["result_id"] == result_id
 
     with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
         list(pool.map(closeout, tasks))
@@ -714,16 +717,15 @@ def test_orca_1_4_271_concurrent_closeout(coordinator):
     after = _events(coordinator.workspace, run_id)
     assert after[: len(before)] == before
     closeout_events = after[len(before) :]
-    assert [event.event_type for event in closeout_events[::2]] == ["run.snapshot.checkpointed"] * (4 * len(tasks))
+    assert [event.event_type for event in closeout_events[::2]] == ["run.snapshot.checkpointed"] * (3 * len(tasks))
     task_events = closeout_events[1::2]
-    assert len(task_events) == 4 * len(tasks)
+    assert len(task_events) == 3 * len(tasks)
     for task in tasks:
         assert [
             (event.event_type, event.payload.get("reason"))
             for event in task_events
             if event.payload.get("task_id") == task
         ] == [
-            ("task.native-capacity", "structured-tab-open"),
             ("task.native-capacity", "released"),
             ("task.observed", None),
             ("task.acknowledged", None),
@@ -735,6 +737,59 @@ def test_orca_1_4_271_concurrent_closeout(coordinator):
     assert status["status"] == "completed"
     assert status["capacity"]["live"] == 0
     assert {row["task_id"] for row in status["tasks"] if row["terminal"] and row["acked"]} == set(tasks)
+
+
+@pytest.mark.parametrize(
+    ("case", "reason"),
+    [
+        ("missing-release", "terminal-evidence-complete"),
+        ("unknown-liveness", "containment-unconfirmed"),
+        ("unfinished-transcript", "result-transfer-missing"),
+        ("wrong-inbox-task", "result-transfer-missing"),
+        ("wrong-transcript-dispatch", "result-transfer-missing"),
+        ("wrong-show-run", "task-mismatch"),
+    ],
+)
+def test_orca_1_4_271_single_observe_requires_closeout_evidence(coordinator, case, reason):
+    roster = coordinator.workspace / ".brigade" / "roster.toml"
+    roster.write_text(roster.read_text().replace(VERSION, "1.4.271"))
+    run_id = coordinator.open()
+    coordinator.accept(coordinator.start())
+    show = _fixture("worker-show-released")
+    inbox = _fixture("worker-done")
+    pages = [_recovery_fixture(f"worker-read-page-{page}") for page in (1, 2)]
+    if case == "missing-release":
+        show = _fixture("worker-show-structured")
+        del show["result"]["terminalResource"]
+    elif case == "unknown-liveness":
+        show["result"]["projection"]["liveness"]["verdict"] = "unknown"
+    elif case == "unfinished-transcript":
+        pages.pop()
+    elif case == "wrong-inbox-task":
+        message = inbox["result"]["messages"][0]
+        message["payload"] = message["payload"].replace(TASK, SECOND_TASK)
+    elif case == "wrong-transcript-dispatch":
+        pages[1]["result"]["dispatchId"] = "ctx_000000000009"
+    elif case == "wrong-show-run":
+        show["result"]["dispatch"]["runId"] = "run_000000000009"
+    observed = coordinator.observe(
+        show,
+        "--worker-done-json",
+        coordinator.payload("inbox", inbox),
+        "--transcript-json",
+        coordinator.payload("transcript", pages),
+        error=reason if case == "wrong-show-run" else None,
+    )
+    if case == "missing-release":
+        assert observed["reason"] == reason and observed["result_id"]
+        coordinator.invoke("ack", run_id, "one", "--result-id", observed["result_id"])
+        assert coordinator.status()["tasks"][0]["capacity_reason"] == "release-unverified"
+    else:
+        if case != "wrong-show-run":
+            assert observed["reason"] == reason and observed["result_id"] is None
+        coordinator.invoke("ack", run_id, "one", "--result-id", "a" * 64, error="task-nonterminal")
+    assert coordinator.status()["capacity"]["live"] == 1
+    coordinator.invoke("finalize", run_id, error="finalize-live")
 
 
 @pytest.mark.parametrize(

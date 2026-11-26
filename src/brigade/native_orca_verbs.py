@@ -246,6 +246,8 @@ def _correlate(task: ClaimedTask, worker: dispatch.WorkerReference, *, mode: str
         "orca_task_id": worker.task_id,
         "dispatch_id": worker.dispatch_id,
         "observe_argv": observations.observe_argv(worker),
+        "inbox_argv": observations.inbox_argv(worker),
+        "transcript_argv": observations.result_argv(worker),
         "replayed": prior is not None and held is None,
     }
 
