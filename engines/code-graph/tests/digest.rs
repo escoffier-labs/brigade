@@ -178,15 +178,12 @@ fn graph_commands(db: &Path) -> Vec<Vec<&str>> {
         vec!["stats"],
         vec!["sync"],
     ];
-    let mut non_graph = vec!["evaluate", "help"];
+    let non_graph = ["evaluate", "help", "links"]; // Links reads the evidence database.
     if cfg!(feature = "watch") {
         commands.push(vec!["watch"]);
     }
     if cfg!(feature = "codesearch") {
         commands.push(vec!["blend", "target"]);
-    }
-    if cfg!(feature = "miseledger") {
-        non_graph.push("links"); // Reads the evidence database instead.
     }
     let cli = brigade_code_graph::cli::Cli::command();
     let expected: std::collections::BTreeSet<_> = cli
