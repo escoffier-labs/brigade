@@ -1,0 +1,1 @@
+- State the operator's authorization in each shared T3 qualification task while preserving the original task text for replay of earlier campaigns.

@@ -39,6 +39,11 @@ WORKLOAD = {
     "package": "pyproject.toml",
     "runner": "src/brigade/run_batch.py",
 }
+TASK_TEXT_VERSION = 2
+TASK_PREAMBLE = (
+    "This is an operator-assigned, read-only benchmark task under Brigade governance. "
+    "The operator authorized the two commands below. Complete the task without asking for another assignment.\n\n"
+)
 ARMS = ("t3", "run-batch")
 CAMPAIGN_SCHEMA = "brigade.t3_qualification_campaign.v1"
 METRICS = {
@@ -170,7 +175,15 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def prepare_batch(workspace: Path, base: str, seat: str, request_id: str) -> tuple[dict[str, Any], dict[str, Any]]:
+def prepare_batch(
+    workspace: Path, base: str, seat: str, request_id: str, task_text_version: int = TASK_TEXT_VERSION
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    # Preserve the original text and fingerprint when replaying older campaigns.
+    evidence.require(
+        type(task_text_version) is int and task_text_version in (1, TASK_TEXT_VERSION),
+        "unsupported qualification task text version",
+    )
+    preamble = TASK_PREAMBLE if task_text_version == TASK_TEXT_VERSION else ""
     answers = {}
     tasks = []
     for task, path in WORKLOAD.items():
@@ -183,7 +196,7 @@ def prepare_batch(workspace: Path, base: str, seat: str, request_id: str) -> tup
                 "isolation": "worktree",
                 "read_only": True,
                 "text": (
-                    f"In your assigned worktree, run git rev-parse HEAD and sha256sum -- {path}. "
+                    f"{preamble}In your assigned worktree, run git rev-parse HEAD and sha256sum -- {path}. "
                     'Return only a JSON object with two string fields named "head" and "sha256", '
                     "containing the observed revision and file digest. Do not change any files."
                 ),
@@ -369,6 +382,7 @@ def _run_campaign(
         "brigade_commit": args.brigade_commit,
         "seat": args.seat,
         "worker_effort": args.worker_effort,
+        "task_text_version": TASK_TEXT_VERSION,
     }
     localio.write_json_exclusive(output / "campaign.json", campaign)
     for pair, arm in schedule():
@@ -378,7 +392,7 @@ def _run_campaign(
         )
         pair_dir = output / f"pair-{pair:02d}"
         request, run_ids = _pair_identities(campaign, pair)
-        payload, answers = prepare_batch(workspace, base, args.seat, request)
+        payload, answers = prepare_batch(workspace, base, args.seat, request, campaign["task_text_version"])
         fingerprint = run_batch.request_fingerprint(payload, base_sha=base)
         context = {
             "qualification": "t3",
@@ -459,7 +473,7 @@ def _collect_row(output: Path, pair: int, arm: str, *, closing: bool = False) ->
     )
     workspace = Path(campaign["workspace"]).resolve()
     base = campaign["base_sha"]
-    payload, answers = prepare_batch(workspace, base, campaign["seat"], request)
+    payload, answers = prepare_batch(workspace, base, campaign["seat"], request, campaign.get("task_text_version", 1))
     fingerprint = run_batch.request_fingerprint(payload, base_sha=base)
     evidence.require(
         evidence.read(pair_dir / "batch.json") == payload

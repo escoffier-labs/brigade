@@ -764,3 +764,50 @@ def test_preflight_matches_worker_effort(tmp_path, monkeypatch, seat_effort, t3_
     else:
         with pytest.raises(ValueError, match="must both use medium effort"):
             qualification._preflight(*args)
+
+
+def test_campaign_shares_operator_assigned_task_text_between_arms(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    base = "a" * 40
+    args = SimpleNamespace(brigade_commit="b" * 40, seat="worker", worker_effort="medium", parent_timeout=1)
+    target = SimpleNamespace(
+        origin_thread="thread-example",
+        origin_environment="env-example",
+        target_project="project-example",
+        provider_instance="codex-example",
+    )
+    batch_bytes = {}
+    expected_answers = {}
+
+    def capture(arm, folder):
+        batch_bytes[arm] = (folder.parent / "batch.json").read_bytes()
+        expected_answers[arm] = json.loads((folder / "expected.json").read_bytes())["answers"]
+
+    monkeypatch.setattr(qualification, "schedule", lambda: [(1, "t3"), (1, "run-batch")])
+    monkeypatch.setattr(qualification, "_preflight", lambda *_args: target)
+    monkeypatch.setattr(qualification.subprocess, "check_output", lambda argv, **_kwargs: argv[-1].encode())
+    monkeypatch.setattr(qualification, "_write_brief", lambda folder, *_args: capture("t3", folder))
+    monkeypatch.setattr(qualification, "_wait_for_parent", lambda *_args: None)
+    monkeypatch.setattr(
+        qualification, "_direct", lambda _workspace, _roster, folder, *_args: capture("run-batch", folder)
+    )
+    monkeypatch.setattr(qualification, "_collect_row", lambda *_args, **_kwargs: {"start_ns": 1, "closed_ns": 1})
+    monkeypatch.setattr(qualification, "summarize", lambda _rows: {})
+
+    qualification._run_campaign(args, tmp_path, tmp_path, tmp_path / "roster.toml", tmp_path, base, target)
+
+    assert json.loads((tmp_path / "campaign.json").read_bytes())["task_text_version"] == 2
+    assert batch_bytes["t3"] == batch_bytes["run-batch"]
+    batch = json.loads(batch_bytes["t3"])
+    assert {task["task_id"] for task in batch["tasks"]} == qualification.WORKLOAD.keys()
+    preamble = (
+        "This is an operator-assigned, read-only benchmark task under Brigade governance. "
+        "The operator authorized the two commands below. Complete the task without asking for another assignment.\n\n"
+    )
+    assert all(task["text"].startswith(preamble) for task in batch["tasks"])
+    legacy, legacy_answers = qualification.prepare_batch(tmp_path, base, args.seat, batch["request_id"], 1)
+    assert [task["text"].removeprefix(preamble) for task in batch["tasks"]] == [
+        task["text"] for task in legacy["tasks"]
+    ]
+    assert expected_answers["t3"] == expected_answers["run-batch"] == legacy_answers

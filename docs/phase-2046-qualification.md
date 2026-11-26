@@ -22,6 +22,14 @@ also enforces read-only through Brigade's worker policy. The harness checks
 that all observed worktrees are distinct, clean, and at the pinned revision.
 Approval waits, if any, remain in the measured time.
 
+Campaign 03 stopped in pair 1 when the medium-effort T3 guide worker waited
+for operator direction instead of returning the Git checks (`status-guide.json`
+and `failure.json` in the retained T3 evidence). Each shared task now starts
+by stating that the operator assigned the read-only workload and authorized
+the two commands. The expected revision and file digest still come from
+the pinned Git objects. Replay uses the task text version saved in
+`campaign.json` so earlier batches retain their original fingerprints.
+
 ## Run the campaign
 
 Use a dedicated clean checkout attached to the designated local T3 parent
