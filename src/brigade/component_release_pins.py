@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+# Published component-manifest-v1.json fingerprints for offline repair.
+MANIFEST_DIGESTS = {
+    "v0.30.0+02270bc7ffd92640cd8debf39711eca7c8678fc0": "046dcba26923a792cb49bea266bfad7c0c8d44beb10c2249356faaa346620ba9",
+    "v0.32.0+682a0ce07a397e058697c40122d94c4ce02f7db8": "9325fe49f5a37e32d65d8931ef85e682aac5e061a319cdbc1c187509f6f00e59",
+}
+
 # From the published component-manifest-v1.json assets. Keep these pins limited to the
 # v0.30.0 affected release and the v0.32.0 bundle documented for explicit repair.
 _ASSET_PINS: dict[str, dict[tuple[str, str], tuple[int, str]]] = {
-    # Published manifest SHA-256: 046dcba26923a792cb49bea266bfad7c0c8d44beb10c2249356faaa346620ba9
     "v0.30.0+02270bc7ffd92640cd8debf39711eca7c8678fc0": {
         ("agent-notify", "darwin-amd64"): (7446896, "f377fc34b417cafaef47ae1588174de4b458ea1ad708a69ef9c371de197d2c51"),
         ("agent-notify", "darwin-arm64"): (6877250, "37ae8797c743a408367fb255b8d1be64729d804c20f2c3cd6c851dec1d85fb1e"),
@@ -84,7 +89,6 @@ _ASSET_PINS: dict[str, dict[tuple[str, str], tuple[int, str]]] = {
             "a7fc5a1196774542c04229b990a230656dd0be16808d6bc4a26a3314ae65f784",
         ),
     },
-    # Published manifest SHA-256: 9325fe49f5a37e32d65d8931ef85e682aac5e061a319cdbc1c187509f6f00e59
     "v0.32.0+682a0ce07a397e058697c40122d94c4ce02f7db8": {
         ("agent-notify", "darwin-amd64"): (7450992, "a67a2a427760fb1f48736f1cb55e976b2ce52f05962a09beee09072ae26dbdde"),
         ("agent-notify", "darwin-arm64"): (6877250, "5e29edaceee3f003bbacc5796e5a3053aa0e33f684f5907ab1ba82cc4f9ae4a4"),
