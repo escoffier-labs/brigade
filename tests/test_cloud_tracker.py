@@ -659,10 +659,13 @@ def test_cli_run_cloud_register_and_adopt(tmp_path: Path, capsys):
 def test_register_on_dispatch_from_codex_cloud(tmp_path: Path, monkeypatch):
     from brigade import codex_cloud, proc
 
-    calls = []
-
     def fake_run(command, timeout, cwd=None, process_registry=None):
         if command[:3] == ["codex", "cloud", "exec"]:
+            (intent,) = cloud_tracker.load_registry(tmp_path)["entries"]
+            assert intent["provider"] == "codex-cloud"
+            assert intent["task_id"] is None
+            assert intent["launch_state"] == "needs-reconcile"
+            assert "do the thing" not in json.dumps(intent)
             return proc.Result(code=0, stdout="task_id: task_dispatch_99\n", stderr="")
         if command[:3] == ["codex", "cloud", "status"]:
             return proc.Result(code=0, stdout="Status: completed\n", stderr="")
@@ -671,11 +674,6 @@ def test_register_on_dispatch_from_codex_cloud(tmp_path: Path, monkeypatch):
         return proc.Result(code=1, stdout="", stderr="unexpected")
 
     monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
-    monkeypatch.setattr(
-        cloud_tracker,
-        "register",
-        lambda *a, **k: calls.append(k) or {"id": "registered"},
-    )
     result = codex_cloud.run_cloud_task(
         "do the thing",
         env_id="env-1",
@@ -685,10 +683,11 @@ def test_register_on_dispatch_from_codex_cloud(tmp_path: Path, monkeypatch):
         register_target=tmp_path,
     )
     assert result.ok
-    assert calls
-    assert calls[0]["task_id"] == "task_dispatch_99"
-    assert calls[0]["provider"] == "codex-cloud"
-    assert "prompt" not in calls[0]
+    (entry,) = cloud_tracker.load_registry(tmp_path)["entries"]
+    assert entry["task_id"] == "task_dispatch_99"
+    assert entry["provider"] == "codex-cloud"
+    assert entry["launch_state"] == "tracked"
+    assert "prompt" not in entry
 
 
 def test_codex_observer_uses_bounded_structured_inventory(tmp_path: Path, monkeypatch):
