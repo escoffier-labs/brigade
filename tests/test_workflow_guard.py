@@ -49,6 +49,7 @@ CLI_ARGS = ["--repo", "example/project", "--pr", "42"]
         "tests/fleet_hub_container_smoke.py",
         "scripts/windows_job.py",
         "scripts/windows_test_weights.json",
+        "scripts/publish_github_release.py",
     ],
 )
 def test_protected_path(path):

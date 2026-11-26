@@ -343,66 +343,21 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: unified-release-assets
           path: release-assets
-      - name: Create or strictly resume the one immutable Brigade release
+      - name: Upload and verify every draft release asset, then publish
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.ref_name }}
         run: |
-          set -euo pipefail
-          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets > existing-release.json 2> release-view.err; then
-            python - release-assets existing-release.json missing-release-assets.txt <<'PY'
-          import hashlib
-          import json
-          import sys
-          from pathlib import Path
-
-          assets_dir = Path(sys.argv[1])
-          release = json.loads(Path(sys.argv[2]).read_text())
-          expected = {
-              path.name: hashlib.sha256(path.read_bytes()).hexdigest()
-              for path in assets_dir.iterdir()
-              if path.is_file()
-          }
-          assets = release.get("assets")
-          if not isinstance(assets, list):
-              raise SystemExit("existing release is missing an assets array")
-
-          errors = []
-          existing = {}
-          for asset in assets:
-              if not isinstance(asset, dict) or not isinstance(asset.get("name"), str):
-                  errors.append("existing release contains an invalid asset entry")
-                  continue
-              name = asset["name"]
-              if name in existing:
-                  errors.append(f"existing release lists duplicate asset {name!r}")
-                  continue
-              existing[name] = asset
-              if name not in expected:
-                  errors.append(f"existing release has unexpected asset {name!r}")
-                  continue
-              if asset.get("digest") != f"sha256:{expected[name]}":
-                  errors.append(f"existing release asset differs from local release asset: {name!r}")
-          if errors:
-              raise SystemExit("\n".join(errors))
-          Path(sys.argv[3]).write_text("\n".join(sorted(set(expected) - set(existing))) + "\n")
-          PY
-            while IFS= read -r asset; do
-              [ -n "$asset" ] || continue
-              gh release upload "$TAG" "release-assets/$asset" --repo "$GITHUB_REPOSITORY"
-            done < missing-release-assets.txt
-          elif grep -qi "release not found" release-view.err; then
-            VERSION="${TAG#v}"
-            gh release create "$TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --verify-tag \
-              --title "$TAG" --notes "Python package: brigadestack==${VERSION} (brigade-cli==${VERSION} is the same code under the old name)"
-          else
-            cat release-view.err >&2
-            exit 1
-          fi
+          VERSION="${TAG#v}"
+          python3 -I scripts/publish_github_release.py \
+            "Python package: brigadestack==${VERSION} (brigade-cli==${VERSION} is the same code under the old name)"
 
   release-asset-gate:
     needs: create-release

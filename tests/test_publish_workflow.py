@@ -269,17 +269,19 @@ def test_publish_acceptance_covers_native_arm64_and_rosetta_without_self_hosted_
     assert "self-hosted" not in section
 
 
-def test_publish_release_reruns_compare_existing_assets_then_upload_only_missing_assets():
-    text = (ROOT / ".github" / "workflows" / "publish.yml").read_text()
-    section = text[text.index("  create-release:") : text.index("  release-asset-gate:")]
-
-    assert 'gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets' in section
-    assert "existing release asset differs from local release asset" in section
-    assert "existing release has unexpected asset" in section
-    assert 'gh release upload "$TAG" "release-assets/$asset"' in section
-    assert 'gh release create "$TAG" release-assets/* --repo "$GITHUB_REPOSITORY" --verify-tag' in section
-    assert "--target" not in section
-    assert "--clobber" not in section
+def test_publish_release_job_runs_draft_publisher_between_assembly_and_asset_gate():
+    workflow = _load_workflow_yaml(ROOT / ".github/workflows/publish.yml")
+    jobs = workflow["jobs"]
+    release = jobs["create-release"]
+    assert release["needs"] == "assemble-release"
+    assert release["permissions"] == {"contents": "write"}
+    assert jobs["release-asset-gate"]["needs"] == "create-release"
+    checkout, download, publish = release["steps"]
+    assert checkout["uses"].startswith("actions/checkout@")
+    assert checkout["with"] == {"persist-credentials": False}
+    assert download["with"] == {"name": "unified-release-assets", "path": "release-assets"}
+    assert publish["env"] == {"GH_TOKEN": "${{ github.token }}", "TAG": "${{ github.ref_name }}"}
+    assert "python3 -I scripts/publish_github_release.py" in publish["run"]
 
 
 def test_publish_workflow_builds_five_agent_notify_binaries_with_release_metadata_ldflags():

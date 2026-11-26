@@ -39,6 +39,7 @@ PROTECTED_PATTERNS = (
     "scripts/pr_tier_selection.py",
     "scripts/pr_tier_shadow.py",
     "scripts/prepare_dev_wheel.py",
+    "scripts/publish_github_release.py",
     "scripts/published-artifact-acceptance.py",
     "scripts/retired_engine_names.py",
     "scripts/shipped_file_history.py",

@@ -1,0 +1,1 @@
+- Publish creates the GitHub release as a draft, uploads and verifies every asset, then publishes it. Reruns finish an existing draft.

@@ -102,6 +102,7 @@ Thumbs.db
 !/scripts/verify
 !/scripts/verify-focused
 !/scripts/verify_component_manifest_provenance.py
+!/scripts/publish_github_release.py
 !/scripts/verify_env.py
 !/scripts/version_sync.py
 !/scripts/stamp_brigade_cli.py
