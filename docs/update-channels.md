@@ -132,9 +132,10 @@ Plain setup refuses a saved beta pin in `update-state.json` when it would instal
 engines older than the receipt importer supports or downgrade verified engines.
 The receipt importer requires engines from v0.31.0 or later. To refresh the pin
 on a pipx install, run `brigade update --channel beta` with network access. When
-setup finds a compatible cached manifest, its refusal prints a command with the
-actual path and release version. That command can run offline if the component
-assets are cached.
+setup finds a compatible cached manifest whose digest ships in the CLI, its
+refusal prints the actual path and release version. That command can run offline
+if the component assets are cached. Other release manifests need network access
+for authentication against the exact release's published size and digest.
 
 On an unreleased source build or an npm install with a refused beta pin, you can
 also supply a compatible stable manifest explicitly. Verify its SHA-256 against
@@ -148,6 +149,12 @@ An explicit manifest applies to one setup run. Its use leaves the saved beta pin
 in place. Repeat the captured verification to import pending receipts. An
 `indexed` result confirms receipt import even if doctor warns that the installed
 release differs from the CLI's bundled manifest.
+
+Setup authenticates a release manifest again when it is used with
+`--allow-compatible-stable-manifest` or read from the updater's manifest cache.
+A plain `--manifest` outside that cache is an explicitly chosen file. Setup
+checks its schema and version and uses its asset sizes and digests. Component
+download URLs start on GitHub, with redirects restricted to GitHub asset hosts.
 
 ## Timer migration after release
 

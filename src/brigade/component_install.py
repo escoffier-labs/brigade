@@ -20,13 +20,14 @@ from dataclasses import dataclass
 from http.client import HTTPException
 from importlib import metadata
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import brigade
 from brigade import (
     component_manifest,
     component_paths,
+    component_release_pins,
     component_shims,
     component_state,
     distribution,
@@ -34,6 +35,9 @@ from brigade import (
     receipts_import_contract,
     templates,
 )
+
+if TYPE_CHECKING:
+    from brigade.update_cmd import ResolvedRelease
 
 _EXPLICIT_ENGINE_REPAIR = "`brigade setup --manifest <verified manifest> --allow-compatible-stable-manifest <version>`"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -47,7 +51,7 @@ _WINDOWS_HTTPS_PRIME_TIMEOUT_SECONDS = 30.0
 _WINDOWS_HTTPS_PRIME_URL_ENV = "BRIGADE_HTTPS_PRIME_URL"
 _WINDOWS_HTTPS_PRIME_COMMAND = (
     "try { Invoke-WebRequest -Uri $env:BRIGADE_HTTPS_PRIME_URL -Method Head "
-    f"-UserAgent '{DOWNLOAD_USER_AGENT}' -UseBasicParsing -ErrorAction Stop | Out-Null }} "
+    f"-UserAgent '{DOWNLOAD_USER_AGENT}' -UseBasicParsing -MaximumRedirection 0 -ErrorAction Stop | Out-Null }} "
     "catch { if ($_.Exception.Response) { [Console]::Error.WriteLine([int]$_.Exception.Response.StatusCode) }; exit 1 }"
 )
 _JSONRPC_INIT_REQUEST = json.dumps(
@@ -168,6 +172,7 @@ def load_verified_exact_release_manifest(
     roots: SetupRoots,
     *,
     online_stable_cache_repair: bool = False,
+    authenticate_for_setup: bool = False,
 ) -> tuple[component_manifest.ComponentManifest, Path] | None:
     """Read the current release manifest recorded in update state without mutating it.
 
@@ -189,8 +194,9 @@ def load_verified_exact_release_manifest(
     {stable, beta}, semver ``component_tag``, 40-hex ``component_target_commit``,
     exact release ``component_manifest_url`` matching ``component_tag``,
     64-hex ``component_manifest_sha256``, ISO ``updated_at``); the digest
-    check below validates provenance, and ``validate_release_manifest_bytes``
-    validates the stable tag/version against the cached manifest.
+    check below checks the recorded digest. Setup also authenticates bytes
+    against the package pins or the exact published release. Diagnostics read
+    the recorded pin without making network requests.
 
     When ``online_stable_cache_repair`` is set and the persisted state is a
     matching stable state (``state.component_tag == v{brigade.__version__}``),
@@ -267,6 +273,12 @@ def load_verified_exact_release_manifest(
         state.component_manifest_sha256,
         cached_bytes,
     )
+    if authenticate_for_setup:
+        release = _authenticate_release_manifest(
+            cached_bytes, state.component_tag, offline=not online_stable_cache_repair
+        )
+        if release.target_commit != state.component_target_commit:
+            raise ExactReleaseManifestError("cached manifest release commit does not match update state", cached)
     try:
         if compatible:
             manifest = update_cmd.validate_release_manifest_bytes(release, allow_compatible_stable_manifest=True)
@@ -518,15 +530,24 @@ def _validate_expected(*, byte_size: int, sha256: str) -> None:
         raise ComponentInstallError(f"sha256 must be 64 lowercase hex characters, got {sha256!r}")
 
 
+def _allowed_asset_redirect(destination: str, original: str) -> bool:
+    from brigade.update_cmd import _is_release_asset_redirect
+
+    parsed = urlparse(destination)
+    return (parsed.scheme == "https" and parsed.netloc == "github.com") or _is_release_asset_redirect(
+        destination, original=original
+    )
+
+
 def _require_https_final_url(response: Any, *, original: str) -> None:
     geturl = getattr(response, "geturl", None)
     if geturl is None:
         return
     final_url = geturl()
-    if urlparse(final_url).scheme.lower() != "https":
+    if not _allowed_asset_redirect(final_url, original):
         status = getattr(response, "code", None)
         raise ComponentInstallError(
-            f"{original} HTTP {status if status is not None else 'redirect'}: download redirected to a non-HTTPS URL"
+            f"{original} HTTP {status if status is not None else 'redirect'}: download redirected outside the allowed HTTPS asset hosts"
         )
 
 
@@ -603,6 +624,8 @@ def _prime_windows_https_roots(url: str, *, timeout: float) -> bool:
     if completed.returncode != 0:
         status = (completed.stderr or b"").strip()
         if len(status) == 3 and status.isdigit():
+            if 300 <= int(status) < 400:
+                return True  # TLS succeeded. The Python retry checks the redirect target.
             raise ComponentInstallError(
                 f"{url} HTTP {status.decode('ascii')}: Windows HTTPS certificate refresh failed"
             )
@@ -644,8 +667,10 @@ def describe_http_error(url: str, exc: urllib.error.HTTPError) -> str:
 
 def _default_urlopen(url: str) -> Any:
     def check_redirect(destination: str, status: int) -> None:
-        if urlparse(destination).scheme.lower() != "https":
-            raise ComponentInstallError(f"{url} HTTP {status}: download redirected to a non-HTTPS URL")
+        if not _allowed_asset_redirect(destination, url):
+            raise ComponentInstallError(
+                f"{url} HTTP {status}: download redirected outside the allowed HTTPS asset hosts"
+            )
 
     request = urllib.request.Request(url, headers={"User-Agent": DOWNLOAD_USER_AGENT})
     return open_download_request(request, timeout=_DOWNLOAD_TIMEOUT_SECONDS, check_redirect=check_redirect)
@@ -1205,25 +1230,40 @@ def release_version_tuple(value: str) -> tuple[int, ...] | None:
     return release + (0,) * max(0, 3 - len(release))
 
 
-def cached_release_manifests(cache_root: str) -> Iterator[tuple[component_manifest.ComponentManifest, Path]]:
-    """Read valid exact-release manifests from the updater's content-addressed cache."""
+def _authenticate_release_manifest(content: bytes, tag: str, *, offline: bool) -> ResolvedRelease:
     from brigade import update_cmd
 
-    directory = Path(component_paths.verified_manifest_path(cache_root, "0" * 64)).parent
-    for path in sorted(directory.glob("*.json")):
+    if (version := update_cmd._parse_tag(tag)) is None:
+        raise ComponentInstallError(f"invalid stable manifest tag {tag!r}")
+    for revision, digest in component_release_pins.MANIFEST_DIGESTS.items():
+        release_tag, _, commit = revision.partition("+")
+        if release_tag == tag:
+            if hashlib.sha256(content).hexdigest() != digest:
+                raise ComponentInstallError(f"manifest for {tag} does not match the package-pinned SHA-256 digest")
+            return update_cmd.ResolvedRelease(0, tag, version, commit, "", len(content), digest, content)
+    if offline:
+        raise ComponentInstallError(f"network access is needed to authenticate the manifest for {tag}")
+    return update_cmd.resolve_release(update_cmd._DefaultHttp(), latest=False, tag=tag, manifest_bytes=content)
+
+
+def cached_release_manifests(cache_root: str) -> Iterator[tuple[component_manifest.ComponentManifest, Path]]:
+    """Yield authenticated, package-pinned release manifests present in the cache."""
+    from brigade import update_cmd
+
+    for revision, digest in component_release_pins.MANIFEST_DIGESTS.items():
+        path = Path(component_paths.verified_manifest_path(cache_root, digest))
         try:
-            content = path.read_bytes()
-            if hashlib.sha256(content).hexdigest() != path.stem:
-                continue
-            manifest = component_manifest.load_bytes(content, source=path, allow_compatible_stable_manifest=True)
-            tag, _, commit = manifest.manifest_revision.partition("+")
-            version = update_cmd._parse_tag(tag)
-            if version is None or not update_cmd._SHA.fullmatch(commit):
-                continue
-            release = update_cmd.ResolvedRelease(0, tag, version, commit, "", len(content), path.stem, content)
-            yield update_cmd._validate_manifest_coordinates(release, manifest), path
-        except (update_cmd.UpdateError, OSError, ValueError):
+            tag = revision.partition("+")[0]
+            release = _authenticate_release_manifest(path.read_bytes(), tag, offline=True)
+            manifest = update_cmd.validate_release_manifest_bytes(release, allow_compatible_stable_manifest=True)
+            yield manifest, path
+        except (ComponentInstallError, update_cmd.UpdateError, OSError, ValueError):
             continue
+
+
+def format_command(argv: Sequence[str]) -> str:
+    """Quote an argument vector for command output."""
+    return subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
 
 
 def _evidence_ack_floor() -> tuple[int, ...]:
@@ -1265,7 +1305,7 @@ def _beta_pin_repair_hint(roots: SetupRoots, installed: component_state.Installe
             "--allow-compatible-stable-manifest",
             candidate.brigade_version,
         ]
-        command = subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
+        command = format_command(argv)
         cached = f"Use the cached manifest with `{command}`."
         return cached if npm else f"{cached} {online}"
     if npm:
@@ -1311,7 +1351,7 @@ def _load_setup_manifest(
     offline: bool,
     opener: Callable[..., Any] | None,
     env: Mapping[str, str] | None,
-    allow_compatible_stable_manifest: bool = False,
+    allow_compatible_stable_manifest: str | None = None,
 ) -> tuple[component_manifest.ComponentManifest, Any | None, str | None]:
     """Load an exact release manifest, with one standalone compatibility fallback.
 
@@ -1331,15 +1371,30 @@ def _load_setup_manifest(
     release for the installed Brigade version and stays strict, except that a
     compatible persisted beta-handoff state can supply a verified cached manifest.
     """
+    from brigade import update_cmd
+
     if manifest_path is not None:
-        return (
-            component_manifest.load(
-                manifest_path,
-                allow_compatible_stable_manifest=allow_compatible_stable_manifest,
-            ),
-            None,
-            None,
+        roots = resolve_roots(env=env)
+        cache_dir = Path(component_paths.verified_manifest_path(roots.cache_root, "0" * 64)).parent
+        in_cache = (
+            manifest_path.parent.absolute() == cache_dir.absolute()
+            or manifest_path.parent.resolve() == cache_dir.resolve()
         )
+        if allow_compatible_stable_manifest is not None or in_cache:
+            version = allow_compatible_stable_manifest or brigade.__version__
+            release = _authenticate_release_manifest(manifest_path.read_bytes(), f"v{version}", offline=offline)
+            if in_cache and manifest_path.name != f"{release.manifest_sha256}.json":
+                raise ComponentInstallError(
+                    f"release manifest cache path does not match its verified digest: {manifest_path}"
+                )
+            return (
+                update_cmd.validate_release_manifest_bytes(
+                    release, allow_compatible_stable_manifest=allow_compatible_stable_manifest is not None
+                ),
+                None,
+                None,
+            )
+        return component_manifest.load(manifest_path), None, None
     if manifest_source == "standalone":
         return component_manifest.load(allow_standalone_legacy_revisions=True), None, None
     if manifest_source != "auto":
@@ -1348,8 +1403,6 @@ def _load_setup_manifest(
     if not uses_bundled_compatibility_manifest():
         return component_manifest.load(), None, None
 
-    from brigade import update_cmd
-
     roots = resolve_roots(env=env)
     try:
         # Persisted update state supplies a verified manifest cache that
@@ -1357,10 +1410,13 @@ def _load_setup_manifest(
         # stable setup tolerates a missing/corrupt cache so it can fall through
         # to exact-release resolution and repair it; offline stable and all
         # beta paths stay fail-closed.
-        cached_manifest = load_verified_exact_release_manifest(roots, online_stable_cache_repair=not offline)
+        state = update_cmd.load_update_state(Path(component_paths.update_state_path(roots.data_root)))
+        beta = state is not None and state.channel == "beta"
+        cached_manifest = load_verified_exact_release_manifest(
+            roots, online_stable_cache_repair=not offline, authenticate_for_setup=offline or beta
+        )
         if cached_manifest is not None:
-            state = update_cmd.load_update_state(Path(component_paths.update_state_path(roots.data_root)))
-            if state is not None and state.channel == "beta":
+            if beta:
                 cached_manifest_obj, _cached_path = cached_manifest
                 _check_saved_beta_pin(roots, cached_manifest_obj)
                 return cached_manifest_obj, None, cached_manifest_obj.brigade_version
@@ -1439,6 +1495,8 @@ def setup_native_components(
     ``components`` names optional components to install as well, such as
     ``brigade-hub`` on a hub host.
     """
+    from brigade import update_cmd
+
     try:
         if dry_run and rollback:
             raise ComponentInstallError("--dry-run and --rollback cannot be used together")
@@ -1448,14 +1506,13 @@ def setup_native_components(
             raise ComponentInstallError("--allow-compatible-stable-manifest requires --manifest")
         if rollback:
             return _setup_rollback(env=env, runner=runner)
-        compatible_stable_manifest_requested = allow_compatible_stable_manifest is not None
         manifest, auto_release, auto_compatible_stable_version = _load_setup_manifest(
             manifest_path=manifest_path,
             manifest_source=manifest_source,
             offline=offline,
             opener=opener,
             env=env,
-            allow_compatible_stable_manifest=compatible_stable_manifest_requested,
+            allow_compatible_stable_manifest=allow_compatible_stable_manifest,
         )
         # The explicit --allow-compatible-stable-manifest flag (beta handoff
         # via --manifest) and the auto branch's reuse of a persisted beta
@@ -1589,7 +1646,7 @@ def setup_native_components(
             except (ComponentInstallError, OSError) as restore_exc:
                 raise ComponentInstallError(f"{exc}; failed to restore prior managed files: {restore_exc}") from exc
             raise
-    except (ComponentInstallError, OSError, ValueError, urllib.error.URLError) as exc:
+    except (ComponentInstallError, OSError, ValueError, urllib.error.URLError, update_cmd.UpdateError) as exc:
         print(f"component setup: {exc}", file=sys.stderr)
         return 1
     return 0

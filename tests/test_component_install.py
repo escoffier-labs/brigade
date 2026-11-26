@@ -50,6 +50,7 @@ from tests.component_install_helpers import (
     fixture_component_revision,
     fixture_payload,
     linux_env,
+    pin_test_release_manifest,
     release_manifest_url,
     smoke_stub_script,
     test_manifest_asset as manifest_asset_fixture,
@@ -120,6 +121,7 @@ def _prepare_auto_release_setup(tmp_path, monkeypatch):
         hashlib.sha256(manifest_bytes).hexdigest(),
         manifest_bytes,
     )
+    pin_test_release_manifest(monkeypatch, manifest_bytes, tag=release.tag, commit=release.target_commit)
     monkeypatch.setattr(component_install.templates, "template_root", lambda: bundled.parents[1])
     monkeypatch.setattr(component_manifest, "manifest_path", lambda: bundled)
     monkeypatch.setattr(update_cmd, "resolve_release", lambda *_args, **_kwargs: release)
@@ -156,6 +158,7 @@ def _prepare_auto_release_setup_real(tmp_path, monkeypatch):
     bundled = tmp_path / "templates" / "components" / "manifest-v1.json"
     bundled.parent.mkdir(parents=True)
     manifest_bytes = write_release_manifest(bundled, brigade_version=brigade.__version__, target_commit=target_commit)
+    pin_test_release_manifest(monkeypatch, manifest_bytes, tag=tag, commit=target_commit)
     http = FakeReleaseHttp(tag=tag, manifest_bytes=manifest_bytes, target_commit=target_commit)
     monkeypatch.setattr(component_install.templates, "template_root", lambda: bundled.parents[1])
     monkeypatch.setattr(component_manifest, "manifest_path", lambda: bundled)
@@ -188,7 +191,7 @@ def _persist_beta_state_real(
     bundled = tmp_path / "templates" / "components" / "manifest-v1.json"
     bundled.parent.mkdir(parents=True, exist_ok=True)
     bundled.write_bytes(manifest_bytes)
-    digest = hashlib.sha256(manifest_bytes).hexdigest()
+    digest = pin_test_release_manifest(monkeypatch, manifest_bytes, tag=f"v{stable_version}", commit=target_commit)
     monkeypatch.setattr(component_install.templates, "template_root", lambda: bundled.parents[1])
     monkeypatch.setattr(component_manifest, "manifest_path", lambda: bundled)
     monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
@@ -784,7 +787,17 @@ def test_setup_rejects_brigade_version_mismatch(tmp_path, monkeypatch):
 def test_setup_only_accepts_the_exact_compatibility_manifest_version(tmp_path, monkeypatch):
     env = linux_env(tmp_path)
     manifest_path = tmp_path / "manifest-v1.json"
-    write_test_manifest(manifest_path, brigade_version="9.9.9")
+    content = write_release_manifest(manifest_path, brigade_version="9.9.9", target_commit="a" * 40)
+    pin_test_release_manifest(monkeypatch, content, tag="v9.9.9", commit="a" * 40)
+    monkeypatch.setattr(
+        update_cmd,
+        "_DefaultHttp",
+        lambda: FakeReleaseHttp(
+            tag="v9.9.8",
+            manifest_bytes=content + b" ",
+            target_commit="a" * 40,
+        ),
+    )
     monkeypatch.setattr("brigade.__version__", "0.23.0", raising=False)
     assert (
         setup_native_components(
@@ -1285,7 +1298,7 @@ def _persist_beta_state(
     bundled = tmp_path / "templates" / "components" / "manifest-v1.json"
     bundled.parent.mkdir(parents=True, exist_ok=True)
     bundled.write_bytes(manifest_bytes)
-    digest = hashlib.sha256(manifest_bytes).hexdigest()
+    digest = pin_test_release_manifest(monkeypatch, manifest_bytes, tag=f"v{stable_version}", commit=target_commit)
     monkeypatch.setattr(component_install.templates, "template_root", lambda: bundled.parents[1])
     monkeypatch.setattr(component_manifest, "manifest_path", lambda: bundled)
     monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
@@ -1388,16 +1401,14 @@ def test_setup_refuses_incompatible_or_downgrading_beta_pin(tmp_path, monkeypatc
     state_path = Path(component_paths.installed_state_path(roots.data_root))
     if pin == "0.31.0":
         current = tmp_path / "current.json"
-        write_test_manifest(current, brigade_version="0.32.0")
-        payload = json.loads(current.read_bytes())
-        payload["manifest_revision"] = "v0.32.0+" + "a" * 40
-        current.write_text(json.dumps(payload), encoding="utf-8")
+        content = write_release_manifest(current, brigade_version="0.32.0", target_commit="a" * 40)
+        pin_test_release_manifest(monkeypatch, content, tag="v0.32.0", commit="a" * 40)
         assert (
             setup_native_components(
                 env=env,
                 manifest_path=current,
                 allow_compatible_stable_manifest="0.32.0",
-                opener=FakeOpener(all_fixture_payloads()),
+                opener=FakeOpener(all_release_payloads(tag="v0.32.0")),
             )
             == 0
         )
@@ -1467,7 +1478,8 @@ def test_refused_pin_names_a_usable_cached_manifest(tmp_path, monkeypatch, capsy
     )
     roots = resolve_roots(env=env)
     content = write_release_manifest(workspace / "replacement.json", brigade_version="0.32.0", target_commit="b" * 40)
-    cached_path = Path(component_paths.verified_manifest_path(roots.cache_root, hashlib.sha256(content).hexdigest()))
+    digest = pin_test_release_manifest(monkeypatch, content, tag="v0.32.0", commit="b" * 40)
+    cached_path = Path(component_paths.verified_manifest_path(roots.cache_root, digest))
     cached_path.write_bytes(content + b" ")
     assert setup_native_components(env=env, offline=True, dry_run=True) == 1
     assert "network access" in capsys.readouterr().err
@@ -1479,15 +1491,116 @@ def test_refused_pin_names_a_usable_cached_manifest(tmp_path, monkeypatch, capsy
     command = subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
     assert f"Use the cached manifest with `{command}`" in error
     assert "brigade update --channel beta" in error
+    opener = FakeOpener(all_release_payloads(tag="v0.32.0"))
+    assert (
+        setup_native_components(
+            env=env, manifest_path=Path(argv[3]), allow_compatible_stable_manifest=argv[5], opener=opener
+        )
+        == 0
+    )
     assert (
         setup_native_components(
             env=env,
             manifest_path=Path(argv[3]),
             allow_compatible_stable_manifest=argv[5],
-            dry_run=True,
+            offline=True,
+            opener=FakeOpener({}),
         )
         == 0
     )
+    cached_path.write_bytes(content + b"\n")
+    assert (
+        setup_native_components(
+            env=env, manifest_path=Path(argv[3]), allow_compatible_stable_manifest=argv[5], opener=FakeOpener({})
+        )
+        == 1
+    )
+    assert "does not match the package-pinned SHA-256" in capsys.readouterr().err
+
+
+def test_compatible_manifest_checks_publisher_metadata_before_install(tmp_path, monkeypatch, capsys):
+    tag = "v9.9.9"
+    env = linux_env(tmp_path)
+    manifest_path = tmp_path / "online.json"
+    content = write_release_manifest(manifest_path, brigade_version=tag[1:], target_commit="a" * 40)
+    http = FakeReleaseHttp(tag=tag, manifest_bytes=content, target_commit="a" * 40)
+    monkeypatch.setattr(update_cmd, "_DefaultHttp", lambda: http)
+    monkeypatch.setattr(component_manifest, "platform_key", lambda: "linux-amd64")
+    assert (
+        setup_native_components(
+            env=env,
+            manifest_path=manifest_path,
+            allow_compatible_stable_manifest=tag[1:],
+            opener=FakeOpener(all_release_payloads(tag=tag)),
+        )
+        == 0
+    )
+    assert any(url.endswith(f"/releases/tags/{tag}") for url in http.urls)
+    assert release_manifest_url(tag) not in http.urls
+    manifest_path.write_bytes(content + b"\n")
+    assert (
+        setup_native_components(
+            env=env, manifest_path=manifest_path, allow_compatible_stable_manifest=tag[1:], opener=FakeOpener({})
+        )
+        == 1
+    )
+    assert "size or SHA-256 verification failed" in capsys.readouterr().err
+
+
+def test_unpinned_cache_candidate_needs_network(tmp_path, monkeypatch):
+    roots = resolve_roots(env=linux_env(tmp_path))
+    content = write_release_manifest(tmp_path / "candidate.json", brigade_version="9.9.9", target_commit="c" * 40)
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, hashlib.sha256(content).hexdigest()))
+    cached.parent.mkdir(parents=True)
+    cached.write_bytes(content)
+    assert "With network access" in component_install._beta_pin_repair_hint(roots, None)
+    assert str(cached) not in component_install._beta_pin_repair_hint(roots, None)
+    assert list(component_install.cached_release_manifests(roots.cache_root)) == []
+
+
+def test_unpinned_compatible_manifest_rejected_offline(tmp_path, monkeypatch, capsys):
+    manifest_path = tmp_path / "candidate.json"
+    write_release_manifest(manifest_path, brigade_version="9.9.9", target_commit="c" * 40)
+    assert (
+        setup_native_components(
+            env=linux_env(tmp_path),
+            manifest_path=manifest_path,
+            offline=True,
+            dry_run=True,
+            allow_compatible_stable_manifest="9.9.9",
+        )
+        == 1
+    )
+    assert "network access" in capsys.readouterr().err.lower()
+
+
+def test_offline_setup_does_not_treat_a_saved_digest_as_release_authentication(tmp_path, monkeypatch, capsys):
+    env = linux_env(tmp_path)
+    roots = resolve_roots(env=env)
+    tag, commit = "v9.9.9", "c" * 40
+    content = write_release_manifest(tmp_path / "candidate.json", brigade_version=tag[1:], target_commit=commit)
+    digest = hashlib.sha256(content).hexdigest()
+    cached = Path(component_paths.verified_manifest_path(roots.cache_root, digest))
+    write_verified_cache(cached, payload=content)
+    state_file = Path(component_paths.update_state_path(roots.data_root))
+    update_cmd.write_update_state(
+        state_file,
+        update_cmd.UpdateState(
+            1,
+            "beta",
+            "brigade update",
+            "0.33.0.dev1",
+            42,
+            tag,
+            commit,
+            release_manifest_url(tag),
+            digest,
+            "2026-07-20T12:00:00+00:00",
+        ),
+    )
+    monkeypatch.setattr(component_install, "uses_bundled_compatibility_manifest", lambda: True)
+    assert setup_native_components(env=env, offline=True, dry_run=True) == 1
+    assert "network access is needed to authenticate" in capsys.readouterr().err
 
 
 def test_restore_tries_all_paths_after_locked_executable(tmp_path, monkeypatch):
@@ -1661,7 +1774,7 @@ def test_setup_rejects_persisted_beta_state_with_mismatched_stable_version(tmp_p
             )
     bundled.write_text(json.dumps(payload))
     manifest_bytes = bundled.read_bytes()
-    digest = hashlib.sha256(manifest_bytes).hexdigest()
+    digest = pin_test_release_manifest(monkeypatch, manifest_bytes, tag=f"v{stable_version}", commit=target_commit)
     monkeypatch.setattr(component_install.templates, "template_root", lambda: bundled.parents[1])
     monkeypatch.setattr(component_manifest, "manifest_path", lambda: bundled)
     monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
@@ -2248,10 +2361,13 @@ def _write_pre_agent_notify_manifest(path: Path, *, brigade_version: str) -> Non
 def test_setup_compatible_stable_manifest_skips_missing_unpublished_agent_notify(tmp_path, monkeypatch):
     env = linux_env(tmp_path)
     manifest_path = tmp_path / "manifest-v1.json"
-    _write_pre_agent_notify_manifest(manifest_path, brigade_version=brigade.__version__)
+    content = write_release_manifest(
+        manifest_path, brigade_version=brigade.__version__, target_commit="a" * 40, drop_component="agent-notify"
+    )
+    pin_test_release_manifest(monkeypatch, content, tag=f"v{brigade.__version__}", commit="a" * 40)
     monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
     monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
-    opener = FakeOpener(all_fixture_payloads())
+    opener = FakeOpener(all_release_payloads(tag=f"v{brigade.__version__}"))
 
     # The beta handoff reuses the verified last-stable asset set and omits
     # agent-notify, which the manifest predates. The compatibility flag must
@@ -2300,10 +2416,10 @@ def test_setup_strict_manifest_rejects_pre_agent_notify_without_beta_handoff(tmp
 def test_setup_compatible_stable_manifest_rejects_missing_published_component(tmp_path, monkeypatch, capsys):
     env = linux_env(tmp_path)
     manifest_path = tmp_path / "manifest-v1.json"
-    _write_pre_agent_notify_manifest(manifest_path, brigade_version=brigade.__version__)
-    payload = json.loads(manifest_path.read_text())
-    del payload["components"]["brigade-evidence"]
-    manifest_path.write_text(json.dumps(payload))
+    content = write_release_manifest(
+        manifest_path, brigade_version=brigade.__version__, target_commit="a" * 40, drop_component="brigade-evidence"
+    )
+    pin_test_release_manifest(monkeypatch, content, tag=f"v{brigade.__version__}", commit="a" * 40)
     monkeypatch.setattr(component_manifest, "manifest_path", lambda: manifest_path)
     monkeypatch.setattr(component_manifest, "platform_key", lambda **_kwargs: "linux-amd64")
 

@@ -590,7 +590,12 @@ def _lookup_release(http: UpdateHttp, suffix: str) -> tuple[Any, str]:
 
 
 def resolve_release(
-    http: UpdateHttp, *, latest: bool, tag: str | None = None, cache_root: Path | None = None
+    http: UpdateHttp,
+    *,
+    latest: bool,
+    tag: str | None = None,
+    cache_root: Path | None = None,
+    manifest_bytes: bytes | None = None,
 ) -> ResolvedRelease:
     if latest == (tag is not None):
         raise ValueError("choose exactly one release lookup mode")
@@ -618,16 +623,18 @@ def resolve_release(
     if not isinstance(size, int) or isinstance(size, bool) or size <= 0 or match is None:
         raise UpdateError("component manifest asset is missing a valid size or SHA-256 release digest")
     sha256 = match.group(1)
-    if cache_root is not None:
+    content = manifest_bytes
+    if content is None and cache_root is not None:
         cached = Path(component_paths.verified_manifest_path(str(cache_root), sha256))
         try:
-            content = cached.read_bytes()
+            cached_content = cached.read_bytes()
         except FileNotFoundError:
             pass
         else:
-            if len(content) == size and hashlib.sha256(content).hexdigest() == sha256:
-                return ResolvedRelease(release_id, release_tag, version, target_commit, url, size, sha256, content)
-    content = http.bytes(url)
+            if len(cached_content) == size and hashlib.sha256(cached_content).hexdigest() == sha256:
+                content = cached_content
+    if content is None:
+        content = http.bytes(url)
     if len(content) != size or hashlib.sha256(content).hexdigest() != sha256:
         raise UpdateError("component manifest asset size or SHA-256 verification failed")
     return ResolvedRelease(release_id, release_tag, version, target_commit, url, size, sha256, content)
@@ -930,7 +937,7 @@ def _repair_matching_engines(
     if cache_release is not None:
         _cache_manifest(paths, cache_release)
     if _returncode(runner(setup_command)) != 0:
-        raise UpdateError(f"engine repair failed: {' '.join(setup_command)}")
+        raise UpdateError(f"engine repair failed: {component_install.format_command(setup_command)}")
 
 
 def installed_pypi_project() -> str:
@@ -967,7 +974,7 @@ def _retire_after_exit_hint(retire_command: list[str], install_command: list[str
     return (
         f"brigade update: installed {PYPI_PROJECT}. After this command exits, remove the old "
         f"{LEGACY_PYPI_PROJECT} app and restore the brigade launcher with: "
-        f"{' '.join(retire_command)} ; {' '.join(install_command)}"
+        f"{component_install.format_command(retire_command)} ; {component_install.format_command(install_command)}"
     )
 
 
@@ -1089,7 +1096,7 @@ def run_update(
             commands = [install_command, retire_command, install_command] if retire_now else [install_command]
             if dry_run:
                 for command in commands:
-                    print(" ".join(command))
+                    print(component_install.format_command(command))
                 print(
                     f"brigade update: would run setup with the verified manifest for {release.tag} using {setup_executable}"
                 )
@@ -1123,20 +1130,20 @@ def run_update(
                 if retired and command is install_command:
                     restored = _restore_launchers(selected_paths, venvs) if venvs is not None else False
                     raise UpdateError(
-                        f"update command failed: {' '.join(command)}. The old {LEGACY_PYPI_PROJECT} app is already "
+                        f"update command failed: {component_install.format_command(command)}. The old {LEGACY_PYPI_PROJECT} app is already "
                         + (
                             f"removed and the brigade launchers were relinked to the existing {PYPI_PROJECT} "
                             "environment, so `brigade` still runs the new version. "
                             if restored
                             else f"removed and no {PYPI_PROJECT} environment could be relinked. "
                         )
-                        + f"No update was recorded. Restore with: {' '.join(install_command)}"
+                        + f"No update was recorded. Restore with: {component_install.format_command(install_command)}"
                     )
-                raise UpdateError(f"update command failed: {' '.join(command)}")
+                raise UpdateError(f"update command failed: {component_install.format_command(command)}")
             if retire_failed:
                 raise UpdateError(
                     f"could not remove the old {LEGACY_PYPI_PROJECT} app, so the update is not recorded. "
-                    f"Finish with: {' '.join(retire_command)} ; {' '.join(install_command)} "
+                    f"Finish with: {component_install.format_command(retire_command)} ; {component_install.format_command(install_command)} "
                     "(older pipx removes launchers by name), then run brigade update again"
                 )
             if retire_after_exit:
@@ -1145,8 +1152,8 @@ def run_update(
                 # would make the next `brigade update` stop at "already owns" and never retire it.
                 raise UpdateError(
                     f"{PYPI_PROJECT} is installed but retiring the old {LEGACY_PYPI_PROJECT} app is pending, "
-                    f"so the update is not recorded. After this command exits, run: {' '.join(retire_command)} ; "
-                    f"{' '.join(install_command)} (removing the old app deletes the brigade launcher), "
+                    f"so the update is not recorded. After this command exits, run: {component_install.format_command(retire_command)} ; "
+                    f"{component_install.format_command(install_command)} (removing the old app deletes the brigade launcher), "
                     "then run brigade update again"
                 )
             write_update_state(state_path, next_state)

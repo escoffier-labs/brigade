@@ -31,6 +31,7 @@ from tests.component_install_helpers import (
     fixture_component_revision,
     fixture_payload,
     linux_env,
+    pin_test_release_manifest,
     write_release_manifest,
     write_test_manifest,
 )
@@ -569,6 +570,10 @@ def test_v030_beta_pin_warns_even_when_it_matches_selected_manifest(tmp_path, mo
     state_path = Path(component_paths.update_state_path(roots.data_root))
     state = update_cmd.load_update_state(state_path)
     assert state is not None
+    cached_pin = Path(component_paths.verified_manifest_path(roots.cache_root, state.component_manifest_sha256))
+    pin_test_release_manifest(
+        monkeypatch, cached_pin.read_bytes(), tag=state.component_tag, commit=state.component_target_commit
+    )
     beta_version = "0.33.0.dev1"
     update_cmd.write_update_state(state_path, replace(state, channel="beta", cli_coordinate=beta_version))
     monkeypatch.setattr(brigade, "__version__", beta_version)
@@ -584,7 +589,8 @@ def test_v030_beta_pin_warns_even_when_it_matches_selected_manifest(tmp_path, mo
     )
     if compatible_cache:
         content = write_release_manifest(tmp_path / "newer.json", brigade_version="0.32.0", target_commit="b" * 40)
-        cached = Path(component_paths.verified_manifest_path(roots.cache_root, hashlib.sha256(content).hexdigest()))
+        manifest_digest = pin_test_release_manifest(monkeypatch, content, tag="v0.32.0", commit="b" * 40)
+        cached = Path(component_paths.verified_manifest_path(roots.cache_root, manifest_digest))
         cached.write_bytes(content)
     assert setup_native_components(env=env, dry_run=True) == 1
     refusal = capsys.readouterr().err

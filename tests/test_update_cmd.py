@@ -5,11 +5,14 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shlex
 import urllib.error
 from email.message import Message
 from io import BytesIO
 from pathlib import Path
 from urllib.response import addinfourl
+
+from tests.component_install_helpers import pin_test_release_manifest
 from unittest.mock import patch
 
 import pytest
@@ -1098,6 +1101,7 @@ def test_update_refuses_channel_takeover_without_switch_flag(tmp_path):
         "newer-damaged",
         "newer-bundled",
         "newer-uncached",
+        "newer-unpinned",
         "digest",
         "record",
         "failed",
@@ -1107,6 +1111,7 @@ def test_update_refuses_channel_takeover_without_switch_flag(tmp_path):
 )
 def test_same_immutable_coordinates_check_engines(tmp_path, monkeypatch, capsys, drift, channel):
     manifest = _manifest()
+    pin_test_release_manifest(monkeypatch, manifest, tag=TAG, commit="a" * 40)
     calls = []
     paths = update_cmd.UpdatePaths(tmp_path / "data", tmp_path / "cache", tmp_path / "bin" / "brigade")
     newer = drift.startswith("newer")
@@ -1127,7 +1132,13 @@ def test_same_immutable_coordinates_check_engines(tmp_path, monkeypatch, capsys,
             monkeypatch.setattr(component_install, "uses_bundled_compatibility_manifest", lambda: True)
             monkeypatch.setattr(component_manifest, "manifest_path", lambda: tmp_path / "fixture-manifest.json")
         elif newer and drift != "newer-uncached":
-            digest = hashlib.sha256(previous_bytes).hexdigest()
+            digest = (
+                hashlib.sha256(previous_bytes).hexdigest()
+                if drift == "newer-unpinned"
+                else pin_test_release_manifest(
+                    monkeypatch, previous_bytes, tag=f"v{installed_version}", commit="a" * 40
+                )
+            )
             cached = Path(component_paths.verified_manifest_path(str(paths.cache_root), digest))
             cached.parent.mkdir(parents=True, exist_ok=True)
             cached.write_bytes(previous_bytes)
@@ -1140,7 +1151,7 @@ def test_same_immutable_coordinates_check_engines(tmp_path, monkeypatch, capsys,
     elif drift == "partial":
         executable.unlink()
         Path(entries[1].managed_path).unlink()
-    elif drift in {"digest", "newer-damaged"}:
+    elif drift in {"digest", "newer-damaged", "newer-unpinned"}:
         executable.write_bytes(b"x" * entries[0].byte_size)
     state_path = paths.data_root / "brigade" / "update-state.json"
     update_cmd.write_update_state(
@@ -1200,6 +1211,17 @@ def test_same_immutable_coordinates_check_engines(tmp_path, monkeypatch, capsys,
         update_cmd._cache_manifest(paths, release)
         monkeypatch.setattr(http, "bytes", lambda _: pytest.fail("healthy update downloaded a manifest"))
 
+    if drift == "newer-unpinned":
+        json_response = http.json
+
+        def exact_tag_missing(url):
+            if url.endswith(f"/releases/tags/v{installed_version}"):
+                http.urls.append(url)
+                raise update_cmd.UpdateError("published release was not found")
+            return json_response(url)
+
+        monkeypatch.setattr(http, "json", exact_tag_missing)
+
     result = update_cmd.run_update(
         channel=channel,
         dry_run=drift == "dry-run",
@@ -1209,6 +1231,13 @@ def test_same_immutable_coordinates_check_engines(tmp_path, monkeypatch, capsys,
         now=lambda: "2026-07-20T12:01:00+00:00",
     )
     assert state_path.read_bytes() == before_update
+    if drift == "newer-unpinned":
+        assert result == 1
+        assert "published release was not found" in capsys.readouterr().err
+        assert any(url.endswith(f"/releases/tags/v{installed_version}") for url in http.urls)
+        assert installed_path.read_bytes() == before_installed
+        assert calls == []
+        return
     if drift in {"failed", "partial"}:
         assert result != 0
         reason = "smoke command exited 7" if drift == "failed" else "second executable locked"
@@ -1240,6 +1269,23 @@ def test_same_immutable_coordinates_check_engines(tmp_path, monkeypatch, capsys,
             hashlib.sha256(entries[0].asset_name.encode()).hexdigest()
         )
     assert len(calls) == (0 if drift in {"healthy", "newer", "newer-bundled", "newer-uncached", "dry-run"} else 1)
+
+
+def test_repair_failure_quotes_the_reported_command(tmp_path, capsys):
+    paths = update_cmd.UpdatePaths(tmp_path / "data", tmp_path / "cache dir", tmp_path / "tool ' beta")
+    content = _manifest()
+    http = _Http(_release(content), content)
+    assert update_cmd.run_update(paths=paths, http=http, runner=lambda argv: 0) == 0
+    commands = []
+
+    def fail(argv):
+        commands.append(argv)
+        return 1
+
+    assert update_cmd.run_update(paths=paths, http=http, runner=fail) == 1
+    output = capsys.readouterr().err.rstrip()
+    expected = update_cmd.subprocess.list2cmdline(commands[0]) if os.name == "nt" else shlex.join(commands[0])
+    assert output.endswith("engine repair failed: " + expected)
 
 
 def test_dry_run_does_not_write_manifest_cache_or_state(tmp_path):
