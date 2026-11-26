@@ -16,10 +16,10 @@ WORKSPACE_DIRNAME = ".brigade"
 LEGACY_WORKSPACE_DIRNAMES = (".solo-mise",)
 CONFIG_REL_PATH = f"{WORKSPACE_DIRNAME}/config.json"
 SUPPORTED_VERSIONS = (1,)
-DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS = 10.0
+# Default budget for the foreground verify pre-sync.
+DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS = 0.5
 CODE_GRAPH_DELTA_TIMEOUT_KEY = "code_graph_delta_timeout_seconds"
-# Legacy key read through v0.32 when the canonical key is absent; the writer
-# never emits it (docs/phase-engine-rename.md, R4).
+# Retained for the doctor warning on existing workspace configs.
 LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY = "graphtrail_delta_timeout_seconds"
 CAPTURE_BEFORE_RETRY_MODES = ("warn", "block", "off")
 DEFAULT_CAPTURE_BEFORE_RETRY = "warn"
@@ -68,12 +68,12 @@ def validate_run_record(value: Any) -> str:
     return value
 
 
-def validate_code_graph_delta_timeout(value: Any, *, key: str = CODE_GRAPH_DELTA_TIMEOUT_KEY) -> float:
+def validate_code_graph_delta_timeout(value: Any) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
-        raise ValueError(f"{key} must be a positive number")
+        raise ValueError(f"{CODE_GRAPH_DELTA_TIMEOUT_KEY} must be a positive number")
     timeout = float(value)
     if not math.isfinite(timeout) or timeout <= 0:
-        raise ValueError(f"{key} must be a positive number")
+        raise ValueError(f"{CODE_GRAPH_DELTA_TIMEOUT_KEY} must be a positive number")
     return timeout
 
 
@@ -93,33 +93,29 @@ def resolve_capture_before_retry(target: Path) -> str:
     return DEFAULT_CAPTURE_BEFORE_RETRY
 
 
-def resolve_code_graph_delta_timeout(target: Path, cli_override: float | None = None) -> float:
+def resolve_code_graph_delta_timeout(
+    target: Path, cli_override: float | None = None, *, default: float = DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS
+) -> float:
     if cli_override is not None:
         try:
             return validate_code_graph_delta_timeout(cli_override)
         except ValueError:
             raise ValueError("--code-graph-timeout must be a positive number") from None
-    cfg = load_config(target)
+    cfg = load_config(target, code_graph_timeout_default=default)
     if cfg is not None:
         return cfg.code_graph_delta_timeout_seconds
-    return DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS
+    return default
 
 
-def legacy_config_keys(target: Path) -> list[tuple[str, str, bool]]:
-    """Return ``(legacy, canonical, ignored)`` for renamed keys the target config still uses.
-
-    ``ignored`` is true when the canonical key is also present, so ``load_config``
-    never reads the legacy value. The file is the one ``load_config`` reads.
-    Doctor reports them. Loading prints one stderr notice per legacy key.
-    """
+def legacy_config_keys(target: Path) -> list[tuple[str, str]]:
+    """Find retired keys for doctor without interpreting their values."""
     path = _existing_config_path(target)
     try:
         data = json.loads(path.read_text(encoding="utf-8-sig")) if path is not None else None
     except (OSError, ValueError):
         return []
     if isinstance(data, dict) and LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY in data:
-        ignored = CODE_GRAPH_DELTA_TIMEOUT_KEY in data
-        return [(LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY, CODE_GRAPH_DELTA_TIMEOUT_KEY, ignored)]
+        return [(LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY, CODE_GRAPH_DELTA_TIMEOUT_KEY)]
     return []
 
 
@@ -247,7 +243,9 @@ def _existing_config_path(target: Path) -> Optional[Path]:
     return None
 
 
-def load_config(target: Path) -> Optional[Config]:
+def load_config(
+    target: Path, *, code_graph_timeout_default: float = DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS
+) -> Optional[Config]:
     path = _existing_config_path(target)
     if path is None:
         return None
@@ -264,17 +262,7 @@ def load_config(target: Path) -> Optional[Config]:
         includes=list(data.get("includes", [])),
     )
     sel.validate()
-    from brigade.engine_deprecation import notice
-
-    if LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY in data:
-        notice(LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY, CODE_GRAPH_DELTA_TIMEOUT_KEY)
-    # The canonical key wins; the legacy key is read only when it is absent.
-    timeout_key = (
-        CODE_GRAPH_DELTA_TIMEOUT_KEY if CODE_GRAPH_DELTA_TIMEOUT_KEY in data else LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY
-    )
-    timeout = validate_code_graph_delta_timeout(
-        data.get(timeout_key, DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS), key=timeout_key
-    )
+    timeout = validate_code_graph_delta_timeout(data.get(CODE_GRAPH_DELTA_TIMEOUT_KEY, code_graph_timeout_default))
     capture_before_retry = validate_capture_before_retry(data.get("capture_before_retry", DEFAULT_CAPTURE_BEFORE_RETRY))
     verify_runs_keep = validate_verify_runs_keep(data.get("verify_runs_keep", DEFAULT_VERIFY_RUNS_KEEP))
     verify_archive_enabled = validate_verify_archive_enabled(

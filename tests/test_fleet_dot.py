@@ -197,7 +197,7 @@ def test_cli_stdin_and_file_default_to_no_auth(tmp_path, monkeypatch, capsys):
     from brigade.cli import fleet_dot
 
     raw = json.dumps(report()).encode()
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: pytest.fail("dry-run loaded auth"))
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: pytest.fail("dry-run loaded auth"))
     monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(raw)))
     args = argparse.Namespace(metadata_file=None, publish=False, holder_file=tmp_path / "missing-holder")
     assert fleet_dot.dispatch(args) == 0
@@ -252,8 +252,8 @@ def report_transport(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: NOW)
     settings = {"hub_url": "https://example.com", "node_token": "fixture-node-token", "admin_token": ""}
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: settings)
-    monkeypatch.setattr(worklore_client, "load_fleet_settings", lambda: settings)
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: settings)
+    monkeypatch.setattr(worklore_client, "load_fleet_settings", lambda **_kwargs: settings)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE)
 
     def presence(snapshot: SessionSnapshot):
@@ -338,14 +338,16 @@ def test_presence_failure_stops_work_and_admin_credentials_are_not_authority(mon
     from brigade import fleet_dot, worklore_client
 
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE)
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"node_token": "", "admin_token": "fixture-admin"})
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda **_kwargs: {"node_token": "", "admin_token": "fixture-admin"}
+    )
     monkeypatch.setattr(fleet_client, "publish_session", lambda *a: pytest.fail("admin token used for cloud presence"))
     raw = report(work_id="work-a", ownership_revision=2, generation=1)
     assert fleet_dot.report_session(raw, publish=True)["components"] == {
         "presence": "failed:node_auth_required",
         "work": "not-attempted",
     }
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"node_token": "fixture-node"})
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: {"node_token": "fixture-node"})
     monkeypatch.setattr(
         fleet_client, "publish_session", lambda *a: fleet_client.SessionWriteResult(ok=False, reason="http_status:400")
     )
@@ -536,7 +538,7 @@ def test_v2_publication_never_confirms_missing_or_malformed_readback(monkeypatch
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://example.test", "node_token": "n" * 40, "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://example.test", "node_token": "n" * 40, "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE)
     monkeypatch.setattr(fleet_client_messages, "identity", lambda **kw: {"principal": NODE})
@@ -571,7 +573,7 @@ def test_v2_refuses_identity_and_configuration_races_before_write(monkeypatch, r
     if race == "missing":
         settings["node_token"] = ""
     current_node = [NODE]
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(settings))
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: dict(settings))
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: current_node[0])
 
     def identity(**kwargs):
@@ -603,7 +605,7 @@ def test_v2_local_http_publication_readback_replay_and_revocation(tmp_path, monk
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     settings = {"hub_url": f"http://127.0.0.1:{server.server_address[1]}", "node_token": token, "admin_token": ""}
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(settings))
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: dict(settings))
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE)
     # Message-only runtime credentials must never be read for node publication.
     monkeypatch.setenv("BRIGADE_FLEET_MESSAGE_TOKEN_FILE", str(tmp_path / "nonexistent"))
@@ -632,7 +634,7 @@ def test_v2_public_session_client_requires_complete_exact_context(monkeypatch, c
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://example.test", "node_token": "n" * 40, "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://example.test", "node_token": "n" * 40, "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE)
     monkeypatch.setattr(fleet_client_messages, "identity", lambda **kw: {"principal": NODE})

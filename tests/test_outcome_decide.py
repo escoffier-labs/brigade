@@ -6,7 +6,18 @@ import pytest
 
 from brigade import outcome_ledger, outcome_ledger_plan as writer
 
-from tests.test_outcome_ledger import ROOT, SKILL_DIR, SUBJECT, T, WORSE, World, owner_pr
+from tests.test_outcome_ledger import (
+    GOOD,
+    ROOT,
+    SKILL_DIR,
+    SNAPSHOT,
+    SUBJECT,
+    T,
+    WORSE,
+    World,
+    owner_pr,
+    profile_snapshot,
+)
 
 
 NOW = dt.datetime(2026, 11, 10, 6, 17, tzinfo=dt.timezone.utc)
@@ -337,7 +348,10 @@ def test_approval_fails_closed_on_unreadable_events(open_approval, writer_script
 
 
 def test_rollback_artifact_restores_the_bundle_and_rejects_changed_bytes(seeded, writer_script, tmp_path):
-    main = seeded.commit({SUBJECT: WORSE, f"{SKILL_DIR}/new.txt": "new file\n"}, T % (21, "04:00:00Z"))
+    main = seeded.commit(
+        {SUBJECT: WORSE, f"{SKILL_DIR}/new.txt": "new file\n", SNAPSHOT: profile_snapshot(seeded, WORSE)},
+        T % (21, "04:00:00Z"),
+    )
     seeded.gh.failed(main, done=T % (21, "04:10:00Z"))
     artifact = tmp_path / "artifact"
     writer_script.compute(seeded.ev, main, artifact, WRITER_NOW)
@@ -345,8 +359,20 @@ def test_rollback_artifact_restores_the_bundle_and_rejects_changed_bytes(seeded,
     assert plan.proposed["subjects"]["skill:note"]["decision"]["action"] == "rollback"
     assert seeded.repo.snapshot(head, SKILL_DIR) == seeded.repo.snapshot(seeded.c0, SKILL_DIR)
     assert (artifact / SUBJECT).read_bytes() == seeded.repo.show(seeded.c0, SUBJECT)
+    expected_snapshot = profile_snapshot(seeded, GOOD).encode()
+    assert seeded.repo.show(head, SNAPSHOT) == (artifact / SNAPSHOT).read_bytes() == expected_snapshot
     (artifact / SUBJECT).write_bytes(b"unexpected\n")
     with pytest.raises(writer_script.PublicationError, match="different copy"):
+        writer_script.verify_artifact(seeded.ev, main, artifact, WRITER_NOW)
+
+
+def test_verify_artifact_rejects_a_tampered_snapshot(seeded, writer_script, tmp_path):
+    main = seeded.commit({SUBJECT: WORSE}, T % (21, "04:00:00Z"))
+    seeded.gh.failed(main, done=T % (21, "04:10:00Z"))
+    artifact = tmp_path / "artifact"
+    writer_script.compute(seeded.ev, main, artifact, WRITER_NOW)
+    (artifact / SNAPSHOT).write_bytes(b"{}\n")
+    with pytest.raises(writer_script.PublicationError, match="different copy of a rollback-derived file"):
         writer_script.verify_artifact(seeded.ev, main, artifact, WRITER_NOW)
 
 

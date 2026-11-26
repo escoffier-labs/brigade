@@ -51,19 +51,20 @@ def _evidence_env(tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-def test_both_index_layouts_warn_with_paths_and_modification_times(tmp_path):
+@pytest.mark.parametrize("canonical_present", [False, True])
+def test_doctor_reports_ignored_code_graph_index(tmp_path, canonical_present):
     env = _evidence_env(tmp_path)
     canonical, legacy = engine_paths.code_graph_db_paths(tmp_path)
-    _seed_index(legacy, 1_700_000_000)
     assert engine_paths.legacy_findings(tmp_path, env=env) == []
+    _seed_index(legacy, 1_700_000_000)
+    if canonical_present:
+        _seed_index(canonical, 1_800_000_000)
+        assert engine_paths.legacy_findings(tmp_path, env=env) == []
+        return
 
-    _seed_index(canonical, 1_800_000_000)
-    [(status, name, detail, scope)] = engine_paths.legacy_findings(tmp_path, env=env)
-    assert (status, name, scope) == ("WARN", "code graph index layout", "target")
-    assert str(canonical) in detail and str(legacy) in detail
-    assert "2027-01-15T08:00:00Z" in detail and "2023-11-14T22:13:20Z" in detail
-    assert "nothing is merged or deleted" in detail
-    assert engine_paths.code_graph_db(tmp_path, env=env).path == canonical
+    assert engine_paths.legacy_findings(tmp_path, env=env) == [
+        ("INFO", "code graph index layout", "legacy index ignored. Run `brigade code sync`", "target")
+    ]
 
 
 @pytest.mark.parametrize("legacy_part", ["data", "config"])
@@ -83,8 +84,6 @@ def test_both_evidence_layouts_warn_and_the_canonical_set_wins(tmp_path, legacy_
 @pytest.mark.parametrize(
     ("legacy", "canonical"),
     [
-        ("GRAPHTRAIL_DB", "BRIGADE_CODE_GRAPH_DB"),
-        ("GRAPHTRAIL_ALLOW_UNSAFE_ROOT", "BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT"),
         ("GRAPHTRAIL_BIN", "BRIGADE_CODE_GRAPH_BIN"),
         ("GRAPHTRAIL_MCP_BIN", "BRIGADE_CODE_GRAPH_MCP_BIN"),
         ("MISELEDGER_BIN", "BRIGADE_EVIDENCE_BIN"),
@@ -105,10 +104,10 @@ def test_legacy_variables_are_info_and_conflicts_warn_without_stderr(tmp_path, c
 
 
 def test_doctor_gathers_rename_findings(tmp_path, monkeypatch):
-    canonical, legacy = engine_paths.code_graph_db_paths(tmp_path)
-    _seed_index(canonical, 1_800_000_000)
+    _, legacy = engine_paths.code_graph_db_paths(tmp_path)
     _seed_index(legacy, 1_700_000_000)
     path = config.config_path(tmp_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
@@ -128,9 +127,9 @@ def test_doctor_gathers_rename_findings(tmp_path, monkeypatch):
         name: (status, detail) for status, name, detail, _scope in doctor._gather_checks(doctor.build_context(tmp_path))
     }
 
-    assert rows["code graph index layout"][0] == doctor.WARN
-    status, detail = rows["legacy config key"]
-    assert status == doctor.INFO and config.CODE_GRAPH_DELTA_TIMEOUT_KEY in detail
+    assert rows["code graph index layout"][0] == doctor.INFO
+    status, detail = rows["unknown config key"]
+    assert status == doctor.WARN and config.CODE_GRAPH_DELTA_TIMEOUT_KEY in detail
 
 
 # --------------------------------------------------------------------------- #
@@ -149,33 +148,46 @@ def test_verify_snapshots_use_canonical_names():
 
 
 # --------------------------------------------------------------------------- #
-# CLI aliases: accepted, hidden from --help, silent
+# Canonical CLI flags and export command
 # --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["receipts", "export", LEGACY_EVIDENCE],
+        ["work", "import", "context", "--from-miseledger", "query"],
+        ["work", "verify", "run", "--command", "true", "--graphtrail-timeout", "7"],
+    ],
+)
+def test_retired_cli_aliases_are_rejected(argv, capsys):
+    with pytest.raises(SystemExit) as exc:
+        cli.main(argv)
+    assert exc.value.code == 2
+    alias = argv[2] if argv[0] == "receipts" else argv[-2]
+    assert alias in capsys.readouterr().err
 
 
 def _parse(argv):
     return cli._build_parser().parse_args(argv)
 
 
-@pytest.mark.parametrize("flag", ["--code-graph-timeout", "--graphtrail-timeout"])
-def test_code_graph_timeout_flag_and_legacy_alias(flag):
-    args = _parse(["work", "verify", "run", "--target", ".", "--command", "true", flag, "7"])
+def test_code_graph_timeout_flag():
+    args = _parse(["work", "verify", "run", "--target", ".", "--command", "true", "--code-graph-timeout", "7"])
     assert args.code_graph_timeout == 7.0
 
 
-@pytest.mark.parametrize("flag", ["--from-evidence", "--from-miseledger"])
-def test_from_evidence_flag_and_legacy_alias(flag):
-    args = _parse(["work", "import", "context", flag, "query text"])
+def test_from_evidence_flag():
+    args = _parse(["work", "import", "context", "--from-evidence", "query text"])
     assert args.from_evidence == "query text"
 
 
-@pytest.mark.parametrize("name", ["evidence", LEGACY_EVIDENCE])
-def test_receipts_export_evidence_and_legacy_alias_dispatch_alike(tmp_path, monkeypatch, capsys, name):
+def test_receipts_export_evidence_dispatch(tmp_path, monkeypatch, capsys):
     seen = []
     monkeypatch.setattr("brigade.receipts_cmd.export_miseledger", lambda **kwargs: seen.append(kwargs) or 0)
-    assert cli.main(["receipts", "export", name, "--target", str(tmp_path), "--new-only"]) == 0
+    assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path), "--new-only"]) == 0
     assert seen and seen[0]["new_only"] is True and seen[0]["target"] == tmp_path
-    assert ("deprecated" in capsys.readouterr().err) == (name == LEGACY_EVIDENCE)
+    assert capsys.readouterr().err == ""
 
 
 @pytest.mark.parametrize(
@@ -552,7 +564,7 @@ def test_mcp_sync_rename_keeps_adopted_opencode_native_headers(tmp_path, capsys)
 
 
 # --------------------------------------------------------------------------- #
-# legacy config key: the file load_config reads, and the ignored case
+# Retired timeout key detection
 # --------------------------------------------------------------------------- #
 
 
@@ -567,9 +579,12 @@ def test_legacy_config_key_found_in_the_legacy_workspace_config(tmp_path):
     _write_workspace_config(tmp_path / legacy_dir / "config.json", **{config.LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY: 7})
     assert not config.config_path(tmp_path).exists()
     loaded = config.load_config(tmp_path)
-    assert loaded is not None and loaded.code_graph_delta_timeout_seconds == 7.0
+    assert (
+        loaded is not None
+        and loaded.code_graph_delta_timeout_seconds == config.DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS
+    )
     assert config.legacy_config_keys(tmp_path) == [
-        (config.LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY, config.CODE_GRAPH_DELTA_TIMEOUT_KEY, False)
+        (config.LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY, config.CODE_GRAPH_DELTA_TIMEOUT_KEY)
     ]
 
 
@@ -585,12 +600,10 @@ def test_doctor_legacy_config_key_message_matches_what_load_config_reads(tmp_pat
     rows = {
         name: (status, detail) for status, name, detail, _scope in doctor._gather_checks(doctor.build_context(tmp_path))
     }
-    status, detail = rows["legacy config key"]
-    assert status == doctor.INFO
-    if with_canonical:
-        assert "is ignored because" in detail and "until v0.33.0" not in detail
-    else:
-        assert "is read while" in detail and "is absent" in detail
+    status, detail = rows["unknown config key"]
+    assert status == doctor.WARN
+    assert "is ignored" in detail
+    assert config.CODE_GRAPH_DELTA_TIMEOUT_KEY in detail
 
 
 # --------------------------------------------------------------------------- #

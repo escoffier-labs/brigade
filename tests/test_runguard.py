@@ -1142,18 +1142,21 @@ def test_wait_ticket_enroll_survives_concurrent_prune_before_publish(tmp_path, m
     runguard._leave_wait_ticket(ticket, queue_dir)
 
 
-def test_wait_to_acquire_lock_timeout_before_immediate_retry_churn(tmp_path, monkeypatch):
+def test_wait_to_acquire_lock_does_not_sleep_past_deadline(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     lock_path = runguard.lock_path(repo)
     lock_path.mkdir(parents=True)
     (lock_path / "pid").write_text(f"{os.getpid()}\n")
-    monotonic = iter((0.0, 0.0, 0.21))
+    monotonic = iter((0.0, 0.21))
+    acquire_calls = 0
     sleeps: list[float] = []
     monkeypatch.setattr(runguard.time, "monotonic", lambda: next(monotonic))
     monkeypatch.setattr(runguard.time, "sleep", sleeps.append)
     monkeypatch.setattr(runguard, "_is_wait_queue_head", lambda *_args, **_kwargs: True)
 
     def always_retry_acquire(*_args, **_kwargs):
+        nonlocal acquire_calls
+        acquire_calls += 1
         raise runguard.RunLockError("another brigade run appears active")
 
     monkeypatch.setattr(runguard, "_acquire_lock", always_retry_acquire)
@@ -1163,10 +1166,11 @@ def test_wait_to_acquire_lock_timeout_before_immediate_retry_churn(tmp_path, mon
         with runguard.run_lock(repo, wait_seconds=0.2, poll_interval=0.05):
             pass
 
+    assert acquire_calls == 1
     assert sleeps == []
 
 
-def test_wait_to_acquire_lock_retries_immediately_without_poll_sleep(tmp_path, monkeypatch):
+def test_wait_to_acquire_lock_polls_after_the_lock_clears(tmp_path, monkeypatch):
     repo = _repo(tmp_path)
     lock_path = runguard.lock_path(repo)
     lock_path.mkdir(parents=True)
@@ -1189,7 +1193,7 @@ def test_wait_to_acquire_lock_retries_immediately_without_poll_sleep(tmp_path, m
     with runguard.run_lock(repo, wait_seconds=1.0, poll_interval=0.05):
         assert acquire_calls == 2
 
-    assert sleeps == []
+    assert sleeps == [0.05]
 
 
 def test_wait_to_acquire_lock_unbounded_immediate_retry_sleeps_between_retries(tmp_path, monkeypatch):

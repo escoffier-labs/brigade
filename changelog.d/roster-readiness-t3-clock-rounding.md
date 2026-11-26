@@ -1,0 +1,1 @@
+- Stop the T3 readiness tests from failing on Windows when the envelope and the receipt clock describe one instant and differ only by a float rounding step.

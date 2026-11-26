@@ -11,7 +11,7 @@ from brigade import code_export
 
 
 def _write_fake_db(target: Path) -> Path:
-    db = target / ".graphtrail" / "graphtrail.db"
+    db = target / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True, exist_ok=True)
     db.write_bytes(b"fake-graphtrail-index")
     return db
@@ -210,7 +210,9 @@ def test_export_impact_queries_selected_symbol_when_names_are_duplicated(
         return proc.Result(0, "{}", "")
 
     monkeypatch.setattr(code_export.proc, "run", fake_run)
-    impact = code_export._impact_section("graphtrail", tmp_path / ".graphtrail/graphtrail.db", tmp_path, "helper")
+    impact = code_export._impact_section(
+        "graphtrail", tmp_path / ".brigade/code-graph/code-graph.db", tmp_path, "helper"
+    )
     assert queries == [selected_query, selected_query]
     assert impact["edges"] == [edge]
     assert impact["callers"] == [edge]

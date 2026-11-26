@@ -1,0 +1,1 @@
+- Speed up active Fleet Hub status reads on the Python fallback by using the existing event indexes.

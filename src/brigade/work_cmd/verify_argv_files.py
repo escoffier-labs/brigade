@@ -22,8 +22,8 @@ from ..localio import check_git_ignored
 MAX_ARGV_FILE_BYTES = 16 * 1024 * 1024
 
 
-def argv_file_hashes(target: Path, commands: list[str | list[str]]) -> dict[str, str] | None:
-    """Return resolved-path SHA-256 bindings, or None when reuse is unsafe."""
+def argv_file_hashes(target: Path, commands: list[str | list[str]]) -> tuple[dict[str, str] | None, str | None]:
+    """Return SHA-256 bindings and an optional reason when hashing is refused."""
     from . import verification
 
     hashes: dict[str, str] = {}
@@ -36,7 +36,7 @@ def argv_file_hashes(target: Path, commands: list[str | list[str]]) -> dict[str,
                 while argv and re.match(r"^[A-Za-z_][A-Za-z0-9_]*=", argv[0]):
                     argv.pop(0)
             if not argv:
-                return None
+                return None, None
             for index, arg in enumerate(argv):
                 if index == 0 and not verification._verify_token_is_path(arg):
                     continue
@@ -47,25 +47,27 @@ def argv_file_hashes(target: Path, commands: list[str | list[str]]) -> dict[str,
                     info = path.stat()
                 except FileNotFoundError:
                     if index == 0:
-                        return None
+                        return None, None
                     continue
                 if stat.S_ISDIR(info.st_mode):
                     if check_git_ignored(target.resolve(), path.resolve()) != "no":
-                        return None
+                        return None, None
                     continue
-                if not stat.S_ISREG(info.st_mode) or info.st_size > MAX_ARGV_FILE_BYTES:
-                    return None
+                if not stat.S_ISREG(info.st_mode):
+                    return None, None
+                if info.st_size > MAX_ARGV_FILE_BYTES:
+                    return None, "argv_file_too_large"
                 path = path.resolve()
                 key = str(path)
                 if key not in hashes:
                     with path.open("rb") as stream:
                         data = stream.read(MAX_ARGV_FILE_BYTES + 1)
                     if len(data) > MAX_ARGV_FILE_BYTES:
-                        return None
+                        return None, "argv_file_too_large"
                     hashes[key] = hashlib.sha256(data).hexdigest()
     except (OSError, ValueError, RuntimeError):
-        return None
-    return hashes
+        return None, None
+    return hashes, None
 
 
 def reusable_receipt(
@@ -74,7 +76,7 @@ def reusable_receipt(
     planned_display: list[str],
     fingerprint: str | None,
     latest: dict[str, Any] | None,
-) -> bool:
+) -> tuple[bool, str | None]:
     if (
         fingerprint is None
         or latest is None
@@ -83,7 +85,7 @@ def reusable_receipt(
         or latest.get("tree_fingerprint") != fingerprint
         or latest.get("planned_commands") != planned_display
     ):
-        return False
+        return False, None
     records = latest.get("commands")
     if (
         not isinstance(records, list)
@@ -94,7 +96,7 @@ def reusable_receipt(
             for record in records
         )
     ):
-        return False
-    hashes = argv_file_hashes(target, commands)
+        return False, None
+    hashes, skip_reason = argv_file_hashes(target, commands)
     # Legacy receipts remain eligible only when no file arguments need binding.
-    return hashes is not None and latest.get("argv_file_hashes", {}) == hashes
+    return hashes is not None and latest.get("argv_file_hashes", {}) == hashes, skip_reason

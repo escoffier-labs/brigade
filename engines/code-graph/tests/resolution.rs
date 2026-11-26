@@ -2,7 +2,7 @@
 
 use std::fs;
 
-use graphtrail::store::{init_schema, open_db, sync_repo, sync_repo_force};
+use brigade_code_graph::store::{init_schema, open_db, sync_repo, sync_repo_force};
 
 #[test]
 fn same_file_call_resolves_to_same_file_symbol() {
@@ -520,7 +520,7 @@ fn rust_crate_use_resolves_bare_imported_function_call() {
         root.join("src").join("lib.rs"),
         r#"
 use crate::m::f;
-use graphtrail::m::g;
+use brigade_code_graph::m::g;
 
 fn run() {
     f();
@@ -745,7 +745,7 @@ fn python_layout_fixture(root: &std::path::Path, source_root: &str) -> rusqlite:
 
 fn assert_python_layout_calls(conn: &rusqlite::Connection, target_file: &str) {
     for source in ["test_bare", "test_qualified"] {
-        let rows = graphtrail::store::explain_calls(conn, source, "foo").unwrap();
+        let rows = brigade_code_graph::store::explain_calls(conn, source, "foo").unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].resolution, "import-strict", "{rows:?}");
         assert_eq!(rows[0].targets.len(), 1);
@@ -800,7 +800,7 @@ fn python_nested_packages_are_not_source_roots() {
     let conn = open_db(&root.join("g.db")).unwrap();
     init_schema(&conn).unwrap();
     sync_repo(&conn, root).unwrap();
-    let rows = graphtrail::store::explain_calls(&conn, "main", "run").unwrap();
+    let rows = brigade_code_graph::store::explain_calls(&conn, "main", "run").unwrap();
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].resolution, "unresolved-external", "{rows:?}");
     assert!(rows[0].targets.is_empty());
@@ -810,7 +810,8 @@ fn python_nested_packages_are_not_source_roots() {
 fn affected_attributes_src_layout_test_callers() {
     let dir = tempfile::tempdir().unwrap();
     let conn = python_layout_fixture(dir.path(), "src/");
-    let report = graphtrail::query::affected(&conn, &["src/pkg/a.py".to_string()], 3).unwrap();
+    let report =
+        brigade_code_graph::query::affected(&conn, &["src/pkg/a.py".to_string()], 3).unwrap();
     let files: Vec<_> = report
         .affected_tests
         .iter()
@@ -842,11 +843,11 @@ fn name_fallback_uses_only_the_callers_language_family() {
     let conn = open_db(&root.join("g.db")).unwrap();
     init_schema(&conn).unwrap();
     sync_repo(&conn, root).unwrap();
-    let absent = graphtrail::store::explain_calls(&conn, "caller", "dispatch").unwrap();
+    let absent = brigade_code_graph::store::explain_calls(&conn, "caller", "dispatch").unwrap();
     assert_eq!(absent.len(), 1);
     assert_eq!(absent[0].resolution, "no-candidates", "{absent:?}");
     assert!(absent[0].targets.is_empty());
-    let unique = graphtrail::store::explain_calls(&conn, "caller", "helper").unwrap();
+    let unique = brigade_code_graph::store::explain_calls(&conn, "caller", "helper").unwrap();
     assert_eq!(unique[0].resolution, "unique-name", "{unique:?}");
     assert_eq!(unique[0].targets.len(), 1);
     assert_eq!(unique[0].targets[0].file_path, "callee.go");
@@ -874,7 +875,7 @@ fn resolver_upgrade_rebuilds_existing_edges_without_reparsing() {
         conn.execute("DELETE FROM meta WHERE key = 'resolver_version'", [])
             .unwrap();
         if let Some(version) = old_version {
-            graphtrail::store::meta::upsert(&conn, "resolver_version", version).unwrap();
+            brigade_code_graph::store::meta::upsert(&conn, "resolver_version", version).unwrap();
         }
         // Simulate old derived state: missing Python edges plus an erroneous Go -> Python edge.
         conn.execute_batch(
@@ -895,7 +896,7 @@ fn resolver_upgrade_rebuilds_existing_edges_without_reparsing() {
             .unwrap();
         assert_eq!(edges, 2, "only the two Python imports should have edges");
         assert!(
-            graphtrail::store::meta::read(&conn, "resolver_version")
+            brigade_code_graph::store::meta::read(&conn, "resolver_version")
                 .unwrap()
                 .is_some()
         );
@@ -1003,7 +1004,7 @@ fn python_conditional_external_import_keeps_fallback_definition_uncertain() {
 
 fn assert_uncertain_external_import_candidate(conn: &rusqlite::Connection) {
     assert_resolves_to(conn, "run", "helper", "unique-name", "core.py");
-    let rows = graphtrail::store::explain_calls(conn, "run", "helper").unwrap();
+    let rows = brigade_code_graph::store::explain_calls(conn, "run", "helper").unwrap();
     assert_eq!(rows[0].targets[0].confidence, 0.7, "{rows:?}");
     let edge_confidence: f64 = conn
         .query_row(
@@ -1135,7 +1136,7 @@ fn python_conditional_module_assignment_keeps_reexported_alias_candidate() {
         "from api import helper\n\ndef run():\n    return helper()\n",
     );
     let conn = resolution_db(root);
-    let rows = graphtrail::store::explain_calls(&conn, "run", "helper").unwrap();
+    let rows = brigade_code_graph::store::explain_calls(&conn, "run", "helper").unwrap();
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].resolution, "import-fallback", "{rows:?}");
     assert_eq!(rows[0].targets.len(), 1, "{rows:?}");
@@ -1155,7 +1156,7 @@ fn python_conditional_module_assignment_keeps_reexported_alias_candidate() {
 }
 
 fn assert_unresolved_call(conn: &rusqlite::Connection, source: &str, target: &str, path: &str) {
-    let rows = graphtrail::store::explain_calls(conn, source, target).unwrap();
+    let rows = brigade_code_graph::store::explain_calls(conn, source, target).unwrap();
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].resolution, path, "{rows:?}");
     assert!(rows[0].targets.is_empty(), "{rows:?}");
@@ -1193,7 +1194,8 @@ fn python_sibling_services_resolve_only_their_own_package() {
     let conn = resolution_db(root);
     for service in ["a", "b"] {
         let rows =
-            graphtrail::store::explain_calls(&conn, &format!("test_{service}"), "work").unwrap();
+            brigade_code_graph::store::explain_calls(&conn, &format!("test_{service}"), "work")
+                .unwrap();
         assert_eq!(rows[0].resolution, "import-strict");
         assert_eq!(rows[0].targets.len(), 1, "{rows:?}");
         assert_eq!(
@@ -1203,7 +1205,8 @@ fn python_sibling_services_resolve_only_their_own_package() {
         assert_eq!(rows[0].targets[0].confidence, 0.9);
     }
     let report =
-        graphtrail::query::affected(&conn, &["services/b/src/common/api.py".into()], 3).unwrap();
+        brigade_code_graph::query::affected(&conn, &["services/b/src/common/api.py".into()], 3)
+            .unwrap();
     let files: Vec<_> = report
         .affected_tests
         .iter()
@@ -1230,7 +1233,7 @@ fn python_fixture_copy_does_not_compete_with_src_package() {
         "from pkg.api import work\ndef test_api():\n    work()\n",
     );
     let conn = resolution_db(root);
-    let rows = graphtrail::store::explain_calls(&conn, "test_api", "work").unwrap();
+    let rows = brigade_code_graph::store::explain_calls(&conn, "test_api", "work").unwrap();
     assert_eq!(rows[0].resolution, "import-strict");
     assert_eq!(rows[0].targets.len(), 1, "{rows:?}");
     assert_eq!(rows[0].targets[0].file_path, "src/pkg/api.py");
@@ -1287,7 +1290,7 @@ fn python_deepest_serving_root_wins() {
         "from pkg.api import work\ndef test_api():\n    work()\n",
     );
     let conn = resolution_db(root);
-    let rows = graphtrail::store::explain_calls(&conn, "test_api", "work").unwrap();
+    let rows = brigade_code_graph::store::explain_calls(&conn, "test_api", "work").unwrap();
     assert_eq!(rows[0].targets.len(), 1, "{rows:?}");
     assert_eq!(rows[0].targets[0].file_path, "services/a/src/pkg/api.py");
 }
@@ -1330,7 +1333,7 @@ fn go_import_directory_matches_only_direct_go_files() {
         "package nested\nfunc Render() {}\n",
     );
     let conn = resolution_db(root);
-    let rows = graphtrail::store::explain_calls(&conn, "run", "Render").unwrap();
+    let rows = brigade_code_graph::store::explain_calls(&conn, "run", "Render").unwrap();
     assert_eq!(rows[0].resolution, "import-strict");
     assert_eq!(rows[0].targets.len(), 1, "{rows:?}");
     assert_eq!(rows[0].targets[0].file_path, "web/render.go");
@@ -1403,8 +1406,8 @@ fn older_writer_sync_provenance_forces_edge_rebuild_without_reparse() {
         .unwrap();
     assert_eq!(confidence, 0.8);
     assert_eq!(
-        graphtrail::store::meta::read(&conn, "resolver_synced_at").unwrap(),
-        graphtrail::store::meta::read(&conn, "synced_at").unwrap()
+        brigade_code_graph::store::meta::read(&conn, "resolver_synced_at").unwrap(),
+        brigade_code_graph::store::meta::read(&conn, "synced_at").unwrap()
     );
     assert!(sync_repo(&conn, root).unwrap().unchanged);
 }
@@ -1433,7 +1436,7 @@ fn assert_resolves_to(
     path: &str,
     target_file: &str,
 ) {
-    let rows = graphtrail::store::explain_calls(conn, source, target).unwrap();
+    let rows = brigade_code_graph::store::explain_calls(conn, source, target).unwrap();
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].resolution, path, "{rows:?}");
     assert_eq!(rows[0].targets.len(), 1, "{rows:?}");
@@ -1623,7 +1626,7 @@ fn python_module_level_calls_reach_callers_and_dead_code() {
         "def cli():\n    return 1\n\nif __name__ == \"__main__\":\n    cli()\n",
     );
     sync_repo(&conn, root).unwrap();
-    let report = graphtrail::query::dead_code(&conn, 100).unwrap();
+    let report = brigade_code_graph::query::dead_code(&conn, 100).unwrap();
     let names: Vec<&str> = report.symbols.iter().map(|s| s.name.as_str()).collect();
     assert!(!names.contains(&"cli"), "{names:?}");
     assert!(!names.contains(&"<module>"), "{names:?}");
@@ -1715,7 +1718,7 @@ fn python_dense_star_cycle_resolves_in_polynomial_time() {
     );
     let started = std::time::Instant::now();
     let conn = resolution_db(root);
-    let rows = graphtrail::store::explain_calls(&conn, "run", "absent").unwrap();
+    let rows = brigade_code_graph::store::explain_calls(&conn, "run", "absent").unwrap();
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert!(rows[0].targets.is_empty(), "{rows:?}");
     assert_resolves_to(&conn, "run", "present", "import-strict", "pkg/m7.py");
@@ -1764,7 +1767,7 @@ fn python_function_local_import_is_not_a_module_export() {
     let conn = resolution_db(root);
     assert_resolves_to(&conn, "run", "helper", "import-strict", "a.py");
     assert_resolves_to(&conn, "go", "helper", "import-strict", "b.py");
-    let rows = graphtrail::store::explain_calls(&conn, "pick", "helper").unwrap();
+    let rows = brigade_code_graph::store::explain_calls(&conn, "pick", "helper").unwrap();
     assert_ne!(rows[0].resolution, "import-strict", "{rows:?}");
 }
 
@@ -1780,7 +1783,7 @@ fn python_star_import_of_aliased_reexport_resolves() {
         "from facade import *\n\ndef run():\n    return exported()\n",
     );
     let conn = resolution_db(root);
-    let rows = graphtrail::store::explain_calls(&conn, "run", "exported").unwrap();
+    let rows = brigade_code_graph::store::explain_calls(&conn, "run", "exported").unwrap();
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_eq!(rows[0].resolution, "import-fallback", "{rows:?}");
     assert_eq!(rows[0].targets.len(), 1, "{rows:?}");
@@ -1838,7 +1841,7 @@ fn python_star_reexport_respects_dunder_all_and_binding_order() {
         "from pkg import helper\n\ndef run():\n    return helper()\n",
     );
     let conn = resolution_db(root);
-    let rows = graphtrail::store::explain_calls(&conn, "run", "helper").unwrap();
+    let rows = brigade_code_graph::store::explain_calls(&conn, "run", "helper").unwrap();
     assert_ne!(rows[0].resolution, "import-strict", "{rows:?}");
 }
 
@@ -1882,7 +1885,7 @@ fn python_module_export_requires_a_top_level_definition() {
         "from pkg import helper\n\ndef run():\n    return helper()\n",
     );
     let conn = resolution_db(root);
-    let rows = graphtrail::store::explain_calls(&conn, "run", "helper").unwrap();
+    let rows = brigade_code_graph::store::explain_calls(&conn, "run", "helper").unwrap();
     assert_eq!(rows.len(), 1, "{rows:?}");
     assert_ne!(rows[0].resolution, "import-strict", "{rows:?}");
     let strict: i64 = conn
@@ -1926,13 +1929,13 @@ fn python_module_symbol_stays_out_of_search() {
     let dir = tempfile::tempdir().unwrap();
     let conn = reexport_fixture(dir.path(), "from .core import helper\n");
     for query in ["core.py", "pkg/core.py", "main"] {
-        let rows = graphtrail::query::search_symbols(&conn, query, 20).unwrap();
+        let rows = brigade_code_graph::query::search_symbols(&conn, query, 20).unwrap();
         assert!(
             rows.iter().all(|row| row.qualified_name != "<module>"),
             "{query}: {rows:?}"
         );
     }
-    let rows = graphtrail::query::search_symbols(&conn, "core.py", 20).unwrap();
+    let rows = brigade_code_graph::query::search_symbols(&conn, "core.py", 20).unwrap();
     assert!(rows.iter().any(|row| row.name == "main"), "{rows:?}");
 }
 
@@ -1972,7 +1975,7 @@ fn python_star_cycle_with_competing_definitions_is_not_import_strict() {
             "from facade import helper\n\ndef run():\n    return helper()\n",
         );
         let conn = resolution_db(root);
-        let rows = graphtrail::store::explain_calls(&conn, "run", "helper").unwrap();
+        let rows = brigade_code_graph::store::explain_calls(&conn, "run", "helper").unwrap();
         assert_eq!(rows.len(), 1, "wrappers={wrappers}: {rows:?}");
         assert_ne!(
             rows[0].resolution, "import-strict",
@@ -2032,7 +2035,7 @@ fn python_conditional_binding_keeps_earlier_cycle_statements() {
             dir.path(),
             &format!("FLAG = True\nfrom b import *\n{guard}from seed import helper{tail}"),
         );
-        let rows = graphtrail::store::explain_calls(&conn, "run", "helper").unwrap();
+        let rows = brigade_code_graph::store::explain_calls(&conn, "run", "helper").unwrap();
         assert_eq!(rows.len(), 1, "{guard:?}: {rows:?}");
         assert_ne!(rows[0].resolution, "import-strict", "{guard:?}: {rows:?}");
     }

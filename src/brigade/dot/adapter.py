@@ -30,9 +30,10 @@ from .profile import (
     runtime_profile,
 )
 from .runtime_config import Runtime
-from .duet_dispatch import DuetFleetTools
+from .duet_dispatch import DuetFleetTools, LimitedFleetTools
 from .safe_state import identity
 from .state import BridgeState, Clock, summarize_arguments, utc_now
+from .tool_grants import TOOL_NOT_PERMITTED, Denied, authorize
 
 MAX_UNACKED = 1000
 # Responses that carry memory hits, and how each derives its query from its own content.
@@ -108,7 +109,12 @@ class DotTools:
             runtime,
             state,
             clock,
-            runtime_profile(profile, runtime.dispatch_enabled, messaging_enabled=bool(runtime.messaging_enabled)),
+            runtime_profile(
+                profile,
+                runtime.dispatch_enabled,
+                messaging_enabled=bool(runtime.messaging_enabled),
+                tool_grants=runtime.tool_grants,
+            ),
         )
         self.fleet, self.hub, self.memory, self.inbox = fleet, hub, memory, inbox
         self.push = MemoryPush(
@@ -123,6 +129,9 @@ class DotTools:
         result: dict[str, Any] = {}
         try:
             identity(owner)
+            decision = authorize(self.profile, self.runtime.tool_grants, name)
+            if isinstance(decision, Denied) and decision.code == TOOL_NOT_PERMITTED:
+                raise DotError(decision.code, reason=decision.reason)
             values = validate_arguments(name, arguments, tools=self.profile.tools)
             if not self.profile.fleet_dispatch and name == "message_send":
                 if self.profile.strict_recipients and values["to"] not in self.runtime.hub.recipients:
@@ -186,20 +195,21 @@ class DotTools:
             error_code = "adapter_unavailable"
             raise
         finally:
-            nested = result.get("result")
-            request_id = arguments.get("request_id")
-            if request_id is None:
-                request_id = result.get("request_id") or (
-                    nested.get("request_id") if isinstance(nested, dict) else None
+            if error_code != TOOL_NOT_PERMITTED:
+                nested = result.get("result")
+                request_id = arguments.get("request_id")
+                if request_id is None:
+                    request_id = result.get("request_id") or (
+                        nested.get("request_id") if isinstance(nested, dict) else None
+                    )
+                self.record_call(
+                    name,
+                    error_code is None,
+                    (time.monotonic() - started) * 1000,
+                    request_id=request_id,
+                    arg_summary=summarize_arguments(arguments),
+                    error_code=error_code,
                 )
-            self.record_call(
-                name,
-                error_code is None,
-                (time.monotonic() - started) * 1000,
-                request_id=request_id,
-                arg_summary=summarize_arguments(arguments),
-                error_code=error_code,
-            )
 
     def record_call(
         self,
@@ -228,7 +238,12 @@ class DotTools:
             pass
 
     def dot_t3_capabilities(self) -> dict[str, Any]:
-        """Static description only: no IO, no subprocess, no config read."""
+        """Describe Dot and read local usage when dispatch limits are configured."""
+        dispatch = {}
+        if self.runtime.dispatch_limits is not None:
+            dispatch["limits"] = self._dispatch_limits()
+            if isinstance(self.fleet, LimitedFleetTools):
+                dispatch["usage"] = self.fleet.dispatch_usage()
         return dict(
             bridge_version="6",
             operating_instructions=self.profile.operating_instructions,
@@ -259,6 +274,7 @@ class DotTools:
                 ),
                 runtime_mode="full-access (trusted operator fleet; children do not raise T3 approval prompts)",
                 max_prompt_bytes=MAX_PROMPT_BYTES,
+                **dispatch,
                 handles=(
                     "Keep the returned request_id. fleet_recent lists every mutating bridge call with its "
                     "request_id and outcome, including calls whose HTTP response was lost."
@@ -318,6 +334,17 @@ class DotTools:
             ),
         )
 
+    def _dispatch_limits(self) -> dict[str, Any] | None:
+        limits = self.runtime.dispatch_limits
+        if limits is None:
+            return None
+        return dict(
+            repositories=sorted(limits.repositories) if limits.repositories is not None else None,
+            max_open=limits.max_open,
+            daily_limit=limits.daily_limit,
+            prompt_max_bytes=limits.prompt_max_bytes,
+        )
+
     def duet_capabilities(self) -> dict[str, Any]:
         """Static description only: no IO, no subprocess, no config read."""
         return dict(
@@ -330,18 +357,7 @@ class DotTools:
             dispatch=dict(
                 enabled=self.runtime.dispatch_enabled,
                 tools=sorted(self.profile.tools & DUET_DISPATCH_TOOLS),
-                limits=(
-                    dict(
-                        repositories=sorted(self.runtime.dispatch_limits.repositories)
-                        if self.runtime.dispatch_limits.repositories is not None
-                        else None,
-                        max_open=self.runtime.dispatch_limits.max_open,
-                        daily_limit=self.runtime.dispatch_limits.daily_limit,
-                        prompt_max_bytes=self.runtime.dispatch_limits.prompt_max_bytes,
-                    )
-                    if self.runtime.dispatch_limits is not None
-                    else None
-                ),
+                limits=self._dispatch_limits(),
             ),
             fleet_hub=dict(
                 read_only=True,
@@ -381,8 +397,11 @@ def build_tools(runtime: Runtime, profile: ConnectorProfile = DOT) -> tuple[DotT
     try:
         commands = CommandRunner()
         # Profiles without fleet dispatch never construct the T3 fleet client.
-        fleet = FleetTools(runtime, state, commands=commands) if profile.fleet_dispatch else None
-        if profile.pack_id == "duet" and runtime.dispatch_enabled:
+        fleet: FleetTools | None = None
+        if profile.fleet_dispatch:
+            fleet_type = LimitedFleetTools if runtime.dispatch_limits is not None else FleetTools
+            fleet = fleet_type(runtime, state, commands=commands)
+        elif profile.pack_id == "duet" and runtime.dispatch_enabled:
             fleet = DuetFleetTools(runtime, state, commands=commands)
         hub_inbox = HubInbox(
             state,

@@ -37,22 +37,24 @@ def test_release_checklist_verifies_pypi_version():
     assert 'for name in ("brigadestack", "brigade-cli"):' in text
 
 
-def test_release_checklist_documents_additive_assets_and_legacy_primary_manifest():
+def test_release_checklist_documents_canonical_assets_and_historical_release_inventory():
     text = (ROOT / "RELEASE.md").read_text()
 
-    for component in ("agent-notify", "graphtrail", "graphtrail-mcp", "miseledger", "sessionfind"):
+    for component in (
+        "agent-notify",
+        "brigade-code-graph",
+        "brigade-code-graph-mcp",
+        "brigade-evidence",
+        "brigade-hub",
+        "sessionfind",
+    ):
         assert component in text
-    for alias in ("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence"):
-        assert alias in text
-    assert "40 native assets" in text
-    assert "42 total GitHub release files" in text
-    assert "41 entries" in text
-    assert "primary manifest retains the five legacy component IDs and executables" in text
-    assert "historical 25-asset releases" in text
+    assert "27 native assets" in text
+    assert "29 total GitHub release files" in text
+    assert "28 files" in text
+    assert "retain their original asset inventories" in text
     assert "component-manifest-v1.json" in text
     assert "checksums.txt" in text
-    # The stale 20-asset count must be gone.
-    assert "20 native assets" not in text
 
 
 def test_cold_start_gate_description_names_the_flags_that_make_it_run():

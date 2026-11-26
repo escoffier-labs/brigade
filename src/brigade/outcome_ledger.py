@@ -30,11 +30,13 @@ import dataclasses
 import datetime as dt
 import hashlib
 import json
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
-from . import outcome as outcome_core, scorecard, shipped_history, verify_manifest
+from . import outcome as outcome_core, scorecard, shipped_history, template_profiles, verify_manifest
 from .outcome_ledger_actions import GhApi, owner_review_ok, parse_time
 from .outcome_ledger_git import Repo, bundle_fingerprint, is_sha
 from .outcome_ledger_trials import MANIFESTS_DIR, TrialPlan, is_hurt_trial, plan_trials, scope_history
@@ -678,10 +680,32 @@ def _completeness_errors(
     return errors
 
 
+TEMPLATES_PATH = "src/brigade/templates"
+PROFILE_SNAPSHOT_PATH = f"{TEMPLATES_PATH}/{template_profiles.SNAPSHOT_NAME}"
+ROLLBACK_DERIVED_PATHS = (PROFILE_SNAPSHOT_PATH,)
+
+
+def rollback_derived_files(repo: Repo, tree: str) -> dict[str, bytes]:
+    """Run the trusted generator with data from a candidate Git commit or tree."""
+    fixtures_path = template_profiles.FIXTURES_PATH
+    with tempfile.TemporaryDirectory(prefix="ledger-template-data-") as directory:
+        root = Path(directory)
+        for source in (TEMPLATES_PATH, fixtures_path):
+            data_root = root / source
+            for name, content in repo.snapshot(tree, source).items():
+                path = template_profiles.template_data_path(data_root, name)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+        snapshot = template_profiles.build_snapshot(
+            templates_root=root / TEMPLATES_PATH, fixtures_dir=root / fixtures_path
+        )
+    return {PROFILE_SNAPSHOT_PATH: template_profiles.render_snapshot(snapshot).encode("utf-8")}
+
+
 def _path_errors(
     repo: Repo, expected: Mapping[str, Any], base: str, change_head: str, head: str, *, any_other_path: bool = False
 ) -> list[str]:
-    """A ledger change may touch the ledger file and the restored bundle, and nothing else."""
+    """Allow only ledger, restored bundles, and verified rollback outputs."""
     errors: list[str] = []
     restores = {
         key: body["restore"] for key, body in expected["subjects"].items() if isinstance(body.get("restore"), dict)
@@ -690,6 +714,8 @@ def _path_errors(
     for path in repo.changed_paths(base, change_head):
         if any_other_path or path == LEDGER_PATH:
             continue
+        if bundle_dirs and path in ROLLBACK_DERIVED_PATHS:
+            continue
         if any(path.startswith(prefix) for prefix in bundle_dirs):
             continue
         errors.append(f"a ledger change may not touch {path}")
@@ -697,4 +723,8 @@ def _path_errors(
         directory = prefix.rstrip("/")
         if repo.snapshot(head, directory) != repo.snapshot(row["to_commit"], directory):
             errors.append(f"{directory}: bundle is not the approved text restored byte for byte")
+    if bundle_dirs and not errors:
+        for path, data in rollback_derived_files(repo, change_head).items():
+            if repo.show(change_head, path) != data:
+                errors.append(f"{path}: does not match the regenerated rollback output")
     return errors

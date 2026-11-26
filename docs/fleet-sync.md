@@ -36,6 +36,12 @@ status of each phase.
 - A relative `token_file` or `node_token_file` is read from the directory
   that holds `fleet.toml`, never from the working directory. `~` expands.
   Memory sync reads `[memory_hub]` from the same guarded file.
+- On POSIX, the effective user must own `token_file` and `node_token_file`,
+  and neither file may grant permissions to group or other users. Use mode
+  `0600`. Configured symlinks use the resolved file for these checks.
+  `brigade doctor` reports the configured files and repair hints. On Windows,
+  Brigade checks that the target is a regular file and skips POSIX ownership
+  and mode checks.
 
 ## Cloud concurrency controls
 
@@ -836,7 +842,7 @@ Python ceiling is the effective one.
 These request bounds leave GET payloads and fleet list clients unchanged.
 Claim fencing failures still return HTTP 503 on read paths, including `/status`.
 Result-set bounds, keyset pagination, and a current-status projection move to
-[the 0.29.0 follow-up](https://github.com/escoffier-labs/brigade/issues/1738).
+[the 0.29.0 follow-up](https://github.com/escoffier-labs/brigadestack/issues/1738).
 Retention, POST throttling, per-node fairness behind a proxy, and the fronting
 proxy runbook also remain deferred to that issue.
 

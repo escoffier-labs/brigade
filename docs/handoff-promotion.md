@@ -147,7 +147,7 @@ rules. Worker, cron, subagent, unknown, and tool-touched origins go to
 classifies that reason as human review and cannot retry it automatically.
 
 On Windows, automatic filing is off. Handoffs go to human review with
-`origin-review-required` until [#2588](https://github.com/escoffier-labs/brigade/issues/2588)
+`origin-review-required` until [#2588](https://github.com/escoffier-labs/brigadestack/issues/2588)
 adds a Win32 ACL confinement check. Regular-file, reparse-point, and single-link
 checks still apply. Files above the automatic inspection limit go to review as
 `handoff-too-large`, with their original bytes preserved. Linked handoffs stay in

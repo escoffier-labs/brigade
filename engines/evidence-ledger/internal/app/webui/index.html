@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MiseLedger</title>
+<title>Brigade Evidence</title>
 <style>
   :root {
     --bg: #0e1116; --panel: #161b22; --panel2: #1c2230; --line: #2a3140;
@@ -81,7 +81,7 @@
 <body>
 <header>
   <div class="brand">
-    <h1>MiseLedger</h1>
+    <h1>Brigade Evidence</h1>
     <span class="sub">local session &amp; conversation finder &middot; <span id="stat"></span></span>
   </div>
   <div class="searchrow">
@@ -120,7 +120,7 @@ async function loadSources(){
       o.value = k; o.textContent = k + " (" + counts[k] + ")";
       srcEl.appendChild(o);
     });
-  } catch(e){ metaEl.textContent = "Cannot reach miseledger server."; }
+  } catch(e){ metaEl.textContent = "Cannot reach brigade-evidence server."; }
 }
 
 function setMode(m){
@@ -199,7 +199,7 @@ function cmdBlock(label, cmd){
 function showSession(s){
   const resume = resumeHint(s);
   const q = (qEl.value||"").trim();
-  const showCmd = `miseledger search "${q}" --source ${s.source_kind} --collection ${s.collection_external_id}`;
+  const showCmd = `brigade-evidence search "${q}" --source ${s.source_kind} --collection ${s.collection_external_id}`;
   detEl.innerHTML = `
     <h2>${esc(s.collection_name || s.collection_external_id)}</h2>
     <div class="kv">source: <code>${esc(s.source_kind)}</code></div>

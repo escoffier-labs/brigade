@@ -20,7 +20,6 @@ COMPONENT_IDS = (
     "brigade-hub",
     "sessionfind",
 )
-LEGACY_ALIASES = ("graphtrail", "graphtrail-mcp", "miseledger")
 SUPPORTED_PLATFORMS = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
 # Mirrors component_manifest.COMPONENT_PLATFORMS: brigade-hub ships for Linux only.
 COMPONENT_PLATFORMS = {"brigade-hub": ("linux-amd64", "linux-arm64")}
@@ -72,8 +71,6 @@ def _validate_inputs(tag: str, commit: str, assets_dir: Path) -> set[str]:
         raise ValueError(f"assets directory does not exist: {assets_dir}")
     found = {path.name for path in assets_dir.iterdir() if path.is_file()}
     expected = expected_asset_names()
-    aliases = {asset_name(component, platform) for component in LEGACY_ALIASES for platform in SUPPORTED_PLATFORMS}
-    expected |= aliases
     missing = sorted(expected - found)
     extra = sorted(found - expected)
     if missing:

@@ -5,7 +5,7 @@ The Brigade plugin gives Claude Code and Codex working agent memory in the sessi
 ## Install in Claude Code
 
 ```
-/plugin marketplace add escoffier-labs/brigade
+/plugin marketplace add escoffier-labs/brigadestack
 /plugin install brigade@brigade
 ```
 
@@ -16,7 +16,7 @@ Before 0.31.0, the only way to try the plugin is to load `plugins/brigade` local
 ## Install in Codex
 
 ```
-codex plugin marketplace add escoffier-labs/brigade
+codex plugin marketplace add escoffier-labs/brigadestack
 codex plugin add brigade@brigade
 ```
 

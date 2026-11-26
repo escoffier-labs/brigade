@@ -56,7 +56,7 @@ type commandSpec struct {
 }
 
 var commandTable = []commandSpec{
-	{name: "version", usage: "version", description: "Print the MiseLedger version.", run: cmdVersion},
+	{name: "version", usage: "version", description: "Print the Brigade Evidence version.", run: cmdVersion},
 	{name: "init", usage: "init", description: "Initialize the local archive and runtime paths.", run: cmdInit},
 	{name: "status", usage: "status", description: "Show archive status and counts.", run: cmdStatus},
 	{name: "sources", usage: "sources discover", description: "List known evidence sources.", run: cmdSources},
@@ -696,7 +696,7 @@ func countOpenCodeExports(root string) int {
 
 // cmdFork snapshots the current ledger into a standalone branch database. The
 // branch is an ordinary ledger you can import experimental sources into without
-// touching the canonical one; `miseledger diff` then reports exactly what a
+// touching the canonical one; `brigade-evidence diff` then reports exactly what a
 // source added, changed, or removed. Inspired by ActiveGraph's fork_run, which
 // copies event rows up to a cut point into a new run so it can diverge without
 // re-running the shared prefix (see ~/notes/activegraph-credits.md).
@@ -1584,7 +1584,7 @@ func runStationTrailImport(db *sql.DB, sourceKind, sourcePath string, values map
 	if err := evalStationTrailCompat(stationTrailCapsFrom(bin), sourceKind); err != nil {
 		return ingest.AdapterResult{}, stationTrailSummary{}, err
 	}
-	summaryFile, err := os.CreateTemp("", "miseledger-stationtrail-*.json")
+	summaryFile, err := os.CreateTemp("", "brigade-evidence-stationtrail-*.json")
 	if err != nil {
 		return ingest.AdapterResult{}, stationTrailSummary{}, err
 	}
@@ -2159,7 +2159,7 @@ func validateCodeReference(reference CodeReference) error {
 		return errors.New("invalid code reference: qualified_name is required")
 	}
 	if !codeReferenceSymbolKinds[reference.SymbolKind] {
-		return errors.New("invalid code reference: symbol_kind must be a supported GraphTrail symbol kind")
+		return errors.New("invalid code reference: symbol_kind must be a supported Code Graph symbol kind")
 	}
 	if reference.SourceSpan.StartLine < 1 || reference.SourceSpan.LineCount < 1 {
 		return errors.New("invalid code reference: source_span must contain positive start_line and line_count")
@@ -3176,7 +3176,7 @@ func renderEvidenceMarkdown(w io.Writer, b []byte) {
 	if err := json.Unmarshal(b, &bundle); err != nil {
 		return
 	}
-	fmt.Fprintf(w, "# MiseLedger Evidence\n\n")
+	fmt.Fprintf(w, "# Brigade Evidence\n\n")
 	fmt.Fprintf(w, "- Generated: %s\n", bundle["generated_at"])
 	if regen := bundle["regenerated_at"]; regen != nil && fmt.Sprint(regen) != "" {
 		fmt.Fprintf(w, "- Regenerated: %s\n", regen)

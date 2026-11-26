@@ -12,7 +12,7 @@ from .native_child_host import NativeChildCustodyError
 from .native_child_observations import RESOURCE_EVENT, NativeObservation, observation_diagnostic
 from .native_orca_dispatch import WorkerReference
 from .native_orca_host import HOST
-from .native_orca_verbs import CORRELATION_EVENT, ClaimedTask, claimed_task
+from .native_orca_verbs import CORRELATION_EVENT, ClaimedTask, claimed_task, owned_task_run
 from .native_child_custody import owned_run
 
 _OBSERVE_SCHEMA = "brigade.orca_observe.v1"
@@ -69,6 +69,7 @@ def _record_observation(task: ClaimedTask, observation: NativeObservation, show:
                     artifact_kind="receipt" if terminal else None,
                     artifact_digest=observation.result_transfer_id if terminal else None,
                     containment=observation.containment,
+                    transcript_clipped=observation.transcript_clipped,
                 ),
                 expected_version=result.version,
             )
@@ -84,7 +85,7 @@ def observe(
         worker = _worker(task)
         observation = observations.classify_show(worker, payload, worker_done=worker_done, transcript=transcript)
         result = _record_observation(task, observation, payload)
-        return {
+        report = {
             **task.report(_OBSERVE_SCHEMA),
             **observation_diagnostic(observation),
             "status": result.status,
@@ -93,6 +94,9 @@ def observe(
             "transcript_argv": observations.result_argv(worker),
             "observe_argv": observations.observe_argv(worker),
         }
+        if result.transcript_clipped:
+            report["transcript_clipped"] = True
+        return report
 
 
 def cancel(
@@ -132,7 +136,7 @@ def cancel(
 
 def ack(*, workspace: Path, run_id: str, task_id: str, result_id: str) -> dict[str, Any]:
     return native_child_lifecycle.ack(
-        HOST, workspace=workspace, run_id=run_id, task_id=task_id, result_id=result_id, owned_run=owned_run
+        HOST, workspace=workspace, run_id=run_id, task_id=task_id, result_id=result_id, owned_run=owned_task_run
     )
 
 

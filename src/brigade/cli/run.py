@@ -526,7 +526,7 @@ def dispatch(args) -> int:
             return 2
     elif (
         args.worker is None
-        and fleet_client.load_fleet_settings().get("hub_url")
+        and fleet_client.load_fleet_settings(include_node=False, include_admin=False).get("hub_url")
         and not run_preference._spoken_seat_names(args.task, loaded_roster)
     ):
         classified = task_roles.classify(args.task)
@@ -1203,7 +1203,12 @@ def dispatch(args) -> int:
         if worktree_cwd is not None and keep_worktree:
             print(f"worktree kept for recovery: {worktree_cwd}", file=sys.stderr)
         return 2
-    except (fleet_client.FleetClaimHeldError, ClaimTargetError, fleet_home_guard.RelativeBrigadeHomeError) as exc:
+    except (
+        fleet_client.FleetClaimHeldError,
+        ClaimTargetError,
+        fleet_home_guard.RelativeBrigadeHomeError,
+        fleet_home_guard.FleetTokenFileError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except TimeoutError as exc:

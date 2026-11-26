@@ -743,7 +743,7 @@ def test_duet_isolation_names_a_neighbour_it_cannot_load(duet_configured, pack_i
 def duet_hub(duet_configured, monkeypatch):
     _, runtime, _ = duet_configured
     monkeypatch.setattr(
-        fleet_client, "load_fleet_settings", lambda: dict(hub_url="https://hub.invalid", node_token="n")
+        fleet_client, "load_fleet_settings", lambda **_kwargs: dict(hub_url="https://hub.invalid", node_token="n")
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: "node-a")
     return message_scope(*message_settings(str(runtime.hub.message_token_file))[:2])
@@ -753,7 +753,9 @@ def duet_hub(duet_configured, monkeypatch):
 def authenticated_duet(duet_configured, message_hub, monkeypatch):
     target, runtime, _ = duet_configured
     base, node_token, _, db = message_hub
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(hub_url=base, node_token=node_token))
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda **_kwargs: dict(hub_url=base, node_token=node_token)
+    )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     with fleet_hub.init_db(db) as connection:
         principal = fleet_hub_messages.add_principal(
@@ -1007,7 +1009,7 @@ def test_duet_startup_scope_stays_bound(authenticated_duet, monkeypatch, change,
         if change == "endpoint":
             settings = fleet_client.load_fleet_settings()
             monkeypatch.setattr(
-                fleet_client, "load_fleet_settings", lambda: dict(settings, hub_url="https://changed.invalid")
+                fleet_client, "load_fleet_settings", lambda **_kwargs: dict(settings, hub_url="https://changed.invalid")
             )
         else:
             with fleet_hub.init_db(db) as connection:

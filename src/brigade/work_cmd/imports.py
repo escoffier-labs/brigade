@@ -197,7 +197,7 @@ def import_context_from_miseledger(
         return 2
     rendered_query = " ".join(str(query or "").split())
     if not rendered_query:
-        print("error: --from-miseledger query is required", file=sys.stderr)
+        print("error: --from-evidence query is required", file=sys.stderr)
         return 2
     if limit < 1:
         print("error: --limit must be a positive integer", file=sys.stderr)

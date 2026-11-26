@@ -15,9 +15,9 @@ use std::thread::{self, JoinHandle};
 #[cfg(feature = "codesearch")]
 use std::time::{Duration, Instant};
 
-use graphtrail::mcp::{handle_request, serve};
-use graphtrail::query::build_context_pack;
-use graphtrail::store::{init_schema, open_db, sync_repo};
+use brigade_code_graph::mcp::{handle_request, serve};
+use brigade_code_graph::query::build_context_pack;
+use brigade_code_graph::store::{init_schema, open_db, sync_repo};
 use serde_json::json;
 use tempfile::TempDir;
 
@@ -558,7 +558,7 @@ fn tools_call_repos_reports_default_db_and_scanned_roots() {
     let conn = open_db(&repo_db).unwrap();
     init_schema(&conn).unwrap();
     sync_repo(&conn, &repo).unwrap();
-    // A second repository in the canonical layout is found by the same scan.
+    // Only the canonical layout is discovered.
     let canonical_repo = root.path().join("repo-b");
     fs::create_dir(&canonical_repo).unwrap();
     fs::write(canonical_repo.join("b.py"), "def beta():\n    return 1\n").unwrap();
@@ -588,7 +588,7 @@ fn tools_call_repos_reports_default_db_and_scanned_roots() {
             .as_array()
             .unwrap()
             .iter()
-            .any(|repo| repo["db"] == repo_db.to_string_lossy().as_ref())
+            .all(|repo| repo["db"] != repo_db.to_string_lossy().as_ref())
     );
     assert!(
         value["repos"].as_array().unwrap().iter().any(|repo| {
@@ -786,7 +786,7 @@ fn per_call_repo_override_resolves_db_path() {
     let (_dir, default_db) = ro_db();
     let other = tempfile::tempdir().unwrap();
     fs::write(other.path().join("w.py"), "def gadget():\n    return 1\n").unwrap();
-    let conn = open_db(&other.path().join(".graphtrail").join("graphtrail.db")).unwrap();
+    let conn = open_db(&canonical_db(other.path())).unwrap();
     init_schema(&conn).unwrap();
     sync_repo(&conn, other.path()).unwrap();
 
@@ -1175,15 +1175,12 @@ fn canonical_and_legacy_mcp_process_contracts() {
     use std::process::{Command, Stdio};
 
     let (dir, db) = ro_db();
-    let default_dir = dir.path().join(".graphtrail");
-    fs::create_dir(&default_dir).unwrap();
+    let default_db = canonical_db(dir.path());
+    fs::create_dir_all(default_db.parent().unwrap()).unwrap();
     // Use SQLite backup semantics via VACUUM INTO rather than copying a live WAL.
     let conn = open_db(&db).unwrap();
-    conn.execute(
-        "VACUUM INTO ?1",
-        [default_dir.join("graphtrail.db").to_str().unwrap()],
-    )
-    .unwrap();
+    conn.execute("VACUUM INTO ?1", [default_db.to_str().unwrap()])
+        .unwrap();
     drop(conn);
     // Explicit and environment cases must not succeed through the default DB.
     let nondefault_dir = dir.path().join("nondefault");
@@ -1196,99 +1193,86 @@ fn canonical_and_legacy_mcp_process_contracts() {
         "invalid json\n"
     );
     const LEGACY_DB_ENV: &str = "GRAPHTRAIL_DB";
-    // Legacy entry points and variables each print a deprecation notice.
-    for (binary, server_name) in [
-        (env!("CARGO_BIN_EXE_graphtrail-mcp"), "graphtrail"),
+    let binary = env!("CARGO_BIN_EXE_brigade-code-graph-mcp");
+    let server_name = "brigade-code-graph";
+    for (args, env_var, env_db) in [
         (
-            env!("CARGO_BIN_EXE_brigade-code-graph-mcp"),
-            "brigade-code-graph",
+            vec!["--db".to_owned(), db.display().to_string()],
+            "BRIGADE_CODE_GRAPH_DB",
+            Some("absent.db"),
+        ),
+        (
+            vec![format!("--db={}", db.display())],
+            LEGACY_DB_ENV,
+            Some("absent.db"),
+        ),
+        (vec![], "BRIGADE_CODE_GRAPH_DB", db.to_str()),
+        // No variable: the working directory's canonical index is used.
+        (vec![], "", None),
+        // The MCP entry point has no help/version parser: these and a missing --db
+        // value are ignored and database selection falls back to the env.
+        (
+            vec!["--help".into(), "--version".into(), "--db".into()],
+            "BRIGADE_CODE_GRAPH_DB",
+            db.to_str(),
         ),
     ] {
-        for (args, env_var, env_db) in [
-            (
-                vec!["--db".to_owned(), db.display().to_string()],
-                "BRIGADE_CODE_GRAPH_DB",
-                Some("absent.db"),
-            ),
-            (
-                vec![format!("--db={}", db.display())],
-                LEGACY_DB_ENV,
-                Some("absent.db"),
-            ),
-            (vec![], "BRIGADE_CODE_GRAPH_DB", db.to_str()),
-            (vec![], LEGACY_DB_ENV, db.to_str()),
-            // No variable: the working directory's legacy index is used in place.
-            (vec![], "", None),
-            // Legacy MCP has no help/version parser: these and a missing --db
-            // value are ignored and database selection falls back to the env.
-            (
-                vec!["--help".into(), "--version".into(), "--db".into()],
-                LEGACY_DB_ENV,
-                db.to_str(),
-            ),
-        ] {
-            let mut command = Command::new(binary);
-            command
-                .args(&args)
-                .current_dir(if env_db.is_some() {
-                    nondefault_dir.as_path()
-                } else {
-                    dir.path()
-                })
-                .env("HOME", dir.path())
-                .env_remove("BRIGADE_CODE_GRAPH_DB")
-                .env_remove(LEGACY_DB_ENV);
-            if let Some(path) = env_db {
-                command.env(env_var, path);
-            }
-            let mut child = command
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .spawn()
-                .unwrap();
-            child
-                .stdin
-                .take()
-                .unwrap()
-                .write_all(input.as_bytes())
-                .unwrap();
-            let output = child.wait_with_output().unwrap();
-            assert_eq!(output.status.code(), Some(0), "{output:?}");
-            assert_eq!(
-                String::from_utf8_lossy(&output.stderr).contains("deprecated"),
-                server_name == "graphtrail"
-                    || (env_var == LEGACY_DB_ENV && !args.iter().any(|v| v.starts_with("--db="))),
-                "{output:?}"
-            );
-            let responses: Vec<serde_json::Value> = String::from_utf8(output.stdout)
-                .unwrap()
-                .lines()
-                .map(|line| serde_json::from_str(line).unwrap())
-                .collect();
-            assert_eq!(responses.len(), 4, "{responses:?}");
-            assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
-            assert_eq!(responses[0]["result"]["serverInfo"]["name"], server_name);
-            assert_eq!(responses[1]["id"], 2);
-            assert_eq!(responses[1]["result"]["isError"], false, "{responses:?}");
-            assert!(
-                responses[1]["result"]["content"][0]["text"]
-                    .as_str()
-                    .unwrap()
-                    .contains("helper"),
-                "{responses:?}"
-            );
-            assert_eq!(responses[2]["error"]["code"], -32601);
-            assert_eq!(responses[3]["error"]["code"], -32700);
-        }
-        let output = Command::new(binary)
-            .current_dir(dir.path())
+        let mut command = Command::new(binary);
+        command
+            .args(&args)
+            .current_dir(if env_db.is_some() {
+                nondefault_dir.as_path()
+            } else {
+                dir.path()
+            })
             .env("HOME", dir.path())
             .env_remove("BRIGADE_CODE_GRAPH_DB")
-            .env_remove(LEGACY_DB_ENV)
-            .stdin(Stdio::null())
-            .output()
+            .env_remove(LEGACY_DB_ENV);
+        if let Some(path) = env_db {
+            command.env(env_var, path);
+        }
+        let mut child = command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
             .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(input.as_bytes())
+            .unwrap();
+        let output = child.wait_with_output().unwrap();
         assert_eq!(output.status.code(), Some(0), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+        let responses: Vec<serde_json::Value> = String::from_utf8(output.stdout)
+            .unwrap()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert_eq!(responses.len(), 4, "{responses:?}");
+        assert_eq!(responses[0]["result"]["protocolVersion"], "2025-06-18");
+        assert_eq!(responses[0]["result"]["serverInfo"]["name"], server_name);
+        assert_eq!(responses[1]["id"], 2);
+        assert_eq!(responses[1]["result"]["isError"], false, "{responses:?}");
+        assert!(
+            responses[1]["result"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("helper"),
+            "{responses:?}"
+        );
+        assert_eq!(responses[2]["error"]["code"], -32601);
+        assert_eq!(responses[3]["error"]["code"], -32700);
     }
+    let output = Command::new(binary)
+        .current_dir(dir.path())
+        .env("HOME", dir.path())
+        .env_remove("BRIGADE_CODE_GRAPH_DB")
+        .env_remove(LEGACY_DB_ENV)
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(0), "{output:?}");
 }

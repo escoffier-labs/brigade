@@ -11,8 +11,8 @@ import (
 
 // Operator approval of legacy stationtrail executables moved off the
 // inherited environment in round 3 of the #1201/#1204 hardening: any child
-// process — including the scanner being gated — can read its parent's
-// environment, so MISELEDGER_STATIONTRAIL_APPROVED_DIGESTS published the
+// process, including the scanner being gated, can read its parent's
+// environment, so the former digest override published the
 // allowlist to the very binaries it gates. The allowlist now lives in an
 // owner-protected file under the private data directory and is validated on
 // every load exactly like the evidence bundle MAC key: regular file, owned by

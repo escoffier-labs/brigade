@@ -5,9 +5,10 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 POSITIVE_CASES=(
-  ".github/workflows/release.yml"
   "testdata/workflows/release/valid-minimal.yml"
 )
+# An archived standalone workflow can be supplied as an extra positive case.
+POSITIVE_CASES+=("$@")
 
 NEGATIVE_CASES=(
   "commented-contract.yml|moved-to-comment contract"

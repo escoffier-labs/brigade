@@ -53,7 +53,7 @@ brigade-evidence crawl gmail --account "$GMAIL_ACCOUNT" --query "subject:brigade
 scripts/smoke_gmail_metadata.sh
 ```
 
-Gmail account selection stays explicit. `scripts/smoke_gmail_metadata.sh` reads the first configured Gog account and runs a metadata-only dry-run with `MISELEDGER_GMAIL_SMOKE_QUERY`, defaulting to `subject:brigade-evidence`. It does not import mail.
+Gmail account selection stays explicit. `scripts/smoke_gmail_metadata.sh` reads the first configured Gog account and runs a metadata-only dry-run with `BRIGADE_EVIDENCE_GMAIL_SMOKE_QUERY`, defaulting to `subject:brigade-evidence`. It does not import mail.
 
 ## Safe Import
 

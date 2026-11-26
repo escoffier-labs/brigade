@@ -34,7 +34,40 @@ STRUCTURAL_FIELDS = frozenset(
     }
 )
 CONTROL_STRUCTURAL_FIELDS = frozenset({"op", "error_class"})
+BUDGET_STRUCTURAL_FIELDS = frozenset(
+    {
+        "dimension",
+        "mode",
+        "reason_class",
+        "usage_source",
+        "transport_capability",
+        "transport_result",
+        "active_remaining",
+    }
+)
+BUDGET_TASK_FIELDS = frozenset({"task_id", "attempt_id"})
+BUDGET_SEAT_FIELDS = frozenset({"active_seats", "outcomes"})
 _DERIVED_FIELDS = frozenset({"spec_digest", "attempt_id", "result_id"})
+
+
+def redact_budget_seats(payload: dict[str, Any]) -> dict[str, Any]:
+    """Rename seats within one cancellation fact, including matching outcomes."""
+    seats = payload.get("active_seats") or []
+    outcomes = payload.get("outcomes") or []
+    originals = dict.fromkeys([*seats, *(row["seat"] for row in outcomes)])
+    aliases = {}
+    index = 0
+    for seat in originals:
+        alias = f"redacted-seat-{index}"
+        while alias in originals:
+            index += 1
+            alias = f"redacted-seat-{index}"
+        aliases[seat] = alias
+        index += 1
+    return {
+        "active_seats": [aliases[seat] for seat in seats],
+        "outcomes": [{**row, "seat": aliases[row["seat"]]} for row in outcomes],
+    }
 
 
 def private_scalars(event: run_journal.RunEvent) -> list[tuple[str, str]]:
@@ -92,6 +125,22 @@ def prepare_requests(
     }
     selected = set(selected)
     selected_task_ids = {event.payload["task_id"] for event in events if event.sequence in selected_controls}
+    known_attempts = {
+        (event.payload["task_id"], event.payload["attempt_id"])
+        for event in events
+        if event.event_type == "task.attempt-prepared"
+    }
+    for index, event in enumerate(events):
+        payload = event.payload
+        if (
+            event.event_type.startswith("run_budget.")
+            and "attempt_id" in payload
+            and requests[index][1] != event.idempotency_key
+        ):
+            correlation = (payload["task_id"], payload["attempt_id"])
+            if correlation not in known_attempts:
+                raise error_type("budget redaction requires matching task attempt history")
+            selected_task_ids.add(payload["task_id"])
     selected.update(
         event.sequence
         for event in events
@@ -361,11 +410,6 @@ def prepare_requests(
         if event.event_type in {"task.accepted", "task.batch-accepted"}
         for row in _rows(event)
     }
-    known_attempts = {
-        (event.payload["task_id"], event.payload["attempt_id"])
-        for event in events
-        if event.event_type == "task.attempt-prepared"
-    }
     for event in related_controls:
         task_id = event.payload.get("task_id")
         if task_id is None:
@@ -405,6 +449,22 @@ def prepare_requests(
         payload["request_id"] = control_requests[old["request_id"]]
         requests[index] = (payload, f"{event.event_type}:{payload['request_id']}")
 
+    # Budget facts can outlive a redacted task descriptor or observation.
+    # Remap their retained references along with the corresponding claim.
+    for index, event in enumerate(events):
+        if not event.event_type.startswith("run_budget.") or "attempt_id" not in event.payload:
+            continue
+        old = event.payload
+        task_id, attempt_id = old["task_id"], old["attempt_id"]
+        payload, key = requests[index]
+        new_task_id = mapped(task_id, "task_id", task_id)
+        new_attempt_id = attempts.get((task_id, attempt_id), attempt_id)
+        if (new_task_id, new_attempt_id) != (task_id, attempt_id):
+            requests[index] = (
+                {**payload, "task_id": new_task_id, "attempt_id": new_attempt_id},
+                key if key != event.idempotency_key else f"redaction:{operation_id}:{event.sequence}",
+            )
+
 
 def assert_affected_task_values_removed(
     original: Sequence[run_journal.RunEvent],
@@ -429,6 +489,14 @@ def assert_affected_task_values_removed(
         for field, value in private_scalars(event)
         if field not in STRUCTURAL_FIELDS | CONTROL_STRUCTURAL_FIELDS
     }
+    selected_references.update(
+        event.payload[field]
+        for event in original
+        if start <= event.sequence <= end
+        and event.event_type.startswith("run_budget.")
+        and "attempt_id" in event.payload
+        for field in BUDGET_TASK_FIELDS
+    )
     # Derived task identities can change outside the selected range too.
     # Every retained task/control alias must lose both selected references and
     # identities rebuilt by the task rewrite, irrespective of target task.
@@ -450,6 +518,10 @@ def assert_affected_task_values_removed(
             structural = STRUCTURAL_FIELDS
         elif event.event_type in {"control.requested", "control.observed", "control.failed"}:
             structural = CONTROL_STRUCTURAL_FIELDS
+        elif event.event_type.startswith("run_budget.") and "attempt_id" in event.payload:
+            if selected_references.intersection((event.payload["task_id"], event.payload["attempt_id"])):
+                raise error_type("rewritten budget fact still contains affected task references")
+            continue
         else:
             continue
         if any(field not in structural and value in selected_references for field, value in private_scalars(event)):

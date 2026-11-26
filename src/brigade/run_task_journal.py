@@ -226,7 +226,11 @@ def _validate_collected_payload(payload: Mapping[str, Any]) -> None:
 def validate_payload(event_type: str, payload: Mapping[str, Any]) -> None:
     """Validate exact closed task shapes, also used by envelope readers."""
     fields = TASK_FIELDS[event_type]
-    if set(payload) != fields:
+    keys = set(payload)
+    if event_type == "task.observed":
+        keys.discard("transcript_clipped")
+        fields = fields - {"transcript_clipped"}
+    if keys != fields:
         raise run_events.CanonicalizationError("task payload fields do not match closed schema")
     if event_type == "task.batch-accepted":
         _validate_batch_payload(payload)
@@ -271,6 +275,12 @@ def validate_payload(event_type: str, payload: Mapping[str, Any]) -> None:
             valid = isinstance(value, str) and value in CONTAINMENT
         elif key == "artifact_kind":
             valid = isinstance(value, str) and value in ARTIFACT_KINDS
+        elif key == "transcript_clipped":
+            valid = (
+                type(value) is bool
+                and payload["status"] in ("completed", "failed")
+                and payload["artifact_kind"] == "receipt"
+            )
         else:
             valid = token(value)
         if not valid:

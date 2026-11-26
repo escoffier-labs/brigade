@@ -11,7 +11,7 @@ or native components, then publishes its state only after both commands succeed.
 | Machine profile | Channel | Use |
 | --- | --- | --- |
 | Production or operator | `stable` | Default. Pins the latest published non-prerelease Brigade release. |
-| Brigade development | `beta` | Intentional development-machine opt-in. Pins the newest non-yanked `brigadestack==0.32.0.devYYYYMMDD` wheel from PyPI. |
+| Brigade development | `beta` | Intentional development-machine opt-in. Pins the newest non-yanked `brigadestack==0.33.0.devYYYYMMDD` wheel from PyPI. |
 
 Daily development wheels are built from `main` on a schedule and published as PyPI
 prereleases with versions of the form `X.Y.Z.devYYYYMMDD` (for example
@@ -21,7 +21,7 @@ the development version to be committed into Brigade's stable version declaratio
 continue to require every declared version to match before the native release matrix can run.
 Development wheels are not promoted to stable and PyPI's default resolver does not select them.
 
-Install a chosen daily build with an exact version pin:
+Install a chosen daily build with an exact version pin. This example uses a published build from the previous preview line.
 
 ```bash
 pipx install 'brigadestack==0.32.0.dev20261120'
@@ -67,15 +67,15 @@ a symbolic link; otherwise the update stops without running or linking anything 
   restore the `brigade` launcher. Run `brigade update` again to record it.
 
 Run `brigade update` for the production default. `brigade update --channel beta`
-selects the newest non-yanked exact `0.32.0.devYYYYMMDD` wheel for the `0.32`
+selects the newest non-yanked exact `0.33.0.devYYYYMMDD` wheel for the `0.33`
 preview line from PyPI release records (never from `info.version`, which stays
-on the latest stable release such as `0.31.0`), ignores yanked uploads, unrelated
+on the latest stable release such as `0.32.0`), ignores yanked uploads, unrelated
 preview lines, unrelated prereleases, Git refs, and native release assets, and
 force-reinstalls that pin into the existing user-global pipx Brigade environment
 (one active CLI environment; no second installer). A machine already owned by the
 other channel fails until the operator supplies `--switch-channel`; a command never
-transfers ownership implicitly. Right after a version bump, beta fails closed until the first dev wheel of the new base publishes at 12:00 UTC. `--dry-run` resolves and prints the exact planned
-global pipx and setup commands without changing pipx, managed components, or state.
+transfers ownership implicitly. Right after a version bump, beta fails closed until the first dev wheel of the new base publishes at 12:00 UTC. `--dry-run` prints the planned pipx commands
+and names the manifest release setup would use. It leaves pipx, managed components, and state intact.
 
 Rollback from beta to stable is explicit:
 
@@ -88,7 +88,7 @@ publication semantics unchanged.
 
 ## State, lock, and native components
 
-The user-global state is `<Brigade data root>/brigade/update-state.json`, separate from component `installed.json`. Its strict schema records the selected channel, owner, exact CLI version (stable release or beta `0.32.0.devYYYYMMDD`), release id and tag, manifest URL and digest, and timestamp. The shared sibling lock `update.lock` covers both channels. A live owner causes a clear failure. Stale metadata is removed only after its recorded process is confirmed dead.
+The user-global state is `<Brigade data root>/brigade/update-state.json`, separate from component `installed.json`. Its strict schema records the selected channel, owner, exact CLI version (stable release or beta `0.33.0.devYYYYMMDD`), release id and tag, manifest URL and digest, and timestamp. The shared sibling lock `update.lock` covers both channels. A live owner causes a clear failure. Stale metadata is removed only after its recorded process is confirmed dead.
 
 Prior beta state that recorded a full Git `main` SHA is migrated on the next
 successful `brigade update --channel beta` to the selected wheel version and
@@ -100,15 +100,90 @@ Stable resolves `releases/latest` once, verifies the exact `component-manifest-v
 The daily wheel channel does not change that beta/pre-pin native contract. Its build stamps only the
 wheel's Python distribution and runtime version; bundled template and component pins remain the
 committed stable values. Operators who use `brigade update --channel beta` receive the
-selected `0.32.0.devYYYYMMDD` wheel plus native bytes from the latest verified stable manifest.
+selected `0.33.0.devYYYYMMDD` wheel plus native bytes from the latest verified stable manifest.
 
-The updater runs `pipx install --force` with an exact requirement, then calls the newly installed absolute `brigade` executable with `setup --manifest <verified-cache-path>`. It does not use the prior executable for setup. This sequence is not an atomic installation transaction: pipx replacement happens before component setup. State publication is transactional, so a failed pipx install or setup leaves the prior update state untouched; rerun the same update to repair components.
+When update coordinates change, the updater runs `pipx install --force` with
+an exact requirement, then calls the newly installed `brigade` executable with
+`setup --manifest <verified-cache-path>`. A failed pipx install or setup leaves
+the prior update state intact. Rerun the same update to repair components.
+
+## Repair managed engines
+
+With a released stable CLI and a stable or absent update pin, run `brigade setup`
+after `pipx upgrade brigadestack` or follow the npm commands below. Package
+managers update the CLI separately from the managed engines. With v0.30.0
+engines and CLI 0.31.0 or 0.32.0, a captured verification can exit 0 and print
+`miseledger indexing: import failed (receipts pending)`.
+
+### Repair through the updater
+
+`brigade update` checks managed engine records and executable bytes even when
+the saved update coordinates match. A healthy install reuses the verified
+manifest cache and downloads no engine or CLI assets. Missing or mismatched
+engines trigger setup without reinstalling the CLI. The updater keeps a healthy
+newer release in place and uses its own verified manifest for repair if it
+detects damage. A failed setup exits non-zero and rolls back the prior state and
+files where possible. It lists any paths it could not restore. HTTP and redirect
+errors identify the URL and status.
+
+### Saved beta pins and unreleased builds
+
+Plain setup refuses a saved beta pin in `update-state.json` when it would install
+engines older than the receipt importer supports or downgrade verified engines.
+The receipt importer requires engines from v0.31.0 or later. To refresh the pin
+on a pipx install, run `brigade update --channel beta` with network access. When
+setup finds a compatible cached manifest whose digest ships in the CLI, its
+refusal prints the actual path and release version. That command can run offline
+if the component assets are cached. An installed stable CLI can also authenticate
+its own exact packaged release manifest or a byte-for-byte copy. Offline setup
+checks that a cached or named manifest matches the installed package byte for
+byte and is internally consistent for the running release, without contacting
+the publisher to confirm the tag's commit or the published digest. A source
+checkout or editable install uses the package directory in its own code tree.
+A compatibility-only manifest in that tree does not qualify. Other release
+manifests need network access for authentication against the exact release's
+published size and digest.
+
+On an unreleased source build or an npm install with a refused beta pin, you can
+also supply a compatible stable manifest explicitly. Verify its SHA-256 against
+the release asset's published digest first. For the v0.32.0 release, use:
+
+```bash
+brigade setup --manifest /path/to/component-manifest-v1.json --allow-compatible-stable-manifest 0.32.0
+```
+
+An explicit manifest applies to one setup run. Its use leaves the saved beta pin
+in place.
+
+When the evidence engine omits an acknowledgement, automatic receipt indexing
+pauses in that worktree. Captured verifications keep saving receipts. After an
+engine replacement, the next capture resumes indexing the backlog. To retry
+immediately from the worktree, run `brigade receipts export evidence --new-only --import`.
+An `indexed` result confirms receipt import even if doctor warns that the installed
+release differs from the CLI's bundled manifest.
+
+Setup authenticates a release manifest again when it is used with
+`--allow-compatible-stable-manifest` or read from the updater's manifest cache.
+A plain `--manifest` outside that cache is an explicitly chosen file. Setup
+checks its schema and version and uses its asset sizes and digests. Component
+download URLs start on GitHub, with redirects restricted to GitHub asset hosts.
 
 ## Timer migration after release
 
 When the external development timer is migrated, replace its direct pipx script with the thin invocation `brigade update --channel beta`. Disable the old direct-pipx script at the same time. This repository does not modify live timer files.
 
 ## Switching npm packages
+
+`brigade update` is for pipx installations. With npm, use the package you
+installed (`brigadestack` or `@escoffier-labs/brigade`) in the commands below.
+With a refused beta pin, follow the [explicit manifest instructions](#saved-beta-pins-and-unreleased-builds)
+for the setup step.
+
+| Install type | Update and engine repair |
+| --- | --- |
+| Global | `npm install --global <package>@latest`, then `brigade setup` |
+| Project | From the project directory run `npm install <package>@latest`, then `npm exec -- brigade setup` |
+| npx | `npx --package <package>@latest brigade setup` |
 
 `brigadestack` and `@escoffier-labs/brigade` both link a global `brigade` command, so install only one of them. npm stops with `EEXIST` on the second install, which is what `npm install --global brigadestack` does while `@escoffier-labs/brigade` owns the command. `npm update --global @escoffier-labs/brigade` keeps working: the package is a compatibility package that depends on exactly `brigadestack` at the same version. To move to the new name, uninstall the old package first:
 
@@ -121,7 +196,9 @@ To go back, run `npm uninstall --global brigadestack`, then `npm install --globa
 
 ## Compatibility window
 
-`brigade setup` normally resolves the running CLI's exact `vX.Y.Z` release manifest, never `latest`. Before the first unified release is available, only an absent exact release or manifest can select the bundled standalone manifest. Digest failures, malformed release metadata, manifest parse failures, and component download failures never fall back. `brigade setup --manifest-source standalone` is the explicit one-unified-release compatibility path. Offline setup uses a verified exact-manifest cache when present or that explicit standalone compatibility path.
+`brigade setup` normally resolves the running CLI's exact `vX.Y.Z` release manifest, never `latest`. Before the first unified release is available, only an absent exact release or manifest can select the bundled standalone manifest. Digest failures, malformed release metadata, manifest parse failures, and component download failures never fall back. `brigade setup --manifest-source standalone` is the explicit one-unified-release compatibility path. With its engine assets cached, offline setup can use the exact manifest shipped in the installed stable package, an authenticated cached manifest, or the explicit standalone compatibility path.
+
+For version drift and refused beta pins, see [Repair managed engines](#repair-managed-engines).
 
 ## Update notifications
 
@@ -132,37 +209,13 @@ that cadence:
 
     A new brigade release is available: X.Y.Z (installed A.B.C). Run "brigade update".
 
-How it learns about new releases: a detached background process may send one
-HTTPS GET to `https://check.brigade.tools/v1/version`. The request has no query
-parameters or body. Its User-Agent carries the Brigade version and OS name,
-with the same bytes as earlier clients. A separate `X-Brigade-Channel` header carries a closed label:
-`pipx`, `pip`, `uvx`, `npm`, `source`, or `plugin`. The current Worker ignores
-that header. Channel recording requires the separate Worker update to ship.
-See [Python CLI telemetry](telemetry.md) for channel detection and
-the complete field list.
-When the User-Agent exactly matches the Brigade CLI format, the Worker records a
-daily version observation: ISO week and UTC day, version, first and last UTC
-timestamps, request count, and an `internal` classification for configured
-operator egress. It derives the source value from a salted SHA-256 hash of the
-connecting address and ISO week. The hash changes weekly, and reports do not
-join sources across weeks.
+A detached background process may send a version request. See
+[Python CLI telemetry](telemetry.md) for request fields, opt-outs, and retention.
 
-Analytics does not store raw IP addresses or a persistent installation ID. It
-also does not store hostnames, usernames, repository or project names, command
-arguments, or account identifiers. These observations are not a count of
-people or installations. A weekly scheduled purge deletes rows older than 90
-days.
-
-The stderr notice is skipped when stderr is not a TTY, when `CI` is set, or
-when the command failed. The background cache refresh can still run with piped
-stderr so `work brief` can surface available updates. It is skipped when `CI`
-or `BRIGADE_NO_UPDATE_CHECK` is set. npm installs now refresh the version cache
-but suppress both the stderr notice and cached work-brief hint.
-
-Set `DO_NOT_TRACK=1` or `BRIGADE_TELEMETRY=0` to keep version retrieval without
-a counted observation. The request then uses a generic `Python-urllib`
-User-Agent and omits the channel header. The Worker records nothing for this
-User-Agent. `BRIGADE_TELEMETRY=off` and `false` also disable counting.
+The stderr notice is skipped when stderr is piped, when `CI` is nonempty, or
+when the command failed. The background refresh can still run with piped stderr
+so `brigade work brief` can show cached updates. npm installs refresh the cache
+and suppress both the stderr notice and cached work-brief hint.
 
 To disable this automatic update check and its cache refresh:
 

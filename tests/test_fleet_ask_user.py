@@ -33,7 +33,9 @@ def station(hub, tmp_path, monkeypatch):
     monkeypatch.delenv("DISPLAY", raising=False)
     monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
     monkeypatch.setattr(
-        fleet_client, "load_fleet_settings", lambda: {"hub_url": hub[0], "node_token": hub[1], "admin_token": ""}
+        fleet_client,
+        "load_fleet_settings",
+        lambda **_kwargs: {"hub_url": hub[0], "node_token": hub[1], "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     monkeypatch.setattr(fleet_client, "spool_path", lambda _node: tmp_path / "spool" / "events.jsonl")

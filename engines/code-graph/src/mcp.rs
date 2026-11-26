@@ -21,7 +21,6 @@ use rusqlite::{OptionalExtension, params};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::cli::MCP_IDENTITY;
 use crate::model::Direction;
 #[cfg(feature = "codesearch")]
 use crate::query::build_context_pack_from_entry_points;
@@ -74,18 +73,8 @@ struct ToolSpec {
 
 /// Read JSON-RPC requests line by line and write one response line per request. `default_db` is the
 /// fallback database used when a request does not specify its own `repo`/`db`. The server reports
-/// the canonical `serverInfo.name`; see [`serve_as`].
-pub fn serve(default_db: &Path, input: impl BufRead, output: impl Write) -> Result<()> {
-    serve_as(MCP_IDENTITY.server_name, default_db, input, output)
-}
-
-/// Like [`serve`], reporting `server_name` as `serverInfo.name` (the invoked entry point's name).
-pub fn serve_as(
-    server_name: &str,
-    default_db: &Path,
-    input: impl BufRead,
-    mut output: impl Write,
-) -> Result<()> {
+/// the canonical `serverInfo.name`.
+pub fn serve(default_db: &Path, input: impl BufRead, mut output: impl Write) -> Result<()> {
     for line in input.lines() {
         let line = line?;
         if line.trim().is_empty() {
@@ -103,7 +92,7 @@ pub fn serve_as(
                 continue;
             }
         };
-        if let Some(resp) = handle_request_as(server_name, default_db, &req) {
+        if let Some(resp) = handle_request(default_db, &req) {
             writeln!(output, "{}", serde_json::to_string(&resp)?)?;
             output.flush()?;
         }
@@ -113,11 +102,6 @@ pub fn serve_as(
 
 /// Handle one JSON-RPC message. Returns `None` for notifications (no response expected).
 pub fn handle_request(default_db: &Path, req: &Value) -> Option<Value> {
-    handle_request_as(MCP_IDENTITY.server_name, default_db, req)
-}
-
-/// Like [`handle_request`], reporting `server_name` as `serverInfo.name`.
-pub fn handle_request_as(server_name: &str, default_db: &Path, req: &Value) -> Option<Value> {
     if !req.is_object() {
         return Some(error(None, -32600, "invalid request"));
     }
@@ -140,7 +124,7 @@ pub fn handle_request_as(server_name: &str, default_db: &Path, req: &Value) -> O
                 json!({
                     "protocolVersion": pv,
                     "capabilities": { "tools": {} },
-                    "serverInfo": { "name": server_name, "version": env!("CARGO_PKG_VERSION") }
+                    "serverInfo": { "name": "brigade-code-graph", "version": env!("CARGO_PKG_VERSION") }
                 }),
             ))
         }
@@ -1051,7 +1035,7 @@ mod tests {
 
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        let db = root.join("graphtrail.db");
+        let db = root.join("code-graph.db");
         std::fs::write(
             root.join("app.py"),
             "def helper(): pass\ndef run(): helper()\n",

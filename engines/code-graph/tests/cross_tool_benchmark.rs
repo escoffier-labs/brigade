@@ -139,7 +139,7 @@ fn cross_tool_runner_executes_the_adapter_protocol_without_answer_keys() {
     let output = tempfile::NamedTempFile::new().expect("result file must be creatable");
     let status = Command::new(python())
         .arg(repository_path("benchmarks/cross-tool/run.py"))
-        .args(["--graphtrail", env!("CARGO_BIN_EXE_graphtrail")])
+        .args(["--graphtrail", env!("CARGO_BIN_EXE_brigade-code-graph")])
         .arg("--comparator")
         .arg(format!(
             "fixture={} \"{}\"",
@@ -180,7 +180,7 @@ fn cross_tool_branch_drift_cannot_pass_by_echoing_the_request() {
     let output = tempfile::NamedTempFile::new().expect("result file must be creatable");
     let status = Command::new(python())
         .arg(repository_path("benchmarks/cross-tool/run.py"))
-        .args(["--graphtrail", env!("CARGO_BIN_EXE_graphtrail")])
+        .args(["--graphtrail", env!("CARGO_BIN_EXE_brigade-code-graph")])
         .args(["--case", "typescript-branch-drift"])
         .arg("--comparator")
         .arg(format!(
@@ -245,7 +245,7 @@ fn cross_tool_runner_normalizes_comparator_paths() {
     let output = tempfile::NamedTempFile::new().expect("result file must be creatable");
     let status = Command::new(python())
         .arg(repository_path("benchmarks/cross-tool/run.py"))
-        .args(["--graphtrail", env!("CARGO_BIN_EXE_graphtrail")])
+        .args(["--graphtrail", env!("CARGO_BIN_EXE_brigade-code-graph")])
         .args(["--case", "typescript-symbol-navigation"])
         .arg("--comparator")
         .arg(format!(
@@ -267,7 +267,7 @@ fn measured_timeout_does_not_bound_fixture_setup() {
     let output = tempfile::NamedTempFile::new().expect("result file must be creatable");
     let status = Command::new(python())
         .arg(repository_path("benchmarks/cross-tool/run.py"))
-        .args(["--graphtrail", env!("CARGO_BIN_EXE_graphtrail")])
+        .args(["--graphtrail", env!("CARGO_BIN_EXE_brigade-code-graph")])
         .args(["--case", "typescript-symbol-navigation"])
         .args(["--timeout-seconds", "0.000001"])
         .args(["--output", output.path().to_str().unwrap()])
@@ -297,7 +297,7 @@ fn cross_tool_runner_times_out_hung_comparators() {
     let started = Instant::now();
     let status = Command::new(python())
         .arg(repository_path("benchmarks/cross-tool/run.py"))
-        .args(["--graphtrail", env!("CARGO_BIN_EXE_graphtrail")])
+        .args(["--graphtrail", env!("CARGO_BIN_EXE_brigade-code-graph")])
         .args(["--case", "typescript-symbol-navigation"])
         .args(["--timeout-seconds", "0.2"])
         .arg("--comparator")

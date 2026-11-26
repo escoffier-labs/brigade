@@ -100,6 +100,11 @@ def _failed(conn: sqlite3.Connection, *, lookback_seconds: int = 86400, stale_af
 def conn() -> sqlite3.Connection:
     conn = sqlite3.connect(":memory:")
     conn.execute(_EVENTS_SCHEMA)
+    conn.execute("CREATE INDEX events_received_at ON events (received_at)")
+    conn.execute("CREATE INDEX events_run_seq ON events (node_id, run_id, sequence)")
+    conn.execute(
+        "CREATE INDEX events_grokbot_run_seq ON events (run_id, sequence, received_at, digest) WHERE harness = 'grokbot'"
+    )
     fleet_hub_sessions.init_schema(conn)
     yield conn
     conn.close()
@@ -1049,6 +1054,38 @@ def test_grokbot_cross_node_revisions_use_one_global_latest_row(conn):
         (NODE_B, "grok-terminal-3", "external.expired"),
         (NODE_B, "shared-normal-run", "run.started"),
     ]
+
+
+def test_active_status_seeks_recent_candidates_and_preserves_winners(conn):
+    _insert(conn, NODE_A, "offset-receipt", 1, "run.started", received_at="2026-08-24 23:55:00-12:00")
+    _insert(conn, NODE_A, "older-winner", 1, "run.started")
+    _insert(conn, NODE_A, "older-winner", 2, "run.started", received_at=_ts(3 * 86400))
+    _insert(conn, NODE_A, "legacy-job", 1, "external.running", harness="grokbot")
+    _insert(conn, NODE_B, "legacy-job", 2, "external.completed", harness="grokbot")
+    _insert(conn, NODE_A, "legacy-job", 3, "run.started")
+
+    statements = []
+    conn.set_trace_callback(statements.append)
+    try:
+        active = fleet_hub_status.latest_status(conn, now=NOW)
+    finally:
+        conn.set_trace_callback(None)
+
+    assert [(row["node_id"], row["run_id"], row["sequence"]) for row in active] == [
+        (NODE_A, "legacy-job", 3),
+        (NODE_A, "offset-receipt", 1),
+    ]
+    plan = [row[3] for statement in statements for row in conn.execute(f"EXPLAIN QUERY PLAN {statement}")]
+    assert any("SEARCH" in operation and "events_received_at" in operation for operation in plan)
+    assert not any(operation.startswith(("SCAN events", "SCAN winner")) for operation in plan)
+
+
+def test_active_status_remains_available_without_receipt_index(conn):
+    _insert(conn, NODE_A, "active", 1, "run.started")
+    expected = fleet_hub_status.latest_status(conn, now=NOW)
+    assert len(expected) == 1
+    conn.execute("DROP INDEX events_received_at")
+    assert fleet_hub_status.latest_status(conn, now=NOW) == expected
 
 
 # --- HTTP integration: hub-served Command Deck (task 2) ----------------------

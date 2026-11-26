@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import subprocess
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -176,7 +178,10 @@ def test_eligible_seat_is_ready_with_exact_qualifiers_and_mixed_sources(workspac
     assert (report["assurance"], report["launch_guaranteed"]) == ("parent-reported", False)
     assert (report["capacity_reserved"], report["parent_active"]) == (False, "unverified")
     assert report["admitted_capacity"] == 2
-    assert report["t3_reported_at"] <= report["t3_received_at"]
+    # The envelope instant parses from an ISO string while the receipt instant
+    # comes from a float wall clock, so the same moment can order either way by
+    # a fraction of a microsecond. Allow exactly the skew the product allows.
+    assert report["t3_reported_at"] <= report["t3_received_at"] + t3.CLOCK_SKEW_SECONDS
     assert _row(report, "route-support")["source"] == "parent-reported"
     for category in ("isolation", "admission", "capacity"):
         assert _row(report, category)["source"] == "brigade-governance"
@@ -313,6 +318,24 @@ def test_report_a_few_milliseconds_ahead_is_not_future(workspace, tmp_path):
     """A coarse receive clock can trail a just-written report; that is not future-dated."""
     payload = _payload(reported_at=_iso(0.2))
     report = _inspect(workspace, tmp_path, payload=payload)
+    assert report["status"] == "ready"
+    assert _row(report, "route-support")["status"] == "passed"
+
+
+def test_receipt_one_ulp_before_the_envelope_is_not_future(workspace, tmp_path, monkeypatch):
+    """The same instant in two float representations is not a future-dated report.
+
+    The envelope carries an ISO string parsed to a float, the receipt carries the
+    local float clock. Near 1.8e9 the ulp is under a microsecond, so the receipt
+    can sort before the report it followed. This pins that ordering on any OS.
+    """
+    reported = datetime(2026, 11, 25, 12, 0, 0, 113171, tzinfo=timezone.utc)
+    receipt = math.nextafter(reported.timestamp(), 0.0)
+    assert reported.timestamp() - receipt < 1e-6
+    monkeypatch.setattr(time, "time", lambda: receipt)
+    report = _inspect(workspace, tmp_path, payload=_payload(reported_at=reported.isoformat()))
+    assert report["t3_reported_at"] > report["t3_received_at"]
+    assert report["t3_reported_at"] <= report["t3_received_at"] + t3.CLOCK_SKEW_SECONDS
     assert report["status"] == "ready"
     assert _row(report, "route-support")["status"] == "passed"
 

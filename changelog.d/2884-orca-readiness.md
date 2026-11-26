@@ -1,0 +1,1 @@
+- Orca readiness checks the installed CLI registry and the seat's declared version. Compatible Orca releases can pass readiness without a Brigade update.

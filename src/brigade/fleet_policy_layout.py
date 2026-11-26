@@ -7,6 +7,7 @@ from datetime import datetime
 import re
 
 from . import fleet_admin_explorer as explorer, fleet_command_deck
+from . import fleet_policy_defaults as defaults_form
 from . import fleet_policy_page as page
 from . import fleet_policy_page_sessions as sessions
 from . import fleet_investigation as investigation
@@ -65,7 +66,7 @@ def render(
             "<details"
             + (" open" if draft_scope == "defaults" else "")
             + "><summary>Edit saved fleet defaults</summary>"
-            + page._defaults_form(view, editable=True, csrf=csrf, draft=draft)
+            + defaults_form.render(view, csrf=csrf, draft=draft)
             + "</details></details>"
         )
     else:

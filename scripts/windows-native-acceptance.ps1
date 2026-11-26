@@ -1024,7 +1024,7 @@ function Assert-ReleaseManifestAndAssets {
             $aliases[$name] = $true
         }
     }
-    if ($checksums.Count -eq ($expected.Count + 1 + $aliases.Count)) {
+    if ($Version -cmatch '^0\.(31|32)\.' -and $checksums.Count -eq ($expected.Count + 1 + $aliases.Count)) {
         foreach ($name in $aliases.Keys) {
             if (-not $checksums.ContainsKey($name)) { throw "release checksums must contain exactly the complete legacy alias matrix" }
             $expected[$name] = $checksums[$name]
@@ -1156,17 +1156,16 @@ function Invoke-VerifiedCanonicalSmoke {
     param([string]$Version, [string]$ReleaseDirectory, [string]$GhExe, [string]$PythonExe = "python",
         [switch]$ProveMcpEncoding)
     $checksums = @(Get-Content -LiteralPath (Join-Path $ReleaseDirectory "checksums.txt"))
-    if ($checksums.Count -eq 26) {
+    $historical = $Version -cmatch '^0\.(?:[0-9]|[12][0-9]|3[0-2])\.'
+    if ($historical -and $checksums.Count -eq 26) {
         if ($ProveMcpEncoding) { throw "published release has no separate canonical graph MCP asset for the encoding proof" }
         return
     }
-    # 40 native assets and the manifest, plus brigade-hub's two Linux assets
-    # from the release that first ships it. Keep in step with
-    # scripts/published-artifact-acceptance.py.
-    if ($checksums.Count -notin @(41, 43)) { throw "invalid cached release inventory" }
+    $expectedCounts = if ($historical) { @(41, 43) } else { @(26, 28) }
+    if ($checksums.Count -notin $expectedCounts) { throw "invalid cached release inventory" }
     $paths = @("brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence") | ForEach-Object {
         $path = [IO.Path]::GetFullPath((Join-Path $ReleaseDirectory "$_-windows-amd64.exe"))
-        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "missing canonical host asset in additive release" }
+        if (-not (Test-Path -LiteralPath $path -PathType Leaf)) { throw "missing canonical host asset in release" }
         $path
     }
     $manifestPath = [IO.Path]::GetFullPath((Join-Path $ReleaseDirectory "component-manifest-v1.json"))
@@ -1483,14 +1482,10 @@ try {
     if ($InstallMode -eq "pypi") {
         Assert-ManagedComponentDigests -Manifest $releaseManifest -Report $report -ManagedBin $managedBin
     }
-    Write-Step "verified compatibility copies"
-    $compatibilityNames = @{ "graphtrail" = "brigade-code-graph"; "graphtrail-mcp" = "brigade-code-graph-mcp"; "miseledger" = "brigade-evidence" }
-    foreach ($legacy in $compatibilityNames.Keys) {
-        $canonical = Get-ManagedExecutablePath -Report $report -ComponentId $compatibilityNames[$legacy] -ManagedBin $managedBin
-        $shim = Join-Path $managedBin ($legacy + ".exe")
-        if (-not (Test-Path -LiteralPath $shim -PathType Leaf)) { throw "missing compatibility copy: $legacy" }
-        if ((Get-FileHash -LiteralPath $shim -Algorithm SHA256).Hash -cne (Get-FileHash -LiteralPath $canonical -Algorithm SHA256).Hash) {
-            throw "compatibility copy digest mismatch: $legacy"
+    if ($InstallMode -eq "source" -or $BrigadeVersion -cnotmatch '^0\.(31|32)\.') {
+        foreach ($legacy in @("graphtrail", "graphtrail-mcp", "miseledger")) {
+            $shim = Join-Path $managedBin ($legacy + ".exe")
+            if (Test-Path -LiteralPath $shim) { throw "unexpected compatibility executable: $legacy" }
         }
     }
     $requiredIds = @("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind") |

@@ -170,42 +170,17 @@ func TestLegacyArchiveOpensInPlaceAndBundleMACVerifies(t *testing.T) {
 	}
 }
 
-func TestIdentityForArgv0(t *testing.T) {
-	for argv0, want := range map[string]string{
-		"":                                CanonicalProgram,
-		CanonicalProgram:                  CanonicalProgram,
-		"/opt/bin/" + CanonicalProgram:    CanonicalProgram,
-		LegacyProgram:                     LegacyProgram,
-		"/usr/local/bin/" + LegacyProgram: LegacyProgram,
-		`C:\tools\` + strings.ToUpper(LegacyProgram) + ".EXE": LegacyProgram,
-		LegacyProgram + ".exe":                                LegacyProgram,
-		LegacyProgram + "-old":                                CanonicalProgram,
-		"renamed-copy":                                        CanonicalProgram,
-	} {
-		if got := IdentityFor(argv0); got != want {
-			t.Errorf("IdentityFor(%q) = %q, want %q", argv0, got, want)
-		}
-	}
-}
-
-func TestMCPServerNameAndDoctorFollowIdentity(t *testing.T) {
+func TestMCPServerNameAndDoctor(t *testing.T) {
 	withTempHome(t)
-	defer func(prev string) { program = prev }(program)
-	for _, identity := range []string{CanonicalProgram, LegacyProgram} {
-		program = identity
-		resp := handleMCPRequest(mcpRequest{JSONRPC: "2.0", ID: "init", Method: "initialize"})
-		result, _ := resp.Result.(map[string]any)
-		server, _ := result["serverInfo"].(map[string]any)
-		if server["name"] != identity {
-			t.Fatalf("%s: serverInfo.name = %v", identity, server["name"])
-		}
-		for _, check := range mcpDoctorChecks() {
-			if check.Name == "mcp_initialize" && !check.OK {
-				t.Fatalf("%s: doctor --mcp rejected its own server name: %s", identity, check.Detail)
-			}
-		}
+	resp := handleMCPRequest(mcpRequest{JSONRPC: "2.0", ID: "init", Method: "initialize"})
+	result, _ := resp.Result.(map[string]any)
+	server, _ := result["serverInfo"].(map[string]any)
+	if server["name"] != CanonicalProgram {
+		t.Fatalf("serverInfo.name = %v", server["name"])
 	}
-	if isServerName("other") {
-		t.Fatal("doctor --mcp accepted an unrelated server name")
+	for _, check := range mcpDoctorChecks() {
+		if check.Name == "mcp_initialize" && !check.OK {
+			t.Fatalf("doctor --mcp rejected its own server name: %s", check.Detail)
+		}
 	}
 }

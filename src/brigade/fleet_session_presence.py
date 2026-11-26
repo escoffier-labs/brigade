@@ -18,8 +18,11 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Literal, Mapping, Sequence
+from typing import TYPE_CHECKING, Literal, Mapping, Sequence
 from urllib.parse import unquote, urlparse
+
+if TYPE_CHECKING:
+    from .fleet_home_guard import FleetTokenRefusal
 
 DEFAULT_TTL_SECONDS = 900
 MIN_TTL_SECONDS = 120
@@ -524,20 +527,27 @@ def _normalize_overlap_path(path: str) -> str:
 
 
 def _hub_url_configured() -> bool:
-    try:
-        from . import fleet_client
+    from . import fleet_client
+    from .fleet_home_guard import FleetTokenFileError
 
+    try:
         return bool(fleet_client.load_fleet_config().get("hub_url"))
+    except FleetTokenFileError:
+        raise
     except Exception:
         return False
 
 
-def _publish_presence(event: str, target: Path, session_id: str, *, harness: str = "claude") -> str | None:
+def _publish_presence(
+    event: str, target: Path, session_id: str, *, harness: str = "claude"
+) -> str | FleetTokenRefusal | None:
     """Best-effort Hub publication. Exceptions never escape to hook callers.
 
     Returns a bounded failure reason, or None when the write landed, the event
     carries no presence effect, or no Hub is configured.
     """
+    from .fleet_home_guard import FleetTokenFileError, report_token_file_refusal
+
     try:
         from . import fleet_client
         from .fleet_session_heartbeat_state import publish_tracked
@@ -553,6 +563,8 @@ def _publish_presence(event: str, target: Path, session_id: str, *, harness: str
                 return "unpublished"
             return None
         return None
+    except FleetTokenFileError as exc:
+        return report_token_file_refusal("fleet presence report", exc)
     except Exception as exc:
         return _bounded_presence_error(exc)
 

@@ -1,0 +1,1 @@
+- Keep automatic update checks working with telemetry opt-outs, retry failed checks on the existing one-hour schedule, and document current request fields and retention.

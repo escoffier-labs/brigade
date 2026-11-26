@@ -29,9 +29,10 @@ Closes #
 ## Agent attribution
 
 <!-- Agent-written PRs keep this block (see CONTRIBUTING.md, "Agent attribution"). Human PRs delete it. -->
+<!-- Every agent-written review comment and summary includes: Review by <model> via <harness> in <client>. -->
 
-Sent by: <orchestrator model> (via <client>)
+Sent on behalf of Solomon by <orchestrator model> via <harness> in <client>
 Models used:
-- Implementation/build: <model, or none>
-- Test/verification: <model, or none> (checks: <listed above, or not run>)
-- Review: <model, or none>
+- Implementation/build: <model> via <harness>, or none
+- Test/verification: <model> via <harness> (checks: listed above), or not run
+- Review: <model> via <harness> for each pass, or none

@@ -1,0 +1,1 @@
+- Set `"verify": true` on an explicit batch to run base-trusted checks on eligible candidate trees in a Linux sandbox and record the receipt with the attempt. Passing results label the tests as candidate-authored.

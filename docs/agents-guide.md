@@ -1,14 +1,14 @@
-# Agent Guide: Installing and Adapting Brigade Stack
+# Agent Guide: Installing and Adapting BrigadeStack
 
 You are a coding agent. **You** install, set up, verify, and leave handoffs. The human usually does not type these commands. They point you at this repo (or paste a short prompt) and expect files and a doctor result on disk.
 
-Developing Brigade Stack itself? Start from root `AGENTS.md`, then `CONTRIBUTING.md`. That file is for contributors, not for wiring a user workspace. To prove a change by driving the CLI, follow [`registry/skills/verify-brigade/SKILL.md`](../registry/skills/verify-brigade/SKILL.md) (Launch / Doctor / Drive / Evidence / Cleanup / Feature map).
+Developing BrigadeStack itself? Start from root `AGENTS.md`, then `CONTRIBUTING.md`. That file is for contributors, not for wiring a user workspace. To prove a change by driving the CLI, follow [`registry/skills/verify-brigade/SKILL.md`](../registry/skills/verify-brigade/SKILL.md) (Launch / Doctor / Drive / Evidence / Cleanup / Feature map).
 
 <a id="what-brigade-is-for"></a>
 
-## What Brigade Stack is for
+## What BrigadeStack is for
 
-Brigade Stack coordinates coding agents across machines and cloud seats. Agents leave receipts and pass evidence-based handoffs so another agent can check their work.
+BrigadeStack coordinates coding agents across machines and cloud seats. Agents leave receipts and pass evidence-based handoffs so another agent can check their work.
 
 - **Agents run:** install, `setup`, `operator quickstart`, `work verify`, handoffs, `code`, `evidence`.
 - **Humans own:** policy, budgets, scopes, and gates. The operator can inspect or stop work and choose where approval is needed.
@@ -43,7 +43,7 @@ Read in this order:
 When a human pastes a short job into Claude Code, Codex, Cursor, OpenClaw, or any agent with shell access, use this exact brief:
 
 ```text
-Read https://github.com/escoffier-labs/brigade and follow docs/agents-guide.md.
+Read https://github.com/escoffier-labs/brigadestack and follow docs/agents-guide.md.
 If brigade is missing, install it with npm install --global
 brigadestack only when Node.js 22+ and npm are present and
 the target is glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64.
@@ -54,13 +54,13 @@ run brigade operator doctor, and report ready: yes. Keep existing memory
 layout. Do not touch remotes, do not commit, stop before anything destructive.
 ```
 
-Brigade Stack coordinates autonomous agent work across machines and cloud seats through local receipts, run journals, and evidence-based handoffs. It also serves memory and skills over MCP and syncs tool and skill projections across harnesses. The operator chooses the scope and gates. Adapt the user's existing memory, handoff, and agent workflow, keeping their local records inspectable.
+BrigadeStack coordinates autonomous agent work across machines and cloud seats through local receipts, run journals, and evidence-based handoffs. It also serves memory and skills over MCP and syncs tool and skill projections across harnesses. The operator chooses the scope and gates. Adapt the user's existing memory, handoff, and agent workflow, keeping their local records inspectable.
 
 ## Installing for a user (you run this)
 
 Platform: Linux, macOS, or native Windows PowerShell. Use the npm package only when Node.js 22 or newer and npm are already present and the target is glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64. It needs no Python first and fetches a managed Python on first launch. On other targets, including musl Linux (such as Alpine) and Windows ARM64, or without Node.js 22+ and npm, use Python 3.11 or newer with pipx or uv. If `pipx` is missing, use the platform package instructions in [`QUICKSTART.md`](../QUICKSTART.md#1-install). Do not assume WSL is required. On an npm install, upgrade with npm, not `brigade update`.
 
-Work in the **target** directory (the repo or operator workspace the user named), not the Brigade Stack source tree unless they asked to develop Brigade Stack.
+Work in the **target** directory (the repo or operator workspace the user named), not the BrigadeStack source tree unless they asked to develop BrigadeStack.
 
 Always dry-run before write. Then apply. Then doctor.
 
@@ -105,7 +105,7 @@ brigade harness install cursor --scope user --write
 brigade harness doctor cursor --scope user
 ```
 
-This profile manages a local plugin rule, the global `brigade-work` skill, one `sessionStart` hook, and MCP entries for Brigade Stack plus the code-map and evidence engines (with canonical labels `brigade-code-graph` / `brigade-evidence` for new entries). It preserves unrelated plugins, hooks, MCP servers, and sibling JSON fields. Existing values with a managed name are reported as conflicts instead of being replaced. Reload Cursor windows after a successful write.
+This profile manages a local plugin rule, the global `brigade-work` skill, one `sessionStart` hook, and MCP entries for BrigadeStack plus the code-map and evidence engines (with canonical labels `brigade-code-graph` / `brigade-evidence` for new entries). It preserves unrelated plugins, hooks, MCP servers, and sibling JSON fields. Existing values with a managed name are reported as conflicts instead of being replaced. Reload Cursor windows after a successful write.
 
 Uninstall is ownership-aware:
 
@@ -122,7 +122,7 @@ Instead of wiring repos one at a time, install the work-loop hooks once at user 
 brigade work hooks install --scope user
 ```
 
-From then on, every repo the agent opens gets the work brief injected at session start, and an unwired repo gets the exact `brigade init` command printed for the agent to run. The home directory is never treated as a work target. Pass `--target <wired-workspace>` to pin `hook-run` to one workspace; omit it to stay multi-repo. Agents can wire new repos themselves and close the verified-work loop without another human command. Remove it with `brigade work hooks uninstall --scope user`. Only Brigade Stack-owned hook entries are touched.
+From then on, every repo the agent opens gets the work brief injected at session start, and an unwired repo gets the exact `brigade init` command printed for the agent to run. The home directory is never treated as a work target. Pass `--target <wired-workspace>` to pin `hook-run` to one workspace; omit it to stay multi-repo. Agents can wire new repos themselves and close the verified-work loop without another human command. Remove it with `brigade work hooks uninstall --scope user`. Only BrigadeStack-owned hook entries are touched.
 
 ## After install: the agent work loop
 
@@ -136,7 +136,7 @@ brigade evidence search "<query>"  # when you need prior runs or claims
 
 `--command` and `--argv-json` receipts are audit-only. When dirty paths match a tracked manifest under `verify/manifests/`, `suggested_command` should name that manifest. See [outcome scoring](outcome-scoring.md).
 
-Do not claim tests passed without a real exit code. Prefer Brigade Stack-wrapped verify over raw test commands when the project wires the work loop.
+Do not claim tests passed without a real exit code. Prefer BrigadeStack-wrapped verify over raw test commands when the project wires the work loop.
 
 ## Adapting existing setups
 
@@ -147,7 +147,7 @@ Before changing files, inventory what is already there:
 
 Preserve the user's memory owner, conventions, repo layout, and tool-specific docs when possible. Prefer adding compatibility wiring (handoff inboxes, shared instructions, portable tool sources, scanner config).
 
-Do not force Brigade Stack's example layout when they already have a working homegrown setup. Do not assume the target must be a git repo; an OpenClaw/Hermes memory workspace or VPS operator directory is valid.
+Do not force BrigadeStack's example layout when they already have a working homegrown setup. Do not assume the target must be a git repo; an OpenClaw/Hermes memory workspace or VPS operator directory is valid.
 
 When the target may already have scripts, handoffs, crons, or process managers, use adopt before rewrite:
 
@@ -177,7 +177,7 @@ Do not commit generated local state unless the user explicitly asks and the docs
 
 ## Safety boundaries
 
-Do not start daemons, install schedulers, publish, push, tag, deploy, mutate remotes, install hooks, or run destructive commands as part of Brigade Stack setup unless the user explicitly asks. Setup writes local wiring and reports its checks. Long-running services and scheduled care can be enabled separately within the user's authorized scope. Boundary: [`docs/execution-model.md`](execution-model.md).
+Do not start daemons, install schedulers, publish, push, tag, deploy, mutate remotes, install hooks, or run destructive commands as part of BrigadeStack setup unless the user explicitly asks. Setup writes local wiring and reports its checks. Long-running services and scheduled care can be enabled separately within the user's authorized scope. Boundary: [`docs/execution-model.md`](execution-model.md).
 
 Do not paste raw scanner output, session text, tokens, API keys, private hostnames, private repo names, or unredacted absolute paths into public issues or docs.
 
@@ -190,7 +190,7 @@ brigade tools doctor --target . --json
 brigade skills doctor --target . --json
 ```
 
-Issue form: https://github.com/escoffier-labs/brigade/issues/new/choose
+Issue form: https://github.com/escoffier-labs/brigadestack/issues/new/choose
 
 ## Success criteria
 

@@ -16,12 +16,15 @@ import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 
 TREE_FINGERPRINT_EVIDENCE_PATHS = (
     ".brigade/work/verify-runs",
     ".brigade/work/verify-required",
+    ".brigade/work/evidence-import-state.json",
+    ".brigade/work/evidence-import-state.lock",
     "memory/outcome/records.jsonl",
     "memory/outcome/.records.lock",
     ".brigade/work/miseledger-export-cursor.json",
@@ -54,7 +57,11 @@ def read_json_dict(path: Path) -> dict[str, Any] | None:
 
 
 def tree_fingerprint_with_head(
-    target: Path, *, extra_evidence_paths: tuple[str, ...] = (), git_env: dict[str, str] | None = None
+    target: Path,
+    *,
+    extra_evidence_paths: tuple[str, ...] = (),
+    git_env: dict[str, str] | None = None,
+    deadline: float | None = None,
 ) -> tuple[str | None, str | None]:
     """Return the Git tree for the live workspace and the HEAD commit that fed it.
 
@@ -71,14 +78,18 @@ def tree_fingerprint_with_head(
             env = {**(os.environ if git_env is None else git_env), "GIT_INDEX_FILE": str(index_file)}
 
             def git(*args: str) -> subprocess.CompletedProcess[str]:
+                command = ["git", "-C", str(target), *args]
+                timeout = 30.0 if deadline is None else min(30.0, deadline - monotonic())
+                if timeout <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
                 return subprocess.run(
-                    ["git", "-C", str(target), *args],
+                    command,
                     check=False,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
                     text=True,
                     stdin=subprocess.DEVNULL,
-                    timeout=30,
+                    timeout=timeout,
                     env=env,
                 )
 

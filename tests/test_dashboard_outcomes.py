@@ -1,4 +1,6 @@
+from datetime import datetime
 from pathlib import Path
+from unittest.mock import Mock
 
 from brigade.center_cmd.dashboard.views import outcome_rank
 
@@ -260,8 +262,12 @@ def test_render_escapes_ratchet_values():
     assert "&lt;b&gt;boom&lt;/b&gt;" in fragment
 
 
-def test_render_ratchet_panel_shows_the_stale_pending_count():
-    base = {"version": 1, "generated_at": "2026-11-17T07:30:00+00:00", "regressions": []}
+def test_render_ratchet_panel_shows_the_stale_pending_count(monkeypatch):
+    generated_at = "2026-11-17T07:30:00+00:00"
+    clock = Mock(wraps=datetime)
+    clock.now.return_value = datetime.fromisoformat(generated_at)
+    monkeypatch.setattr(outcome_rank, "datetime", clock)
+    base = {"version": 1, "generated_at": generated_at, "regressions": []}
     stale = outcome_rank.render(
         {
             "ranking": [],

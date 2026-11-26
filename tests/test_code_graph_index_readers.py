@@ -1,9 +1,7 @@
 """Brigade readers of the code graph index follow the engine's resolution rule.
 
-A repository first indexed by the renamed engine has only the canonical index.
-Each reader must see it, keep using a legacy-only index in place, and prefer
-the canonical index when both exist (docs/phase-engine-rename.md, "Resolution
-rule"). One representative reader per module group.
+Each reader uses the canonical index even when an old index is also present.
+One representative reader per module group.
 """
 
 from __future__ import annotations
@@ -22,23 +20,22 @@ from brigade.claude_hooks import dependencies
 from brigade.operator_cmd import lifecycle
 from brigade.work_cmd import footprint
 
-LAYOUTS = ("canonical", "legacy", "both")
+LAYOUTS = ("canonical", "both")
 
 
 @pytest.fixture(autouse=True)
 def _no_index_overrides(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(engine_paths.CODE_GRAPH_DB_ENV, raising=False)
-    monkeypatch.delenv(engine_paths.LEGACY_CODE_GRAPH_DB_ENV, raising=False)
 
 
 def _seed(target: Path, layout: str) -> Path:
     """Create the index files for ``layout`` and return the one a reader must use."""
     canonical, legacy = engine_paths.code_graph_db_paths(target)
-    present = {"canonical": [canonical], "legacy": [legacy], "both": [canonical, legacy]}[layout]
+    present = {"canonical": [canonical], "both": [canonical, legacy]}[layout]
     for path in present:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text("")
-    return legacy if layout == "legacy" else canonical
+    return canonical
 
 
 def _fake_engine(monkeypatch: pytest.MonkeyPatch, binary: str = "/x/engine") -> None:
@@ -135,7 +132,12 @@ def test_status_readers_report_the_resolved_index(tmp_path, monkeypatch, layout)
     assert str(expected) in graph["detail"]
 
 
-def test_readers_see_no_index_on_an_unindexed_repo(tmp_path, monkeypatch):
+@pytest.mark.parametrize("legacy_present", [False, True])
+def test_readers_see_no_index_on_an_unindexed_repo(tmp_path, monkeypatch, legacy_present):
+    if legacy_present:
+        _, legacy = engine_paths.code_graph_db_paths(tmp_path)
+        legacy.parent.mkdir()
+        legacy.touch()
     _fake_engine(monkeypatch)
     calls = _capture_runs(monkeypatch)
 
@@ -158,27 +160,6 @@ def test_readers_honor_the_explicit_variable(tmp_path, monkeypatch):
 
     assert briefs.code_graph_brief(tmp_path, "fix dispatch").attached is True
     assert {_db_arg(argv) for argv in calls} == {str(explicit)}
-
-
-def test_readers_refuse_conflicting_variables_without_raising(tmp_path, monkeypatch):
-    _seed(tmp_path, "both")
-    monkeypatch.setenv(engine_paths.CODE_GRAPH_DB_ENV, str(tmp_path / "a.db"))
-    monkeypatch.setenv(engine_paths.LEGACY_CODE_GRAPH_DB_ENV, str(tmp_path / "b.db"))
-    _fake_engine(monkeypatch)
-    monkeypatch.setattr(search_cmd.proc, "which", lambda cmd: None)
-    calls = _capture_runs(monkeypatch, stdout="{}")
-
-    assert briefs.code_graph_brief(tmp_path, "fix dispatch").attached is False
-    assert context_cmd._code_graph_summary(tmp_path, {"text": "lint"}) is None
-    predicted = footprint.predict_footprint(tmp_path, symbols=["dispatch"], impact_runner=lambda *a: {})
-    assert "conflicting code graph database overrides" in str(predicted)
-    assert "conflicting" in code_export.export_payload(tmp_path)["error"]
-    status = search_cmd.status_payload(tmp_path)
-    assert next(iter(status["tools"].values()))["db_present"] is False
-    assert "conflicting" in status["summary"]
-    assert "conflicting" in lifecycle._loop_stations_payload(tmp_path)["graph"]["detail"]
-    # Only the doctor probes in the status payload may reach the engine; no reader opens an index.
-    assert all("--db" not in argv for argv in calls)
 
 
 def _recording_engine(tmp_path: Path) -> tuple[Path, Path]:

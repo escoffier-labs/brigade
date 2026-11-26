@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
 from dataclasses import asdict
 from pathlib import Path
+from typing import NoReturn
 
 from . import native_orca_host, proc
 from .native_child_host import NativeChildError
@@ -15,17 +17,27 @@ from .roster import Roster
 from .roster_readiness import SOURCE_ORCA_LOCAL_PROBE, Observation, ReadinessRequest
 
 PROBE_TIMEOUT_SECONDS = 12.0
-_VERSION = re.compile(r"v?(\d+\.\d+\.\d+(?:-[\w.-]+)?(?:\+[\w.-]+)?)", re.ASCII)
-# Orca 1.4.269 usage with both required selector groups and optional flags.
-_WORKER_START_USAGE = re.compile(
-    r"^Usage: orca-ide orchestration worker-start "
-    r"\(--task <task_id> \| --spec <text> \| --spec-file <path\|->\)"
-    r"(?: \[--[^\]\r\n]+\])* \(--agent <agent> \| --terminal <handle>\)"
-    r"(?: \[--[^\]\r\n]+\])*[ \t]*\r?$",
-    re.MULTILINE,
-)
-_OPTIONS = re.compile(r"^Options:[ \t]*\r?\n(.*?)(?=^\S[^\r\n]*:[^\S\r\n]*\r?$|\Z)", re.MULTILINE | re.DOTALL)
-_RETRY_REQUEST_OPTION = re.compile(r"^[ \t]+--retry-request(?=[ \t=\r\n]|$)", re.MULTILINE)
+# The flags used by launch_argv and native_orca_observations. Require the full
+# worker-start shape, including flags used only for some target declarations.
+_REQUIRED_FLAGS = {
+    "worker-start": {
+        "environment",
+        "retry-request",
+        "run",
+        "task",
+        "worktree",
+        "base-branch",
+        "agent",
+        "model",
+        "effort",
+        "json",
+        "full",
+    },
+    "worker-show": {"environment", "dispatch", "json", "full"},
+    "worker-stop": {"environment", "dispatch", "retry-request", "json"},
+    "worker-read": {"environment", "dispatch", "source", "json"},
+    "inbox": {"environment", "run", "limit", "json", "full"},
+}
 _CREDENTIAL_ENV_NAME = re.compile(
     r"TOKEN|SECRET|PASSWORD|PASSWD|CREDENTIAL|API_KEY|APIKEY|PRIVATE_KEY|AUTH"
     r"|^(?:OP_|AWS_|GH_|GITHUB_|ANTHROPIC_|OPENAI_|GOOGLE_APPLICATION)"
@@ -60,6 +72,41 @@ def _probe(argv: list[str]) -> tuple[str, str | None]:
     return result.stdout, None
 
 
+def _unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result = dict(pairs)
+    if len(result) != len(pairs):
+        raise ValueError("duplicate registry key")
+    return result
+
+
+def _invalid_constant(_: str) -> NoReturn:
+    raise ValueError("invalid registry constant")
+
+
+def _registry_commands(stdout: str) -> dict[tuple[str, ...], set[str]]:
+    payload = json.loads(stdout, object_pairs_hook=_unique_object, parse_constant=_invalid_constant)
+    if not isinstance(payload, dict):
+        raise ValueError("invalid registry")
+    schema = payload.get("schemaVersion")
+    entries = payload.get("commands")
+    if type(schema) is not int or schema != 1 or not isinstance(entries, list):
+        raise ValueError("unrecognized registry schema")
+    commands: dict[tuple[str, ...], set[str]] = {}
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("invalid registry command")
+        path, flags = entry.get("path"), entry.get("flags")
+        if not isinstance(path, list) or not path or not all(isinstance(part, str) and part for part in path):
+            raise ValueError("invalid command path")
+        if not isinstance(flags, list) or not all(isinstance(flag, str) and flag for flag in flags):
+            raise ValueError("invalid command flags")
+        key = tuple(path)
+        if key in commands:
+            raise ValueError("duplicate command path")
+        commands[key] = set(flags)
+    return commands
+
+
 def orca_route_observations(
     roster: Roster, request: ReadinessRequest, *, scope: str
 ) -> dict[str, Observation | tuple[Observation, ...]]:
@@ -91,29 +138,28 @@ def orca_route_observations(
     if error is not None:
         checks["orca-version"] = observed("unknown", f"orca-version-probe-{error}")
         return checks
-    version_match = _VERSION.fullmatch(stdout.strip())
-    if version_match is None:
+    version = stdout.strip().removeprefix("v")
+    if not native_orca_host.valid_version(version):
         checks["orca-version"] = observed("unknown", "orca-version-unrecognized")
         return checks
-    version = version_match[1]
-    if version not in native_orca_host.SUPPORTED_VERSIONS:
-        checks["orca-version"] = observed("unsupported", "orca-version-unsupported", detail=version)
-        return checks
-    checks["orca-version"] = observed("passed", "orca-version-supported", detail=version)
+    checks["orca-version"] = observed("passed", "orca-version-parsed", detail=version)
 
-    stdout, error = _probe([command, orchestration, "worker-start", "--help"])
+    # Keep the existing evidence category for readers of readiness v1.
+    category = "orca-retry-request"
+    stdout, error = _probe([command, "agent-context", "--json"])
     if error is not None:
-        checks["orca-retry-request"] = observed("unknown", f"orca-help-probe-{error}")
+        checks[category] = observed("unknown", f"orca-registry-probe-{error}")
         return checks
-    usage = _WORKER_START_USAGE.search(stdout)
-    options = _OPTIONS.search(stdout, usage.end()) if usage is not None else None
-    if options is None:
-        checks["orca-retry-request"] = observed("unknown", "orca-worker-start-help-unrecognized")
+    try:
+        commands = _registry_commands(stdout)
+    except (ValueError, RecursionError):
+        checks[category] = observed("unknown", "orca-registry-unrecognized")
         return checks
-    if not _RETRY_REQUEST_OPTION.search(options[1]):
-        checks["orca-retry-request"] = observed("unsupported", "orca-retry-request-unsupported")
-        return checks
-    checks["orca-retry-request"] = observed("passed", "orca-retry-request-supported")
+    for verb, required in _REQUIRED_FLAGS.items():
+        if not required.issubset(commands.get((orchestration, verb), ())):
+            checks[category] = observed("unsupported", "orca-command-capabilities-missing", detail=verb)
+            return checks
+    checks[category] = observed("passed", "orca-command-capabilities-present")
 
     agents = []
     for seat in request.workers:
@@ -129,7 +175,11 @@ def orca_route_observations(
             )
         elif (gap := native_orca_host.structural_gap(target)) is not None:
             agents.append(observed("unsupported", f"orca-target-{gap}", seat=seat))
+        elif target.orca_version != version:
+            agents.append(
+                observed("unsupported", "orca-target-version-mismatch", detail=target.orca_version, seat=seat)
+            )
         else:
-            agents.append(observed("passed", "orca-agent-enabled", detail=target.agent, seat=seat))
+            agents.append(observed("passed", "orca-agent-declared", detail=target.agent, seat=seat))
     checks["orca-agent"] = tuple(agents)
     return checks

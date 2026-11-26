@@ -544,7 +544,7 @@ def test_crash_after_claim_blocks_every_new_claim(tmp_path, monkeypatch):
 
 @POSIX_ONLY
 def test_requested_but_unaccepted_charges_capacity_without_blocking_siblings(tmp_path):
-    workspace, run_id = _enroll(tmp_path, ("one", "two", "three"))
+    workspace, run_id = _enroll(tmp_path, ("one", "two", "three"), target_extra=("max_live = 3",))
     run_json = _run_dir(workspace, run_id) / "run.json"
     meta = json.loads(run_json.read_text(encoding="utf-8"))
     meta["run_budget"] = {
@@ -557,7 +557,7 @@ def test_requested_but_unaccepted_charges_capacity_without_blocking_siblings(tmp
     assert _claim(workspace, run_id, "two")["dispatch_attempt"] == 2
     with pytest.raises(dispatch.DispatchError) as denied:
         _claim(workspace, run_id, "three")
-    assert denied.value.code in {"capacity-denied", "budget-exhausted"}
+    assert denied.value.code == "budget-exhausted"
     assert len([event for event in _events(workspace, run_id) if event.event_type == "run.dispatch.requested"]) == 2
 
 

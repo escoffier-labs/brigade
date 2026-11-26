@@ -163,7 +163,7 @@ def test_symbol_impact_refinement_detects_indirect_overlap(tmp_path, monkeypatch
 
     monkeypatch.setattr(work_cmd.helpers, "_now", _now)
 
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_bytes(b"fake-graphtrail-index")
     monkeypatch.setattr(partition_mod.component_bins, "resolve", lambda _name: "/fake/graphtrail")
@@ -192,7 +192,7 @@ def test_symbol_impact_refinement_detects_indirect_overlap(tmp_path, monkeypatch
 
 def test_symbol_impact_memoized_within_partition_call(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_bytes(b"fake-graphtrail-index")
     monkeypatch.setattr(partition_mod.component_bins, "resolve", lambda _name: "/fake/graphtrail")
@@ -215,7 +215,7 @@ def test_symbol_impact_memoized_within_partition_call(tmp_path, monkeypatch):
 
 def test_malformed_impact_payload_falls_back_to_file_overlap(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_bytes(b"fake-graphtrail-index")
     monkeypatch.setattr(partition_mod.component_bins, "resolve", lambda _name: "/fake/graphtrail")

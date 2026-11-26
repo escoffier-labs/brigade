@@ -361,18 +361,14 @@ def test_ci_workflow_runs_embedded_engine_commands_from_engine_directories():
         "go vet ./...",
         "go install golang.org/x/vuln/cmd/govulncheck@v1.3.0",
         "govulncheck ./...",
-        'go build -o "bin/$name" "./cmd/$name"',
+        "go build -o bin/brigade-evidence ./cmd/brigade-evidence",
         "go build -o bin/sessionfind ./cmd/sessionfind",
-        "scripts/check_release_workflow.sh",
-        'export EVIDENCE_BIN="$PWD/bin/$name"',
         "scripts/smoke_archive.sh",
         "scripts/smoke_mcp.sh",
         "scripts/smoke_http.sh",
     ):
         assert command in evidence_ledger
-    # Build and smoke both the canonical and the legacy evidence entry points.
-    loops = re.findall(r"for name in (.+); do", evidence_ledger)
-    assert loops == ["brigade-evidence miseledger"] * 2
+    assert "./cmd/miseledger" not in evidence_ledger
 
 
 def test_ci_workflow_runs_notify_go_commands_from_notify_directory():
@@ -1760,12 +1756,10 @@ def test_ci_windows_native_acceptance_builds_and_pins_same_commit_engines():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     section = _workflow_job_section(text, "windows-native-acceptance")
 
-    assert (
-        '$codeGraphBins = @("graphtrail", "graphtrail-mcp", "brigade-code-graph", "brigade-code-graph-mcp")' in section
-    )
+    assert '$codeGraphBins = @("brigade-code-graph", "brigade-code-graph-mcp")' in section
     assert 'cargo build --release --locked @($codeGraphBins | ForEach-Object { "--bin"; $_ })' in section
     assert 'Copy-Item "target/release/$bin.exe" "$env:GITHUB_WORKSPACE/engine-bin/$bin.exe"' in section
-    assert "./cmd/miseledger" in section
+    assert "./cmd/brigade-evidence" in section
     assert "./cmd/sessionfind" in section
     assert "-EngineBinDir" in section
     assert "-InstallMode source" in section
@@ -2899,7 +2893,7 @@ def test_windows_release_asset_validation_runtime(tmp_path, case, engine, reposi
         + f"if (-not $Uri.StartsWith('{base}')) {{ throw 'unexpected URL' }}\n"
         + "$name = $Uri.Split('/')[-1]\n"
         + f"Copy-Item -LiteralPath (Join-Path '{source.as_posix()}' $name) -Destination $OutFile\n}}\n"
-        + f"$manifest = Assert-ReleaseManifestAndAssets -Version '1.2.3' -Destination '{(tmp_path / 'out').as_posix()}' -PythonExe '{python_exe}'\n"
+        + f"$manifest = Assert-ReleaseManifestAndAssets -Version '0.32.3' -Destination '{(tmp_path / 'out').as_posix()}' -PythonExe '{python_exe}'\n"
         + "if (@($manifest.components.PSObject.Properties).Count -ne 5) { throw 'legacy return changed' }\n"
     )
     result = subprocess.run(
@@ -2992,7 +2986,7 @@ def test_windows_canonical_acceptance_runtime(tmp_path, engine, case, repository
         "\"$Repository/.github/workflows/publish.yml\",'--source-digest',$Revision,'--source-ref',\"refs/tags/v$Version\")\n"
         "if ($args[0] -ne 'attestation' -or $args[1] -ne 'verify') { throw 'wrong command' }\n"
         "if (-not [IO.Path]::IsPathRooted($args[2])) { throw 'relative subject' }\n"
-        "foreach ($pair in @(@('--source-digest', ('a' * 40)), @('--source-ref', 'refs/tags/v1.2.3'), "
+        "foreach ($pair in @(@('--source-digest', ('a' * 40)), @('--source-ref', 'refs/tags/v0.32.3'), "
         f"@('--repo','{repository}'), @('--signer-workflow','{repository}/.github/workflows/publish.yml'))) {{\n"
         "$i = [Array]::IndexOf($args, $pair[0]); if ($i -lt 0 -or $args[$i+1] -cne $pair[1]) { throw 'wrong binding' } }\n"
         "foreach ($key in $keys) { if ([Environment]::GetEnvironmentVariable($key, 'Process') -ne 'fixture-only') { throw 'verification lost auth' } }\n"
@@ -3009,7 +3003,7 @@ def test_windows_canonical_acceptance_runtime(tmp_path, engine, case, repository
         "$script:smoked++\n"
         + ("throw 'fixture smoke failed'\n" if case == "smoke-failure" else "")
         + "}\ntry {\n"
-        + f"Invoke-VerifiedCanonicalSmoke -Version '1.2.3' -ReleaseDirectory '{tmp_path.as_posix().replace(chr(39), chr(39) * 2)}' -PythonExe '{python_exe}'\n"
+        + f"Invoke-VerifiedCanonicalSmoke -Version '0.32.3' -ReleaseDirectory '{tmp_path.as_posix().replace(chr(39), chr(39) * 2)}' -PythonExe '{python_exe}'\n"
         + "} finally { foreach ($key in $keys) { if ([Environment]::GetEnvironmentVariable($key, 'Process') -ne 'fixture-only') { throw 'auth restoration failed' } } }\n"
         + ("if ($script:smoked -ne 1) { throw 'missing smoke' }\n" if case == "ok" else "")
         + (
@@ -3134,7 +3128,7 @@ class Stub {
         + "Set-Content -LiteralPath $env:FIXTURE_SMOKE -Value 'smoked'\n"
         + ("throw 'fixture smoke failed'\n" if case == "smoke-failure" else "")
         + "}\ntry {\n"
-        + f"Invoke-VerifiedCanonicalSmoke -Version '1.2.3' -ReleaseDirectory {literal(release)} -GhExe $ghExe -PythonExe {literal(sys.executable)}\n"
+        + f"Invoke-VerifiedCanonicalSmoke -Version '0.32.3' -ReleaseDirectory {literal(release)} -GhExe $ghExe -PythonExe {literal(sys.executable)}\n"
         + "} finally { foreach ($key in $keys) { if ([Environment]::GetEnvironmentVariable($key, 'Process') -ne 'fixture-only') { throw 'auth restoration failed' } } }\n"
     )
     smoke = tmp_path / "smoked.txt"
@@ -3187,7 +3181,7 @@ class Stub {
                 "--source-digest",
                 "a" * 40,
                 "--source-ref",
-                "refs/tags/v1.2.3",
+                "refs/tags/v0.32.3",
                 "--format",
                 "json",
             ]

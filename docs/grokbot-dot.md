@@ -96,6 +96,7 @@ optional. Replace placeholders with the deployment's configured values.
 | `hub.poll_seconds` | integer | Hub poll interval, 10 through 300 seconds. |
 | `hub.recipients` | object | Up to 16 aliases mapped to agent principals or node UUIDs. Keep a `conductor` alias for the conductor's principal. |
 | `dispatch_enabled` | boolean | Gate for the six dispatch/message tools marked below. |
+| `dispatch_limits` | object | Optional repository, open request, daily attempt and prompt limits. |
 | `events_enabled` | boolean | Enable event capabilities, RPCs, workers, fleet polling, and webhooks. When false, pass requests straight to MCP. |
 | `digest_pr_repo` | string | Repository for digest PR queries, formatted `owner/repo`. |
 | `callback_hosts` | string array | Nonempty allowlist of callback hostnames. |
@@ -110,6 +111,70 @@ optional. Replace placeholders with the deployment's configured values.
 Dot is one profile of this connector code. The duet pack runs the same code with
 its own runtime schema, identity and a smaller tool set. See
 [duet-connector.md](duet-connector.md).
+
+### Dispatch limits
+
+Add `dispatch_limits` to the runtime JSON to limit new work from
+`fleet_submit` and `fleet_followup`. When absent, Dot dispatch is unlimited
+by this policy and the existing tool limits still apply.
+
+```json
+{
+  "dispatch_limits": {
+    "repositories": ["example-repo"],
+    "max_open": 3,
+    "daily_limit": 20,
+    "prompt_max_bytes": 24576
+  }
+}
+```
+
+An empty `dispatch_limits` object enables the numeric defaults shown above.
+Omitting `repositories` allows all configured aliases. An empty
+`repositories: []` list denies all repositories. The daily budget counts
+launch attempts per UTC day. The prompt limit counts UTF-8 bytes, including
+any appended owner authorization. Dot accepts configured values up to 32768
+and caps the effective limit at 24576 bytes.
+
+Answer and approve require a known repository whenever dispatch limits are
+configured. With an allowlist, followup also requires a known repository.
+These calls return `repository_unknown` when a required repository cannot
+be resolved and `repository_not_allowed` when it is outside the allowlist.
+Interrupt can stop any request regardless of the repository or dispatch
+budget. Answer, approve and interrupt use no launch quota.
+
+Unknown outcomes or a crash retain the reservation. Inspect `fleet_recent`
+and ask the operator to reconcile before retrying. No automatic expiry can
+reopen capacity for unknown work. Status and wait release slots only after a
+confirmed terminal state. Interrupt alone does not release a slot. When
+`events_enabled` is false, automatic release is disabled. Call
+`fleet_status` or `fleet_wait` explicitly to observe completion.
+
+`dot_t3_capabilities` reports effective values under `fleet.limits`.
+`fleet.usage` reports open slots, today's attempts and the number of open
+reservations without a request ID. A reservation can lack an ID while submit
+is in flight or after an uncertain outcome.
+
+### Tool grants
+
+Add `tool_grants` to the runtime JSON to choose which tool classes the approved
+identity can use. This example keeps reads, messaging, and dispatch available
+and excludes `inbox_ack` and memory writes.
+
+```json
+"tool_grants": {"classes": ["read", "messaging", "dispatch"], "deny": ["inbox_ack"]}
+```
+
+Both arrays are required, with at least one entry in `classes`. The `deny` array
+accepts Dot tool names. Use `deny: []` to allow every tool in the listed
+classes, subject to the connector's existing checks. The `messaging` class has
+`message_send`, `inbox_reply`, and `inbox_ack`. The `dispatch` class includes
+`fleet_report_session` in both dry-run and publish mode. The `memory_write`
+class has `handoff_write`, and the remaining tools are `read`.
+
+Denied tools are omitted from MCP discovery and calls return
+`tool_not_permitted`. Omit `tool_grants` to keep the default tool set. Restart
+the listener to apply changes.
 
 ### Starting from the template
 

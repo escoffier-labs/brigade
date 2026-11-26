@@ -1,5 +1,5 @@
 name: Bug report
-description: Something is broken in GraphTrail itself, such as the CLI, the extractors, the graph queries, or the MCP server.
+description: Something is broken in Brigade Code Graph itself, such as the CLI, the extractors, the graph queries, or the MCP server.
 title: "[Bug]: "
 labels: ["bug"]
 body:
@@ -9,16 +9,16 @@ body:
       label: What happened
       description: What did you run, and what did you expect versus what you got?
       placeholder: |
-        I ran `graphtrail --db .graphtrail/graphtrail.db callers serve` and got X.
+        I ran `brigade-code-graph --db .brigade/code-graph/code-graph.db callers serve` and got X.
         I expected Y.
     validations:
       required: true
   - type: input
     id: version
     attributes:
-      label: GraphTrail version
-      description: Output of `graphtrail --version`.
-      placeholder: graphtrail X.Y.Z
+      label: Brigade Code Graph version
+      description: Output of `brigade-code-graph --version`.
+      placeholder: brigade-code-graph X.Y.Z
     validations:
       required: true
   - type: dropdown
@@ -66,7 +66,7 @@ body:
     id: diagnostics
     attributes:
       label: Diagnostics
-      description: Paste relevant stderr and `graphtrail --db .graphtrail/graphtrail.db doctor . --json` output when available. Remove private paths and credentials first.
+      description: Paste relevant stderr and `brigade-code-graph --db .brigade/code-graph/code-graph.db doctor . --json` output when available. Remove private paths and credentials first.
       render: shell
     validations:
       required: false

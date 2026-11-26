@@ -51,12 +51,13 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     _run(accepted)
     _receipt(accepted, required=True)
+    accepted.add_argument("--show-json", help="Full worker-show JSON for recovering an uncertain start.")
 
     hold = commands.add_parser("hold-resolve", help="Assert a recovered launch or abandon it while retaining capacity.")
     _run(hold)
     _receipt(hold)
     hold.add_argument("--abandon", action="store_true")
-    hold.add_argument("--show-json", help="Full worker-show JSON for recovering an outcome_unknown start.")
+    hold.add_argument("--show-json", help="Full worker-show JSON for recovering an uncertain start.")
 
     observe = commands.add_parser(
         "observe",
@@ -70,7 +71,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     _run(observe)
     observe.add_argument("--native-json", required=True, help="worker-show --json --full file, or `-`.")
     observe.add_argument("--worker-done-json", help="Orca inbox --full --json output file, or `-`.")
-    observe.add_argument("--transcript-json", help="Orca worker-read --source transcript --json output file, or `-`.")
+    observe.add_argument(
+        "--transcript-json",
+        help="Orca worker-read JSON reply or ordered array of up to eight replies, from a file or `-`.",
+    )
 
     cancel = commands.add_parser("cancel", help="Request worker-stop or record its receipt and full worker-show JSON.")
     _run(cancel)
@@ -128,7 +132,7 @@ def _dispatch(args: Any) -> dict[str, Any]:
     payload = read(args.native_json)
     exit_code = args.exit_code if reporting else 0
     if verb == "accepted":
-        return native_orca_verbs.accepted(**task, payload=payload, exit_code=exit_code)
+        return native_orca_verbs.accepted(**task, payload=payload, exit_code=exit_code, show=read(show))
     if verb == "hold-resolve":
         if args.abandon == reporting:
             raise refuse("native-invalid", "supply exactly one of --abandon or the native start receipt")
@@ -151,8 +155,9 @@ def _describe(report: dict[str, Any]) -> None:
         reason = task["capacity_reason"]
         refusal = task.get("start_refusal")
         disposition = f" ({refusal})" if refusal is not None else ""
+        worktree_note = " (worktree retained)" if task.get("worktree_retained") is True else ""
         capacity_note = f" (holds capacity: {reason})" if reason is not None else ""
-        print(f"  {task['task_id']} {task['state']}{disposition}{capacity_note}")
+        print(f"  {task['task_id']} {task['state']}{disposition}{worktree_note}{capacity_note}")
 
 
 def dispatch(args: Any) -> int:

@@ -1,0 +1,1 @@
+- Check Codex app-server account status and exact model availability during Brigade roster readiness without submitting a prompt.

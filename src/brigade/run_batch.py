@@ -127,7 +127,7 @@ def validate_batch(payload: object) -> dict[str, Any]:
     and hashes ``capability`` when a task uses one, so only seat-only tasks are
     unchanged and existing seat-only fingerprints stay byte for byte.
     """
-    obj = _fields(payload, {"schema", "request_id", "tasks", "synthesis"}, "batch")
+    obj = _fields(payload, {"schema", "request_id", "tasks", "synthesis", "verify"}, "batch")
     if obj.get("schema") != SCHEMA:
         raise BatchError("unsupported-schema", f"schema must be {SCHEMA}")
     if not journal.task_id(obj.get("request_id")):
@@ -186,7 +186,16 @@ def validate_batch(payload: object) -> dict[str, Any]:
         if not isinstance(synthesis, dict):
             raise BatchError("invalid-synthesis", "synthesis must be null or an explicit text/seat object")
         synthesis = _selection(_fields(synthesis, {"text", "seat"}, "synthesis"), "synthesis", capability=False)
-    return {"schema": SCHEMA, "request_id": obj["request_id"], "tasks": tasks, "synthesis": synthesis}
+    verify = obj.get("verify", False)
+    if not isinstance(verify, bool):
+        raise BatchError("invalid-verify", "verify must be a boolean")
+    return {
+        "schema": SCHEMA,
+        "request_id": obj["request_id"],
+        "tasks": tasks,
+        "synthesis": synthesis,
+        **({"verify": True} if verify else {}),
+    }
 
 
 def _needs_base_pin(canonical: dict[str, Any]) -> bool:
@@ -256,6 +265,7 @@ def plan_batch(payload: object, *, base_sha: str | None = None) -> dict[str, Any
         "layers": _layers(canonical["tasks"]),
         "tasks": [{k: v for k, v in task.items() if k != "text"} for task in canonical["tasks"]],
         "synthesis": {"seat": canonical["synthesis"]["seat"]} if canonical["synthesis"] else None,
+        **({"verify": True} if canonical.get("verify") else {}),
     }
 
 

@@ -15,10 +15,9 @@ export XDG_CONFIG_HOME="$TMP_HOME/.config"
 export XDG_DATA_HOME="$TMP_HOME/.local/share"
 export XDG_CACHE_HOME="$TMP_HOME/.cache"
 
-# EVIDENCE_BIN selects the entry point; CI runs this script with both names.
 EVIDENCE_BIN="${EVIDENCE_BIN:-$ROOT/bin/brigade-evidence}"
 if [ ! -x "$EVIDENCE_BIN" ]; then
-  (cd "$ROOT" && go build -o "$EVIDENCE_BIN" "./cmd/$(basename "$EVIDENCE_BIN")")
+  (cd "$ROOT" && go build -o "$EVIDENCE_BIN" ./cmd/brigade-evidence)
 fi
 SESSIONFIND="${SESSIONFIND:-$ROOT/bin/sessionfind}"
 if [ ! -x "$SESSIONFIND" ]; then

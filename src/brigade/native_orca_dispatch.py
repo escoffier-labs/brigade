@@ -13,10 +13,9 @@ from .native_child_journal import digest
 from .native_orca_host import (
     HOST,
     NEW_WORKTREES,
-    ORCA_VERSION,
-    SUPPORTED_VERSIONS,
     NativeTarget,
     require_supported_target,
+    valid_version,
 )
 
 _START_DOMAIN = "brigade.native-orca.worker-start.v1"
@@ -74,11 +73,11 @@ class WorkerReference:
 
     binding: LaunchBinding
     dispatch_id: str
-    orca_version: str = ORCA_VERSION
+    orca_version: str
 
     def __post_init__(self) -> None:
         self.binding.checked_key()
-        if self.orca_version not in SUPPORTED_VERSIONS or not valid_id(self.dispatch_id, "ctx"):
+        if not valid_version(self.orca_version) or not valid_id(self.dispatch_id, "ctx"):
             raise NativeChildError("native-invalid", "the Orca worker reference is invalid")
 
     @property
@@ -149,6 +148,10 @@ _TASK_STATES_FOR_REFUSAL = frozenset({"failed"})
 class DefiniteStartRefusal(NativeChildError):
     """A matching refusal that produced no live worker for this claim."""
 
+    def __init__(self, code: str, message: str, *, worktree_retained: bool = False) -> None:
+        super().__init__(code, message)
+        self.worktree_retained = worktree_retained
+
 
 def parse_start(binding: LaunchBinding, target: NativeTarget, payload: object, *, exit_code: int) -> WorkerReference:
     """Correlate a ready, replay-safe worker-start receipt, with no retry advice."""
@@ -188,8 +191,19 @@ def parse_start(binding: LaunchBinding, target: NativeTarget, payload: object, *
     return _start_reference(binding, target, reply)
 
 
+def failed_start_with_residuals(
+    binding: LaunchBinding, target: NativeTarget, payload: object, *, exit_code: int
+) -> tuple[WorkerReference, list[object]] | None:
+    """Recover the dispatch and residual handles from a matching failed receipt."""
+    reply = result_fields(payload)
+    residual = reply.get("residualResources")
+    if exit_code == 0 or reply.get("state") != "failed" or not isinstance(residual, list) or not residual:
+        return None
+    return _start_reference(binding, target, reply), residual
+
+
 def unconfirmed_start(binding: LaunchBinding, target: NativeTarget, payload: object) -> WorkerReference:
-    """Recover identity from the original unknown receipt, never from a notice."""
+    """Recover identity from the original unknown receipt."""
     reply = result_fields(payload)
     if reply.get("state") != "outcome_unknown":
         raise NativeChildError("start-unknown", "a full outcome_unknown start receipt is required for recovery")

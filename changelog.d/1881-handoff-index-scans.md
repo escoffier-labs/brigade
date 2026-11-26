@@ -1,0 +1,1 @@
+- Reuse unchanged Git index listings during handoff ingest while checking for index changes and filesystem aliases before writing or archiving.

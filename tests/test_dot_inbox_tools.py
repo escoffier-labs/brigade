@@ -43,7 +43,7 @@ class FakeMessages:
         from brigade import fleet_client
 
         self.settings = dict(hub_url="https://hub.invalid", node_token="fixture-node", admin_token="fixture-admin")
-        monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(self.settings))
+        monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: dict(self.settings))
         monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: "node-a")
         self.rows, self.calls, self.fail = [], [], {}
         self.queued = False
@@ -838,7 +838,7 @@ def dot_message_transport(dot_private_dir, monkeypatch):
     token_file.write_text("x" * 64)
     token_file.chmod(0o600)
     settings = dict(hub_url="https://hub.example.test", node_token="n" * 64, admin_token="")
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(settings))
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: dict(settings))
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: "node-a")
     monkeypatch.setattr(fleet_client, "spool_path", lambda *args: dot_private_dir.parent / "spool" / "node.jsonl")
     cfg = HubConfig("agent:dot", "node-a", token_file, 30, {"worker": "node-b"})

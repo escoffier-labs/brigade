@@ -296,6 +296,7 @@ class TestClient:
     def _config(self, tmp_path, url: str, token: str) -> None:
         token_file = tmp_path / "token.txt"
         token_file.write_text(token + "\n")
+        token_file.chmod(0o600)
         self.home.mkdir(parents=True, exist_ok=True)
         (self.home / "fleet.toml").write_text(f'[fleet]\nhub_url = "{url}"\ntoken_file = "{token_file.as_posix()}"\n')
 
@@ -387,6 +388,7 @@ class TestClient:
         url, token, _db = hub
         token_file = tmp_path / "token.txt"
         token_file.write_text(token + "\n")
+        token_file.chmod(0o600)
         self.home.mkdir(parents=True, exist_ok=True)
         # A Windows-style token_file path: the parsed TOML value carries
         # single backslashes. Written as a basic string with escaped

@@ -441,7 +441,9 @@ def build_render_context(selection: Selection) -> dict[str, str]:
     }
 
 
-def resolve_manifests(selection: Selection) -> Tuple[List[dict], List[str], List[str]]:
+def resolve_manifests(
+    selection: Selection, *, templates_root: Path | None = None
+) -> Tuple[List[dict], List[str], List[str]]:
     """Return (files, dirs, post_install_notes) for a Selection.
 
     Files are deduped by `dst`: later manifests win, so a harness can
@@ -451,19 +453,19 @@ def resolve_manifests(selection: Selection) -> Tuple[List[dict], List[str], List
     dirs: List[str] = []
     notes: List[str] = []
 
-    depth_manifest = load_depth_manifest(selection.depth)
+    depth_manifest = load_depth_manifest(selection.depth, templates_root=templates_root)
     files.extend(depth_manifest.get("files", []))
     dirs.extend(depth_manifest.get("dirs", []))
     notes.extend(depth_manifest.get("post_install_notes", []))
 
     for harness_id in selection.harnesses:
-        m = load_harness_manifest(harness_id)
+        m = load_harness_manifest(harness_id, templates_root=templates_root)
         files.extend(m.get("files", []))
         dirs.extend(m.get("dirs", []))
         notes.extend(m.get("post_install_notes", []))
 
     for include_id in selection.includes:
-        m = load_include_manifest(include_id)
+        m = load_include_manifest(include_id, templates_root=templates_root)
         files.extend(m.get("files", []))
         dirs.extend(m.get("dirs", []))
         notes.extend(m.get("post_install_notes", []))

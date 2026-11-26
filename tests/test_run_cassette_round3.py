@@ -178,18 +178,18 @@ def test_sidecar_cleanup_failure_is_anchored_and_retryable(tmp_path, monkeypatch
     run, snapshot, _ = _authority_run(tmp_path)
     _record(run)
     _finish_recording(run, snapshot)
-    purge = store.purge
+    purge = store._purge_locked
 
     def fail(*args, **kwargs):
         raise OSError("unavailable")
 
-    monkeypatch.setattr(store, "purge", fail)
+    monkeypatch.setattr(store, "_purge_locked", fail)
     kwargs = dict(sequence_start=2, sequence_end=2, reason="credential-exposure", operator_confirmed=True)
     with pytest.raises(run_redaction.RedactionError, match="cassette sidecar redaction failed"):
         run_redaction.redact_journal(run, **kwargs)
     events = run_journal.read_journal(run / "events" / "lifecycle.jsonl").events
     assert events[-1].event_type == "run.redaction.recorded"
-    monkeypatch.setattr(store, "purge", purge)
+    monkeypatch.setattr(store, "_purge_locked", purge)
     run_redaction.redact_journal(run, **kwargs)
     assert not list((run / "events" / "cassettes").iterdir())
     assert (

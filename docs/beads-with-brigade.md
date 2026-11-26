@@ -135,4 +135,4 @@ counts.
 
 The hub work view does not show the mirrored ready set yet. That depends on
 hub dependency edges, tracked in
-[#2210](https://github.com/escoffier-labs/brigade/issues/2210).
+[#2210](https://github.com/escoffier-labs/brigadestack/issues/2210).

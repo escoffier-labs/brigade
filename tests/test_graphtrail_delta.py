@@ -95,7 +95,6 @@ def test_capture_before_indexes_a_fresh_repo_at_the_canonical_path(monkeypatch, 
     engine.chmod(0o755)
     monkeypatch.setattr(component_bins, "resolve", lambda name, **kw: str(engine))
     monkeypatch.delenv(engine_paths.CODE_GRAPH_DB_ENV, raising=False)
-    monkeypatch.delenv(engine_paths.LEGACY_CODE_GRAPH_DB_ENV, raising=False)
     monkeypatch.chdir(tmp_path)
 
     result = code_graph_delta.capture_before(repo, tmp_path / "run")

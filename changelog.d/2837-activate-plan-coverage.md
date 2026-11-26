@@ -1,0 +1,1 @@
+- Require planned test files for selective verify receipts in this repository and limit the planner and its Git commands to the environment settings they need.

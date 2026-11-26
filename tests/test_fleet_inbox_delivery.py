@@ -47,7 +47,7 @@ def fleet(hub, tmp_path, monkeypatch):
     """This process is node A; ``sender`` is node B's credential."""
     base, token_a, token_b, _db = hub
     settings = {"hub_url": base, "node_token": token_a, "admin_token": ""}
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(settings))
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: dict(settings))
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda *_args, **_kwargs: NODE_A)
     monkeypatch.setattr(fleet_client, "spool_path", lambda _node: tmp_path / "spool" / "events.jsonl")
     monkeypatch.delenv("BRIGADE_FLEET_MESSAGE_TOKEN_FILE", raising=False)

@@ -1128,8 +1128,8 @@ def test_smoke_import_and_search_rejects_an_empty_new_only_export(acceptance_mod
         )
 
 
-def _release_fixture(*, additive=True, hub=False, repository="escoffier-labs/brigade"):
-    base = f"https://github.com/{repository}/releases/download/v1.2.3/"
+def _release_fixture(*, additive=True, hub=False, repository="escoffier-labs/brigade", version="0.32.3"):
+    base = f"https://github.com/{repository}/releases/download/v{version}/"
     legacy = ("agent-notify", "brigade-code-graph", "brigade-code-graph-mcp", "brigade-evidence", "sessionfind")
     aliases = ("graphtrail", "graphtrail-mcp", "miseledger")
     platforms = ("linux-amd64", "linux-arm64", "darwin-amd64", "darwin-arm64", "windows-amd64")
@@ -1148,7 +1148,7 @@ def _release_fixture(*, additive=True, hub=False, repository="escoffier-labs/bri
             }
         if component in legacy:
             components[component] = {
-                "source": {"repository": repository, "release_tag": "v1.2.3"},
+                "source": {"repository": repository, "release_tag": f"v{version}"},
                 "assets": assets,
             }
     if hub:
@@ -1164,7 +1164,7 @@ def _release_fixture(*, additive=True, hub=False, repository="escoffier-labs/bri
                 "download_url": base + name,
             }
         components["brigade-hub"] = {
-            "source": {"repository": repository, "release_tag": "v1.2.3"},
+            "source": {"repository": repository, "release_tag": f"v{version}"},
             "assets": assets,
         }
     bodies["component-manifest-v1.json"] = json.dumps({"components": components}).encode()
@@ -1172,9 +1172,11 @@ def _release_fixture(*, additive=True, hub=False, repository="escoffier-labs/bri
     return base, bodies, checksums
 
 
-def _verify_fixture(module, tmp_path, bodies, checksums, repository="escoffier-labs/brigade", **kwargs):
+def _verify_fixture(
+    module, tmp_path, bodies, checksums, repository="escoffier-labs/brigade", *, version="0.32.3", **kwargs
+):
     checksum_text = "".join(f"{digest}  {name}\n" for name, digest in sorted(checksums.items())).encode()
-    base = f"https://github.com/{repository}/releases/download/v1.2.3/"
+    base = f"https://github.com/{repository}/releases/download/v{version}/"
 
     def fetch(url):
         if not url.startswith(base):
@@ -1184,7 +1186,19 @@ def _verify_fixture(module, tmp_path, bodies, checksums, repository="escoffier-l
         assert "/" not in name
         return checksum_text if name == "checksums.txt" else bodies[name]
 
-    return module.verify_release_assets("1.2.3", tmp_path, fetch_bytes=fetch, **kwargs)
+    return module.verify_release_assets(version, tmp_path, fetch_bytes=fetch, **kwargs)
+
+
+@pytest.mark.parametrize("additive", [False, True])
+def test_canonical_release_rejects_aliases(acceptance_module, tmp_path, additive):
+    version = "0.33.0"
+    _, bodies, checksums = _release_fixture(additive=additive, hub=True, version=version)
+    if additive:
+        with pytest.raises(acceptance_module.AcceptanceError, match="checksums.txt must cover exactly"):
+            _verify_fixture(acceptance_module, tmp_path, bodies, checksums, version=version)
+    else:
+        _verify_fixture(acceptance_module, tmp_path, bodies, checksums, version=version)
+        assert len(list((tmp_path / "release-assets").iterdir())) == 29
 
 
 def test_additive_release_hashes_all_forty_binaries_without_changing_legacy_return(acceptance_module, tmp_path):
@@ -1305,7 +1319,7 @@ def test_legacy_metadata_and_checksum_guards_survive_additive_inventory(
     manifest = json.loads(bodies["component-manifest-v1.json"])
     asset = manifest["components"]["brigade-code-graph"]["assets"]["linux-amd64"]
     if mutation == "url":
-        asset["download_url"] = base.replace("v1.2.3", "latest") + asset["asset_name"]
+        asset["download_url"] = base.replace("v0.32.3", "latest") + asset["asset_name"]
     elif mutation == "platform":
         assets = manifest["components"]["brigade-code-graph"]["assets"]
         assets["linux-riscv64"] = assets.pop("linux-arm64")
@@ -1319,7 +1333,7 @@ def test_legacy_metadata_and_checksum_guards_survive_additive_inventory(
         checksum_text += f"{'a' * 64}  brigade-code-graph-linux-amd64\n"
         with pytest.raises(acceptance_module.AcceptanceError, match="repeats"):
             acceptance_module.verify_release_assets(
-                "1.2.3",
+                "0.32.3",
                 tmp_path,
                 fetch_bytes=lambda url: (
                     checksum_text.encode() if url == base + "checksums.txt" else bodies[url.removeprefix(base)]
@@ -1394,7 +1408,7 @@ def test_acceptance_canonical_wiring_fails_closed(acceptance_module, tmp_path, m
             assert Path(argv[3]).is_absolute()
             assert "--repo" in argv and argv[argv.index("--repo") + 1] == "escoffier-labs/brigade"
             assert argv[argv.index("--source-digest") + 1] == "a" * 40
-            assert argv[argv.index("--source-ref") + 1] == "refs/tags/v1.2.3"
+            assert argv[argv.index("--source-ref") + 1] == "refs/tags/v0.32.3"
             assert argv[argv.index("--signer-workflow") + 1] == "escoffier-labs/brigade/.github/workflows/publish.yml"
             failed = (case == "attestation" and "brigade-evidence-" in argv[3]) or (
                 case == "manifest-attestation" and argv[3].endswith(".json")
@@ -1409,11 +1423,11 @@ def test_acceptance_canonical_wiring_fails_closed(acceptance_module, tmp_path, m
             assert not set(secrets) & set(kwargs["env"])
         output = '{"jsonrpc":"2.0","id":1,"result":{}}' if len(argv) == 1 else "{}"
         if argv[1:] == ["--version"] and Path(argv[0]).name == "brigade":
-            output = "brigade 1.2.3"
+            output = "brigade 0.32.3"
         return subprocess.CompletedProcess(argv, 0, output, "")
 
     if case in {"ok", "legacy"}:
-        module.run_acceptance("1.2.3", runner=runner)
+        module.run_acceptance("0.32.3", runner=runner)
     else:
         message = (
             "missing canonical"
@@ -1423,7 +1437,7 @@ def test_acceptance_canonical_wiring_fails_closed(acceptance_module, tmp_path, m
             else "source commit"
         )
         with pytest.raises(module.AcceptanceError, match=message):
-            module.run_acceptance("1.2.3", runner=runner)
+            module.run_acceptance("0.32.3", runner=runner)
     native = [argv for argv, _ in calls if Path(argv[0]).name.startswith("brigade-")]
     attestations = [argv for argv, _ in calls if argv[0] == "gh"]
     assert len(native) == (3 if case == "ok" else 0)
@@ -1551,10 +1565,12 @@ def test_unknown_component_keys_are_rejected(acceptance_module, tmp_path):
         _verify_fixture(acceptance_module, tmp_path, bodies, checksums, OLD_REPOSITORY)
 
 
-def _materialized_release(module, tmp_path, monkeypatch, *, manifest_repository, mutate=None):
+def _materialized_release(module, tmp_path, monkeypatch, *, manifest_repository, mutate=None, version="0.32.3"):
     """Write a verified-looking cached release whose manifest records manifest_repository."""
-    _, bodies, checksums = _release_fixture(repository=OLD_REPOSITORY)
-    _verify_fixture(module, tmp_path, bodies, checksums, OLD_REPOSITORY)
+    _, bodies, checksums = _release_fixture(
+        repository=OLD_REPOSITORY, additive=version != "0.33.0", hub=version == "0.33.0", version=version
+    )
+    _verify_fixture(module, tmp_path, bodies, checksums, OLD_REPOSITORY, version=version)
     release_dir = tmp_path / "release-assets"
     path = release_dir / "component-manifest-v1.json"
     manifest = json.loads(path.read_text())
@@ -1591,12 +1607,17 @@ def _signing_runner(signed_by, calls, *, certificate_id="1238165856"):
 
 
 @pytest.mark.parametrize("repository", [OLD_REPOSITORY, NEW_REPOSITORY])
-def test_attestation_uses_the_repository_the_manifest_records(acceptance_module, tmp_path, monkeypatch, repository):
-    release_dir = _materialized_release(acceptance_module, tmp_path, monkeypatch, manifest_repository=repository)
+@pytest.mark.parametrize("version", ["0.32.3", "0.33.0"])
+def test_attestation_uses_the_repository_the_manifest_records(
+    acceptance_module, tmp_path, monkeypatch, repository, version
+):
+    release_dir = _materialized_release(
+        acceptance_module, tmp_path, monkeypatch, manifest_repository=repository, version=version
+    )
     calls = []
 
     acceptance_module.smoke_verified_canonical_release(
-        release_dir, "1.2.3", runner=_signing_runner(repository, calls), env={}
+        release_dir, version, runner=_signing_runner(repository, calls), env={}
     )
 
     assert len(calls) == 4
@@ -1615,7 +1636,7 @@ def test_attestation_signed_by_the_other_repository_is_rejected(
 
     with pytest.raises(acceptance_module.AcceptanceError):
         acceptance_module.smoke_verified_canonical_release(
-            release_dir, "1.2.3", runner=_signing_runner(signed, calls), env={}
+            release_dir, "0.32.3", runner=_signing_runner(signed, calls), env={}
         )
     assert {argv[argv.index("--repo") + 1] for argv in calls} == {recorded}
 
@@ -1638,7 +1659,7 @@ def test_attestation_is_never_attempted_for_an_unaccepted_or_mixed_manifest_repo
 
     with pytest.raises(acceptance_module.AcceptanceError, match="exactly one of"):
         acceptance_module.smoke_verified_canonical_release(
-            release_dir, "1.2.3", runner=_signing_runner(OLD_REPOSITORY, calls), env={}
+            release_dir, "0.32.3", runner=_signing_runner(OLD_REPOSITORY, calls), env={}
         )
     assert calls == []
 
@@ -1688,7 +1709,7 @@ def test_a_reused_old_name_cannot_serve_a_release(acceptance_module, tmp_path, m
         raise AssertionError(f"must not download from the impostor: {url}")
 
     with pytest.raises(acceptance_module.AcceptanceError, match="repository ID"):
-        acceptance_module.verify_release_assets("1.2.3", tmp_path, fetch_bytes=fetch, repositories=(OLD_REPOSITORY,))
+        acceptance_module.verify_release_assets("0.32.3", tmp_path, fetch_bytes=fetch, repositories=(OLD_REPOSITORY,))
     assert fetched == []
 
 
@@ -1719,13 +1740,13 @@ def test_attestation_certificate_must_name_the_real_repository_id(acceptance_mod
 
     calls = []
     acceptance_module.smoke_verified_canonical_release(
-        release_dir, "1.2.3", runner=_signing_runner(repository, calls), env={}
+        release_dir, "0.32.3", runner=_signing_runner(repository, calls), env={}
     )
     assert len(calls) == 4
 
     with pytest.raises(acceptance_module.AcceptanceError, match="repository ID"):
         acceptance_module.smoke_verified_canonical_release(
-            release_dir, "1.2.3", runner=_signing_runner(repository, [], certificate_id="999"), env={}
+            release_dir, "0.32.3", runner=_signing_runner(repository, [], certificate_id="999"), env={}
         )
 
 
@@ -1736,7 +1757,7 @@ def test_attestation_check_is_skipped_for_a_manifest_naming_a_reused_name(accept
 
     with pytest.raises(acceptance_module.AcceptanceError, match="repository ID"):
         acceptance_module.smoke_verified_canonical_release(
-            release_dir, "1.2.3", runner=_signing_runner(OLD_REPOSITORY, calls), env={}
+            release_dir, "0.32.3", runner=_signing_runner(OLD_REPOSITORY, calls), env={}
         )
     assert calls == []
 

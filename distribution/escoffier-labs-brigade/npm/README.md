@@ -40,5 +40,5 @@ it and leaves the old one untouched.
 
 [Homepage](https://brigade.tools) |
 [Documentation](https://brigade.tools/docs) |
-[Source](https://github.com/escoffier-labs/brigade/tree/main/distribution/escoffier-labs-brigade/npm) |
-[Issues](https://github.com/escoffier-labs/brigade/issues)
+[Source](https://github.com/escoffier-labs/brigadestack/tree/main/distribution/escoffier-labs-brigade/npm) |
+[Issues](https://github.com/escoffier-labs/brigadestack/issues)

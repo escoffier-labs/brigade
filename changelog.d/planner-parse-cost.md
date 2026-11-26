@@ -1,0 +1,1 @@
+- Required-test planning uses a small process pool for large Python trees, reducing the time spent previewing plans and stamping verify receipts.

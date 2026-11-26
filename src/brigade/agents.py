@@ -37,6 +37,7 @@ from .antigravity_help import (  # noqa: F401  re-exported for callers and tests
     _clear_antigravity_print_timeout_cache,
     _warn_antigravity_plan_mode_unsupported,
 )
+from .local_batch_output import parse_local_batch_result as _local_batch_result
 from .result_integrity import validate_final_output
 
 _OLLAMA_PREFIX = "ollama:"
@@ -1250,6 +1251,7 @@ def run_agent(
     session_binding_id: str | None = None,
     process_registry: proc.ProcessRegistry | None = None,
     cloud_safe_mode: bool = False,
+    local_batch_output: bool = False,
 ) -> AgentResult:
     child_env: dict[str, str] | None = None
     resolved_overrides: dict[str, str] | None = None
@@ -1474,6 +1476,9 @@ def run_agent(
             requested_model=model,
             reasoning=reasoning,
         )
+    local_batch = local_batch_output and cli_ref in {"codex", "claude"}
+    if local_batch and cli_ref == "claude":
+        argv[1:1] = ["--output-format", "json"]
     # Both modes emit a JSON envelope, but only read-only constrains the model
     # to the {kind, answer} schema; write mode must stay free to use tools.
     grok_envelope = cli_ref == "grok"
@@ -1520,11 +1525,31 @@ def run_agent(
     def scrub_detail(detail: str) -> str:
         return _scrub_env_override_values(detail, resolved_overrides, resolved_secret_targets)
 
-    safe_stdout = _scrub_env_override_values(result.stdout, resolved_overrides, resolved_secret_targets)
-    safe_stderr = _scrub_env_override_values(result.stderr, resolved_overrides, resolved_secret_targets)
+    text = result.stdout.strip()
+    session_id = None
+    batch_error = None
+    if local_batch:
+        text, session_id, batch_error = _local_batch_result(cli_ref, text, result.stderr, scrub_detail)
+    safe_stdout = scrub_detail(text if local_batch and cli_ref == "claude" else result.stdout)
+    safe_stderr = scrub_detail(result.stderr)
+    if batch_error is not None:
+        return AgentResult(
+            text="",
+            ok=False,
+            detail=batch_error,
+            failure_phase="harness",
+            failure_kind=batch_error,
+            stdout=safe_stdout,
+            stderr=safe_stderr,
+            exit_code=result.code,
+            timed_out=result.code == 124,
+            requested_model=model,
+            reasoning=reasoning,
+            session_id=session_id,
+        )
 
     if getattr(result, "stream_limit_exceeded", False):
-        safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides, resolved_secret_targets)
+        safe_text = safe_stdout.strip()
         overflow_detail = f"combined output exceeded {proc.MAX_STREAM_BYTES} stream byte limit"
         failure_detail = scrub_detail(safe_stderr.strip() or overflow_detail)[:200]
         return AgentResult(
@@ -1551,7 +1576,7 @@ def run_agent(
     truncated_ok_exit = result.output_limit_exceeded and result.code == 0
 
     if result.output_limit_exceeded and not truncated_ok_exit:
-        safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides, resolved_secret_targets)
+        safe_text = safe_stdout.strip()
         overflow_detail = f"combined output exceeded {proc.MAX_CAPTURE_BYTES} byte capture limit; output truncated"
         failure_detail = scrub_detail(safe_stderr.strip() or overflow_detail)[:200]
         return AgentResult(
@@ -1571,7 +1596,7 @@ def run_agent(
         )
 
     if getattr(result, "incomplete_process_group", False):
-        safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides, resolved_secret_targets)
+        safe_text = safe_stdout.strip()
         incomplete_detail = "process group kept the output pipes open after child exit; terminated as incomplete"
         failure_detail = scrub_detail(safe_stderr.strip() or incomplete_detail)[:200]
         return AgentResult(
@@ -1589,7 +1614,7 @@ def run_agent(
         )
 
     if result.decode_failed:
-        safe_text = _scrub_env_override_values(result.stdout.strip(), resolved_overrides, resolved_secret_targets)
+        safe_text = safe_stdout.strip()
         failure_detail = scrub_detail(safe_stderr.strip() or result.decode_failure_detail)[:200]
         return AgentResult(
             text=safe_text,
@@ -1605,10 +1630,8 @@ def run_agent(
             reasoning=reasoning,
         )
 
-    text = result.stdout.strip()
     structured_error = ""
     structured_diagnostic = ""
-    grok_session_id = None
     grok_request_id = None
     grok_stop_reason = None
     if grok_envelope:
@@ -1616,14 +1639,14 @@ def run_agent(
         text = grok_final.text
         structured_error = grok_final.error
         structured_diagnostic = grok_final.diagnostic
-        grok_session_id = grok_final.session_id
+        session_id = grok_final.session_id
         grok_request_id = grok_final.request_id
         grok_stop_reason = grok_final.stop_reason
     safe_text = _scrub_env_override_values(text, resolved_overrides, resolved_secret_targets)
     safe_structured_error = _scrub_env_override_values(structured_error, resolved_overrides, resolved_secret_targets)[
         :200
     ]
-    if structured_grok and session_binding_id is not None and grok_session_id != session_binding_id:
+    if structured_grok and session_binding_id is not None and session_id != session_binding_id:
         return AgentResult(
             text="",
             ok=False,
@@ -1659,7 +1682,7 @@ def run_agent(
                 requested_model=model,
                 reasoning=reasoning,
                 stop_reason=grok_stop_reason,
-                session_id=grok_session_id,
+                session_id=session_id,
                 request_id=grok_request_id,
             )
         if result.code == 127 and "command not found" in safe_stderr.lower():
@@ -1676,7 +1699,7 @@ def run_agent(
                 requested_model=model,
                 reasoning=reasoning,
                 stop_reason=grok_stop_reason,
-                session_id=grok_session_id,
+                session_id=session_id,
                 request_id=grok_request_id,
             )
         raw_detail = safe_stderr.strip() or f"exit {result.code}"
@@ -1719,7 +1742,7 @@ def run_agent(
             requested_model=model,
             reasoning=reasoning,
             stop_reason=grok_stop_reason,
-            session_id=grok_session_id,
+            session_id=session_id,
             request_id=grok_request_id,
         )
     if structured_error:
@@ -1738,7 +1761,7 @@ def run_agent(
                     requested_model=model,
                     reasoning=reasoning,
                     stop_reason=grok_stop_reason,
-                    session_id=grok_session_id,
+                    session_id=session_id,
                     request_id=grok_request_id,
                 )
         return AgentResult(
@@ -1753,7 +1776,7 @@ def run_agent(
             requested_model=model,
             reasoning=reasoning,
             stop_reason=grok_stop_reason,
-            session_id=grok_session_id,
+            session_id=session_id,
             request_id=grok_request_id,
         )
     antigravity_no_output = (
@@ -1803,7 +1826,7 @@ def run_agent(
             requested_model=model,
             reasoning=reasoning,
             stop_reason=grok_stop_reason,
-            session_id=grok_session_id,
+            session_id=session_id,
             request_id=grok_request_id,
         )
     # #1144: truncation metadata rides along whichever result the contract
@@ -1825,7 +1848,7 @@ def run_agent(
             requested_model=model,
             reasoning=reasoning,
             stop_reason=grok_stop_reason,
-            session_id=grok_session_id,
+            session_id=session_id,
             request_id=grok_request_id,
             output_bytes=truncation_bytes,
             output_cap_bytes=truncation_cap,
@@ -1845,7 +1868,7 @@ def run_agent(
         requested_model=model,
         reasoning=reasoning,
         stop_reason=grok_stop_reason,
-        session_id=grok_session_id,
+        session_id=session_id,
         request_id=grok_request_id,
         output_bytes=truncation_bytes,
         output_cap_bytes=truncation_cap,

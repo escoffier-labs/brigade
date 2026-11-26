@@ -26,7 +26,7 @@ def stations(hub, tmp_path, monkeypatch):
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": base, "node_token": token_a, "admin_token": ""},
+        lambda **_kwargs: {"hub_url": base, "node_token": token_a, "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     monkeypatch.setattr(fleet_client, "spool_path", lambda _node: tmp_path / "spool" / "events.jsonl")
@@ -157,7 +157,7 @@ def test_errors_hide_exception_text_and_admin_tokens(stations, monkeypatch):
     assert error and "private-token-value" not in json.dumps(payload)
     settings = fleet_client.load_fleet_settings()
     settings["admin_token"] = settings["node_token"]
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: settings)
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: settings)
     for name in ("fleet_who", "fleet_claims", "fleet_inbox"):
         payload, error = a.call(name, {})
         assert error and settings["node_token"] not in json.dumps(payload)

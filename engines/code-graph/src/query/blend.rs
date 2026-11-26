@@ -1,4 +1,4 @@
-//! Blend external semantic-search hits with GraphTrail call-graph centrality.
+//! Blend external semantic-search hits with Brigade Code Graph call-graph centrality.
 //!
 //! This module is pure (no network): it takes embedding hits keyed by file and combines them with
 //! each symbol's call-edge degree. The HTTP fetch lives in the feature-gated `adapters::codesearch`.

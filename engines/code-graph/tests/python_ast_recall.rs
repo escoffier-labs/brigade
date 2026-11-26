@@ -9,7 +9,7 @@ use std::fmt::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use graphtrail::store::{init_schema, open_db, sync_repo};
+use brigade_code_graph::store::{init_schema, open_db, sync_repo};
 use rusqlite::Connection;
 
 /// (path relative to the corpus root, line, name)

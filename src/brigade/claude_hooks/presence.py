@@ -13,8 +13,10 @@ def emit_presence(event: str, target: Path, session_id: str) -> str | None:
     free to ignore it: this never raises.
     """
     try:
+        from ..fleet_home_guard import FleetTokenRefusal
         from ..fleet_session_presence import _publish_presence
 
-        return _publish_presence(event, target, session_id)
+        result = _publish_presence(event, target, session_id)
+        return result.reason if isinstance(result, FleetTokenRefusal) else result
     except Exception:
         return None

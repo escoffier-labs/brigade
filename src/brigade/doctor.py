@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 from .budgets import (
     MEMORY_CARE_SCAN_STALE_DAYS,
 )
-from . import config, engine_paths, localio, memory_read_recorder_doctor
+from . import config, engine_paths, localio, memory_read_recorder_doctor, publish_doctor
 from .selection import WRITER_INBOXES
 from .station import DoctorContext
 
@@ -703,7 +703,6 @@ def _recovery_journal_chain_reason(report: run_journal.JournalReport, run_id: st
 
 
 def _recovery_checkpoint_bound_reason(run_dir: Path, event: object) -> str | None:
-    import os
 
     from brigade import run_checkpoint, run_journal
 
@@ -874,10 +873,6 @@ def skills_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     return [(OK, "skills: built-in templates", "portable Brigade skills available")]
 
 
-def tokens_station_checks(ctx: DoctorContext) -> List[CheckResult]:
-    return []
-
-
 def search_station_checks(ctx: DoctorContext) -> List[CheckResult]:
     # The managed code-search tools carry this station's signal. The station
     # itself owns no per-workspace files and does not start local services.
@@ -1019,8 +1014,14 @@ def run(
     operator: bool = False,
     agent: bool = False,
 ) -> int:
+    from . import component_report
+
     ctx = build_context(target, harness)
-    checks = _gather_checks(ctx)
+    if operator:
+        checks = [_operator_check(*finding) for finding in component_report.doctor_checks()]
+    else:
+        checks = [_scoped_check(*finding) for finding in component_report.outdated_doctor_checks()]
+    checks.extend(_gather_checks(ctx))
     if operator and "grok" in ctx.harnesses:
         checks.extend(_operator_check(status, name, detail) for status, name, detail in _check_grok_cli())
     if full:
@@ -1044,11 +1045,10 @@ def run(
     if ctx.selection is not None:
         sel = ctx.selection
         print(f"  harnesses: {', '.join(sel.harnesses) or '(none)'} (owner={sel.owner}, depth={sel.depth})")
+    elif ctx.harnesses:
+        print(f"  harnesses: (legacy target, no config; declared {', '.join(ctx.harnesses)})")
     else:
-        if ctx.harnesses:
-            print(f"  harnesses: (legacy target, no config; declared {', '.join(ctx.harnesses)})")
-        else:
-            print("  harnesses: (unspecified; no Brigade config and no explicit --harness)")
+        print("  harnesses: (unspecified; no Brigade config and no explicit --harness)")
     if not operator:
         print("  scope: target workspace only (pass --operator for host-global checks)")
     return _report(checks, full=full, target=ctx.target, operator=operator)
@@ -1083,23 +1083,19 @@ def _replace_recovery_check_with_full(
 
 
 def _gather_checks(ctx: DoctorContext) -> List[ScopedCheckResult]:
-    from . import component_report
+    from .claude_hooks import latch_doctor
     from .registry import all_stations
     from . import managed
 
     checks: List[ScopedCheckResult] = []
-    for status, name, detail in component_report.doctor_checks():
-        checks.append(_operator_check(status, name, detail))
     checks.extend(_scoped_check(*finding) for finding in engine_paths.legacy_findings(ctx.target))
     checks.extend(
         _scoped_check(
-            INFO,
-            "legacy config key",
-            f"{key} is ignored because {replacement} is also set; remove {key}"
-            if ignored
-            else f"{key} is read while {replacement} is absent, until v0.33.0; rewrite it as {replacement}",
+            WARN,
+            "unknown config key",
+            f"{key} is ignored. If needed, set {replacement} and remove {key}.",
         )
-        for key, replacement, ignored in config.legacy_config_keys(ctx.target)
+        for key, replacement in config.legacy_config_keys(ctx.target)
     )
     missing_tools: List[Tuple[str, str]] = []
     for station in all_stations():
@@ -1126,6 +1122,8 @@ def _gather_checks(ctx: DoctorContext) -> List[ScopedCheckResult]:
                 f"{len(missing_tools)} managed tools not installed ({', '.join(stations)}); optional, install with `brigade add <station>`",
             )
         )
+    if latch := latch_doctor.check(ctx.target):
+        checks.append(_normalize_scoped_check(latch))
     checks.append(_normalize_scoped_check(_check_receipts(ctx.target)))
     return checks
 
@@ -1628,7 +1626,7 @@ def _memory_care_today() -> date:
 
 
 def _check_publish_gate(target: Path) -> List[CheckResult]:
-    results: List[CheckResult] = []
+    results = publish_doctor.push_gate_checks(target)
     hook = target / "hooks" / "pre-push"
     if hook.is_file():
         results.append((OK, "publish: hooks/pre-push", str(hook)))

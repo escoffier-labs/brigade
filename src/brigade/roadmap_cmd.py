@@ -44,9 +44,7 @@ DOC_COMMAND_TOP_LEVELS = {
     "work",
 }
 COMMAND_INVENTORY_RELATIVE_PATH = Path("docs") / "command-inventory.md"
-COMMAND_DEPRECATIONS: tuple[tuple[str, str], ...] = (
-    ("brigade receipts export miseledger", "brigade receipts export evidence"),
-)
+COMMAND_DEPRECATIONS: tuple[tuple[str, str], ...] = ()
 # Every deprecated path is also an alias, so the parser and the inventory agree
 # after normalization (the inventory lists deprecated paths only as markers).
 COMMAND_ALIASES: tuple[tuple[str, str], ...] = (

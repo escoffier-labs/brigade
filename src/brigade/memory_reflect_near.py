@@ -75,8 +75,17 @@ def _read_config(path: Path) -> bytes | None:
         if len(raw) > io.MAX_INPUT_BYTES:
             raise ValueError("file size limit exceeded")
         after, live = os.fstat(fd), os.lstat(path)
-        fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
-        if any(getattr(before, key) != getattr(snapshot, key) for snapshot in (opened, after, live) for key in fields):
+        fields = ("st_dev", "st_ino", "st_mode", "st_nlink", "st_size", "st_mtime_ns")
+        # On Windows, lstat's ctime is creation time while fstat can report
+        # change time. Compare ctime within each stat source and use the
+        # explicit creation time across sources where CPython exposes it.
+        if (
+            any(getattr(before, key) != getattr(snapshot, key) for snapshot in (opened, after, live) for key in fields)
+            or before.st_ctime_ns != live.st_ctime_ns
+            or opened.st_ctime_ns != after.st_ctime_ns
+            or getattr(before, "st_birthtime_ns", before.st_ctime_ns)
+            != getattr(opened, "st_birthtime_ns", opened.st_ctime_ns)
+        ):
             raise OSError("config changed during read")
         return raw
     finally:

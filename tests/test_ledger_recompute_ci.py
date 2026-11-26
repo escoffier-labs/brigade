@@ -726,6 +726,15 @@ def trusted_tree_world(tmp_path):
     ):
         (origin / relative).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy(ROOT / relative, origin / relative)
+    # The live note text may be unreleased (a soak regression, say). Record the copied
+    # text as released in this throwaway origin so the fixture's "release" row stays valid.
+    history_path = origin / "src/brigade/templates/shipped-file-history.json"
+    history = json.loads(history_path.read_text(encoding="utf-8"))
+    digest = shipped_history.skill_digest((origin / skill_dir / "SKILL.md").read_bytes())
+    rows = history["files"][shipped_history.skill_key("note")]
+    if not any(row["sha256"] == digest and row["tag"] for row in rows):
+        rows[:] = [row for row in rows if row["sha256"] != digest] + [{"sha256": digest, "tag": "v0.0.0"}]
+        history_path.write_text(json.dumps(history, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     git(origin, "add", ".")
     git(origin, "commit", "-qm", "base")
     c0 = git(origin, "rev-parse", "HEAD")

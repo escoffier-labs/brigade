@@ -84,7 +84,7 @@ The reason is the trust model. A receipt from ordinary work carries attribution 
 
 ## CI results shown on the host (display only)
 
-Every trial scored on the workspace host is **local**. `local_trials` and `attested_trials` stay as the scorecard computes them, and `attested_trials` is zero until [#2591](https://github.com/escoffier-labs/brigade/issues/2591) lands.
+Every trial scored on the workspace host is **local**. `local_trials` and `attested_trials` stay as the scorecard computes them, and `attested_trials` is zero until [#2591](https://github.com/escoffier-labs/brigadestack/issues/2591) lands.
 
 Beside them the host can show a separate **seen passing in CI** count. It is informational. The host lookup is forgeable by a same-user agent, so nothing on the host may promote, rank, band or gate from it. The count lives outside the scorecard dimensions, it is not written into the persisted scorecard, and the promotion decision reads none of it. The brief line reads `trials: 12 local, 3 seen passing in CI (display only)`, and `outcome rank` appends `seen_passing_in_ci=N (display only)` for a skill when N is above zero.
 
@@ -141,7 +141,7 @@ The ledger turns trials into a scorecard and calls `scorecard.decide_scorecard` 
 - A hurt trial on text that was never approved restores the newest approved text, even after helped trials.
 - When there is no approved text to restore, the ledger holds and flags it.
 
-A rollback is physical. The ledger pull request restores the whole skill bundle to the approved bytes, and the recompute checks the result byte for byte against git history. The restore commit touches the manifest scope and needs its own verdict for the restored text.
+A rollback is physical. The ledger pull request restores the whole skill bundle to the approved bytes, and the recompute checks the result byte for byte against git history. The writer refreshes `src/brigade/templates/template-profile-snapshot.json` from the restored tree. The append-only `src/brigade/templates/shipped-file-history.json` already records previously shipped text. The restore commit touches the manifest scope and needs its own verdict for the restored text.
 
 ### The required check
 
@@ -156,7 +156,7 @@ For a change that does, the check requires all of these:
 5. `cutoff_at` is not earlier than the `covers` commit time, not in the future, and at most 24 hours behind the check's clock. The writer runs at least daily and a pull request normally merges the same day, so a day leaves room for an overnight wait.
 6. Carried trials equal the previous ledger's rows exactly. A manifest restart carries forward the missing verdicts.
 7. `approved` is append only. Every entry matches git history at its commit, `release` entries match the shipped file history, and `owner_review` entries have the review described below.
-8. The change touches the ledger file and a restored skill bundle, and nothing else. A ledger pull request that also touches `scripts/`, `src/brigade/outcome_ledger*`, `.github/workflows/` or `verify/manifests/` is rejected.
+8. A ledger pull request can change the ledger file and any skill bundle it restores. A rollback can also refresh `src/brigade/templates/template-profile-snapshot.json`. Recompute runs the generator from trusted main on the proposed tree's data and compares the snapshot byte for byte. A ledger pull request that also touches `scripts/`, `src/brigade/outcome_ledger*`, `.github/workflows/` or `verify/manifests/` is rejected.
 
 For a cumulative merge queue group, the check uses the ledger pull request's squash commit for the allowed path list and checks restored bytes at the group tip.
 
@@ -229,7 +229,7 @@ brigade outcome explain <skill-or-card-id> --target .
 
 ### Routing only
 
-`outcome reconcile --apply` is routing only ([owner decision on #2589](https://github.com/escoffier-labs/brigade/issues/2589#issuecomment-6965099265), 2026-11-18). It changes a skill's status and route policy marker and nothing else: it never installs, rolls back, uninstalls or otherwise writes a skill file, under any harness directory, receipt or rollback snapshot.
+`outcome reconcile --apply` is routing only ([owner decision on #2589](https://github.com/escoffier-labs/brigadestack/issues/2589#issuecomment-6965099265), 2026-11-18). It changes a skill's status and route policy marker and nothing else: it never installs, rolls back, uninstalls or otherwise writes a skill file, under any harness directory, receipt or rollback snapshot.
 
 Why: every local input to a physical change is writable by the agent being gated. Install receipts, rollback snapshot pointers and fingerprints, and the registry all sit in a workspace that agent's own user controls, so a scheduled rollback could install bytes the agent chose. Forgeable state may veto a change, never authorize one, so no unattended path acts on it.
 

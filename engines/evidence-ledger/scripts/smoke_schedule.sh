@@ -2,10 +2,10 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-MISELEDGER="${MISELEDGER:-$ROOT/bin/miseledger}"
+EVIDENCE_BIN="${EVIDENCE_BIN:-$ROOT/bin/brigade-evidence}"
 
-if [[ ! -x "$MISELEDGER" ]]; then
-  (cd "$ROOT" && go build -o bin/miseledger ./cmd/miseledger)
+if [[ ! -x "$EVIDENCE_BIN" ]]; then
+  (cd "$ROOT" && go build -o "$EVIDENCE_BIN" ./cmd/brigade-evidence)
 fi
 
 TMP_HOME="$(mktemp -d)"
@@ -30,10 +30,10 @@ command = "import"
 args = ["adapter", "$ROOT/testdata/adapters/discrawl.fixture.jsonl", "--source", "discrawl", "--json"]
 EOF
 
-"$MISELEDGER" init >/dev/null
-"$MISELEDGER" schedule run "$XDG_CONFIG_HOME/miseledger/schedule.toml" --json >"$TMP_WORK/schedule-run.json"
-"$MISELEDGER" schedule daemon "$XDG_CONFIG_HOME/miseledger/schedule.toml" --interval 1ms --max-runs 2 --json >"$TMP_WORK/schedule-daemon.json"
-"$MISELEDGER" status --json >"$TMP_WORK/status.json"
+"$EVIDENCE_BIN" init >/dev/null
+"$EVIDENCE_BIN" schedule run "$XDG_CONFIG_HOME/miseledger/schedule.toml" --json >"$TMP_WORK/schedule-run.json"
+"$EVIDENCE_BIN" schedule daemon "$XDG_CONFIG_HOME/miseledger/schedule.toml" --interval 1ms --max-runs 2 --json >"$TMP_WORK/schedule-daemon.json"
+"$EVIDENCE_BIN" status --json >"$TMP_WORK/status.json"
 
 python3 - "$TMP_WORK" <<'PY'
 import json

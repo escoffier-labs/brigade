@@ -9,7 +9,7 @@ import re
 import stat
 import sys
 import time
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -63,18 +63,23 @@ def directory(run_dir: Path, *, create: bool = False, create_root: bool = True) 
 
 
 @contextmanager
-def journal_scope(run_dir: Path) -> Iterator[None]:
-    """Bind journal helpers to an existing run opened by a no-follow walk.
+def publication_scope(run_dir: Path) -> Iterator[Path]:
+    """Fence cassette mutations under the lifecycle pair and its sibling file lock."""
+    from . import run_journal, run_lifecycle
 
-    A run deleted mid-flight is never recreated here, so late publication
-    cannot resurrect an orphan tree.
-    """
-    descriptor = dirfd.open_directory_chain(Path(os.path.abspath(run_dir)))
+    run_dir = Path(os.path.abspath(run_dir))
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    # Bind an existing run so late publication cannot recreate a deleted run.
+    descriptor = dirfd.open_directory_chain(run_dir)
     info = os.fstat(descriptor)
     bound = run_dirfd.BoundRunDir(run_dir, descriptor, (info.st_dev, info.st_ino))
     token = run_dirfd._active.set(bound)
     try:
-        yield
+        with run_lifecycle.checkpoint_event_pair():
+            # The lock must exist even for runs that never create a journal.
+            bound.dir_fd("events", create=True)
+            with run_journal.journal_mutation(journal):
+                yield journal
     finally:
         run_dirfd._active.reset(token)
         bound.close()
@@ -242,7 +247,16 @@ def inventory(parent: int, *, private_only: bool = False) -> list[tuple[str, os.
 
 
 def purge(run_dir: Path, *, private_only: bool = False) -> int:
-    """Remove bodies or the entire cassette inventory, never the journal."""
+    """Remove cassette bodies under the same fence used by publication."""
+    try:
+        with publication_scope(run_dir):
+            return _purge_locked(run_dir, private_only=private_only)
+    except FileNotFoundError:
+        return 0
+
+
+def _purge_locked(run_dir: Path, *, private_only: bool = False) -> int:
+    """Remove cassette entries while the caller holds the publication fence."""
     try:
         with directory(run_dir) as parent:
             removed = _remove_owned_temps(parent)
@@ -254,8 +268,6 @@ def purge(run_dir: Path, *, private_only: bool = False) -> int:
                             continue
                     dirfd.unlink_child(parent, name)
                 except FileNotFoundError:
-                    # Retention may concurrently delete another inventoried body.
-                    # Keep deleting the remaining entries rather than returning early.
                     continue
                 except (ValueError, CassetteError):
                     if private_only:
@@ -270,19 +282,14 @@ def purge(run_dir: Path, *, private_only: bool = False) -> int:
 
 def purge_inactive(run_dir: Path, *, workspace: Path, private_only: bool = False) -> int:
     """Fence maintenance against publication and check the candidate's lease."""
-    from . import run_journal, run_lifecycle, runguard
+    from . import runguard
 
-    journal = run_dir / "events" / "lifecycle.jsonl"
-    with (
-        journal_scope(run_dir),
-        run_lifecycle.checkpoint_event_pair(),
-        run_journal.journal_mutation(journal) if run_journal.bound_lstat(journal) is not None else nullcontext(),
-    ):
+    with publication_scope(run_dir):
         # CLI maintenance owns this run's lock itself. A different live process
         # must never lose its stop marker, publication temp, or private bodies.
         if runguard.has_active_run_owner(workspace, run_dir) and not runguard.is_active_run_owner(workspace, run_dir):
             raise CassetteError("cassette purge requires an inactive run")
-        return purge(run_dir, private_only=private_only)
+        return _purge_locked(run_dir, private_only=private_only)
 
 
 def _remove_owned_temps(parent: int) -> int:

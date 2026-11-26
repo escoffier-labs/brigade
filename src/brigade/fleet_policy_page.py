@@ -53,7 +53,6 @@ from .fleet_policy_form import SEAT_TEXT_FIELDS as SEAT_TEXT_FIELDS
 from .fleet_policy_form import KEEP_CURRENT as KEEP_CURRENT
 from .fleet_policy_form import (
     CONSUMER_FORM,
-    DEFAULTS_FORM,
     REASON,
     REPOSITORY_FORM,
     ROLLBACK_FORM,
@@ -1418,111 +1417,6 @@ def _plan_panel(
         )
         + _confirm_form(draft, review)
         + "</section>"
-    )
-
-
-def _defaults_form(view: PolicyView, *, editable: bool, csrf: str, draft: Submission | None) -> str:
-    if not editable:
-        return (
-            '<section class="panel" aria-labelledby="defaults"><header><h2 id="defaults">Saved fleet defaults'
-            '</h2></header><p class="hint">Free-model eligibility and contributor training use allow_free and '
-            "allow_training. Quota pools and cost classes stay separate.</p>"
-            f"<pre>{_esc(json.dumps(view.document['defaults'], indent=2, sort_keys=True))}</pre></section>"
-        )
-    values = _draft_for(draft, "defaults")
-    roles = view.document["defaults"].get("roles", {})
-    data = view.document["defaults"].get("data", {})
-    execution = view.document["defaults"].get("execution", {})
-
-    def role_control(role: str) -> str:
-        stored = roles.get(role) or ""
-        current = values.get(f"role_{role}", stored)
-        label = ROLE_LABELS.get(role, role)
-        seat_obj = next((s for s in view.seats if s.name == current), None)
-        cost_txt = f" · cost {seat_obj.cost_class}" if seat_obj else ""
-        hint = f"policy role key: {role}{cost_txt}"
-        control = _seat_options(
-            f"role_{role}",
-            current,
-            view.seats,
-            editable=editable,
-            stored=stored,
-            retired_seats=view.retired_seats.get("", ()),
-        )
-        return _labelled(label, control, hint=hint, form=DEFAULTS_FORM)
-
-    role_cells = "".join(role_control(role) for role in POLICY_ROLES)
-    training = values.get("data_allow_training", "yes" if data.get("allow_training") else "no")
-    allow_free = values.get("data_allow_free", _yes_no(data.get("allow_free")))
-    body = (
-        f'<div class="roster-grid">{role_cells}</div>'
-        '<div class="roster-grid">'
-        + _labelled(
-            "Allow contributor training",
-            _enum_select("data_allow_training", training, ("yes", "no"), editable=editable, blank="(inherit)"),
-            hint="policy key: data.allow_training",
-            form=DEFAULTS_FORM,
-        )
-        + _labelled(
-            "Allow free models",
-            _enum_select("data_allow_free", allow_free, ("yes", "no"), editable=editable, blank="(inherit)"),
-            hint="policy key: data.allow_free",
-            form=DEFAULTS_FORM,
-        )
-        + _labelled(
-            "Data retention",
-            _input("data_retention", values.get("data_retention", data.get("retention") or ""), editable=editable),
-            hint="policy key: data.retention",
-            form=DEFAULTS_FORM,
-        )
-        + _labelled(
-            "Default machine",
-            _input(
-                "execution_machine",
-                values.get("execution_machine", execution.get("machine") or ""),
-                editable=editable,
-            ),
-            hint="policy key: execution.machine",
-            form=DEFAULTS_FORM,
-        )
-        + _labelled(
-            "Maximum concurrent workers",
-            _input(
-                "execution_concurrency",
-                values.get(
-                    "execution_concurrency",
-                    execution.get("concurrency") if execution.get("concurrency") is not None else "",
-                ),
-                editable=editable,
-            ),
-            hint="policy key: execution.concurrency",
-            form=DEFAULTS_FORM,
-        )
-        + _labelled(
-            "Worker timeout (seconds)",
-            _input(
-                "execution_timeout_seconds",
-                values.get(
-                    "execution_timeout_seconds",
-                    execution.get("timeout_seconds") if execution.get("timeout_seconds") is not None else "",
-                ),
-                editable=editable,
-            ),
-            hint="policy key: execution.timeout_seconds",
-            form=DEFAULTS_FORM,
-        )
-        + "</div>"
-        '<p class="hint">Free-model eligibility and contributor training are configured in the data section '
-        "(allow_free and allow_training). A quota pool name is a label, not a price or cost classification. "
-        "Quota pools and cost classes stay separate.</p>"
-    )
-    return (
-        '<section class="panel" aria-labelledby="defaults"><header><h2 id="defaults">Fleet defaults and roles</h2>'
-        '</header><form method="post" action="/deck/policy" class="roster-form">'
-        + _hidden("defaults", "", view.revision, csrf)
-        + body
-        + _actions(_reason_for(draft, "defaults"))
-        + "</form></section>"
     )
 
 

@@ -14,7 +14,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 REPOSITORY = "escoffier-labs/brigade"
 RENAMED_REPOSITORY = "escoffier-labs/brigadestack"
-TAG = "v1.2.3"
+TAG = "v0.32.3"
 BASE = f"https://github.com/{REPOSITORY}/releases/download/{TAG}/"
 API = f"https://api.github.com/repos/{REPOSITORY}/releases/tags/{TAG}"
 REF_API = f"https://api.github.com/repos/{REPOSITORY}/git/ref/tags/{TAG}"
@@ -83,21 +83,22 @@ def _manifest(repository: str = REPOSITORY) -> dict:
         }
     return {
         "schema_version": 1,
-        "brigade_version": "1.2.3",
-        "manifest_revision": "v1.2.3+" + "a" * 40,
+        "brigade_version": "0.32.3",
+        "manifest_revision": "v0.32.3+" + "a" * 40,
         "supported_platforms": list(PLATFORMS),
         "components": components,
     }
 
 
-def _release(manifest: dict, repository: str = REPOSITORY) -> tuple[dict, str, str]:
-    base = _urls(repository)[0]
+def _release(manifest: dict, repository: str = REPOSITORY, *, aliases: bool = True) -> tuple[dict, str, str]:
+    tag = next(iter(manifest["components"].values()))["source"]["release_tag"]
+    base = _urls(repository)[0].replace(TAG, tag)
     native = {
         asset["asset_name"]: asset
         for component in manifest["components"].values()
         for asset in component["assets"].values()
     }
-    for component in ("graphtrail", "graphtrail-mcp", "miseledger"):
+    for component in ("graphtrail", "graphtrail-mcp", "miseledger") if aliases else ():
         for platform in PLATFORMS:
             name = _asset_name(component, platform)
             native[name] = {"byte_size": len(name.encode()), "sha256": hashlib.sha256(name.encode()).hexdigest()}
@@ -131,7 +132,7 @@ def _release(manifest: dict, repository: str = REPOSITORY) -> tuple[dict, str, s
             },
         ]
     )
-    return {"tag_name": TAG, "target_commitish": "main", "assets": assets}, checksums, manifest_body
+    return {"tag_name": tag, "target_commitish": "main", "assets": assets}, checksums, manifest_body
 
 
 REPOSITORY_ID = 1238165856
@@ -147,8 +148,9 @@ def _fetcher(
     repository: str = REPOSITORY,
     repository_id: int = REPOSITORY_ID,
 ):
-    base, api, ref_api, tag_api = _urls(repository)
-    tag_ref = tag_ref or {"ref": f"refs/tags/{TAG}", "object": {"type": "commit", "sha": "a" * 40}}
+    tag = release["tag_name"]
+    base, api, ref_api, tag_api = (url.replace(TAG, tag) for url in _urls(repository))
+    tag_ref = tag_ref or {"ref": f"refs/tags/{tag}", "object": {"type": "commit", "sha": "a" * 40}}
     tag_objects = tag_objects or {}
 
     def fetch(url: str) -> tuple[int, str]:

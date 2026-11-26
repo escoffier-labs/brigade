@@ -177,8 +177,10 @@ Replaced regex `collect_calls` + regex import scanners with one `LangSpec`-drive
 - Decision: NO `rmcp`/`tokio`. Hand-rolled newline-delimited JSON-RPC 2.0 in `src/mcp.rs`
   (zero new deps, no async runtime) keeps the sidecar small and dependency-light, matching the
   project's non-goals. `handle_request` is pure and unit-testable; `serve` is the stdio loop.
-- `src/bin/graphtrail-mcp.rs` resolves the db from `--db`/`--db=`/`GRAPHTRAIL_DB`/default and opens
-  it with `open_read_only` (`SQLITE_OPEN_READ_ONLY`) so the server cannot mutate the graph.
+- Originally, `src/bin/graphtrail-mcp.rs` resolved the db from `--db`/`--db=`/`GRAPHTRAIL_DB`/default.
+  As of Brigade v0.33, it uses the explicit path, the canonical environment variable,
+  or the canonical index. The former variable is ignored and the old index stays
+  on disk outside default resolution. Queries use `open_read_only` (`SQLITE_OPEN_READ_ONLY`).
 - Tools: search/callers/callees/impact/context/stats. `tests/mcp.rs` covers initialize echo,
   notification-no-response, tools/list, tools/call (success + unknown), unknown-method error.
 - Verified end-to-end by piping a real JSON-RPC session into the binary against a brigade db.

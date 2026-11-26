@@ -36,10 +36,13 @@ import argparse
 import ast
 import hashlib
 import json
+import multiprocessing
+import os
 import re
 import subprocess
 import sys
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path, PurePosixPath
 from typing import Sequence
 
@@ -144,14 +147,23 @@ def dotted_name(path: str, root: str, prefix: str) -> tuple[str, bool]:
     return ".".join([prefix, *parts] if prefix else parts), is_package
 
 
+def _worker_count() -> int:
+    affinity = getattr(os, "sched_getaffinity", None)
+    if affinity is not None:
+        try:
+            return min(6, len(affinity(0)))
+        except OSError:
+            pass
+    return min(6, os.cpu_count() or 1)
+
+
 class Graph:
     """Static import graph over src, scripts and tests."""
 
-    def __init__(self, repo: Path, test_files: dict[str, Path]) -> None:
+    def __init__(self, repo: Path, test_files: dict[str, Path], *, parallel: bool = True) -> None:
         self.repo = repo
         self.paths: dict[str, Path] = {}  # node -> file
         self.is_package: dict[str, bool] = {}
-        self.text: dict[str, str] = {}  # test node -> source text
         self.test_nodes: dict[str, str] = {}  # `tests/x.py` -> node
         sources: list[tuple[Path, str, str]] = []
         for base, prefix in (("src/brigade", "brigade"), ("scripts", "scripts")):
@@ -168,15 +180,20 @@ class Graph:
             self.is_package[node] = package
             if prefix == "tests":
                 self.test_nodes[rel] = node
-        self.top: dict[str, set[str]] = defaultdict(set)  # import-time (or test-run-time) edges
-        self.lazy: dict[str, set[str]] = defaultdict(set)  # imports deferred into a function body
-        self.parse_errors: list[str] = []
-        for node, path in self.paths.items():
-            self._read(node, path)
+        self._reset_read_outputs()
+        workers = _worker_count() if parallel and len(self.paths) >= 128 else 1
+        if workers <= 1 or not self._read_parallel(workers):
+            self._read_serial()
         # conftest imports apply to every test at or below its directory.
         for rel, node in self.test_nodes.items():
             for conftest in self._conftests_above(rel):
                 self.top[node].add(conftest)
+
+    def _reset_read_outputs(self) -> None:
+        self.text: dict[str, str] = {}  # test node -> source text
+        self.top: dict[str, set[str]] = defaultdict(set)  # import-time (or test-run-time) edges
+        self.lazy: dict[str, set[str]] = defaultdict(set)  # imports deferred into a function body
+        self.parse_errors: list[str] = []
 
     def _conftests_above(self, rel: str) -> list[str]:
         parts = PurePosixPath(rel).parts[:-1]
@@ -190,7 +207,7 @@ class Graph:
     def resolve(self, name: str, importer: str | None = None) -> set[str]:
         """Existing modules executed by importing `name` (itself plus parent packages)."""
         parts = name.split(".")
-        found = {".".join(parts[:i]) for i in range(1, len(parts) + 1)} & self.paths.keys()
+        found = {".".join(parts[:i]) for i in range(1, len(parts) + 1)} & self.is_package.keys()
         if importer is not None and not found and parts[0] not in {"brigade", "scripts", "tests"}:
             # Plain `import helper`: pytest puts the test file's directory on sys.path.
             package = importer if self.is_package[importer] else importer.rpartition(".")[0]
@@ -198,8 +215,34 @@ class Graph:
                 local = f"{base}.{name}" if base else name
                 found |= {
                     ".".join(local.split(".")[:i]) for i in range(1, len(local.split(".")) + 1)
-                } & self.paths.keys()
+                } & self.is_package.keys()
         return found
+
+    def _read_serial(self) -> None:
+        for node, path in self.paths.items():
+            self._read(node, path)
+
+    def _read_parallel(self, workers: int) -> bool:
+        items = list(self.paths.items())
+        batches = [items[start : start + 64] for start in range(0, len(items), 64)]
+        try:
+            with ProcessPoolExecutor(
+                max_workers=workers,
+                mp_context=multiprocessing.get_context("spawn"),
+                initializer=_init_read_worker,
+                initargs=(self.repo, self.is_package),
+            ) as pool:
+                results = list(pool.map(_read_batch, batches))
+        except Exception:  # noqa: BLE001 - retry with serial extraction if any pool operation fails
+            return False
+        # Merge in scan order after every worker succeeds, so a retry starts clean.
+        for top, lazy, text, errors in results:
+            self.top.update(top)
+            self.lazy.update(lazy)
+            self.text.update(text)
+            self.parse_errors.extend(errors)
+
+        return True
 
     def _read(self, node: str, path: Path) -> None:
         try:
@@ -281,10 +324,10 @@ class Graph:
             for text in strings
             if text.lstrip(".").isidentifier()
             for base in {prefix, package, package.rpartition(".")[0]}
-        } & self.paths.keys()
+        } & self.is_package.keys()
         if named:
             return named
-        return {name for name in self.paths if name == prefix or name.startswith(prefix + ".")}
+        return {name for name in self.is_package if name == prefix or name.startswith(prefix + ".")}
 
     def affected(self, changed: set[str]) -> tuple[set[str], dict[str, int]]:
         """Return (direct importers, {importer: fewest deferred imports on any path to a changed module}).
@@ -309,6 +352,27 @@ class Graph:
                     best[parent] = used
                     queue.append(parent)
         return direct, best
+
+
+_worker_reader: Graph
+
+
+def _init_read_worker(repo: Path, is_package: dict[str, bool]) -> None:
+    global _worker_reader
+    # Workers need the module map and extractor, without scanning the tree again.
+    _worker_reader = Graph.__new__(Graph)
+    _worker_reader.repo = repo
+    _worker_reader.is_package = is_package
+
+
+def _read_batch(
+    items: list[tuple[str, Path]],
+) -> tuple[dict[str, set[str]], dict[str, set[str]], dict[str, str], list[str]]:
+    reader = _worker_reader
+    reader._reset_read_outputs()
+    for node, path in items:
+        reader._read(node, path)
+    return reader.top, reader.lazy, reader.text, reader.parse_errors
 
 
 def _call_name(call: ast.Call) -> str:

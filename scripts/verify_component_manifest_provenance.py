@@ -374,10 +374,12 @@ def verify_manifest(
         if name in release_assets:
             errors.append(f"GitHub release lists duplicate asset {name!r}")
         release_assets[name] = asset
-    alias_names = {
-        _expected_asset_name(component, platform) for component in LEGACY_ALIASES for platform in SUPPORTED_PLATFORMS
-    }
-    expected_aliases = alias_names
+    # Only the two releases in the rename window shipped the extra matrix.
+    expected_aliases = (
+        {_expected_asset_name(component, platform) for component in LEGACY_ALIASES for platform in SUPPORTED_PLATFORMS}
+        if re.match(r"^v0\.(31|32)\.", tag)
+        else set()
+    )
     for name in sorted(expected_aliases):
         asset = release_assets.get(name)
         if asset is None:

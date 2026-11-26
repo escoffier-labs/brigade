@@ -561,6 +561,8 @@ def test_doctor_all_checks_and_failures(configured):
     target, _, _ = configured
     with (
         patch("brigade.fleet_client_message_credentials.read_message_token_file", return_value="fixture"),
+        patch("brigade.fleet_client.load_fleet_settings", return_value={"node_token": "fixture-node-token"}),
+        patch("brigade.fleet_client.resolve_node_id", return_value=parse_runtime(_document()).hub.node_id),
         patch("brigade.dot.fleet_tools.FleetTools.fleet_capacity", return_value={"ok": True}),
         patch.object(m, "_probe", return_value=(401, None)),
     ):
@@ -571,12 +573,31 @@ def test_doctor_all_checks_and_failures(configured):
         "state",
         "access-config",
         "hub-token",
+        "node-credential",
         "t3-fleet",
         "endpoint",
     ]
     assert all(c["status"] == "ok" for c in checks)
+    assert "fixture-node-token" not in repr(checks)
+
+    for settings, resolved in [
+        ({"node_token": "fixture-node-token"}, "different-node"),
+        ({"node_token": ""}, parse_runtime(_document()).hub.node_id),
+    ]:
+        with (
+            patch("brigade.fleet_client_message_credentials.read_message_token_file", return_value="fixture"),
+            patch("brigade.fleet_client.load_fleet_settings", return_value=settings),
+            patch("brigade.fleet_client.resolve_node_id", return_value=resolved),
+            patch("brigade.dot.fleet_tools.FleetTools.fleet_capacity", return_value={"ok": True}),
+            patch.object(m, "_probe", return_value=(401, None)),
+        ):
+            by_name = {c["check"]: c["status"] for c in m.doctor(target)}
+        assert by_name["node-credential"] == "fail"
+
     with (
         patch("brigade.fleet_client_message_credentials.read_message_token_file", side_effect=ValueError("private")),
+        patch("brigade.fleet_client.load_fleet_settings", return_value={"node_token": "fixture-node-token"}),
+        patch("brigade.fleet_client.resolve_node_id", return_value=parse_runtime(_document()).hub.node_id),
         patch("brigade.dot.fleet_tools.FleetTools.fleet_capacity", return_value={"error": "fleet_error"}),
         patch.object(m, "_probe", return_value=(0, None)),
     ):

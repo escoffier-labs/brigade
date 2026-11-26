@@ -1,0 +1,1 @@
+- Serialize cassette purge and publication across processes, including runs without a lifecycle journal.

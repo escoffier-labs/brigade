@@ -1,0 +1,1 @@
+- Windows ingest honors valid near-duplicate settings in `.brigade/memory-care.toml`.

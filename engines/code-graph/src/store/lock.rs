@@ -5,14 +5,23 @@
 //! processes would still plan against the same pre-sync state and duplicate the extraction
 //! work. The lockfile makes the second sync fail fast instead.
 //!
-//! The lock is a `<db>.lock` file containing the owning PID. A lock whose owner is no longer
-//! alive is reclaimed automatically, so a crashed or killed sync never wedges the database.
+//! The lock is a `<db>.lock` file containing the owning PID. On Windows the owner's
+//! handle releases it on process exit. Leftover PID files can be reclaimed by the
+//! next writer.
 
 use std::fs;
-use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
 
+#[cfg(not(windows))]
+use std::io::ErrorKind;
+
+#[cfg(windows)]
+use anyhow::Result;
+#[cfg(not(windows))]
 use anyhow::{Context, Result, bail};
+
+#[cfg(windows)]
+mod windows;
 
 /// How old an existing lock must be before it is reclaimed on platforms where
 /// process liveness cannot be checked.
@@ -21,11 +30,22 @@ const STALE_LOCK_MAX_AGE_SECS: u64 = 60 * 60;
 /// RAII guard for the sync lock; dropping it releases the lock.
 #[derive(Debug)]
 pub struct SyncLock {
+    #[cfg(not(windows))]
     path: PathBuf,
+    #[cfg(windows)]
+    _file: fs::File,
 }
 
 impl SyncLock {
     /// Acquire the sync lock for `db_path`, reclaiming a stale one if its owner died.
+    #[cfg(windows)]
+    pub fn acquire(db_path: &Path) -> Result<SyncLock> {
+        let file = windows::acquire(&lock_path(db_path))?;
+        Ok(SyncLock { _file: file })
+    }
+
+    /// Acquire the sync lock for `db_path`, reclaiming a stale one if its owner died.
+    #[cfg(not(windows))]
     pub fn acquire(db_path: &Path) -> Result<SyncLock> {
         let path = lock_path(db_path);
         for attempt in 0..2 {
@@ -71,6 +91,7 @@ impl SyncLock {
     }
 }
 
+#[cfg(not(windows))]
 impl Drop for SyncLock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.path);
@@ -87,6 +108,7 @@ fn lock_path(db_path: &Path) -> PathBuf {
 
 /// A lock is stale when its owning process is provably dead, or (where liveness
 /// cannot be checked) when it is implausibly old.
+#[cfg(not(windows))]
 fn lock_is_stale(path: &Path) -> bool {
     let owner_pid = fs::read_to_string(path)
         .ok()
@@ -117,7 +139,7 @@ fn pid_alive(pid: u32) -> Option<bool> {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 fn pid_alive(_pid: u32) -> Option<bool> {
     None
 }
@@ -164,17 +186,41 @@ mod tests {
         fs::write(&lock_file, "999999999\n").unwrap();
 
         let lock = SyncLock::acquire(&db);
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let lock = lock.unwrap();
             assert!(lock_file.exists());
             drop(lock);
             assert!(!lock_file.exists());
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             // Without a liveness check the fresh lock is not yet stale by age.
             assert!(lock.is_err());
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn malformed_owner_uses_lock_age() {
+        use std::fs::FileTimes;
+        use std::time::{Duration, SystemTime};
+
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("g.db");
+        let path = lock_path(&db);
+        fs::write(&path, "invalid\n").unwrap();
+        assert!(SyncLock::acquire(&db).is_err());
+
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_times(FileTimes::new().set_modified(
+                SystemTime::now() - Duration::from_secs(STALE_LOCK_MAX_AGE_SECS + 60),
+            ))
+            .unwrap();
+        drop(SyncLock::acquire(&db).unwrap());
+        assert!(!path.exists());
     }
 }

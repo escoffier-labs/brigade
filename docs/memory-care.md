@@ -440,7 +440,7 @@ Receipts with malformed fields are ignored rather than honored: only a `reviewed
 
 ## Boundary
 
-Automatic archiving of unused cards, including expiry retirement, is switched off in code until [#2620](https://github.com/escoffier-labs/brigade/issues/2620) lands. It will require a configured hub with explicit card-read coverage. Stale marking remains live. Card changes retain before-bytes and undo. It never deletes memory. Paths covered by `read_only_paths` and cards with frontmatter `archive: never` are exempt. Content guard, secret and credential scanning, and pre-push checks remain in force. Scheduling care commands is the operator's job: see the [execution model](execution-model.md).
+Automatic archiving of unused cards, including expiry retirement, is switched off in code until [#2620](https://github.com/escoffier-labs/brigadestack/issues/2620) lands. It will require a configured hub with explicit card-read coverage. Stale marking remains live. Card changes retain before-bytes and undo. It never deletes memory. Paths covered by `read_only_paths` and cards with frontmatter `archive: never` are exempt. Content guard, secret and credential scanning, and pre-push checks remain in force. Scheduling care commands is the operator's job: see the [execution model](execution-model.md).
 
 ## Tending
 
@@ -768,7 +768,7 @@ The daily scheduled care runbook runs `memory care tend --stage lifecycle`.
 The pass marks an unused agent card stale after 30 days. Stale marking remains
 live, and stale cards remain searchable. A recent read returns a stale card to
 active. Automatic archiving of unused cards, including expiry retirement, is
-switched off in code until [#2620](https://github.com/escoffier-labs/brigade/issues/2620)
+switched off in code until [#2620](https://github.com/escoffier-labs/brigadestack/issues/2620)
 lands. It will require a configured hub that supplies `last_card_read_day`.
 Local-only workspaces cannot automatically archive cards. The 90-day archive
 policy is retained for that future gate. Expiry retirement currently reports

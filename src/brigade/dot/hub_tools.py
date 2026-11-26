@@ -23,6 +23,8 @@ OCTOPOOL_WHOAMI_TIMEOUT = 8
 OCTOPOOL_ROUTE_TTL = 600
 DIGEST_DEADLINE = 40
 DIGEST_PR_LIMIT = 30
+MAX_WORK_LIST_PAGES = 20
+WORK_LIST_PAGE_SIZE = 100
 
 
 class HubTools:
@@ -246,21 +248,46 @@ class HubTools:
         )
 
     def fleet_work_list(self, source: str | None = None, status: str | None = None, limit: int = 25) -> dict[str, Any]:
-        value, error = self._hub_read(["work", "list"] + (["--source", source] if source else []))
-        if error:
-            return error
-        if not isinstance(value, dict) or not isinstance(value.get("items"), list):
-            return {"error": "brigade_unavailable"}
-        items = [item for item in value["items"] if isinstance(item, dict)]
+        items: list[dict[str, Any]] = []
+        cursor: str | None = None
+        seen_cursors: set[str] = set()
+        truncated = False
+        pages_read = 0
+        while pages_read < MAX_WORK_LIST_PAGES:
+            tail = ["work", "list"] + (["--source", source] if source else [])
+            tail.extend(["--limit", str(WORK_LIST_PAGE_SIZE)])
+            if cursor is not None:
+                tail.extend(["--cursor", cursor])
+            value, error = self._hub_read(tail)
+            if error:
+                return error
+            if not isinstance(value, dict) or not isinstance(value.get("items"), list):
+                return {"error": "brigade_unavailable"}
+            items.extend(item for item in value["items"] if isinstance(item, dict))
+            pages_read += 1
+            next_cursor = value.get("next_cursor")
+            if next_cursor is None or next_cursor == "":
+                break
+            if not isinstance(next_cursor, str):
+                return {"error": "brigade_unavailable"}
+            if next_cursor in seen_cursors:
+                truncated = True
+                break
+            seen_cursors.add(next_cursor)
+            cursor = next_cursor
+        else:
+            truncated = True
         matched = [item for item in items if status is None or item.get("status") == status]
         return dict(
             source=source,
             status=status,
             page_count=len(items),
+            pages_read=pages_read,
             by_status=self._tally(items, "status"),
             match_count=len(matched),
             items=[self._work_summary(item) for item in matched[:limit]],
-            more_on_hub=bool(value.get("next_cursor")),
+            more_on_hub=truncated,
+            truncated=truncated,
             next="Read one item with fleet_work_show(work_id).",
         )
 

@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import shlex
+import signal
 import subprocess
 from pathlib import Path
+from time import monotonic, sleep
 
 import pytest
 
-from brigade import cli, verify_manifest_git
-from brigade.work_cmd import verify_required
+from brigade import cli, proc, verify_manifest_git
+from brigade.work_cmd import verify_gate, verify_required
 
 
 def git(repo: Path, *args: str) -> str:
@@ -239,6 +242,7 @@ def test_missing_planner_file_at_base(repo, capsys):
     ("body", "timeout", "reason"),
     [
         ("raise SystemExit(7)", False, "status 7"),
+        ("raise SystemExit(124)", False, "status 124"),
         ("import missing_planner_dependency", False, "status 1"),
         ("time.sleep(1)", True, "timed out"),
         ("out.write_text('not json')", False, "UTF-8 JSON"),
@@ -252,6 +256,49 @@ def test_planner_failures_are_errors(repo, capsys, monkeypatch, body, timeout, r
     if timeout:
         monkeypatch.setattr(verify_required, "PLANNER_TIMEOUT_SECONDS", 0.01)
     assert reason in error(target, capsys)["reason"]
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").is_file(), reason="requires Linux process status")
+@pytest.mark.parametrize("timeout", [True, False])
+def test_planner_reaps_child_on_timeout_and_normal_exit(repo, capsys, monkeypatch, tmp_path, timeout):
+    target, _ = repo
+    child_file = tmp_path / "child-pid"
+    planner(
+        target,
+        "import subprocess\n"
+        f"child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(10)'])\n"
+        f"pathlib.Path({str(child_file)!r}).write_text(str(child.pid))\n"
+        + (
+            "time.sleep(10)"
+            if timeout
+            else "out.write_text(json.dumps(dict(mode='selective', selected=['tests/a.py'])))"
+        ),
+    )
+    commit(target, "planner with child")
+    monkeypatch.setattr(verify_required, "PLANNER_TIMEOUT_SECONDS", 1.0)
+
+    def child_is_live(pid):
+        try:
+            return Path(f"/proc/{pid}/stat").read_bytes().rpartition(b")")[2].split()[0] != b"Z"
+        except FileNotFoundError:
+            return False
+
+    try:
+        if timeout:
+            assert "planner timed out" in error(target, capsys)["reason"]
+        else:
+            assert run(target, capsys)["tests"] == ["tests/a.py"]
+        pid = int(child_file.read_text())
+        deadline = monotonic() + 1.0
+        while child_is_live(pid) and monotonic() < deadline:
+            sleep(0.01)
+        assert not child_is_live(pid)
+    finally:
+        if child_file.is_file() and child_is_live(pid := int(child_file.read_text())):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
 
 
 @pytest.mark.parametrize(
@@ -346,12 +393,20 @@ def test_git_subprocesses_use_target_environment(repo, capsys, monkeypatch, tmp_
     monkeypatch.setenv("GIT_DIR", str(other / ".git"))
     monkeypatch.setenv("GIT_WORK_TREE", str(other))
     monkeypatch.setenv("Git_Config_Count", "0")
+    caller_only = ("LD_PRELOAD", "PYTHONPATH", "PYTHONSTARTUP", "BRIGADE_TEST_EXTRA")
+    if entry_point != "resolve_base":
+        for name in caller_only:
+            monkeypatch.setenv(name, "caller-value")
     original_run = subprocess.run
+    original_planner_run = proc.run
     planner_environments = []
 
-    def check_environment(argv, *args, **kwargs):
+    def check_environment(argv, kwargs):
         env = kwargs.get("env")
         assert env is not None
+        assert "PATH" in env
+        if entry_point != "resolve_base":
+            assert all(name not in env for name in caller_only)
         git_keys = {key for key in env if key.upper().startswith("GIT_")}
         if argv[0] == "git":
             assert git_keys == ({"GIT_INDEX_FILE"} if argv[1] == "-C" else set())
@@ -364,14 +419,23 @@ def test_git_subprocesses_use_target_environment(repo, capsys, monkeypatch, tmp_
             else:
                 assert git_keys == set()
             planner_environments.append(git_keys)
+
+    def run_git(argv, *args, **kwargs):
+        check_environment(argv, kwargs)
         return original_run(argv, *args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "run", check_environment)
+    def run_planner(argv, **kwargs):
+        check_environment(argv, kwargs)
+        return original_planner_run(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run_git)
+    monkeypatch.setattr(proc, "run", run_planner)
     if entry_point == "resolve_base":
         assert verify_manifest_git.resolve_base(target).commit == head
     else:
         result = run(target, capsys)
         assert result["head_sha"] == head
+        assert result["tests"] == ["tests/a.py", "tests/z.py"]
         assert result["covers_worktree"] is True
         assert len(planner_environments) == 1
 
@@ -423,6 +487,7 @@ def test_hint_quotes_arguments_for_bash(repo, capsys):
     output = run(target, capsys, human=True)
     assert "Bash" in output
     assert shlex.split(output.splitlines()[0]) == ["focused", *paths]
+    assert "after the command prefix and before any separator" in output
 
 
 def test_test_filenames_are_not_pytest_argument_files(repo, capsys):
@@ -465,12 +530,33 @@ def test_bundled_planner_reads_committed_sources(repo, capsys):
     for name in config["planner_files"]:
         write(target, name, (project / name).read_text(encoding="utf-8"))
     write(target, "src/brigade/a.py", "value = 1\n")
+    # Exercise worker startup from the copied planner as well as the selector entry point.
+    for i in range(128):
+        write(target, f"src/brigade/filler_{i}.py", "")
     write(target, "tests/test_a.py", "from brigade import a\n")
     write(target, "tests/test_module_size_ratchet.py", "")
     pin_base(target, commit(target, "install bundled planner"))
     write(target, "src/brigade/a.py", "value = 2\n")
     commit(target, "change a module")
     write(target, "tests/test_a.py", "\n")
+    write(target, "scripts/ci_test_selection.py", "raise AssertionError('loaded the working-tree planner')\n")
     result = run(target, capsys)
     assert result["tests"] == ["tests/test_a.py", "tests/test_module_size_ratchet.py"]
+    assert result["base_trusted"] is True
     assert result["covers_worktree"] is False
+
+
+def test_repository_planner_template_satisfies_declared_coverage():
+    project = Path(__file__).resolve().parents[1]
+    policy = verify_gate._parse_declaration((project / "verify/required-check.json").read_bytes())
+    assert policy.needs_plan_coverage is True
+    config = json.loads((project / verify_required.CONFIG_PATH).read_text(encoding="utf-8"))
+    files = ["tests/test_verify_gate.py", "tests/test_verify_required.py"]
+    entries = {name: (b"100644", b"") for name in files if (project / name).is_file()}
+    argv = verify_required._run_argv(config["run_argv"], files)
+    prefix = list(policy.argv_prefix)
+    assert argv[: len(prefix)] == prefix
+    selectors = argv[len(prefix) :]
+    assert selectors == ["--", *files]
+    assert verify_gate._command_files(selectors, entries) == set(files)
+    assert verify_gate._command_files(["-p", "xdist", "-n", "4", *selectors], entries) == set(files)

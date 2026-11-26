@@ -49,7 +49,7 @@ one acquisition cannot self-deadlock; other threads in the same process
 wait on a per-entry ``RLock`` until that owner fully releases, then take
 their own cross-process acquisition.
 
-Residuals tracked in escoffier-labs/brigade#1215: a descendant that calls
+Residuals tracked in escoffier-labs/brigadestack#1215: a descendant that calls
 ``setsid()`` or double-forks escapes process-group reaping (``descendants_reaped``
 records that the group was reaped, not that no descendant survives); and the
 Windows ``LK_NBLCK`` deadline path has no native contention test yet.

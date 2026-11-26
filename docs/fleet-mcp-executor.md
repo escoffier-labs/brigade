@@ -1,6 +1,6 @@
 # Fleet MCP through Executor
 
-Slice 7 of [#1887](https://github.com/escoffier-labs/brigade/issues/1887).
+Slice 7 of [#1887](https://github.com/escoffier-labs/brigadestack/issues/1887).
 This opt-in recipe mounts the existing [Fleet MCP station](runbooks/fleet-hub-proxmox.md#fleet-mcp-station)
 in an Executor app. Direct MCP over stdio or loopback HTTP remains available.
 Executor is not the default route. No Executor installation or operator

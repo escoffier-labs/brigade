@@ -54,8 +54,8 @@ def event(target: Path, name: str, **fields):
 
 
 def graph(target: Path, monkeypatch, **overrides):
-    db = target / ".graphtrail" / "graphtrail.db"
-    db.parent.mkdir()
+    db = target / ".brigade" / "code-graph" / "code-graph.db"
+    db.parent.mkdir(parents=True)
     with closing(sqlite3.connect(db)) as conn, conn:
         conn.execute("CREATE TABLE files(path TEXT, content_hash TEXT)")
         conn.executemany(
@@ -107,7 +107,7 @@ def test_graph_connections_close_after_use(target, monkeypatch, operation):
             (target / "caller.py").write_text("changed\n")
         elif operation == "missing_file":
             (target / "caller.py").unlink()
-        db = target / ".graphtrail" / "graphtrail.db"
+        db = target / ".brigade" / "code-graph" / "code-graph.db"
         if operation == "missing_file":
             with pytest.raises(FileNotFoundError):
                 dependencies._content_matches_index(target, db, threading.Event())
@@ -212,7 +212,7 @@ def test_unusable_graph_records_null_and_reason_without_denying(target, monkeypa
     )
     original = code_graph_delta._run_graphtrail
     if failure == "no_index":
-        (target / ".graphtrail" / "graphtrail.db").unlink()
+        (target / ".brigade" / "code-graph" / "code-graph.db").unlink()
     elif failure == "no_binary":
         monkeypatch.setattr(code_graph_delta, "_graphtrail_bin", lambda: None)
     elif failure in {"sync_failed", "sync_timeout", "query_timeout", "malformed"}:
@@ -283,7 +283,7 @@ def test_dependency_check_forces_refresh_when_stat_metadata_could_be_unchanged(t
     graph(target, monkeypatch)
     caller = target / "caller.py"
     caller.write_text(caller.read_text().replace("serve()", "other()"))
-    db = target / ".graphtrail/graphtrail.db"
+    db = target / ".brigade/code-graph/code-graph.db"
     with sqlite3.connect(db) as conn:
         conn.execute(
             "UPDATE files SET content_hash = ? WHERE path = 'caller.py'",

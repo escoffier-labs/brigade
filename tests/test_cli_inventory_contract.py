@@ -142,23 +142,10 @@ def test_untested_parser_paths_report_is_well_formed_and_non_failing():
     # Presence of untested paths is a maintenance signal, not a failure.
 
 
-def test_deprecated_inventory_paths_are_machine_readable_and_parse():
+def test_deprecation_metadata_and_inventory_have_no_retired_commands():
     payload = roadmap_cmd.command_contract_payload(REPO_ROOT)
-    deprecated = payload["deprecated_paths"]
-    inventory_paths = _deprecated_inventory_command_paths(COMMAND_INVENTORY.read_text(encoding="utf-8"))
-
-    assert deprecated
-    assert {item["path"] for item in deprecated} == set(inventory_paths)
-    assert {path.split()[1] for path in inventory_paths} == {"receipts"}
-    # A deprecated path names the same replacement the alias table folds it into.
-    assert all(item["replacement"] == roadmap_cmd._apply_command_alias(item["path"]) for item in deprecated)
-    assert all(item["replacement"] != item["path"] for item in deprecated)
-
-    parser = cli._build_parser()
-    for path in [*inventory_paths, *(item["replacement"] for item in deprecated)]:
-        with pytest.raises(SystemExit) as exc:
-            parser.parse_args([*path.removeprefix("brigade ").split(), "--help"])
-        assert exc.value.code == 0
+    assert payload["deprecated_paths"] == []
+    assert _deprecated_inventory_command_paths(COMMAND_INVENTORY.read_text(encoding="utf-8")) == []
 
 
 def test_run_cloud_is_a_native_parser_branch():

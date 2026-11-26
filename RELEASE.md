@@ -64,15 +64,20 @@ Commit on a feature branch, push it, open a PR, wait for required checks, and me
 
 ## 5. Tag the merged commit
 
-Fetch `origin/main`, confirm its declared version, create an annotated tag on that exact commit, push only the tag, and wait for the publish workflow:
+Start in a clean checkout of the merged release commit. Fetch `origin/main`,
+confirm the checkout matches it, and run the shim expiry guard before tagging.
+The stable publish workflow repeats the guard after validating tag identity.
 
 ```bash
 (
   set -euo pipefail
   git fetch origin main --tags
+  release_commit="$(git rev-parse origin/main)"
+  test "$(git rev-parse HEAD)" = "$release_commit"
+  test -z "$(git status --porcelain)"
   version="$(.venv/bin/python -c 'import tomllib; print(tomllib.load(open("pyproject.toml", "rb"))["project"]["version"])')"
-  git show origin/main:pyproject.toml | grep -F "version = \"$version\""
-  git tag -a "v$version" origin/main -m "v$version"
+  .venv/bin/python scripts/retired_engine_names.py --release-version "$version"
+  git tag -a "v$version" "$release_commit" -m "v$version"
   git push origin "v$version"
 
   run_id=""
@@ -86,25 +91,21 @@ Fetch `origin/main`, confirm its declared version, create an annotated tag on th
 )
 ```
 
-The next publish workflow builds the five managed components (`agent-notify`, `graphtrail`,
-`graphtrail-mcp`, `miseledger`, and `sessionfind`) for `linux-amd64`, `linux-arm64`,
-`darwin-amd64`, `darwin-arm64`, and `windows-amd64`. It also builds the canonical aliases
-`brigade-code-graph`, `brigade-code-graph-mcp`, and `brigade-evidence` as separate targets
-for every platform. It creates one Brigade release with exactly 40 native assets
-(25 legacy + 15 canonical) and exactly 42 total GitHub release files, counting the
-native assets plus `component-manifest-v1.json` and `checksums.txt`. Checksums cover
-41 entries: all native assets and the primary manifest. Attestations cover those same files.
-The primary manifest retains the five legacy component IDs and executables for
-stable 0.30.0 upgrade and offline rollback compatibility. Validators still accept
-complete historical 25-asset releases (27 total files), but new production requires
-the complete additive inventory. Partial alias sets and unrelated extras are rejected.
-The checked-in historical manifest stays unchanged. Package assembly stages the
-new tag's generated legacy-primary manifest. Default installation identities stay legacy.
+The publish workflow builds `agent-notify`, `brigade-code-graph`,
+`brigade-code-graph-mcp`, `brigade-evidence`, and `sessionfind` for
+`linux-amd64`, `linux-arm64`, `darwin-amd64`, `darwin-arm64`, and
+`windows-amd64`, plus `brigade-hub` for both Linux architectures. The release
+contains 29 total GitHub release files: 27 native assets,
+`component-manifest-v1.json`, and `checksums.txt`. Checksums and attestations
+cover 28 files, comprising the native binaries and the manifest. Package
+assembly bundles the generated manifest for the exact tag. Historical tags
+retain their original asset inventories.
+
 The release body names `brigadestack==<version>` and mentions `brigade-cli==<version>` as the same code under the old name. The `build-python-dist` job builds both distributions from one tree: the root project as `brigadestack`, then a temporary copy stamped by `scripts/stamp_brigade_cli.py` as `brigade-cli` (same version, dependencies, extras and package files; only the name and console scripts differ). Before the PyPI upload, the separate `check-cli-upgrade` job (no OIDC token) runs `scripts/check_cli_upgrade.py`, which installs the newest older stable `brigade-cli` from PyPI in a fresh venv, upgrades it to the built wheel and requires `brigade --version` and `brigade-hook --help` to work, so an in-place `pipx upgrade brigade-cli` cannot ship broken. `build-and-publish` downloads the built artifact by ID and checks it against the build job's SHA-256 manifest before it uploads. Through 0.33 `brigade-cli` stays a full build. After 0.33, add the final stub release: a `brigade-cli` with no `brigadestack` dependency whose `brigade` command prints the migration command (`pipx uninstall brigade-cli` then `pipx install brigadestack`), and drop the stamped build and this gate in the same change. Rust builds run on the exact native runner
 for each platform. Go builds are pure-Go cross builds with `CGO_ENABLED=0`.
 
-The generated manifest and all component URLs must point to
-`escoffier-labs/brigade` at the exact tag. The workflow fails before PyPI publication if inventory,
+The generated manifest and all component URLs use the repository name
+recorded by the publishing workflow and the exact release tag. The workflow fails before PyPI publication if inventory,
 checksum, release-page manifest, or `gh attestation verify` checks fail. PyPI wheel and sdist builds
 copy the final generated manifest into package data after that gate.
 
@@ -178,7 +179,7 @@ For a new name, this creates a public `0.0.0-stage` placeholder. The staged vers
 Once all six placeholders exist, verify each package's organization ownership. Set `package_name` to each exact approved name in turn, configure its trusted publisher, complete the 2FA prompt and read back the configuration:
 
 ```sh
-npm trust github "$package_name" --repo escoffier-labs/brigade --file npm-publish.yml --env npm --allow-publish
+npm trust github "$package_name" --repo escoffier-labs/brigadestack --file npm-publish.yml --env npm --allow-publish
 npm trust list "$package_name"
 ```
 

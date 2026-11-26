@@ -1,7 +1,6 @@
 """Exercise the workflow guard against pull request API responses."""
 
 import json
-import os
 from pathlib import Path
 from posixpath import normpath
 import re
@@ -10,13 +9,13 @@ import subprocess
 import pytest
 
 from scripts import workflow_guard
-from tests.test_ci_workflow import _workflow_bash_command
 from tests.test_publish_workflow import _load_workflow_yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github/workflows"
 APPROVAL = "workflow-change-approved"
 HEAD = "a" * 40
+RELEASE_SCOPE = "7abc3f44de68421afbb710eea4640dfbd236f5679add92851980ea2dcd1ad1e4"
 STATUSES = f"repos/example/project/commits/{HEAD}/statuses?per_page=100"
 CLI_ARGS = ["--repo", "example/project", "--pr", "42"]
 
@@ -31,6 +30,7 @@ CLI_ARGS = ["--repo", "example/project", "--pr", "42"]
         "scripts/pr_test_tiers.json",
         "scripts/pr_tier_selection.py",
         "scripts/workflow_guard.py",
+        "scripts/workflow_approval_digest.py",
         "scripts/windows_affected_tests.py",
         "verify/required-check.json",
         "verify/required-tests.json",
@@ -70,10 +70,33 @@ def test_unprotected_paths():
 
 
 @pytest.fixture(autouse=True)
-def pull_request_event(monkeypatch):
-    monkeypatch.setenv("PR_BASE_REF", "main")
-    monkeypatch.setenv("REPO_DEFAULT_BRANCH", "main")
+def pull_request_event(monkeypatch, tmp_path):
+    event_path = tmp_path / "event.json"
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(event_path))
+
+    def write(*, base="main", head=HEAD, event_repo="example/project", base_repo="example/project", number=42, **extra):
+        event_path.write_text(
+            json.dumps(
+                {
+                    "number": number,
+                    "action": "opened",
+                    "label": {"name": APPROVAL},
+                    "repository": {"full_name": event_repo, "default_branch": "main"},
+                    "pull_request": {
+                        "number": number,
+                        "state": "open",
+                        "updated_at": "2026-01-01T00:00:02Z",
+                        "head": {"sha": head},
+                        "base": {"ref": base, "sha": "b" * 40, "repo": {"full_name": base_repo}},
+                    },
+                    **extra,
+                }
+            )
+        )
+
+    write()
     monkeypatch.setenv("APPROVAL_RECORD_RESULT", "skipped")
+    return write
 
 
 @pytest.fixture
@@ -88,18 +111,41 @@ def fake_gh(monkeypatch):
         heads=(HEAD, HEAD),
         fail_statuses=False,
         number=42,
+        bases=("main", "main", "main"),
+        base_shas=("b" * 40, "b" * 40, "b" * 40),
+        history=None,
+        history_after=None,
+        live_repo="example/project",
+        delete=(0, "HTTP/2.0 204 No Content"),
     ):
         pull = f"repos/example/project/pulls/{number}"
-        live_heads = iter(heads)
+        calls = []
+        label_history = [[approval_event()]] if history is None else history
+        history_pages = iter((label_history, label_history if history_after is None else history_after))
+        live_heads = iter((*heads, heads[-1]))
+        live_bases = iter(bases)
+        live_base_shas = iter(base_shas)
 
         def run(args, **kwargs):
             assert args[:2] == ["gh", "api"]
             assert kwargs.get("shell", False) is False
+            calls.append(args[2:])
+            if args[2] == "--include":
+                return subprocess.CompletedProcess(args, delete[0], stdout=delete[1])
             if args[2] == f"{pull}/files?per_page=100":
                 assert args[3:] == ["--paginate", "--slurp"]
                 if fail:
                     raise subprocess.CalledProcessError(1, args, stderr="API unavailable")
                 payload = pages
+            elif args[2] == f"repos/example/project/issues/{number}/events?per_page=100":
+                assert args[3:] == ["--paginate", "--slurp"]
+                payload = next(history_pages)
+            elif args[2] == f"repos/example/project/issues/{number}/labels?per_page=100":
+                assert args[3:] == ["--paginate", "--slurp"]
+                payload = [[], [{"name": label} for label in labels]]
+            elif args[2].startswith("repos/example/project/statuses/"):
+                assert args[3:5] == ["-X", "POST"]
+                payload = {}
             elif args[2] == STATUSES:
                 assert args[3:] == ["--paginate", "--slurp"]
                 assert workflow_guard.protected_paths(
@@ -114,12 +160,15 @@ def fake_gh(monkeypatch):
                 payload = {
                     "changed_files": sum(map(len, pages)) if changed_files is None else changed_files,
                     "head": {"sha": next(live_heads)},
-                    "base": {"ref": "main", "sha": "b" * 40},
+                    "number": number,
+                    "state": "open",
+                    "base": {"ref": next(live_bases), "sha": next(live_base_shas), "repo": {"full_name": live_repo}},
                     "labels": [{"name": label} for label in labels],
                 }
             return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload))
 
         monkeypatch.setattr(workflow_guard.subprocess, "run", run)
+        return calls
 
     return install
 
@@ -131,8 +180,121 @@ def approval_status(
         "context": context,
         "state": state,
         "description": "pull request 42 approval removed" if state == "failure" else "pull request 42 approved",
+        "created_at": "2026-01-01T00:00:02Z",
         "creator": {"login": login, "type": creator_type, "id": creator_id},
     }
+
+
+def approval_event(action="labeled", *, event_id=100, second=1):
+    return {
+        "id": event_id,
+        "event": action,
+        "created_at": f"2026-01-01T00:00:{second:02}Z",
+        "label": {"name": APPROVAL},
+    }
+
+
+@pytest.mark.parametrize("base", ["release/0.32", "release/0.32-extra", "Release/0.32", "refs/heads/release/0.32"])
+def test_release_base_is_admitted_exactly(fake_gh, pull_request_event, base):
+    pull_request_event(base=base)
+    fake_gh([[{"filename": "docs/guide.md"}]], bases=(base,) * 3)
+    assert workflow_guard.main(CLI_ARGS) == (0 if base == "release/0.32" else 2)
+
+
+@pytest.mark.parametrize("field", ["head", "event_repo", "base_repo"])
+@pytest.mark.parametrize("value", [None, "wrong"])
+def test_rejects_missing_or_mismatched_event_identity(fake_gh, pull_request_event, field, value):
+    pull_request_event(**{field: value})
+    fake_gh([[{"filename": "docs/guide.md"}]])
+    assert workflow_guard.main(CLI_ARGS) == 2
+
+
+def test_rejects_live_base_change_during_pagination(fake_gh):
+    fake_gh(
+        [[{"filename": "docs/guide.md"}]],
+        base_shas=("b" * 40, "c" * 40, "c" * 40),
+    )
+    assert workflow_guard.main(CLI_ARGS) == 2
+
+
+@pytest.mark.parametrize("action", ["base_ref_changed", "reopened", "unlabeled"])
+def test_legacy_approval_cannot_survive_invalidation(fake_gh, action):
+    fake_gh(
+        [[{"filename": ".github/workflows/ci.yml"}]],
+        statuses=[[approval_status()]],
+        history=[[approval_event()], [approval_event(action, event_id=101, second=3)]],
+    )
+    assert workflow_guard.main(CLI_ARGS) == 1
+
+
+@pytest.mark.parametrize(
+    "payload", [{"action": "reopened"}, {"action": "edited", "changes": {"base": {"ref": {"from": "release/0.32"}}}}]
+)
+def test_lifecycle_event_rejects_prior_label_before_history_catches_up(fake_gh, pull_request_event, payload):
+    pull_request_event(**payload)
+    scope = workflow_guard.base_scope("main")
+    status = dict(approval_status(), description=f"pull request 42 approved [{scope}:100]")
+    fake_gh([[{"filename": ".github/workflows/ci.yml"}]], statuses=[[status]])
+    assert workflow_guard.main(CLI_ARGS) == 1
+
+
+@pytest.mark.parametrize(
+    ("label_id", "include_release_scope", "exit_code"), [(102, True, 0), (100, True, 1), (102, False, 1)]
+)
+def test_new_status_requires_current_base_and_label_transition(
+    fake_gh, pull_request_event, label_id, include_release_scope, exit_code
+):
+    base = "release/0.32"
+    pull_request_event(base=base, action="edited", changes={"base": {"ref": {"from": "main"}}})
+    scope = RELEASE_SCOPE if include_release_scope else workflow_guard.base_scope("main")
+    status = dict(approval_status(), description=f"pull request 42 approved [{scope}:{label_id}]")
+    fake_gh(
+        [[{"filename": ".github/workflows/ci.yml"}]],
+        bases=(base,) * 3,
+        statuses=[[status, approval_status()]],
+        history=[
+            [approval_event(), approval_event("base_ref_changed", event_id=101, second=2)],
+            [approval_event(event_id=102, second=3)],
+        ],
+    )
+    assert workflow_guard.main(CLI_ARGS) == exit_code
+
+
+def test_stable_live_base_advance_before_first_read_is_allowed(fake_gh):
+    fake_gh([[{"filename": "docs/guide.md"}]], base_shas=("c" * 40,) * 3)
+    assert workflow_guard.main(CLI_ARGS) == 0
+
+
+@pytest.mark.parametrize("flag", [[], ["--record-approval"]])
+def test_label_transition_during_status_read_or_write_cannot_pass(fake_gh, pull_request_event, flag):
+    pull_request_event(action="labeled")
+    calls = fake_gh(
+        [[{"filename": ".github/workflows/ci.yml"}]],
+        labels=[APPROVAL],
+        statuses=[[approval_status()]],
+        history_after=[[approval_event("unlabeled", event_id=101, second=3)]],
+    )
+    expected = 2 if flag else 1
+    assert workflow_guard.main([*CLI_ARGS, *flag]) == expected
+    assert all("POST" not in call for call in calls)
+
+
+def test_audit_reader_recognizes_scoped_approval_and_skips_other_base(fake_gh):
+    from scripts import workflow_approval_digest
+
+    wrong_scope = workflow_guard.base_scope("main")
+    statuses = [
+        dict(approval_status("failure"), description=f"pull request 42 approval removed [{wrong_scope}:101]"),
+        dict(approval_status(), description=f"pull request 42 approved [{RELEASE_SCOPE}:100]"),
+    ]
+    fake_gh([[{"filename": ".github/workflows/ci.yml"}]], statuses=[statuses])
+
+    assert workflow_approval_digest.approval_record(
+        "example/project", HEAD, 42, "release/0.32", allow_legacy=False
+    ) == (
+        "yes",
+        "2026-01-01T00:00:02Z",
+    )
 
 
 @pytest.mark.parametrize(
@@ -188,21 +350,21 @@ def test_status_without_a_matching_pr_number_is_ignored(fake_gh, description):
     assert workflow_guard.main(CLI_ARGS) == 0
 
 
-def test_shared_head_approval_applies_to_one_pull_request(fake_gh):
+def test_shared_head_approval_applies_to_one_pull_request(fake_gh, pull_request_event):
     files = [[{"filename": ".github/workflows/ci.yml"}]]
     statuses = [[approval_status()]]
     fake_gh(files, statuses=statuses)
     assert workflow_guard.main(CLI_ARGS) == 0
+    pull_request_event(number=43)
     fake_gh(files, statuses=statuses, number=43)
     assert workflow_guard.main([*CLI_ARGS[:-1], "43"]) == 1
 
 
-def test_retarget_after_nondefault_base_label_requires_approval(fake_gh, monkeypatch):
-    # The writer is skipped on the non-default base, as pinned by the job contract test.
-    monkeypatch.setenv("PR_BASE_REF", "other-branch")
+def test_retarget_after_nondefault_base_label_requires_approval(fake_gh, pull_request_event):
+    pull_request_event(base="other-branch")
     fake_gh([[{"filename": ".github/workflows/ci.yml"}]], labels=[APPROVAL])
     assert workflow_guard.main(CLI_ARGS) == 2
-    monkeypatch.setenv("PR_BASE_REF", "main")
+    pull_request_event()
     assert workflow_guard.main(CLI_ARGS) == 1
 
 
@@ -281,8 +443,8 @@ def test_protected_filename_stays_on_one_log_line(fake_gh, capsys):
 
 
 @pytest.mark.parametrize("base", ["other-branch", ""])
-def test_rejects_nondefault_or_missing_base(fake_gh, capsys, monkeypatch, base):
-    monkeypatch.setenv("PR_BASE_REF", base)
+def test_rejects_nondefault_or_missing_base(fake_gh, capsys, pull_request_event, base):
+    pull_request_event(base=base)
     fake_gh([[{"filename": "docs/guide.md"}]], labels=[APPROVAL])
 
     assert workflow_guard.main(CLI_ARGS) == 2
@@ -336,56 +498,9 @@ def test_workflow_job_contract(guard_workflow):
     assert run_guard["env"] == {
         "GH_TOKEN": "${{ github.token }}",
         "PR_NUMBER": "${{ github.event.number }}",
-        "PR_BASE_REF": "${{ github.event.pull_request.base.ref }}",
-        "REPO_DEFAULT_BRANCH": "${{ github.event.repository.default_branch }}",
         "APPROVAL_RECORD_RESULT": "${{ needs.record-approval.result }}",
     }
     assert guard["steps"][-1]["if"] == "github.event_name == 'merge_group'"
-
-
-CLEAR_APPROVAL_SCRIPT = """\
-if response=$(gh api --include --silent -X DELETE "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels/workflow-change-approved" 2>/dev/null); then
-  exit 0
-fi
-if [[ $response =~ ^HTTP/[^[:space:]]+[[:space:]]404([[:space:]]|$) ]]; then
-  exit 0
-fi
-echo "Could not clear the workflow approval label." >&2
-exit 1
-"""
-
-RECORD_APPROVAL_SCRIPT = """\
-if [[ ! $PR_HEAD_SHA =~ ^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$ ]]; then
-  echo "Invalid pull request head commit." >&2
-  exit 1
-fi
-if [[ ! $PR_NUMBER =~ ^[0-9]+$ ]]; then
-  echo "Invalid pull request number." >&2
-  exit 2
-fi
-state=failure
-description="pull request $PR_NUMBER approval removed"
-case "$PR_ACTION" in
-  labeled)
-    labels=$(gh api "repos/$GITHUB_REPOSITORY/issues/$PR_NUMBER/labels?per_page=100" --paginate --slurp) || exit 2
-    present=$(jq -er '
-      if type == "array" and length > 0 and all(.[]; type == "array") then
-        [ .[][] | if (.name | type) == "string" then .name else error("Invalid label") end ]
-        | any(. == "workflow-change-approved") | tostring
-      else error("Invalid label pages")
-      end
-    ' <<< "$labels") || exit 2
-    if [[ $present == true ]]; then
-      state=success
-      description="pull request $PR_NUMBER approved"
-    fi
-    ;;
-  unlabeled) ;;
-  *) exit 1 ;;
-esac
-gh api --silent -X POST "repos/$GITHUB_REPOSITORY/statuses/$PR_HEAD_SHA" \\
-  -f context=workflow-change-approved -f state="$state" -f description="$description" || exit 2
-"""
 
 
 def test_write_jobs_only_run_the_expected_scripts(guard_workflow):
@@ -396,52 +511,32 @@ def test_write_jobs_only_run_the_expected_scripts(guard_workflow):
     }
     clear = jobs["clear-approval"]
     record = jobs["record-approval"]
-    assert clear["if"] == "github.run_attempt == '1' && github.event.action == 'synchronize'"
-    assert record["if"] == (
-        "github.run_attempt == '1' && github.event.label.name == 'workflow-change-approved' && "
-        "(github.event.action == 'unlabeled' || "
-        "(github.event.action == 'labeled' && "
-        "github.event.pull_request.base.ref == github.event.repository.default_branch))"
+    assert clear["if"] == (
+        "github.event_name == 'pull_request_target' && github.run_attempt == '1' && github.event.action == 'synchronize'"
     )
-    record_if = record["if"]
-    for action, base, expected in (
-        ("unlabeled", "other-branch", True),
-        ("labeled", "other-branch", False),
-    ):
-        evaluated = record_if.replace("github.run_attempt", "'1'")
-        evaluated = evaluated.replace("github.event.label.name", repr(APPROVAL))
-        evaluated = evaluated.replace("github.event.action", repr(action))
-        evaluated = evaluated.replace("github.event.pull_request.base.ref", repr(base))
-        evaluated = evaluated.replace("github.event.repository.default_branch", repr("main"))
-        assert eval(evaluated.replace("&&", "and").replace("||", "or"), {"__builtins__": {}}) is expected
-    assert set(clear) == {"if", "permissions", "runs-on", "steps"}
-    assert set(record) == {*clear, "concurrency"}
+    assert record["if"] == (
+        "github.event_name == 'pull_request_target' && github.run_attempt == '1' && "
+        "github.event.label.name == 'workflow-change-approved' && "
+        "(github.event.action == 'labeled' || github.event.action == 'unlabeled')"
+    )
     assert record["concurrency"] == {
         "group": "workflow-guard-record-approval-${{ github.event.number }}",
         "cancel-in-progress": False,
     }
-    for job, permissions, script, env in (
-        (clear, {"pull-requests": "write"}, CLEAR_APPROVAL_SCRIPT, {}),
-        (
-            record,
-            {"statuses": "write", "pull-requests": "read"},
-            RECORD_APPROVAL_SCRIPT,
-            {
-                "PR_HEAD_SHA": "${{ github.event.pull_request.head.sha }}",
-                "PR_ACTION": "${{ github.event.action }}",
-            },
-        ),
+    for job, permissions, mode in (
+        (clear, {"contents": "read", "pull-requests": "write"}, "--clear-approval"),
+        (record, {"contents": "read", "statuses": "write", "pull-requests": "read"}, "--record-approval"),
     ):
         assert job["runs-on"] == "ubuntu-latest"
         assert job["permissions"] == permissions
-        (step,) = job["steps"]
+        checkout, step = job["steps"]
+        assert set(checkout) == {"name", "uses", "with"}
         assert set(step) == {"name", "env", "run"}
         assert step["env"] == {
             "GH_TOKEN": "${{ github.token }}",
             "PR_NUMBER": "${{ github.event.number }}",
-            **env,
         }
-        assert step["run"] == script
+        assert step["run"] == f'python3 scripts/workflow_guard.py --repo "$GITHUB_REPOSITORY" --pr "$PR_NUMBER" {mode}'
 
 
 @pytest.mark.parametrize(
@@ -449,110 +544,86 @@ def test_write_jobs_only_run_the_expected_scripts(guard_workflow):
     [
         ("HTTP/2.0 204 No Content", 0, 0),
         ("HTTP/2.0 404 Not Found", 1, 0),
-        ("HTTP/2.0 403 Forbidden", 1, 1),
-        ("", 1, 1),
+        ("HTTP/2.0 403 Forbidden", 1, 2),
+        ("", 1, 2),
     ],
 )
 def test_clear_approval_uses_one_delete_and_only_accepts_success_or_404(
-    guard_workflow, status_line, api_exit, job_exit
+    fake_gh, pull_request_event, status_line, api_exit, job_exit
 ):
-    script = guard_workflow["jobs"]["clear-approval"]["steps"][0]["run"]
-    fake_gh = """
-gh() {
-  printf '%s\\n' "$*" >&3
-  printf '%s\\r\\n' "$STATUS_LINE"
-  return "$API_EXIT"
-}
-exec 3>&1
-"""
-    result = subprocess.run(
-        _workflow_bash_command(fake_gh + script, "-e"),
-        env=dict(
-            os.environ,
-            GITHUB_REPOSITORY="example/project",
-            PR_NUMBER="42",
-            STATUS_LINE=status_line,
-            API_EXIT=str(api_exit),
-        ),
-        capture_output=True,
-        text=True,
-    )
-    assert result.returncode == job_exit, result.stderr
-    assert result.stdout.splitlines() == [
-        "api --include --silent -X DELETE repos/example/project/issues/42/labels/workflow-change-approved"
+    pull_request_event(action="synchronize", base="release/0.32")
+    calls = fake_gh([[]], bases=("release/0.32",) * 3, delete=(api_exit, status_line))
+
+    assert workflow_guard.main([*CLI_ARGS, "--clear-approval"]) == job_exit
+    assert calls == [
+        ["repos/example/project/pulls/42"],
+        ["--include", "--silent", "-X", "DELETE", "repos/example/project/issues/42/labels/workflow-change-approved"],
     ]
 
 
+@pytest.mark.parametrize("flag", ["--record-approval", "--clear-approval"])
+@pytest.mark.parametrize("live", [{"heads": ("c" * 40,)}, {"bases": ("release/0.32",)}, {"live_repo": "example/other"}])
+def test_write_jobs_reject_stale_or_mismatched_live_snapshot(fake_gh, pull_request_event, flag, live):
+    pull_request_event(action="labeled" if flag == "--record-approval" else "synchronize")
+    calls = fake_gh([[]], **live)
+
+    assert workflow_guard.main([*CLI_ARGS, flag]) == 2
+    assert calls == [["repos/example/project/pulls/42"]]
+
+
 @pytest.mark.parametrize(
-    ("sha", "number", "action", "labels", "api_exit", "job_exit", "read_labels", "state"),
+    ("action", "latest", "present", "exit_code", "state"),
     [
-        (HEAD, "42", "labeled", [[{"name": APPROVAL}]], 0, 0, True, "success"),
-        (HEAD, "42", "labeled", [[], [{"name": APPROVAL}]], 0, 0, True, "success"),
-        (HEAD, "42", "labeled", [[{"name": "other"}]], 0, 0, True, "failure"),
-        (HEAD, "42", "labeled", [[{"name": APPROVAL}, {}]], 0, 2, True, None),
-        (HEAD, "42", "labeled", [[]], 1, 2, True, None),
-        ("B" * 64, "42", "unlabeled", [[{"name": APPROVAL}]], 0, 0, False, "failure"),
-        (HEAD, "42", "unlabeled", [[]], 1, 2, False, "failure"),
-        ("a" * 39, "42", "labeled", [[]], 0, 1, False, None),
-        ("G" * 40, "42", "labeled", [[]], 0, 1, False, None),
-        ("a" * 41, "42", "labeled", [[]], 0, 1, False, None),
-        (HEAD, "42/../43", "labeled", [[]], 0, 2, False, None),
-        (HEAD, "42", "edited", [[]], 0, 1, False, None),
+        ("labeled", "labeled", True, 0, "success"),
+        ("unlabeled", "labeled", True, 0, None),
+        ("labeled", "unlabeled", False, 0, "failure"),
+        ("unlabeled", "unlabeled", False, 0, "failure"),
+        ("labeled", "labeled", False, 2, None),
     ],
 )
-def test_record_approval_checks_live_label_and_posts_once_to_the_event_commit(
-    guard_workflow, sha, number, action, labels, api_exit, job_exit, read_labels, state
+def test_record_approval_keeps_latest_label_state(
+    fake_gh, pull_request_event, action, latest, present, exit_code, state
 ):
-    script = guard_workflow["jobs"]["record-approval"]["steps"][0]["run"]
-    fake_gh = """
-gh() {
-  printf '%s\\n' "$*" >&3
-  if [[ $2 == */labels?per_page=100 ]]; then
-    printf '%s\\n' "$LABELS"
-  fi
-  return "$API_EXIT"
-}
-exec 3>&1
-"""
-    result = subprocess.run(
-        _workflow_bash_command(fake_gh + script, "-e"),
-        env=dict(
-            os.environ,
-            GITHUB_REPOSITORY="example/project",
-            PR_HEAD_SHA=sha,
-            PR_NUMBER=number,
-            PR_ACTION=action,
-            API_EXIT=str(api_exit),
-            LABELS=json.dumps(labels),
-        ),
-        capture_output=True,
-        text=True,
+    base = "release/0.32"
+    pull_request_event(base=base, action=action)
+    calls = fake_gh(
+        [[]],
+        bases=(base,) * 3,
+        labels=[APPROVAL] if present else [],
+        history=[[approval_event()], [approval_event(latest, event_id=101, second=3)]],
     )
-    assert result.returncode == job_exit, result.stderr
-    calls = []
-    if read_labels:
-        calls.append("api repos/example/project/issues/42/labels?per_page=100 --paginate --slurp")
-    if state is not None:
+
+    assert workflow_guard.main([*CLI_ARGS, "--record-approval"]) == exit_code
+    posts = [call for call in calls if "POST" in call]
+    if state is None:
+        assert posts == []
+    else:
         description = "approved" if state == "success" else "approval removed"
-        calls.append(
-            f"api --silent -X POST repos/example/project/statuses/{sha} "
-            f"-f context={APPROVAL} -f state={state} -f description=pull request 42 {description}"
-        )
-    assert result.stdout.splitlines() == calls
+        assert posts == [
+            [
+                f"repos/example/project/statuses/{HEAD}",
+                "-X",
+                "POST",
+                "-f",
+                f"context={APPROVAL}",
+                "-f",
+                f"state={state}",
+                "-f",
+                f"description=pull request 42 {description} [{RELEASE_SCOPE}:101]",
+            ]
+        ]
 
 
 def test_workflow_only_checks_out_base_with_pinned_actions(guard_workflow):
-    checkouts = []
-    for job in guard_workflow["jobs"].values():
+    for name, job in guard_workflow["jobs"].items():
         assert "uses" not in job
-        for step in job["steps"]:
-            uses = step.get("uses")
-            if uses is not None:
-                assert re.fullmatch(r"actions/checkout@[0-9a-f]{40}", uses)
-                checkouts.append(step)
-                assert step["with"] == {"persist-credentials": False}
-                assert step["if"] == "github.event_name == 'pull_request_target'"
-    assert len(checkouts) == 1
+        (checkout,) = [step for step in job["steps"] if "uses" in step]
+        assert re.fullmatch(r"actions/checkout@[0-9a-f]{40}", checkout["uses"])
+        assert checkout["with"] == {"persist-credentials": False}
+        if name == "workflow-guard":
+            assert checkout["if"] == "github.event_name == 'pull_request_target'"
+        else:
+            assert "github.event_name == 'pull_request_target'" in job["if"]
 
 
 def workflow_strings(value, path=()):
@@ -567,24 +638,14 @@ def workflow_strings(value, path=()):
 
 
 def test_workflow_expressions_stay_out_of_shell_and_untrusted_inputs(guard_workflow):
-    event_head = ("jobs", "record-approval", "steps", 0, "env", "PR_HEAD_SHA")
-    trusted_inputs = {
-        "github.token",
-        "github.event.number",
-        "github.event.pull_request.base.ref",
-        "github.event.repository.default_branch",
-        "github.event.action",
-        "needs.record-approval.result",
-    }
+    trusted_inputs = {"github.token", "github.event.number", "needs.record-approval.result"}
     for path, value in workflow_strings(guard_workflow):
         if "run" in path:
             assert "${{" not in value, path
         if "env" in path or "with" in path:
             expressions = re.findall(r"\$\{\{\s*(.*?)\s*\}\}", value, re.DOTALL)
-            allowed = {"github.event.pull_request.head.sha"} if path == event_head else trusted_inputs
-            assert set(expressions) <= allowed, path
-        if "github.event.pull_request.head" in value:
-            assert path == event_head and value == "${{ github.event.pull_request.head.sha }}"
+            assert set(expressions) <= trusted_inputs, path
+        assert "github.event.pull_request.head" not in value, path
 
 
 # These are ordinary tests explicitly selected by workflow commands. Requiring a

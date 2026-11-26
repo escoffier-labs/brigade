@@ -26,7 +26,7 @@
 </p>
 
 > [!IMPORTANT]
-> **Inside Brigade:** agent-notify lives in [escoffier-labs/brigade](https://github.com/escoffier-labs/brigade) (source under `stations/notify`). Install `brigadestack` and run `brigade setup`, which installs the managed `agent-notify` binary and records its absolute path. Use `brigade add notifications` for wiring plans. This standalone repository remains available during the transition; report issues on the [Brigade tracker](https://github.com/escoffier-labs/brigade/issues).
+> **Inside Brigade:** agent-notify lives in [escoffier-labs/brigadestack](https://github.com/escoffier-labs/brigadestack) (source under `stations/notify`). Install `brigadestack` and run `brigade setup`, which installs the managed `agent-notify` binary and records its absolute path. Use `brigade add notifications` for wiring plans. This standalone repository remains available during the transition; report issues on the [Brigade tracker](https://github.com/escoffier-labs/brigadestack/issues).
 
 ## Install
 

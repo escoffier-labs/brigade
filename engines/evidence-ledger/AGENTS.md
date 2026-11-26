@@ -7,14 +7,14 @@
 
 ## Project Shape
 - MiseLedger is a local-first Go CLI that imports `miseledger.adapter.v1` JSONL records into a SQLite evidence archive, then serves search, show, explain, Markdown export, evidence bundles, read-only SQL, a loopback HTTP API, and a stdio MCP server.
-- Entry point: `cmd/miseledger/main.go`. Almost all command logic lives in `internal/app` (CLI dispatch, HTTP server, MCP, watch). Supporting packages: `internal/adapter` (record contract), `internal/ingest` (importer), `internal/archive` (SQLite), `internal/sources/` (native session, provider-export, and memory-card adapters), `internal/security`, `internal/textnorm`.
+- Entry point: `cmd/brigade-evidence/main.go`. Almost all command logic lives in `internal/app` (CLI dispatch, HTTP server, MCP, watch). Supporting packages: `internal/adapter` (record contract), `internal/ingest` (importer), `internal/archive` (SQLite), `internal/sources/` (native session, provider-export, and memory-card adapters), `internal/security`, `internal/textnorm`.
 - SQLite is pure Go via `modernc.org/sqlite`. Do not introduce cgo.
 - Docs in `docs/` cover the adapter contract, schema, MCP surface, and query cookbook. Fixtures live in `testdata/adapters` and `testdata/harnesses`.
 
 ## Verification
 - `go test ./...` runs the full suite across the app, archive, ingest, source adapters, and supporting packages.
 - `go vet ./...` for static checks.
-- `go build -o bin/miseledger ./cmd/miseledger` builds the CLI (`bin/` is gitignored).
+- `go build -o bin/brigade-evidence ./cmd/brigade-evidence` builds the CLI (`bin/` is gitignored).
 - When a change touches import, search, HTTP, or MCP behavior, run the matching smoke script. Each builds the binary if missing and runs in an isolated temp HOME:
   - `scripts/smoke_archive.sh` (import, search, evidence, prune, doctor)
   - `scripts/smoke_http.sh` (loopback HTTP server, needs `curl` and `python3`)
@@ -23,7 +23,6 @@
 
 ## Hard Prohibitions
 - Native imports read real private session logs (`miseledger import codex ~/.codex/sessions`, `openclaw ~/.openclaw/agents`, `claude ~/.claude/projects`). During development, review, or debugging, never run an import against a live session directory. Use `testdata/` fixtures and the temp-HOME smoke scripts instead. The only exception is an explicit user request naming the live path.
-- `scripts/bootstrap_local.sh` curls remote install scripts from GitHub. Never run it as a build or test step, and never run it at all without first reading what it fetches.
 - Need to exercise a new harness format: add a fixture under `testdata/`, never a snippet copied from a real session log.
 - Tempted to bypass a failing check: do not. Never push with `--no-verify` if a pre-push hook exists, and never commit around a failing test.
 - Hit a blocker (missing tool, failing dependency, ambiguous spec): stop and report the exact blocker and error text. Do not work around it silently.

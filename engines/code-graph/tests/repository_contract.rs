@@ -678,7 +678,11 @@ fn mcp_read_only_contract_distinguishes_opt_in_refresh_writes() {
         );
     }
 
-    for path in ["src/bin/graphtrail-mcp.rs", "Dockerfile", "tests/mcp.rs"] {
+    for path in [
+        "src/bin/brigade-code-graph-mcp.rs",
+        "Dockerfile",
+        "tests/mcp.rs",
+    ] {
         let content = repository_file(path);
         assert!(
             content.contains("read-only query connections"),

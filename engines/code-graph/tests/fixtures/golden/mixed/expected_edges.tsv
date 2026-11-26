@@ -7,7 +7,7 @@ python/pkg/commands/entry.py	<module>	15	python/pkg/commands/entry.py	cli
 python/pkg/commands/entry.py	<module>	16	python/pkg/commands/sub/sibling.py	func
 python/pkg/commands/sub/caller.py	run	6	python/pkg/commands/handoff_cmd.py	lint
 python/pkg/commands/sub/caller.py	run	7	python/pkg/commands/sub/sibling.py	func
-src/bin/graphtrail-mcp.rs	main	4	src/mcp.rs	serve
+src/bin/brigade-code-graph-mcp.rs	main	4	src/mcp.rs	serve
 src/lib.rs	run	14	src/factory.rs	build
 src/lib.rs	run	15	src/m.rs	f
 src/lib.rs	run	16	src/m.rs	g

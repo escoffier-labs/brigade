@@ -1,12 +1,15 @@
 # content-guard: allow jwt-token file
 from __future__ import annotations
 
+import re
 import unittest
 from itertools import product
 from pathlib import Path
+from time import perf_counter
 
 from brigade.guard.engine import scan_text
 from brigade.guard.policy import Policy, load_policy
+from brigade.guard.rules import DEFAULT_RULES
 from brigade.guard.types import Rule
 
 
@@ -307,6 +310,146 @@ class MissingLeakShapeTests(unittest.TestCase):
                     self.assertEqual([finding.rule_id for finding in result.findings], ["windows-home-path"])
                     self.assertEqual([finding.match for finding in result.findings], [path])
                     self.assertEqual(result.redacted_text, before + "<PRIVATE_HOME_PATH>" + after)
+
+    def test_unquoted_windows_spaced_directories_stop_at_explicit_boundaries(self) -> None:
+        public_policy = load_policy(Path(__file__).parents[2] / "src/brigade/guard/policies/public-repo.json")
+        redact_policy = Policy(rules={"windows-home-path": "redact"})
+        for components in (("Example User",), ("Example User", "Private Folder")):
+            for separators in product(("\\", "\\\\", "/"), repeat=len(components) + 1):
+                path = "C:" + "".join(
+                    separator + part for separator, part in zip(separators, ("Users", *components), strict=True)
+                )
+                for before, after in (
+                    ("Config at ", ""),
+                    ("Config at ", "  \r\nNext line."),
+                    ("Config at ", ", then continue."),
+                    ("Config at ", ": retry later"),
+                    ("Config at (", ") for logs."),
+                    ("Config at [", "]; then continue."),
+                    ("Config at ", "\tthen continue"),
+                ):
+                    with self.subTest(separators=separators, components=components, before=before, after=after):
+                        text = before + path + after
+                        blocked = scan_text(text, policy=public_policy)
+                        self.assertTrue(blocked.blocked)
+                        self.assertEqual([finding.match for finding in blocked.findings], [path])
+                        result = scan_text(text, policy=redact_policy)
+                        self.assertEqual([finding.match for finding in result.findings], [path])
+                        self.assertEqual(result.redacted_text, before + "<PRIVATE_HOME_PATH>" + after)
+
+    def test_unquoted_windows_directory_keeps_ambiguous_prose(self) -> None:
+        path = "C:" + "\\" + "Users" + "\\" + "Example User" + "\\" + "Logs"
+        for after in (" for later.", " --verbose", " see (details)"):
+            with self.subTest(after=after):
+                result = scan_text("Config at " + path + after, policy=Policy(rules={"windows-home-path": "redact"}))
+                self.assertEqual([finding.match for finding in result.findings], [path])
+                self.assertEqual(result.redacted_text, "Config at <PRIVATE_HOME_PATH>" + after)
+
+    def test_windows_directory_does_not_stop_at_a_colon_inside_following_text(self) -> None:
+        root = "C:" + "\\" + "Users" + "\\"
+        first, second = root + "example-one", root + "example-two"
+        replacement = "<PRIVATE_HOME_PATH>"
+        for suffix, expected, matches in (
+            (" and " + second, " and " + replacement, [first, second]),
+            (" or http://", " or http://", [first]),
+            (" at 10:30", " at 10:30", [first]),
+        ):
+            with self.subTest(suffix=suffix):
+                result = scan_text("See " + first + suffix, policy=Policy(rules={"windows-home-path": "redact"}))
+                self.assertEqual([finding.match for finding in result.findings], matches)
+                self.assertEqual(result.redacted_text, "See " + replacement + expected)
+
+    def test_unquoted_windows_dotted_directories_use_the_explicit_boundary(self) -> None:
+        root = "C:" + "\\" + "Users" + "\\"
+        for leaf in ("example-user\\v1.2 Final", "Example.User Final"):
+            with self.subTest(leaf=leaf):
+                path = root + leaf
+                result = scan_text(path, policy=Policy(rules={"windows-home-path": "redact"}))
+                self.assertEqual([finding.match for finding in result.findings], [path])
+                self.assertEqual(result.redacted_text, "<PRIVATE_HOME_PATH>")
+
+    def test_windows_directories_stop_at_trailing_separator_or_markup(self) -> None:
+        for separator in ("\\", "\\\\", "/"):
+            root = "C:" + separator + "Users" + separator
+            for before, path, after in (
+                ("See ", root + "example-user" + separator + "My Documents" + separator, " for later"),
+                ("path: ", root + "Example User", " # comment"),
+                ("**", root + "Example User", "**"),
+            ):
+                with self.subTest(separator=separator, before=before):
+                    result = scan_text(before + path + after, policy=Policy(rules={"windows-home-path": "redact"}))
+                    self.assertEqual([finding.match for finding in result.findings], [path])
+                    self.assertEqual(result.redacted_text, before + "<PRIVATE_HOME_PATH>" + after)
+
+    def test_windows_directories_inside_underscore_emphasis(self) -> None:
+        public_policy = load_policy(Path(__file__).parents[2] / "src/brigade/guard/policies/public-repo.json")
+        redact_policy = Policy(rules={"windows-home-path": "redact"})
+        root = "C:" + "\\" + "Users" + "\\"
+        for marker, leaf, after in (
+            ("_", "Example User", ""),
+            ("_", "Example_User\\Private Folder", ", then continue."),
+            ("_", "Example_User_", ""),
+            ("__", "example-user", "."),
+        ):
+            with self.subTest(marker=marker, leaf=leaf, after=after):
+                path = root + leaf
+                text = f"Open {marker}{path}{marker}{after}"
+                blocked = scan_text(text, policy=public_policy)
+                self.assertTrue(blocked.blocked)
+                self.assertEqual([finding.match for finding in blocked.findings], [path])
+                result = scan_text(text, policy=redact_policy)
+                self.assertEqual([finding.match for finding in result.findings], [path])
+                self.assertEqual(result.redacted_text, f"Open {marker}<PRIVATE_HOME_PATH>{marker}{after}")
+
+    def test_windows_directories_stop_at_invalid_path_characters(self) -> None:
+        public_policy = load_policy(Path(__file__).parents[2] / "src/brigade/guard/policies/public-repo.json")
+        redact_policy = Policy(rules={"windows-home-path": "redact"})
+        path = "C:" + "\\" + "Users" + "\\" + "Example User"
+        for after in ("?", "? Next", "<", ">", ": Next", '"', "|", "*"):
+            with self.subTest(after=after):
+                text = "Open " + path + after
+                blocked = scan_text(text, policy=public_policy)
+                self.assertTrue(blocked.blocked)
+                self.assertEqual([finding.match for finding in blocked.findings], [path])
+                result = scan_text(text, policy=redact_policy)
+                self.assertEqual([finding.match for finding in result.findings], [path])
+                self.assertEqual(result.redacted_text, "Open <PRIVATE_HOME_PATH>" + after)
+
+    def test_emphasized_windows_paths_stop_at_invalid_path_characters(self) -> None:
+        public_policy = load_policy(Path(__file__).parents[2] / "src/brigade/guard/policies/public-repo.json")
+        redact_policy = Policy(rules={"windows-home-path": "redact"})
+        root = "C:" + "\\" + "Users" + "\\"
+        for marker, leaf, boundary in product(("_", "__", "*"), ("Example", "Example User"), '<>:"|?*'):
+            with self.subTest(marker=marker, leaf=leaf, boundary=boundary):
+                path = root + leaf
+                tail = f"{boundary} More{marker}"
+                text = f"{marker}{path}{tail}"
+                blocked = scan_text(text, policy=public_policy)
+                self.assertTrue(blocked.blocked)
+                self.assertEqual([finding.match for finding in blocked.findings], [path])
+                result = scan_text(text, policy=redact_policy)
+                self.assertEqual([finding.match for finding in result.findings], [path])
+                self.assertEqual(result.redacted_text, f"{marker}<PRIVATE_HOME_PATH>{tail}")
+
+    def test_windows_spaced_directory_matching_scales_linearly(self) -> None:
+        rule = next(rule for rule in DEFAULT_RULES if rule.id == "windows-home-path")
+        pattern = re.compile(rule.pattern, rule.flags)
+        root = "C:" + "\\" + "Users" + "\\"
+        unit = "A" * 63 + " " * 64
+        elapsed = []
+        for repeats in (1000, 8000):
+            path = root + unit * repeats + "Example User"
+            text = path + "?"
+            timings = []
+            for _ in range(3):
+                start = perf_counter()
+                match = pattern.search(text)
+                timings.append(perf_counter() - start)
+                assert match is not None
+                self.assertEqual(match.span(), (0, len(path)))
+            elapsed.append(min(timings))
+        # An 8x input grows to about 64x runtime if matching is quadratic.
+        self.assertLess(elapsed[1] / elapsed[0], 24, elapsed)
 
     def test_compound_hostname_config_keys_match_without_broadening_code_context(self) -> None:
         host = "fixture-db" + ".internal"

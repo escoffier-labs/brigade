@@ -83,7 +83,7 @@ A workspace file never chooses where a credential goes. `[hub]` in `.brigade/mem
 The pair replaces both fleet values for hub memory only: `status`, `search`, `card`, `pull`, `push`, `import` and `proposals`, and the Dot and Duet memory tools, which run those commands. `brigade fleet` commands keep reading `[fleet]`. The keys go together, and setting one without the other is a config error that names the missing key. The checks:
 
 - `hub_url` follows the fleet hub URL rule (https, or http on loopback) and may not carry a user name or password.
-- `node_token_file` expands a leading `~` and must then be an absolute path. It must be a private regular file you own, with no group or other permission bits, holding 32 to 512 URL-safe characters (letters, digits, `_` and `-`). This is the check the message credentials get. The fleet `node_token_file` is read without it, so a fleet node token outside that range works through `[fleet]` but is refused here.
+- `node_token_file` expands a leading `~` and must then be an absolute path. It must be a private regular file you own, with no group or other permission bits, holding 32 to 512 URL-safe characters (letters, digits, `_` and `-`). Fleet token files also have POSIX ownership and permission checks. The 32 to 512 character format applies to the memory hub override.
 - The override must not be a fleet credential. A token equal to the fleet node token or admin token is refused, and so is a file that is the same file as `[fleet] node_token_file` or `[fleet] token_file`. The error names the setting and never prints either token.
 
 In `off` mode the override is not read.

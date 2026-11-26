@@ -39,7 +39,7 @@ def test_filing_degrades_to_empty_predicted_without_graphtrail(tmp_path):
 
 def test_filing_predicted_enrichment_via_mocked_impact(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_bytes(b"fake-graphtrail-index")
 
@@ -70,7 +70,7 @@ def test_filing_predicted_enrichment_via_mocked_impact(tmp_path, monkeypatch):
 
 
 def test_run_graphtrail_impact_argv_for_dash_query(tmp_path, monkeypatch):
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_bytes(b"fake-graphtrail-index")
     captured: list[list[str]] = []
@@ -93,7 +93,7 @@ def test_run_graphtrail_impact_argv_for_dash_query(tmp_path, monkeypatch):
 
 
 def test_run_graphtrail_impact_argv_preserves_non_dash_query(tmp_path, monkeypatch):
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_bytes(b"fake-graphtrail-index")
     captured: list[list[str]] = []
@@ -152,7 +152,7 @@ def test_extract_plan_files_from_steps_and_source_context():
 
 def test_run_graphtrail_impact_unwraps_graph_query_object(tmp_path, monkeypatch):
     """Engines since #1646 wrap impact edges in a resolution object."""
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_bytes(b"fake-graphtrail-index")
     edge = {"source": "a", "target": "b", "source_file": "src/a.py", "target_file": "src/b.py"}
@@ -170,8 +170,8 @@ def test_run_graphtrail_impact_unwraps_graph_query_object(tmp_path, monkeypatch)
 
 @pytest.mark.parametrize("resolution", ["qualified_name", "fuzzy"])
 def test_prediction_preserves_ambiguous_graph_candidates(tmp_path, monkeypatch, resolution):
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
-    db.parent.mkdir()
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
+    db.parent.mkdir(parents=True)
     db.write_bytes(b"fake-graphtrail-index")
     monkeypatch.setattr(footprint_mod.component_bins, "resolve", lambda _name: "/fake/graphtrail")
     payload = {

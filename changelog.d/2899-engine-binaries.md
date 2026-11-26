@@ -1,0 +1,1 @@
+- Ship only canonical engine executables and clean up managed compatibility executables during setup and rollback.

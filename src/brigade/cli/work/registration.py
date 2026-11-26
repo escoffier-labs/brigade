@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 
-from brigade.engine_deprecation import LegacyOption
 import json
 from pathlib import Path
 
@@ -245,6 +244,15 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_work_verify_required = verify_sub.add_parser("required", help="Plan the tests required by the current diff.")
     p_work_verify_required.add_argument("--target", "-t", type=Path, default=Path("."), help="Repository to inspect.")
     p_work_verify_required.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_verify_required.add_argument("--worktree", action="store_true", help="Plan against the current Git tree.")
+
+    p_push_check = verify_sub.add_parser("push-check", help="Check local verification receipts for pushed branch tips.")
+    p_push_check.add_argument("--target", "-t", type=Path, default=Path("."), help="Repository to inspect.")
+    p_push_check.add_argument("--ref", help="Check a local ref instead of reading pre-push lines.")
+    p_push_check.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    from ...work_cmd.push_gate import register as register_push_gate
+
+    register_push_gate(verify_sub)
     p_work_verify_plan = verify_sub.add_parser("plan", help="Plan local verification without running commands.")
     p_work_verify_plan.add_argument(
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect."
@@ -314,16 +322,6 @@ def register(sub: argparse._SubParsersAction) -> None:
         type=float,
         default=None,
         help="Timeout in seconds for each code graph sync/diff during code graph delta capture.",
-    )
-    # Legacy spelling, hidden from --help, accepted through v0.32 (docs/phase-engine-rename.md).
-    p_work_verify_run.add_argument(
-        "--graphtrail-timeout",
-        action=LegacyOption,
-        replacement="--code-graph-timeout",
-        dest="code_graph_timeout",
-        type=float,
-        default=None,
-        help=argparse.SUPPRESS,
     )
     p_work_verify_run.add_argument(
         "--capture",
@@ -912,15 +910,6 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         metavar="QUERY",
         help="Fetch a Brigade-source evidence bundle from the evidence engine and print it as untrusted context.",
-    )
-    # Legacy spelling, hidden from --help, accepted through v0.32 (docs/phase-engine-rename.md).
-    p_work_import_context.add_argument(
-        "--from-miseledger",
-        action=LegacyOption,
-        replacement="--from-evidence",
-        dest="from_evidence",
-        default=None,
-        help=argparse.SUPPRESS,
     )
     p_work_import_context.add_argument("--limit", type=int, default=5, help="Maximum evidence results to fetch.")
     p_work_import_context.add_argument(

@@ -301,23 +301,22 @@ It runs these checks in order:
 
 1. Resolve `orca-ide` from PATH, the same command dispatch uses.
    On Linux, the command `orca` belongs to the GNOME screen reader.
-2. Run `--version` and compare its output with the Orca adapter's supported
-   versions.
-3. Run `orchestration worker-start --help`, recognize Orca's worker-start
-   usage line, and look for `--retry-request` before the next heading after
-   `Options:`.
-4. Validate each selected seat's `[orca_targets.<seat>]` declaration using
-   the Orca adapter's dispatch rules for the agent, version, worktree, model,
-   and effort. Invalid declarations report `orca-target-invalid`. A valid
-   declaration with an unsupported setting reports `orca-target-<gap>`.
+2. Run `--version` and parse the installed release number.
+3. Run `agent-context --json` once and check the schema 1 registry for the
+   exact command paths and required flags for `worker-start`, `worker-show`,
+   `worker-stop`, `worker-read`, and `inbox`. Both start and stop must
+   advertise `retry-request`. Additional flags and fields are accepted.
+4. Validate each selected seat's `[orca_targets.<seat>]` declaration, including
+   an exact match between its `orca_version` and the parsed CLI version.
 
 Each CLI probe has a 12-second timeout and receives a copy of the environment
 with credential-like variable names removed. A timed-out, failed, or unrecognized
-probe produces `unknown` evidence and exit 3 (`unverified`). A missing
-executable, unsupported version, absent retry flag, or incompatible target
-produces exit 2 (`blocked`). Subsequent checks appear as `skipped` in both
-output formats when a prerequisite prevents them from running. The JSON schema
-is `brigade.roster_readiness.v1`. Orca evidence is tagged `orca-local-probe`.
+probe produces `unknown` evidence and exit 3 (`unverified`). Missing commands
+or flags, an absent executable, or an incompatible seat produce exit 2
+(`blocked`). Subsequent checks appear as `skipped` when a prerequisite
+prevents them from running. The JSON schema is `brigade.roster_readiness.v1`.
+Orca evidence is tagged `orca-local-probe`. The existing `orca-retry-request`
+category reports the command registry check.
 
 `ready` describes the local probe and roster snapshot. The route leaves admitted
 capacity unset and reports `launch_guaranteed: false` and

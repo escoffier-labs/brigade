@@ -1,0 +1,1 @@
+- Use BrigadeStack in the guides and point current documentation links to the renamed GitHub repository.

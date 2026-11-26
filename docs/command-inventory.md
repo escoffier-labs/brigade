@@ -53,7 +53,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade profiles`: 2 command path(s)
 - `brigade projection`: 1 command path(s)
 - `brigade projects` (extras): 10 command path(s)
-- `brigade receipts`: 20 command path(s)
+- `brigade receipts`: 19 command path(s)
 - `brigade reconfigure`: 1 command path(s)
 - `brigade release` (extras): 23 command path(s)
 - `brigade repos` (extras): 74 command path(s)
@@ -77,7 +77,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade untrusted` (extras): 2 command path(s)
 - `brigade update`: 1 command path(s)
 - `brigade version`: 1 command path(s)
-- `brigade work`: 165 command path(s)
+- `brigade work`: 171 command path(s)
 - `brigade workflow` (extras): 3 command path(s)
 
 ## Commands
@@ -527,7 +527,6 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade receipts export derivative`
 - `brigade receipts export evidence`
 - `brigade receipts export journal`
-- `brigade receipts export miseledger` (deprecated; use `brigade receipts export evidence`)
 - `brigade receipts export openinference`
 - `brigade receipts export otel-genai`
 - `brigade receipts export package`
@@ -1029,6 +1028,12 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade work tasks`
 - `brigade work verify ci`
 - `brigade work verify plan`
+- `brigade work verify push-check`
+- `brigade work verify push-gate install`
+- `brigade work verify push-gate report`
+- `brigade work verify push-gate run`
+- `brigade work verify push-gate status`
+- `brigade work verify push-gate uninstall`
 - `brigade work verify required`
 - `brigade work verify run`
 - `brigade work verify runs`

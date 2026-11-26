@@ -22,6 +22,7 @@ from brigade.outcome_ledger_actions import EvidenceError, parse_time  # noqa: E4
 from brigade.outcome_ledger_git import GitError, Repo, is_sha  # noqa: E402
 
 PLAN_FILE = "plan.json"
+CANDIDATE_TITLE = "chore(outcome): update the CI outcome ledger"
 BRANCH_CONFIG = (
     "-c",
     "user.name=github-actions[bot]",
@@ -73,10 +74,16 @@ def compute(ev: ledger.Evidence, main: str, artifact: Path, now: dt.datetime) ->
     (artifact / PLAN_FILE).write_bytes(ledger.canonical_bytes(metadata))
     if plan.proposed is not None:
         definitions = ledger.defs_from_ledger(plan.proposed)
-        output = {
-            ledger.LEDGER_PATH: ledger.canonical_bytes(plan.proposed),
-            **bundle_files(ev.repo, restores(plan.proposed, definitions)),
-        }
+        raw = ledger.canonical_bytes(plan.proposed)
+        restore_map = restores(plan.proposed, definitions)
+        output = {ledger.LEDGER_PATH: raw, **bundle_files(ev.repo, restore_map)}
+        if restore_map:
+            commit = candidate_commit(ev.repo, main, raw, restore_map, title=CANDIDATE_TITLE)
+            for path in ledger.ROLLBACK_DERIVED_PATHS:
+                data = ev.repo.show(commit, path)
+                if data is None:
+                    raise PublicationError(f"candidate is missing {path}")
+                output[path] = data
         for name, data in output.items():
             path = artifact / name
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -112,8 +119,12 @@ def candidate_commit(repo: Repo, main: str, raw: bytes, restore_map: dict[str, s
         git("read-tree", main)
         for path, source in restore_map.items():
             git("restore", "--staged", f"--source={source}", "--", path)
-        blob = git("hash-object", "-w", "--stdin", data=raw)
-        git("update-index", "--add", "--cacheinfo", f"100644,{blob},{ledger.LEDGER_PATH}")
+        files = {ledger.LEDGER_PATH: raw}
+        if restore_map:
+            files.update(ledger.rollback_derived_files(repo, git("write-tree")))
+        for path, data in files.items():
+            blob = git("hash-object", "-w", "--stdin", data=data)
+            git("update-index", "--add", "--cacheinfo", f"100644,{blob},{path}")
         tree = git("write-tree")
         return git(*BRANCH_CONFIG, "commit-tree", tree, "-p", main, "-m", title)
 
@@ -164,11 +175,15 @@ def verify_artifact(
         raise PublicationError("the plan state disagrees with its proposed ledger")
     restore_map = restores(proposed, definitions)
     bundle = bundle_files(ev.repo, restore_map)
-    if files != {PLAN_FILE, ledger.LEDGER_PATH, *bundle}:
+    derived = ledger.ROLLBACK_DERIVED_PATHS if restore_map else ()
+    if files != {PLAN_FILE, ledger.LEDGER_PATH, *bundle, *derived}:
         raise PublicationError("the artifact files disagree with the proposed plan")
     if any((artifact / path).read_bytes() != data for path, data in bundle.items()):
         raise PublicationError("the artifact has a different copy of a restored bundle")
-    commit = candidate_commit(ev.repo, main, raw, restore_map, title="chore(outcome): update the CI outcome ledger")
+    commit = candidate_commit(ev.repo, main, raw, restore_map, title=CANDIDATE_TITLE)
+    for path in derived:
+        if (artifact / path).read_bytes() != ev.repo.show(commit, path):
+            raise PublicationError(f"the artifact has a different copy of a rollback-derived file: {path}")
     errors = ledger.verify_ledger(
         ev,
         raw=raw,

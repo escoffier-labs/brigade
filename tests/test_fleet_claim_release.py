@@ -1352,6 +1352,7 @@ def test_heartbeat_and_exit_release_follow_a_rotated_node_token_on_the_bound_hub
     home.mkdir()
     token_file = tmp_path / "node-token"
     token_file.write_text("fake-token-one\n", encoding="utf-8")
+    token_file.chmod(0o600)
     # Trigger the heartbeat's next renewal from this test instead of waiting for
     # a wall-clock tick. The connection read is gated until rotation is fully set
     # up, so the renewal observes the final token and config together.
@@ -1509,6 +1510,7 @@ def test_bound_connection_follows_shared_rotation_after_a_transient_empty_bind_s
 
 def _write_fleet_file(home, token_file, hub_url, token):
     token_file.write_text(token + "\n", encoding="utf-8")
+    token_file.chmod(0o600)
     (home / "fleet.toml").write_text(
         f'[fleet]\nhub_url = "{hub_url}"\nnode_token_file = "{token_file.as_posix()}"\n', encoding="utf-8"
     )
@@ -1539,6 +1541,7 @@ def test_bound_connection_reads_a_file_token_and_its_hub_from_one_snapshot(tmp_p
 
     token_file = tmp_path / "node-token"
     token_file.write_text("fake-hub-two-token\n", encoding="utf-8")
+    token_file.chmod(0o600)
     _fleet_env(monkeypatch)
     snapshots = []
 
@@ -1599,7 +1602,7 @@ def test_initial_acquire_retry_uses_a_token_rotated_during_the_first_attempt(mon
     assert posts[0][2] == posts[1][2]
 
 
-@pytest.mark.parametrize("file_state", ["empty", "unreadable"])
+@pytest.mark.parametrize("file_state", ["empty", "missing"])
 def test_exit_orphan_release_keeps_node_credential_when_its_file_is_unavailable(tmp_path, monkeypatch, file_state):
     """Orphan cleanup must retain the claim's node credential kind (#1781)."""
     home = tmp_path / "home"
@@ -1630,7 +1633,6 @@ def test_exit_orphan_release_keeps_node_credential_when_its_file_is_unavailable(
             token_file.write_text("", encoding="utf-8")
         else:
             token_file.unlink()
-            token_file.mkdir()  # Reading a directory fails even for privileged test runners.
     assert done.wait(5), "exit cleanup did not hand off to orphan release"
     assert len(releases) == 2
     assert [(hub, token) for hub, token, _ in releases] == [(HUB_ONE, "fake-node-token")] * 2
@@ -1645,7 +1647,9 @@ def test_repo_claim_keeps_initial_credential_kind_across_empty_bind_snapshots(tm
     node_file = home / "node-token"
     admin_file = home / "admin-token"
     node_file.write_text("fake-node-token" if kind == "node" else "", encoding="utf-8")
+    node_file.chmod(0o600)
     admin_file.write_text("fake-admin-one", encoding="utf-8")
+    admin_file.chmod(0o600)
     config_file = home / "fleet.toml"
     full_config = (
         f'[fleet]\nhub_url = "{HUB_ONE}"\nnode_token_file = "{node_file.as_posix()}"\n'

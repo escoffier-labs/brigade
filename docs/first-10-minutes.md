@@ -1,4 +1,4 @@
-# First 10 Minutes With Brigade Stack
+# First 10 Minutes With BrigadeStack
 
 Start with one Git repository you control. This walkthrough uses the published 0.31.0 bridge and records a check you can inspect afterward. It needs no model credentials, services, or schedulers.
 
@@ -114,4 +114,4 @@ brigadestack operator doctor --target . --profile local-operator --json
 brigadestack operator verify-harness --target . --harness codex --json
 ```
 
-Review output before sharing it. Remove tokens, private hostnames, repository names, and absolute personal paths. Use the [setup problem form](https://github.com/escoffier-labs/brigade/issues/new/choose) with the redacted evidence. Do not rerun setup with `--force` to suppress an unexplained failure.
+Review output before sharing it. Remove tokens, private hostnames, repository names, and absolute personal paths. Use the [setup problem form](https://github.com/escoffier-labs/brigadestack/issues/new/choose) with the redacted evidence. Do not rerun setup with `--force` to suppress an unexplained failure.

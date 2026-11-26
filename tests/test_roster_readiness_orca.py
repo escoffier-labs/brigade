@@ -1,4 +1,4 @@
-"""Local route support against the Orca 1.4.269 CLI contract."""
+"""Local readiness against versioned Orca CLI registry evidence."""
 
 import json
 import os
@@ -10,14 +10,19 @@ from brigade import cli, proc
 
 ORCA_VERSION = "1.4.269"
 VERSION_ARGS = ["--version"]
-HELP_ARGS = ["orchestration", "worker-start", "--help"]
+REGISTRY_ARGS = ["agent-context", "--json"]
+
+
+def registry_fixture(version):
+    path = Path(__file__).parent / "fixtures" / "native_orca" / f"registry-{version}.json"
+    fixture = json.loads(path.read_bytes())
+    assert fixture["orca_version"] == version
+    return fixture["registry"]
 
 
 @pytest.fixture
 def orca_cli(tmp_path, monkeypatch, capsys):
-    fixture_path = Path(__file__).parent / "fixtures" / "native_orca" / f"readiness-{ORCA_VERSION}.json"
-    fixture = json.loads(fixture_path.read_bytes())
-    assert fixture["orca_version"] == ORCA_VERSION
+    fixture = registry_fixture(ORCA_VERSION)
     executable = str(tmp_path / "example orca install" / "orca-test.exe")
     roster = tmp_path / "roster.toml"
 
@@ -25,9 +30,9 @@ def orca_cli(tmp_path, monkeypatch, capsys):
         *,
         installed=True,
         version=None,
-        help_text=None,
+        registry_text=None,
         agent="codex",
-        help_code=0,
+        registry_code=0,
         declared_version=ORCA_VERSION,
         worktree="new-child",
         target_fields="",
@@ -72,11 +77,11 @@ orca_version = "{declared_version}"
             args = argv[1:]
             calls.append(args)
             if args == VERSION_ARGS:
-                stdout = fixture["version"]["stdout"] if version is None else version
+                stdout = ORCA_VERSION + "\n" if version is None else version
                 return proc.Result(0, stdout, "")
-            assert args == HELP_ARGS
-            stdout = fixture["worker_start_help"]["stdout"] if help_text is None else help_text
-            return proc.Result(help_code, stdout, "example diagnostic" if help_code else "")
+            assert args == REGISTRY_ARGS
+            stdout = json.dumps(fixture) if registry_text is None else registry_text
+            return proc.Result(registry_code, stdout, "example diagnostic" if registry_code else "")
 
         monkeypatch.setattr(proc, "resolve_executable", resolve)
         monkeypatch.setattr(proc, "run", run)
@@ -108,20 +113,20 @@ orca_version = "{declared_version}"
     [
         ("missing-binary", 2, "blocked", ("failed", "skipped", "skipped", "skipped"), "orca-binary-missing", []),
         (
-            "unsupported-version",
+            "version-mismatch",
             2,
             "blocked",
-            ("passed", "unsupported", "skipped", "skipped"),
-            "orca-version-unsupported",
-            [VERSION_ARGS],
+            ("passed", "passed", "passed", "unsupported"),
+            "orca-target-version-mismatch",
+            [VERSION_ARGS, REGISTRY_ARGS],
         ),
         (
             "missing-retry-request",
             2,
             "blocked",
             ("passed", "passed", "unsupported", "skipped"),
-            "orca-retry-request-unsupported",
-            [VERSION_ARGS, HELP_ARGS],
+            "orca-command-capabilities-missing",
+            [VERSION_ARGS, REGISTRY_ARGS],
         ),
         (
             "disabled-agent",
@@ -129,23 +134,23 @@ orca_version = "{declared_version}"
             "blocked",
             ("passed", "passed", "passed", "unsupported"),
             "orca-target-driver-unsupported",
-            [VERSION_ARGS, HELP_ARGS],
+            [VERSION_ARGS, REGISTRY_ARGS],
         ),
         (
             "probe-timeout",
             3,
             "unverified",
             ("passed", "passed", "unknown", "skipped"),
-            "orca-help-probe-timeout",
-            [VERSION_ARGS, HELP_ARGS],
+            "orca-registry-probe-timeout",
+            [VERSION_ARGS, REGISTRY_ARGS],
         ),
         (
             "probe-failure",
             3,
             "unverified",
             ("passed", "passed", "unknown", "skipped"),
-            "orca-help-probe-failed",
-            [VERSION_ARGS, HELP_ARGS],
+            "orca-registry-probe-failed",
+            [VERSION_ARGS, REGISTRY_ARGS],
         ),
         (
             "unrecognized-version-output",
@@ -155,20 +160,20 @@ orca_version = "{declared_version}"
             "orca-version-unrecognized",
             [VERSION_ARGS],
         ),
-        ("ready", 0, "ready", ("passed", "passed", "passed", "passed"), None, [VERSION_ARGS, HELP_ARGS]),
+        ("ready", 0, "ready", ("passed", "passed", "passed", "passed"), None, [VERSION_ARGS, REGISTRY_ARGS]),
     ],
 )
 def test_orca_1_4_269_readiness(orca_cli, scenario, exit_code, status, states, reason, probe_args):
     invoke, fixture = orca_cli
     options = {
         "missing-binary": {"installed": False},
-        "unsupported-version": {"version": "1.4.267\r\n"},
+        "version-mismatch": {"version": "1.4.267\r\n"},
         "missing-retry-request": {
-            "help_text": fixture["worker_start_help"]["stdout"].replace("--retry-request", "--retry-request-extra"),
+            "registry_text": json.dumps(fixture).replace('"retry-request"', '"retry-request-extra"'),
         },
         "disabled-agent": {"agent": "unsupported-agent"},
-        "probe-timeout": {"help_code": 124},
-        "probe-failure": {"help_code": 1},
+        "probe-timeout": {"registry_code": 124},
+        "probe-failure": {"registry_code": 1},
         "unrecognized-version-output": {"version": "unrecognized"},
         "ready": {},
     }
@@ -209,7 +214,7 @@ def test_orca_1_4_269_text_reports_skipped_checks(orca_cli):
 @pytest.mark.parametrize(
     ("target", "reason"),
     [
-        ({"declared_version": "1.0.0"}, "orca-target-version-unsupported"),
+        ({"declared_version": "1.4.269 extra"}, "orca-target-version-unsupported"),
         ({"worktree": "current"}, "orca-target-worktree-unsupported"),
         ({"target_fields": 'effort = "high"'}, "orca-target-model-required"),
         ({"target_fields": 'unknown_field = "example"'}, "orca-target-invalid"),
@@ -224,37 +229,73 @@ def test_orca_1_4_269_refuses_invalid_target(orca_cli, target, reason):
     assert report["limiting_reason"] == evidence["orca-agent"]["reason"] == reason
     assert evidence["orca-version"]["status"] == "passed"
     assert evidence["orca-agent"]["status"] == "unsupported"
-    assert calls == [VERSION_ARGS, HELP_ARGS]
+    assert calls == [VERSION_ARGS, REGISTRY_ARGS]
 
 
-@pytest.mark.parametrize("section", ["Notes", "Examples", "Additional information"])
-def test_orca_1_4_269_retry_request_in_a_later_section_does_not_count(orca_cli, section):
-    invoke, fixture = orca_cli
-    before_notes, heading, notes = fixture["worker_start_help"]["stdout"].partition("\nNotes:\n")
-    assert heading and notes
-    before_notes = before_notes.replace(" [--retry-request <id>]", "")
-    before_notes = "\n".join(
-        line for line in before_notes.split("\n") if not line.lstrip().startswith("--retry-request ")
+@pytest.mark.parametrize("version", ["1.4.268", "1.4.269", "1.4.271"])
+def test_ready_with_exact_version_and_registry_capabilities(orca_cli, version):
+    invoke, _ = orca_cli
+    registry = registry_fixture(version)
+    registry["futureField"] = {"enabled": True}
+    registry["commands"][0]["futureField"] = "example"
+    code, out, calls = invoke(
+        version=version + "\n", declared_version=version, registry_text=json.dumps(registry), extra_args=("--json",)
     )
-    assert "--retry-request" not in before_notes
-    help_text = before_notes + f"\n{section}:\n  --retry-request <id>  Mentioned here only\n"
-    help_text += notes if section == "Notes" else heading + notes
-    code, out, calls = invoke(help_text=help_text, extra_args=("--json",))
+    assert code == 0
+    assert json.loads(out)["status"] == "ready"
+    assert calls == [VERSION_ARGS, REGISTRY_ARGS]
+
+
+@pytest.mark.parametrize(
+    ("command", "flag"),
+    [
+        ("worker-start", "retry-request"),
+        ("worker-stop", "retry-request"),
+        ("worker-show", "full"),
+        ("worker-read", "source"),
+        ("inbox", "run"),
+    ],
+)
+def test_missing_capability_blocks_readiness(orca_cli, command, flag):
+    invoke, registry = orca_cli
+    entry = next(item for item in registry["commands"] if item["path"] == ["orchestration", command])
+    entry["flags"].remove(flag)
+    code, out, calls = invoke(registry_text=json.dumps(registry), extra_args=("--json",))
     assert code == 2
-    assert json.loads(out)["limiting_reason"] == "orca-retry-request-unsupported"
-    assert calls == [VERSION_ARGS, HELP_ARGS]
+    assert json.loads(out)["limiting_reason"] == "orca-command-capabilities-missing"
+    assert calls == [VERSION_ARGS, REGISTRY_ARGS]
 
 
-def test_orca_1_4_269_foreign_worker_start_usage_is_unverified(orca_cli):
-    invoke, fixture = orca_cli
-    help_text = "\n".join(
-        "Usage: unrelated worker-start" if line.startswith("Usage:") else line
-        for line in fixture["worker_start_help"]["stdout"].split("\n")
-    )
-    code, out, calls = invoke(help_text=help_text, extra_args=("--json",))
-    assert code == 3
-    assert json.loads(out)["limiting_reason"] == "orca-worker-start-help-unrecognized"
-    assert calls == [VERSION_ARGS, HELP_ARGS]
+@pytest.mark.parametrize(
+    "change",
+    ["path", "missing-command", "duplicate", "flags", "unknown-schema", "bool-schema", "duplicate-key", "json"],
+)
+def test_registry_requires_unambiguous_structured_evidence(orca_cli, change):
+    invoke, registry = orca_cli
+    commands = registry["commands"]
+    entry = commands[0]
+    if change == "path":
+        entry["path"] = "orchestration inbox"
+    elif change == "missing-command":
+        entry["path"].insert(0, "foreign")
+    elif change == "duplicate":
+        commands.append(entry.copy())
+    elif change == "flags":
+        entry["flags"].append(False)
+    elif change == "unknown-schema":
+        registry["schemaVersion"] = 2
+    elif change == "bool-schema":
+        registry["schemaVersion"] = True
+    text = json.dumps(registry)
+    if change == "json":
+        text = "Usage: orca-ide"
+    elif change == "duplicate-key":
+        text = '{"schemaVersion": 2, ' + text[1:]
+    code, out, calls = invoke(registry_text=text, extra_args=("--json",))
+    assert code == (2 if change == "missing-command" else 3)
+    reason = "orca-command-capabilities-missing" if change == "missing-command" else "orca-registry-unrecognized"
+    assert json.loads(out)["limiting_reason"] == reason
+    assert calls == [VERSION_ARGS, REGISTRY_ARGS]
 
 
 def test_orca_1_4_269_probes_filter_credentials_and_keep_startup_env(orca_cli, monkeypatch, tmp_path):
@@ -297,5 +338,5 @@ def test_orca_1_4_269_probes_filter_credentials_and_keep_startup_env(orca_cli, m
 
     code, _, calls = invoke(check_env=check_env)
     assert code == 0
-    assert calls == [VERSION_ARGS, HELP_ARGS]
+    assert calls == [VERSION_ARGS, REGISTRY_ARGS]
     assert all(os.environ[name] == "example" for name in credentials)

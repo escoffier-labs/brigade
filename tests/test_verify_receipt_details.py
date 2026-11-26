@@ -45,7 +45,7 @@ def test_inherited_test_env_is_bounded():
 
 
 def test_reuse_rejects_incomplete_completed_receipt(tmp_path, monkeypatch):
-    monkeypatch.setattr(verify_argv_files, "argv_file_hashes", lambda target, commands: {})
+    monkeypatch.setattr(verify_argv_files, "argv_file_hashes", lambda target, commands: ({}, None))
     latest = {
         "status": "completed",
         "tree_fingerprint": "tree",
@@ -53,7 +53,10 @@ def test_reuse_rejects_incomplete_completed_receipt(tmp_path, monkeypatch):
         "commands": [{"status": "completed", "exit_code": 0}],
         "argv_file_hashes": {},
     }
-    assert not verify_argv_files.reusable_receipt(tmp_path, [["one"], ["two"]], ["one", "two"], "tree", latest)
+    assert verify_argv_files.reusable_receipt(tmp_path, [["one"], ["two"]], ["one", "two"], "tree", latest) == (
+        False,
+        None,
+    )
 
 
 def test_log_write_failure_is_nonpassing(tmp_path, monkeypatch):
@@ -249,7 +252,7 @@ def test_reused_receipt_does_not_claim_an_observed_stable_tree():
 
 @pytest.mark.parametrize("commands", [None, [], [{"status": "busy", "exit_code": 75}]])
 def test_reuse_refuses_missing_empty_or_busy_command_records(tmp_path, monkeypatch, commands):
-    monkeypatch.setattr(verify_argv_files, "argv_file_hashes", lambda target, planned: {})
+    monkeypatch.setattr(verify_argv_files, "argv_file_hashes", lambda target, planned: ({}, None))
     latest = {
         "status": "completed",
         "tree_fingerprint": "tree",
@@ -257,7 +260,7 @@ def test_reuse_refuses_missing_empty_or_busy_command_records(tmp_path, monkeypat
         "commands": commands,
         "argv_file_hashes": {},
     }
-    assert not verify_argv_files.reusable_receipt(tmp_path, [["one"]], ["one"], "tree", latest)
+    assert verify_argv_files.reusable_receipt(tmp_path, [["one"]], ["one"], "tree", latest) == (False, None)
 
 
 def test_other_readers_know_the_busy_status():

@@ -27,7 +27,7 @@ FIXTURE_SETUP_TIMEOUT_SECONDS = 30.0
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--graphtrail", default="target/release/graphtrail")
+    parser.add_argument("--graphtrail", default="target/release/brigade-code-graph")
     parser.add_argument(
         "--comparator",
         action="append",

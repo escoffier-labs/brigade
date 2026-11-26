@@ -1,6 +1,6 @@
 //! Structural diff of two code graphs.
 //!
-//! ActiveGraph-inspired: GraphTrail's code graph is a projection of a repo, so a
+//! ActiveGraph-inspired: Brigade Code Graph's code graph is a projection of a repo, so a
 //! before/after diff of two indexed DBs answers "what did this change do to the
 //! call graph?" in a compact, receipt-attachable shape. Pure read/compare, both
 //! connections opened read-only by the caller. See `docs/design/activegraph-inspiration.md`.

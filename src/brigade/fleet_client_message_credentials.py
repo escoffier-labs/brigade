@@ -11,6 +11,7 @@ import stat
 import sys
 
 from . import fleet_client, fleet_home_guard
+from .fleet_home_guard import open_token_fd as _open_token_fd
 from .mcp_events import EVENT_ERROR_CODES
 
 ENV_TOKEN_FILE = "BRIGADE_FLEET_MESSAGE_TOKEN_FILE"
@@ -66,23 +67,6 @@ class FleetMessageHubError(fleet_client.FleetClientError):
         self.code = code if isinstance(code, str) and code in MESSAGE_CODES else None
 
 
-def _open_token_fd(path: str) -> int:
-    """Open the final path component itself, never the target of a link swapped in after a check."""
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    if nofollow:
-        # NONBLOCK prevents a hostile FIFO from blocking before fstat rejects it.
-        return os.open(path, os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0))
-    if sys.platform == "win32":
-        # O_NOFOLLOW is 0 on Windows, so open with FILE_FLAG_OPEN_REPARSE_POINT and refuse a
-        # handle that is a reparse point or a directory, then read from that same handle (#2422).
-        try:
-            from .work_cmd import nt_dirfd
-        except ImportError:  # no ctypes on this build: fail closed as a credential error
-            raise ValueError from None
-        return nt_dirfd.open_path_file(os.path.abspath(path), os.O_RDONLY)
-    raise ValueError  # No way to open without following a link: fail closed.
-
-
 def read_message_token_file(path: str, *, label: str = "message") -> str:
     """Read a bounded private regular file without following its final symlink or reparse point.
 
@@ -126,11 +110,11 @@ def message_settings(token_file: str | None, *, node_credential: bool = False) -
     # A relative BRIGADE_HOME would let the working directory choose the hub and the node
     # credential, so message operations refuse it before reading anything (#2423).
     fleet_home_guard.fleet_config_path(strict=True)
-    settings = fleet_client.load_fleet_settings()
+    path = None if node_credential else token_file if token_file is not None else os.environ.get(ENV_TOKEN_FILE)
+    settings = fleet_client.load_fleet_settings(include_node=path is None, optional_admin=True)
     hub = settings.get("hub_url", "")
     if not hub:
         raise MessageNotConfiguredError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
-    path = None if node_credential else token_file if token_file is not None else os.environ.get(ENV_TOKEN_FILE)
     if path is not None:
         token = read_message_token_file(path)
     else:
@@ -201,6 +185,8 @@ class MessageAuthority:
             )
         except MessageNotConfiguredError:
             raise
+        except fleet_home_guard.FleetTokenFileError as error:
+            raise MessageAuthorityError(str(error), code="token_file_invalid") from None
         except fleet_client.FleetClientError as error:
             raise MessageAuthorityError(
                 "message credential invalid", code=getattr(error, "code", None) or "token_file_invalid"
@@ -217,6 +203,8 @@ class MessageAuthority:
                 if self.node_credential
                 else message_settings(self.token_file)
             )
+        except fleet_home_guard.FleetTokenFileError as error:
+            raise MessageAuthorityError(str(error), code="token_file_invalid") from None
         except fleet_client.FleetClientError as error:
             raise MessageAuthorityError(
                 "message credential invalid", code=getattr(error, "code", None) or "token_file_invalid"

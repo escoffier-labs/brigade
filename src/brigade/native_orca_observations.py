@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from typing import Mapping
 
+from .native_child_host import NativeChildError
 from .native_child_journal import digest
 from .native_child_observations import NativeObservation
 from .native_orca_dispatch import CLI, WorkerReference, mutation_key, result_fields, valid_id
@@ -13,6 +14,7 @@ _STOP_DOMAIN = "brigade.native-orca.worker-stop.v1"
 _RESULT_DOMAIN = "brigade.native-orca.result.v1"
 _WAIT_SOURCES = ("hook", "prompt-text", "title")
 _TERMINAL_WORKER = {"completed": "succeeded", "failed": "failed"}
+_MAX_TRANSCRIPT_PAGES = 8
 
 
 def _dispatch_argv(command: str, worker: WorkerReference) -> tuple[str, ...]:
@@ -53,12 +55,6 @@ def _show(worker: WorkerReference, payload: object) -> tuple[Mapping[str, object
     dispatch = _fields(reply.get("dispatch"))
     if not dispatch:
         return {}, _awaiting(worker, "snapshot-unavailable")
-    if (dispatch.get("runId"), dispatch.get("taskId"), dispatch.get("id")) != (
-        worker.run_id,
-        worker.task_id,
-        worker.dispatch_id,
-    ):
-        return {}, NativeObservation("refused", "task-mismatch", worker, None, None, None, "unknown")
     host_scope = _fields(dispatch.get("hostScope"))
     if (
         reply.get("server") is not None
@@ -68,9 +64,15 @@ def _show(worker: WorkerReference, payload: object) -> tuple[Mapping[str, object
         return {}, NativeObservation("refused", "remote-mismatch", worker, None, None, None, "unknown")
     if dispatch.get("status") == "circuit_broken":
         return {}, NativeObservation("refused", "circuit-broken", worker, None, None, None, "unknown")
+    if (dispatch.get("runId"), dispatch.get("taskId"), dispatch.get("id")) != (
+        worker.run_id,
+        worker.task_id,
+        worker.dispatch_id,
+    ):
+        return reply, NativeObservation("refused", "task-mismatch", worker, None, None, None, "unknown")
     shown_worker = _fields(reply.get("worker"))
     if shown_worker.get("dispatchId") != worker.dispatch_id:
-        return {}, _awaiting(worker, "missing-evidence")
+        return reply, _awaiting(worker, "missing-evidence")
     return reply, None
 
 
@@ -164,31 +166,81 @@ def _report_id(worker: WorkerReference, worker_done: object, status: str) -> str
     return min(matches) if matches else None
 
 
-def _transcript_digest(worker: WorkerReference, payload: object, worker_state: str) -> str | None:
-    reply = result_fields(payload)
-    page = _fields(reply.get("transcript"))
-    status = _fields(reply.get("status"))
-    source = reply.get("sourceIdentity")
-    messages = page.get("messages")
-    if (
-        reply.get("dispatchId") != worker.dispatch_id
-        or reply.get("source") != "transcript"
-        or reply.get("sourceExact") is not True
-        or reply.get("contentComplete") is not True
-        or reply.get("fallbackReason") is not None
-        or reply.get("clipping") not in (None, [])
-        or status.get("worker") != worker_state
-        or not isinstance(source, str)
-        or not source
-        or not isinstance(messages, list)
-        or not messages
-        or page.get("limited") is not False
-        or type(page.get("returnedMessageCount")) is not int
-        or page.get("returnedMessageCount") != len(messages)
-    ):
+def _ends_in_assistant_text(message: object) -> bool:
+    row = _fields(message)
+    blocks = row.get("blocks")
+    if row.get("role") != "assistant" or not isinstance(blocks, list) or not blocks:
+        return False
+    block = _fields(blocks[-1])
+    text = block.get("text")
+    return block.get("type") == "text" and isinstance(text, str) and bool(text.strip())
+
+
+def _transcript_digest(worker: WorkerReference, payload: object, worker_state: str) -> tuple[str, bool] | None:
+    pages = payload if isinstance(payload, list) else [payload]
+    if not 1 <= len(pages) <= _MAX_TRANSCRIPT_PAGES:
+        return None
+    messages: list[object] = []
+    message_ids: set[str] = set()
+    cursors: set[str] = set()
+    previous_cursor: str | None = None
+    source_identity: str | None = None
+    clipped = False
+    for index, envelope in enumerate(pages, 1):
+        reply = result_fields(envelope)
+        page = _fields(reply.get("transcript"))
+        source = reply.get("sourceIdentity")
+        page_messages = page.get("messages")
+        more = index < len(pages)
+        complete = reply.get("contentComplete")
+        clipping = reply.get("clipping")
+        cursor = page.get("nextCursor")
+        if (
+            _fields(envelope).get("error") is not None
+            or reply.get("dispatchId") != worker.dispatch_id
+            or reply.get("source") != "transcript"
+            or reply.get("sourceExact") is not True
+            or reply.get("fallbackReason") is not None
+            or _fields(reply.get("status")).get("worker") != worker_state
+            or not isinstance(source, str)
+            or not source
+            or (source_identity is not None and source_identity != source)
+            or not isinstance(page_messages, list)
+            or "cursor" not in reply
+            or "nextCursor" not in page
+            or reply["cursor"] != cursor
+            or page.get("limited") is not more
+            or type(complete) is not bool
+            or (not more and not complete)
+            or type(page.get("returnedMessageCount")) is not int
+            or page.get("returnedMessageCount") != len(page_messages)
+        ):
+            return None
+        if clipping == ["transcript_payload"]:
+            clipped = True
+        elif clipping not in (None, []):
+            return None
+        if more:
+            if not isinstance(cursor, str) or not cursor or cursor in cursors:
+                return None
+            cursors.add(cursor)
+            previous_cursor = cursor
+        # Orca echoes the current page's next cursor, not the request cursor.
+        # An empty final page repeats it, but the replies cannot prove a gap
+        # did not occur before a non-empty final page.
+        elif not page_messages and previous_cursor is not None and cursor != previous_cursor:
+            return None
+        for message in page_messages:
+            message_id = _fields(message).get("id")
+            if not isinstance(message_id, str) or not message_id or message_id in message_ids:
+                return None
+            message_ids.add(message_id)
+        source_identity = source
+        messages.extend(page_messages)
+    if not messages or (clipped and not _ends_in_assistant_text(messages[-1])):
         return None
     try:
-        return digest({"source": source, "messages": messages}, _RESULT_DOMAIN)
+        return digest({"source": source_identity, "messages": messages}, _RESULT_DOMAIN), clipped
     except (ValueError, TypeError, RecursionError):
         return None
 
@@ -225,14 +277,22 @@ def classify_show(
     if _fields(reply.get("worker")).get("state") != worker_state:
         return _awaiting(worker, "terminal-status-mismatch")
     report_id = _report_id(worker, worker_done, status)
-    artifact = _transcript_digest(worker, transcript, worker_state)
-    if report_id is None or artifact is None:
+    evidence = _transcript_digest(worker, transcript, worker_state)
+    if report_id is None or evidence is None:
         return _awaiting(worker, "result-transfer-missing")
+    artifact, clipped = evidence
     transfer = digest(
         {"handle": worker.handle_digest, "status": status, "report": report_id, "artifact": artifact}, _RESULT_DOMAIN
     )
     return NativeObservation(
-        "terminal-candidate", "terminal-evidence-complete", worker, status, worker.run_id, transfer, "quiescent"
+        "terminal-candidate",
+        "terminal-evidence-complete",
+        worker,
+        status,
+        worker.run_id,
+        transfer,
+        "quiescent",
+        transcript_clipped=clipped,
     )
 
 
@@ -286,6 +346,46 @@ def resource_state(worker: WorkerReference, payload: object, *, retained_status:
     ):
         return "structured-tab-open"
     return "worker-not-released"
+
+
+def failed_start_released(worker: WorkerReference, payload: object, residuals: list[object]) -> set[str]:
+    """Return matched residual kinds when the worker's release and exit are proven."""
+    reply, refusal = _show(worker, payload)
+    if refusal is not None and refusal.reason in ("remote-mismatch", "circuit-broken"):
+        raise NativeChildError(refusal.reason, "Orca refused the failed-start worker snapshot")
+    dispatch = _fields(reply.get("dispatch"))
+    shown_worker = _fields(reply.get("worker"))
+    resource = _fields(reply.get("terminalResource"))
+    identities = (
+        (dispatch.get("runId"), worker.run_id),
+        (dispatch.get("taskId"), worker.task_id),
+        (dispatch.get("id"), worker.dispatch_id),
+        (shown_worker.get("dispatchId"), worker.dispatch_id),
+        (resource.get("ownerDispatchId"), worker.dispatch_id),
+    )
+    if any(actual is not None and actual != expected for actual, expected in identities):
+        raise NativeChildError("native-mismatch", "the Orca worker-show does not match the start receipt")
+    if refusal is not None or resource_state(worker, payload, retained_status="failed") != "released":
+        return set()
+
+    # The released terminal's row also identifies the worktree it ran in.
+    handle = resource.get("terminalHandle")
+    if not isinstance(handle, str) or not handle:
+        return set()
+    resource_ids = {"terminal": handle, "worktree": resource.get("worktreeId")}
+    matched: set[str] = set()
+    for entry in residuals:
+        residual = _fields(entry)
+        kind, residual_id = residual.get("kind"), residual.get("id")
+        if (
+            not isinstance(kind, str)
+            or not isinstance(residual_id, str)
+            or not residual_id
+            or resource_ids.get(kind) != residual_id
+        ):
+            return set()
+        matched.add(kind)
+    return matched
 
 
 def parse_stop(

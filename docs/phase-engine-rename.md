@@ -16,8 +16,9 @@ Rules that apply to every slice:
 
 - Old names live on as compatibility shims or legacy readers for at most two
   releases (v0.31 and v0.32, including their patch releases). They are removed
-  in v0.33.0. The one proposed exception is the evidence data directory. See
-  [Open questions](#open-questions).
+  at the v0.33.0 release cut, except for the nine rows listed under the v0.34
+  follow-up. The evidence data directory has its own migration boundary.
+  See [Open questions](#open-questions).
 - Historical receipts, memory cards, and evidence are never rewritten, and old
   evidence is never re-signed to change branding (ROADMAP, "Finish engine
   identity before moving existing data").
@@ -119,9 +120,9 @@ old spelling stays forever and is pinned by a test.
 | Release assets | `graphtrail-<platform>` and others | `brigade-code-graph-<platform>` and others | Dual-publish (already built) | v0.31, v0.32 | v0.33 stops building them |
 | Published releases up to v0.32 | asset names, checksums, attestations | unchanged | Frozen (never re-published or re-signed) | forever | never |
 | Binary env overrides | `GRAPHTRAIL_BIN`, `GRAPHTRAIL_MCP_BIN`, `MISELEDGER_BIN` | `BRIGADE_CODE_GRAPH_BIN`, `BRIGADE_CODE_GRAPH_MCP_BIN`, `BRIGADE_EVIDENCE_BIN` | Dual-read, doctor INFO on legacy use (stderr notice from R5) | v0.31, v0.32 | v0.33 |
-| Engine env vars | `GRAPHTRAIL_DB`, `GRAPHTRAIL_ALLOW_UNSAFE_ROOT` | `BRIGADE_CODE_GRAPH_DB`, `BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT` | Dual-read, doctor INFO on legacy use (stderr notice from R5) | v0.31, v0.32 | v0.33 |
+| Engine env vars | `GRAPHTRAIL_DB`, `GRAPHTRAIL_ALLOW_UNSAFE_ROOT` | `BRIGADE_CODE_GRAPH_DB`, `BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT` | Dual-read during the rename window, with doctor INFO and an R5 stderr notice | v0.31, v0.32 | Done for v0.33. Only the canonical variables are read. |
 | Legacy install fallbacks | `.cargo/bin/graphtrail*`, `.local/bin/miseledger` under the home directory | none | Dual-accept (resolver fallback) | v0.31, v0.32 | v0.33 |
-| Code graph index | `<repo>/.graphtrail/graphtrail.db` | `<repo>/.brigade/code-graph/code-graph.db` | Legacy read in place | v0.31, v0.32 | v0.33 (index is rebuildable) |
+| Code graph index | `<repo>/.graphtrail/graphtrail.db` | `<repo>/.brigade/code-graph/code-graph.db` | Legacy read in place during the rename window | v0.31, v0.32 | Done for v0.33. The old index is kept and ignored by default. |
 | Evidence data, config, cache dirs | `<data>/miseledger/`, `<config>/miseledger/`, `<cache>/miseledger/` | `<data>/brigade/evidence/`, `<config>/brigade/evidence/`, `<cache>/brigade/evidence/` | Legacy read in place | v0.31, v0.32, then see open question 1 | gated on data migration |
 | Verify-run snapshot files | `graphtrail-before.db`, `graphtrail-after.db` | `code-graph-before.db`, `code-graph-after.db` | Migrate (transient, deleted after each run) | none | v0.31 |
 | Receipt export cursor | `.brigade/work/miseledger-export-cursor.json` | unchanged | Frozen (dedup state, renaming re-exports history) | forever | never |
@@ -134,8 +135,8 @@ old spelling stays forever and is pinned by a test.
 | JSON output keys | `miseledger_binary`, `miseledger_version`, `tools["graphtrail"]`, ... | `evidence_binary`, `evidence_version`, `tools["brigade-code-graph"]`, ... | Dual-emit | v0.31, v0.32 | v0.33 (schema id bumps to v2 where a key is dropped) |
 | Code graph output sentinels | `__graphtrail_limit_truncated__`, `__graphtrail_truncated_<dir>__` | unchanged | Frozen (machine-matched ids in query output) | forever | never |
 | DOT export graph name | `digraph graphtrail` | `digraph code_graph` | Migrate (cosmetic label) | none | v0.31 |
-| CLI flags and subcommands | `receipts export miseledger`, `work import --from-miseledger`, `work verify run --graphtrail-timeout` | `receipts export evidence`, `--from-evidence`, `--code-graph-timeout` | Dual-accept (hidden alias, warning) | v0.31, v0.32 | v0.33 |
-| Workspace config key | `graphtrail_delta_timeout_seconds` | `code_graph_delta_timeout_seconds` | Dual-read, doctor INFO on legacy use (stderr notice from R5) | v0.31, v0.32 | v0.33 |
+| CLI flags and subcommands | `receipts export miseledger`, `work import --from-miseledger`, `work verify run --graphtrail-timeout` | `receipts export evidence`, `--from-evidence`, `--code-graph-timeout` | Dual-accept during the rename window, with a warning | v0.31, v0.32 | Done for v0.33. Only the canonical commands and options are accepted. |
+| Workspace config key | `graphtrail_delta_timeout_seconds` | `code_graph_delta_timeout_seconds` | Dual-read during the rename window, with doctor INFO and an R5 stderr notice | v0.31, v0.32 | Done for v0.33. Doctor warns about the unknown key and names its replacement. |
 | Station ids and manifests | station `graphtrail`, `miseledger` in `station.json` and `managed-snapshot.json` | `brigade-code-graph`, `brigade-evidence` | Dual-accept (legacy id resolves as an alias) | v0.31, v0.32 | v0.33 |
 | Rust package and crate | package and lib `graphtrail` | `brigade-code-graph` / `brigade_code_graph` | Migrate (in-repo only) | none | v0.31 |
 | Go module path | `github.com/escoffier-labs/miseledger` | `github.com/escoffier-labs/brigade/engines/evidence-ledger` | Migrate (all packages are under `internal/`) | none | v0.31 |
@@ -212,7 +213,14 @@ Slice R0 adds the pins before any rename work starts:
 
 ### Resolution rule
 
-The Python helper and both engines implement one rule:
+For v0.33, tasks 4 and 5 are complete. Code Graph resolves the index from
+`--db`, then the canonical environment variable, then the canonical repository
+path. The old environment variables are ignored. The former index stays on
+disk and is ignored during automatic resolution. Doctor suggests running
+`brigade code sync` when only the former index exists. The notice clears when
+the rebuild creates the canonical index.
+
+During v0.31 and v0.32, the Python helper and both engines used this rule:
 
 1. An explicit location wins: `--db`, then the canonical environment variable,
    then the legacy one. Canonical and legacy variables that are both set to
@@ -222,12 +230,11 @@ The Python helper and both engines implement one rule:
    does not. Writes go to the legacy location too. Nothing is copied or moved.
 4. Otherwise, the canonical location is created.
 
-When both exist, the canonical location wins. It is what v0.33 will read, so
-choosing it now avoids a second silent switch at removal time. `brigade
-doctor` reports WARN with both paths and their modification times. Nothing is
+During the rename window, when both existed, the canonical location won.
+`brigade doctor` reported WARN with both paths and their modification times. Nothing is
 merged or deleted. For evidence, the database, MAC key and config resolve as
-one directory, never one file from each. While the legacy directory exists,
-writers never create the canonical directory, so both can exist only after a
+one directory, never one file from each. While only the legacy Evidence directory exists,
+Evidence writers use it in place, so both can exist only after a
 manual copy or a downgrade and upgrade cycle (see
 [Installer acceptance](#installer-acceptance)).
 
@@ -601,9 +608,10 @@ waits for R2, R3 and R4. R6 is last.
   `tests/fixtures/retired-engine-names-allowlist.json`. Each entry gives a path
   glob, a reason (`frozen`, `shim`, `history`, `fixture`), and, for `frozen`
   and `shim` entries, the exact allowed literals. A match outside the
-  allowlist fails. `shim` entries carry `"remove_in": "0.33.0"`. A version
-  check fails once the package version reaches 0.33.0 while a `shim` entry
-  remains, so removal cannot be forgotten.
+  allowlist fails. Ordinary CI checks the allowlist, including the
+  `"remove_in": "0.33.0"` deadline on every `shim` entry. The stable release
+  guard enforces removal at the 0.33.0 release cut and rejects any remaining
+  `shim` entry for later stable releases.
 - Tests: the guard against a temporary repository, plus the skill sync,
   managed snapshot and template profile checks.
 - Acceptance: the guard passes, `brigade evidence --help` and `brigade code
@@ -622,39 +630,49 @@ waits for R2, R3 and R4. R6 is last.
 Removal tasks for v0.33, one pull request per engine plus one for Python and
 release:
 
-1. Delete the `graphtrail` and `graphtrail-mcp` `[[bin]]` targets and
-   `engines/evidence-ledger/cmd/miseledger`. Remove the legacy identity branch,
-   the legacy `serverInfo.name` and the deprecation lines.
-2. Stop building the 15 legacy-named release assets. Remove them from
-   `publish.yml`, both acceptance scripts and the provenance script. Earlier
-   releases keep theirs.
+1. Done for v0.33. Removed the legacy Rust and Go executable targets and the
+   basename-dependent CLI and MCP identities.
+2. Done for v0.33. The release builds and attests 27 native binaries. The 15
+   legacy assets are accepted only when verifying releases from the rename
+   window. Setup and rollback clean up managed aliases from old installs.
 3. Remove the legacy entries from `COMPONENT_FAMILIES` reading paths,
    `ENV_OVERRIDES` and `_LEGACY_RELATIVE`. A legacy-keyed `installed.json`
    is then treated as absent, and doctor tells the user to run `brigade setup`.
    Setup stops creating shims and deletes the shims it created earlier.
-4. Remove `GRAPHTRAIL_DB` and `GRAPHTRAIL_ALLOW_UNSAFE_ROOT` reads.
-5. Stop reading `.graphtrail/graphtrail.db`. Doctor reports INFO "legacy
+4. Done for v0.33. Removed `GRAPHTRAIL_DB` and `GRAPHTRAIL_ALLOW_UNSAFE_ROOT` reads.
+5. Done for v0.33. Automatic resolution skips `.graphtrail/graphtrail.db`. Doctor reports INFO "legacy
    index ignored. Run `brigade code sync`". The old directory is never
    deleted, and the walker keeps skipping it so a stale database is never
    indexed.
-6. Evidence legacy directories: as decided under open question 1.
-7. Remove the CLI aliases (`receipts export miseledger`, `--from-miseledger`,
-   `--graphtrail-timeout`) and the `graphtrail_delta_timeout_seconds` read. A
-   leftover key produces the existing unknown-key warning.
+6. Done for v0.33. Keep detecting and opening the legacy evidence layout
+   in place until a data migration with recovery proof ships (option a under
+   open question 1). The canonical layout still takes precedence when both
+   exist. The database, MAC key, config and cache resolve as one layout.
+7. Done for v0.33. Removed the CLI aliases (`receipts export miseledger`, `--from-miseledger`,
+   `--graphtrail-timeout`) and the `graphtrail_delta_timeout_seconds` read. Doctor
+   warns about the unknown key and points to `code_graph_delta_timeout_seconds`.
 8. Drop the legacy JSON keys and bump each affected output schema id to `v2`.
 9. Drop legacy station id aliases from `managed.py` and the snapshot.
 10. `brigade mcp sync` renames owned `graphtrail` and `miseledger` keys by
     default and prints the tool-permission hint. User-authored entries are
     still left alone.
-11. Remove the stub at `docs/wiring-graphtrail-miseledger.md`.
-12. Delete the standalone engine release tooling that root CI never runs:
-    `engines/evidence-ledger/.github/workflows/release.yml`, its validator and
-    `testdata/workflows/release/*.yml`, `install.sh` and
-    `scripts/bootstrap_local.sh`, plus `engines/code-graph/.github/workflows/*`.
-    First confirm that no root workflow or test invokes them. Rename instead
-    if one does.
-13. Delete every `shim` entry from the retired-name allowlist. The version
-    check from R6 enforces this.
+11. Done for v0.33. Removed the stub at `docs/wiring-graphtrail-miseledger.md`.
+12. In progress. Evidence standalone release tooling was retired. The Code
+    Graph repository contract tests still verify the embedded CI and registry
+    publication workflows. Move the applicable checks before deleting them.
+13. Done for v0.33. Removed expired rows, pinned required literals at their
+    current counts, and assigned the nine approved exceptions a v0.34.0 expiry.
+
+### v0.34 follow-up
+
+1. Verify that the Cargo adapter's separate deprecation window has elapsed.
+   Decide the disposition of the published crate identity and registry
+   metadata before retiring the feature, its CLI options, and its CI entry.
+2. Move the embedded Code Graph workflow contract checks to root CI and the
+   supported release workflow, preserving MSRV and registry publication checks.
+3. Remove live legacy component aliases, resolver fallbacks, and help-banner
+   handling in one cutover. Keep historical release verification and safe
+   cleanup of aliases from existing installs.
 
 ## Installer acceptance
 

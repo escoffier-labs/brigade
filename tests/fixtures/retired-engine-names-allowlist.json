@@ -11,33 +11,19 @@
   {
     "path": ".github/workflows/ci.yml",
     "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "reason": "Keep CI coverage until the Cargo adapter deprecation window and crate identity are resolved.",
     "literals": {
-      "graphtrail": 2,
-      "miseledger": 8
+      "miseledger": 2
     },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": ".github/workflows/publish.yml",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "GraphTrail": 4,
-      "graphtrail": 22,
-      "miseledger": 7
-    },
-    "remove_in": "0.33.0"
+    "remove_in": "0.34.0"
   },
   {
     "path": ".gitignore",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Exclude the retired per-repository index from Git status while leaving the original index in place.",
     "literals": {
-      "GraphTrail": 1,
       "graphtrail": 1
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "CHANGELOG.md",
@@ -53,14 +39,12 @@
     }
   },
   {
-    "path": "RELEASE.md",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "path": "README.md",
+    "kind": "history",
+    "reason": "Exact historical indexing output from CLI 0.31.0 and 0.32.0.",
     "literals": {
-      "graphtrail": 2,
       "miseledger": 1
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "benchmarks/model-ratings-2026-07/README.md",
@@ -87,6 +71,14 @@
     "literals": {
       "graphtrail": 2,
       "miseledger": 2
+    }
+  },
+  {
+    "path": "changelog.d/2949-outdated-engine-diagnostic.md",
+    "kind": "history",
+    "reason": "Exact historical indexing output from CLI 0.31.0 and 0.32.0.",
+    "literals": {
+      "miseledger": 1
     }
   },
   {
@@ -123,14 +115,6 @@
     }
   },
   {
-    "path": "docs/command-inventory.md",
-    "kind": "frozen",
-    "reason": "Persisted schema or source path, archived URL, or compatibility documentation.",
-    "literals": {
-      "miseledger": 1
-    }
-  },
-  {
     "path": "docs/designs/evidence-eligibility-sanitizer.md",
     "kind": "history",
     "reason": "Historical plan, changelog or captured research; original identities remain unchanged.",
@@ -152,7 +136,7 @@
     "reason": "Persisted schema or source path, archived URL, or compatibility documentation.",
     "literals": {
       "graphtrail": 2,
-      "miseledger": 2
+      "miseledger": 1
     }
   },
   {
@@ -212,8 +196,8 @@
     "literals": {
       "GRAPHTRAIL": 7,
       "MISELEDGER": 3,
-      "graphtrail": 72,
-      "miseledger": 65
+      "graphtrail": 70,
+      "miseledger": 64
     }
   },
   {
@@ -321,8 +305,7 @@
     "kind": "frozen",
     "reason": "Persisted schema or source path, archived URL, or compatibility documentation.",
     "literals": {
-      "graphtrail": 2,
-      "miseledger": 2
+      "miseledger": 1
     }
   },
   {
@@ -389,7 +372,15 @@
     "reason": "Persisted schema or source path, archived URL, or compatibility documentation.",
     "literals": {
       "graphtrail": 2,
-      "miseledger": 14
+      "miseledger": 6
+    }
+  },
+  {
+    "path": "docs/update-channels.md",
+    "kind": "history",
+    "reason": "Exact historical indexing output from CLI 0.31.0 and 0.32.0.",
+    "literals": {
+      "miseledger": 1
     }
   },
   {
@@ -402,71 +393,30 @@
     }
   },
   {
-    "path": "docs/wiring-graphtrail-miseledger.md",
-    "kind": "shim",
-    "reason": "Redirect stub for the renamed wiring guide until v0.33.",
-    "literals": {
-      "graphtrail": 1,
-      "miseledger": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/code-graph/.github/ISSUE_TEMPLATE/bug.yml",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "GraphTrail": 2,
-      "graphtrail": 8
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/code-graph/.github/ISSUE_TEMPLATE/config.yml",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "GraphTrail": 1,
-      "graphtrail": 2
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/code-graph/.github/ISSUE_TEMPLATE/feature.yml",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "GraphTrail": 3,
-      "MiseLedger": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
     "path": "engines/code-graph/.github/workflows/ci.yml",
     "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "reason": "Move the embedded workflow feature and MSRV contracts to root CI.",
     "literals": {
       "miseledger": 2
     },
-    "remove_in": "0.33.0"
+    "remove_in": "0.34.0"
   },
   {
     "path": "engines/code-graph/.github/workflows/publish.yml",
     "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "reason": "Move embedded registry publication contract checks to the supported release workflow.",
     "literals": {
       "graphtrail": 1
     },
-    "remove_in": "0.33.0"
+    "remove_in": "0.34.0"
   },
   {
     "path": "engines/code-graph/.gitignore",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Exclude the retired index when working in the standalone Code Graph tree.",
     "literals": {
       "graphtrail": 1
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "engines/code-graph/AGENTS.md",
@@ -509,12 +459,12 @@
   {
     "path": "engines/code-graph/Cargo.toml",
     "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "reason": "Resolve the Cargo adapter deprecation window and published crate identity.",
     "literals": {
-      "graphtrail": 4,
+      "graphtrail": 3,
       "miseledger": 1
     },
-    "remove_in": "0.33.0"
+    "remove_in": "0.34.0"
   },
   {
     "path": "engines/code-graph/README.md",
@@ -637,7 +587,7 @@
     "reason": "Captured benchmark, release history or historical design records.",
     "literals": {
       "GraphTrail": 4,
-      "graphtrail": 25
+      "graphtrail": 24
     }
   },
   {
@@ -659,13 +609,13 @@
   {
     "path": "engines/code-graph/build.rs",
     "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "reason": "Keep the warning until the Cargo adapter deprecation window closes.",
     "literals": {
       "GraphTrail": 3,
       "MISELEDGER": 2,
       "MiseLedger": 1
     },
-    "remove_in": "0.33.0"
+    "remove_in": "0.34.0"
   },
   {
     "path": "engines/code-graph/content/announcements/v0.2.0-drafts.md",
@@ -725,25 +675,6 @@
     "literals": {
       "graphtrail": 2
     }
-  },
-  {
-    "path": "engines/code-graph/docs/assets/workflows/quickstart.json",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "GRAPHTRAIL": 1,
-      "graphtrail": 3
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/code-graph/docs/assets/workflows/relationships.json",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "graphtrail": 1
-    },
-    "remove_in": "0.33.0"
   },
   {
     "path": "engines/code-graph/docs/design/activegraph-inspiration.md",
@@ -814,168 +745,45 @@
     }
   },
   {
-    "path": "engines/code-graph/src/bin/brigade-code-graph-mcp.rs",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "graphtrail": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/code-graph/src/bin/graphtrail-mcp.rs",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "graphtrail": 4
-    },
-    "remove_in": "0.33.0"
-  },
-  {
     "path": "engines/code-graph/src/cli.rs",
     "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "reason": "Keep the adapter CLI until the Cargo deprecation window closes.",
     "literals": {
       "MiseLedger": 2,
-      "graphtrail": 4,
       "miseledger": 17
     },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/code-graph/src/evaluate.rs",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "graphtrail": 3
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/code-graph/src/lib.rs",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "GraphTrail": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/code-graph/src/main.rs",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "graphtrail": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/code-graph/src/mcp.rs",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "graphtrail": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/code-graph/src/query/affected.rs",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "GraphTrail": 1,
-      "graphtrail": 2
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/code-graph/src/query/blend.rs",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "GraphTrail": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/code-graph/src/query/diff.rs",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "GraphTrail": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/code-graph/src/query/doctor.rs",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "graphtrail": 1
-    },
-    "remove_in": "0.33.0"
+    "remove_in": "0.34.0"
   },
   {
     "path": "engines/code-graph/src/query/graph.rs",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Keep all three machine-matched graph truncation sentinel IDs stable in query output.",
     "literals": {
       "graphtrail": 3
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "engines/code-graph/src/store/db.rs",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Former index path retained for detection and explicit paths.",
     "literals": {
-      "GRAPHTRAIL": 1,
       "graphtrail": 2
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/code-graph/src/store/repo_policy.rs",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "GRAPHTRAIL": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/code-graph/src/store/resolve.rs",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "graphtrail": 1
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "engines/code-graph/src/store/walk.rs",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "The walker excludes the old index directory after retirement.",
     "literals": {
       "graphtrail": 1
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "engines/code-graph/src/watch.rs",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Document and test watcher exclusion of changes to the retired index and its lock so they cannot trigger reindexing.",
     "literals": {
       "graphtrail": 5
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/code-graph/tests/analysis.rs",
-    "kind": "fixture",
-    "reason": "Compatibility or persisted-identity fixture and regression coverage.",
-    "literals": {
-      "graphtrail": 2
     }
   },
   {
@@ -983,7 +791,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "graphtrail": 4
+      "graphtrail": 1
     }
   },
   {
@@ -991,24 +799,16 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "GRAPHTRAIL": 8,
+      "GRAPHTRAIL": 6,
       "GraphTrail": 4,
       "MISELEDGER": 8,
       "MiseLedger": 2,
-      "graphtrail": 15,
+      "graphtrail": 6,
       "miseledger": 16
     }
   },
   {
     "path": "engines/code-graph/tests/context_floor_cli.rs",
-    "kind": "fixture",
-    "reason": "Compatibility or persisted-identity fixture and regression coverage.",
-    "literals": {
-      "graphtrail": 3
-    }
-  },
-  {
-    "path": "engines/code-graph/tests/context_ranking_benchmark.rs",
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
@@ -1021,35 +821,11 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "GraphTrail": 2,
-      "graphtrail": 19
+      "graphtrail": 14
     }
   },
   {
     "path": "engines/code-graph/tests/diff.rs",
-    "kind": "fixture",
-    "reason": "Compatibility or persisted-identity fixture and regression coverage.",
-    "literals": {
-      "graphtrail": 3
-    }
-  },
-  {
-    "path": "engines/code-graph/tests/fixtures/golden/mixed/expected_edges.tsv",
-    "kind": "fixture",
-    "reason": "Compatibility or persisted-identity fixture and regression coverage.",
-    "literals": {
-      "graphtrail": 1
-    }
-  },
-  {
-    "path": "engines/code-graph/tests/fixtures/golden/mixed/src/bin/graphtrail-mcp.rs",
-    "kind": "fixture",
-    "reason": "Compatibility or persisted-identity fixture and regression coverage.",
-    "literals": {
-      "graphtrail": 2
-    }
-  },
-  {
-    "path": "engines/code-graph/tests/fixtures/golden/mixed/src/lib.rs",
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
@@ -1061,7 +837,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "graphtrail": 3
+      "graphtrail": 2
     }
   },
   {
@@ -1069,15 +845,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "graphtrail": 6
-    }
-  },
-  {
-    "path": "engines/code-graph/tests/identity_v7.rs",
-    "kind": "fixture",
-    "reason": "Compatibility or persisted-identity fixture and regression coverage.",
-    "literals": {
-      "graphtrail": 2
+      "graphtrail": 3
     }
   },
   {
@@ -1085,7 +853,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "graphtrail": 17
+      "graphtrail": 13
     }
   },
   {
@@ -1093,7 +861,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "graphtrail": 8
+      "graphtrail": 1
     }
   },
   {
@@ -1102,7 +870,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "GRAPHTRAIL": 1,
-      "graphtrail": 18
+      "graphtrail": 8
     }
   },
   {
@@ -1110,7 +878,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "graphtrail": 2
+      "graphtrail": 1
     }
   },
   {
@@ -1121,7 +889,7 @@
       "GraphTrail": 11,
       "MISELEDGER": 2,
       "MiseLedger": 13,
-      "graphtrail": 11,
+      "graphtrail": 10,
       "miseledger": 11
     }
   },
@@ -1130,70 +898,16 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "graphtrail": 45
+      "graphtrail": 15
     }
-  },
-  {
-    "path": "engines/code-graph/tests/round3.rs",
-    "kind": "fixture",
-    "reason": "Compatibility or persisted-identity fixture and regression coverage.",
-    "literals": {
-      "graphtrail": 2
-    }
-  },
-  {
-    "path": "engines/code-graph/tests/signature_cap.rs",
-    "kind": "fixture",
-    "reason": "Compatibility or persisted-identity fixture and regression coverage.",
-    "literals": {
-      "graphtrail": 3
-    }
-  },
-  {
-    "path": "engines/evidence-ledger/.github/ISSUE_TEMPLATE/bug.yml",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 4
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/.github/ISSUE_TEMPLATE/config.yml",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/.github/workflows/ci.yml",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 2
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/.github/workflows/release.yml",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "MISELEDGER": 1,
-      "miseledger": 9
-    },
-    "remove_in": "0.33.0"
   },
   {
     "path": "engines/evidence-ledger/.gitignore",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Exclude existing retired indexes from Git status in standalone Evidence checkouts.",
     "literals": {
       "graphtrail": 1
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "engines/evidence-ledger/AGENTS.md",
@@ -1224,15 +938,6 @@
     }
   },
   {
-    "path": "engines/evidence-ledger/Dockerfile",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "MiseLedger": 2
-    },
-    "remove_in": "0.33.0"
-  },
-  {
     "path": "engines/evidence-ledger/README.md",
     "kind": "frozen",
     "reason": "Persisted identifiers, archived URLs or source and asset paths in documentation.",
@@ -1247,32 +952,6 @@
     "reason": "Persisted identifiers, archived URLs or source and asset paths in documentation.",
     "literals": {
       "MiseLedger": 3
-    }
-  },
-  {
-    "path": "engines/evidence-ledger/cmd/miseledger/entrypoints_test.go",
-    "kind": "fixture",
-    "reason": "Compatibility input or regression fixture.",
-    "literals": {
-      "miseledger": 2
-    }
-  },
-  {
-    "path": "engines/evidence-ledger/cmd/miseledger/main.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/cmd/miseledger/station_manifest_test.go",
-    "kind": "fixture",
-    "reason": "Compatibility input or regression fixture.",
-    "literals": {
-      "MiseLedger": 1,
-      "miseledger": 1
     }
   },
   {
@@ -1304,7 +983,7 @@
     "kind": "frozen",
     "reason": "Persisted identifiers, archived URLs or source and asset paths in documentation.",
     "literals": {
-      "miseledger": 6
+      "miseledger": 3
     }
   },
   {
@@ -1337,7 +1016,6 @@
     "kind": "frozen",
     "reason": "Persisted identifiers, archived URLs or source and asset paths in documentation.",
     "literals": {
-      "MISELEDGER": 1,
       "miseledger": 1
     }
   },
@@ -1408,15 +1086,6 @@
     }
   },
   {
-    "path": "engines/evidence-ledger/docs/assets/miseledger-fold-diagram.png",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
     "path": "engines/evidence-ledger/docs/assets/miseledger-fold-diagram.svg",
     "kind": "frozen",
     "reason": "Persisted identifiers, archived URLs or source and asset paths in documentation.",
@@ -1459,26 +1128,6 @@
     }
   },
   {
-    "path": "engines/evidence-ledger/docs/assets/workflows/evidence.json",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "MISELEDGER": 1,
-      "MiseLedger": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/docs/assets/workflows/stack-map.json",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "MISELEDGER": 1,
-      "MiseLedger": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
     "path": "engines/evidence-ledger/docs/design/activegraph-inspiration.md",
     "kind": "frozen",
     "reason": "Persisted identifiers, archived URLs or source and asset paths in documentation.",
@@ -1514,23 +1163,12 @@
     }
   },
   {
-    "path": "engines/evidence-ledger/install.sh",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "MISELEDGER": 1,
-      "miseledger": 4
-    },
-    "remove_in": "0.33.0"
-  },
-  {
     "path": "engines/evidence-ledger/internal/adapter/record.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Preserve the v1 adapter schema ID used by saved JSONL and external producers.",
     "literals": {
       "miseledger": 1
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "engines/evidence-ledger/internal/adapter/record_test.go",
@@ -1542,14 +1180,11 @@
   },
   {
     "path": "engines/evidence-ledger/internal/app/app.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Keep existing incremental Markdown export manifest and staging paths plus the filename digest domain.",
     "literals": {
-      "GraphTrail": 1,
-      "MiseLedger": 2,
-      "miseledger": 5
-    },
-    "remove_in": "0.33.0"
+      "miseledger": 3
+    }
   },
   {
     "path": "engines/evidence-ledger/internal/app/app_test.go",
@@ -1568,16 +1203,6 @@
     }
   },
   {
-    "path": "engines/evidence-ledger/internal/app/crawlexport.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "MiseLedger": 1,
-      "miseledger": 2
-    },
-    "remove_in": "0.33.0"
-  },
-  {
     "path": "engines/evidence-ledger/internal/app/e2_readpath_test.go",
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
@@ -1587,21 +1212,19 @@
   },
   {
     "path": "engines/evidence-ledger/internal/app/evidence_cache_auth.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Verify bundle MACs already stored in evidence databases with the original MAC domain.",
     "literals": {
       "miseledger": 1
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "engines/evidence-ledger/internal/app/evidence_sanitize.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Keep persisted evidence resource URIs resolvable and preserve the hash domain for stable public stub IDs.",
     "literals": {
       "miseledger": 2
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "engines/evidence-ledger/internal/app/evidence_sanitizer_test.go",
@@ -1610,15 +1233,6 @@
     "literals": {
       "miseledger": 4
     }
-  },
-  {
-    "path": "engines/evidence-ledger/internal/app/help.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 1
-    },
-    "remove_in": "0.33.0"
   },
   {
     "path": "engines/evidence-ledger/internal/app/import_pipe_lifecycle_test.go",
@@ -1653,24 +1267,6 @@
     }
   },
   {
-    "path": "engines/evidence-ledger/internal/app/mcp.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "MiseLedger": 4
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/app/memory.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 2
-    },
-    "remove_in": "0.33.0"
-  },
-  {
     "path": "engines/evidence-ledger/internal/app/memory_test.go",
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
@@ -1679,49 +1275,12 @@
     }
   },
   {
-    "path": "engines/evidence-ledger/internal/app/migrate.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
     "path": "engines/evidence-ledger/internal/app/paths.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Detect and open existing Evidence archives in place until a data migration with recovery proof ships.",
     "literals": {
       "miseledger": 2
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/app/prunepolicy.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 2
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/app/scanner_approvals.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "MISELEDGER": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/app/schedule.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 4
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "engines/evidence-ledger/internal/app/schedule_test.go",
@@ -1732,67 +1291,12 @@
     }
   },
   {
-    "path": "engines/evidence-ledger/internal/app/server.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/app/sessions.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 4
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/app/sourceharvest.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 2
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/app/telecrawl.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/app/webui/index.html",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "MiseLedger": 2,
-      "miseledger": 2
-    },
-    "remove_in": "0.33.0"
-  },
-  {
     "path": "engines/evidence-ledger/internal/archive/db_test.go",
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
     "literals": {
       "miseledger": 7
     }
-  },
-  {
-    "path": "engines/evidence-ledger/internal/ingest/busy.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 1
-    },
-    "remove_in": "0.33.0"
   },
   {
     "path": "engines/evidence-ledger/internal/ingest/busy_test.go",
@@ -1804,12 +1308,11 @@
   },
   {
     "path": "engines/evidence-ledger/internal/ingest/importer.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Preserve stored source-scan schema, backup collection matching, item and artifact locators, and provenance source system.",
     "literals": {
       "miseledger": 8
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "engines/evidence-ledger/internal/ingest/importer_test.go",
@@ -1821,12 +1324,11 @@
   },
   {
     "path": "engines/evidence-ledger/internal/ingest/memory.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Find existing workspace and item backup collections using their stored key prefixes.",
     "literals": {
       "miseledger": 2
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "engines/evidence-ledger/internal/ingest/memory_lifecycle_test.go",
@@ -1838,12 +1340,11 @@
   },
   {
     "path": "engines/evidence-ledger/internal/ingest/provenance.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Preserve capability item scope and database provenance locator and source-system values used by stored evidence.",
     "literals": {
       "miseledger": 3
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "engines/evidence-ledger/internal/ingest/provenance_test.go",
@@ -1870,24 +1371,6 @@
     }
   },
   {
-    "path": "engines/evidence-ledger/internal/sources/cursor/cursor.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/internal/sources/memory/memory.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
     "path": "engines/evidence-ledger/internal/sources/pi/pi_test.go",
     "kind": "fixture",
     "reason": "Compatibility input or regression fixture.",
@@ -1904,71 +1387,37 @@
     }
   },
   {
-    "path": "engines/evidence-ledger/internal/toolpath/toolpath.go",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "miseledger": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/scripts/bootstrap_local.sh",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "MISELEDGER": 1,
-      "miseledger": 5
-    },
-    "remove_in": "0.33.0"
-  },
-  {
     "path": "engines/evidence-ledger/scripts/smoke_archive.sh",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Checks the persisted evidence resource URI.",
     "literals": {
       "miseledger": 1
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "engines/evidence-ledger/scripts/smoke_gmail_metadata.sh",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "MISELEDGER": 6,
-      "miseledger": 4
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "engines/evidence-ledger/scripts/smoke_http.sh",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Checks the persisted evidence resource URI.",
     "literals": {
       "miseledger": 1
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "engines/evidence-ledger/scripts/smoke_schedule.sh",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Exercises scheduling against a detected historical archive layout.",
     "literals": {
-      "MISELEDGER": 7,
-      "miseledger": 7
-    },
-    "remove_in": "0.33.0"
+      "miseledger": 4
+    }
   },
   {
     "path": "engines/evidence-ledger/scripts/validate_release_workflow.py",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "kind": "frozen",
+    "reason": "Verifies archived standalone release workflow source and its fixture contracts.",
     "literals": {
       "MISELEDGER": 1,
       "miseledger": 7
-    },
-    "remove_in": "0.33.0"
+    }
   },
   {
     "path": "engines/evidence-ledger/testdata/adapters/agent-session.fixture.jsonl",
@@ -2589,23 +2038,6 @@
     }
   },
   {
-    "path": "plugins/brigade/skills/brigade-work/SKILL.md",
-    "kind": "frozen",
-    "reason": "Persisted schema or source path, archived URL, or compatibility documentation.",
-    "literals": {
-      "miseledger": 2
-    }
-  },
-  {
-    "path": "scripts/generate_component_manifest.py",
-    "kind": "frozen",
-    "reason": "Persisted schema or source path, archived URL, or compatibility documentation.",
-    "literals": {
-      "graphtrail": 2,
-      "miseledger": 1
-    }
-  },
-  {
     "path": "scripts/published-artifact-acceptance.py",
     "kind": "frozen",
     "reason": "Persisted schema or source path, archived URL, or compatibility documentation.",
@@ -2722,7 +2154,7 @@
     "kind": "frozen",
     "reason": "Persisted schema, receipt or import identity and internal reader names.",
     "literals": {
-      "miseledger": 8
+      "miseledger": 5
     }
   },
   {
@@ -2756,19 +2188,17 @@
     "kind": "frozen",
     "reason": "Persisted schema, receipt or import identity and internal reader names.",
     "literals": {
-      "GraphTrail": 1,
-      "graphtrail": 1,
-      "miseledger": 1
+      "GraphTrail": 1
     }
   },
   {
     "path": "src/brigade/code_cmd.py",
     "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "reason": "Coordinate legacy help handling with component alias retirement and historical verification.",
     "literals": {
       "graphtrail": 3
     },
-    "remove_in": "0.33.0"
+    "remove_in": "0.34.0"
   },
   {
     "path": "src/brigade/code_export.py",
@@ -2798,34 +2228,24 @@
   {
     "path": "src/brigade/component_bins.py",
     "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "reason": "Coordinate live resolver cutover with component alias retirement and historical verification.",
     "literals": {
       "GRAPHTRAIL": 2,
       "MISELEDGER": 1,
       "graphtrail": 6,
       "miseledger": 3
     },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "src/brigade/component_install.py",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "graphtrail": 2,
-      "miseledger": 6
-    },
-    "remove_in": "0.33.0"
+    "remove_in": "0.34.0"
   },
   {
     "path": "src/brigade/component_manifest.py",
     "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "reason": "Separate historical release verification from live component alias resolution.",
     "literals": {
       "graphtrail": 2,
       "miseledger": 1
     },
-    "remove_in": "0.33.0"
+    "remove_in": "0.34.0"
   },
   {
     "path": "src/brigade/config.py",
@@ -2874,44 +2294,28 @@
   },
   {
     "path": "src/brigade/engine_paths.py",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
-    "literals": {
-      "GRAPHTRAIL": 2,
-      "graphtrail": 2,
-      "miseledger": 2
-    },
-    "remove_in": "0.33.0"
-  },
-  {
-    "path": "src/brigade/evidence_brief.py",
     "kind": "frozen",
-    "reason": "Persisted schema, receipt or import identity and internal reader names.",
+    "reason": "Former index path for doctor reporting and explicit paths, plus legacy Evidence storage retained pending migration.",
     "literals": {
-      "MiseLedger": 2,
+      "graphtrail": 2,
       "miseledger": 2
     }
   },
   {
-    "path": "src/brigade/evidence_cmd.py",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "path": "src/brigade/evidence_brief.py",
+    "kind": "frozen",
+    "reason": "Preserve the exact run evidence heading asserted by prompt fixtures and emitted in stored session notes.",
     "literals": {
-      "MiseLedger": 14,
-      "miseledger": 32
-    },
-    "remove_in": "0.33.0"
+      "MiseLedger": 1
+    }
   },
   {
-    "path": "src/brigade/evidence_runtime.py",
-    "kind": "shim",
-    "reason": "Legacy resolver, entry point, build target or deprecation compatibility through v0.32.",
+    "path": "src/brigade/evidence_cmd.py",
+    "kind": "frozen",
+    "reason": "Read the existing export cursor for deduplication and identify the v1 adapter schema in the export plan.",
     "literals": {
-      "MISELEDGER": 7,
-      "MiseLedger": 7,
-      "miseledger": 4
-    },
-    "remove_in": "0.33.0"
+      "miseledger": 2
+    }
   },
   {
     "path": "src/brigade/fixtures/paired-brigade-work/baseline/SKILL.md",
@@ -3004,16 +2408,16 @@
       "GraphTrail": 5,
       "MiseLedger": 5,
       "graphtrail": 17,
-      "miseledger": 5
+      "miseledger": 4
     }
   },
   {
     "path": "src/brigade/receipts_cmd.py",
     "kind": "frozen",
-    "reason": "Persisted schema, receipt or import identity and internal reader names.",
+    "reason": "Persisted schema, receipt or import identity, internal reader names and import diagnostics.",
     "literals": {
       "MISELEDGER": 18,
-      "miseledger": 92
+      "miseledger": 90
     }
   },
   {
@@ -3040,14 +2444,6 @@
     "literals": {
       "graphtrail": 3,
       "miseledger": 6
-    }
-  },
-  {
-    "path": "src/brigade/roadmap_cmd.py",
-    "kind": "frozen",
-    "reason": "Persisted schema, receipt or import identity and internal reader names.",
-    "literals": {
-      "miseledger": 1
     }
   },
   {
@@ -3084,14 +2480,6 @@
     "literals": {
       "graphtrail": 36,
       "miseledger": 24
-    }
-  },
-  {
-    "path": "src/brigade/templates/skills/brigade-work/SKILL.md",
-    "kind": "frozen",
-    "reason": "Persisted identifiers, archived URLs or source and asset paths in documentation.",
-    "literals": {
-      "miseledger": 2
     }
   },
   {
@@ -3150,7 +2538,7 @@
     "reason": "Persisted schema, receipt or import identity and internal reader names.",
     "literals": {
       "MiseLedger": 1,
-      "miseledger": 4
+      "miseledger": 3
     }
   },
   {
@@ -3231,7 +2619,7 @@
     "literals": {
       "GraphTrail": 11,
       "MiseLedger": 4,
-      "graphtrail": 60,
+      "graphtrail": 38,
       "miseledger": 43
     }
   },
@@ -3265,8 +2653,8 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "MiseLedger": 1,
-      "graphtrail": 3,
-      "miseledger": 9
+      "graphtrail": 1,
+      "miseledger": 8
     }
   },
   {
@@ -3283,7 +2671,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "GraphTrail": 4,
-      "graphtrail": 22
+      "graphtrail": 14
     }
   },
   {
@@ -3291,7 +2679,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "graphtrail": 17
+      "graphtrail": 13
     }
   },
   {
@@ -3300,7 +2688,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "GraphTrail": 1,
-      "graphtrail": 8
+      "graphtrail": 6
     }
   },
   {
@@ -3335,7 +2723,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "graphtrail": 8,
-      "miseledger": 4
+      "miseledger": 3
     }
   },
   {
@@ -3384,20 +2772,11 @@
     }
   },
   {
-    "path": "tests/test_config.py",
-    "kind": "fixture",
-    "reason": "Compatibility or persisted-identity fixture and regression coverage.",
-    "literals": {
-      "graphtrail": 5
-    }
-  },
-  {
     "path": "tests/test_context_cmd.py",
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "GraphTrail": 1,
-      "graphtrail": 2
+      "GraphTrail": 1
     }
   },
   {
@@ -3405,7 +2784,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "graphtrail": 8
+      "graphtrail": 6
     }
   },
   {
@@ -3429,7 +2808,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "GRAPHTRAIL": 4,
+      "GRAPHTRAIL": 2,
       "MISELEDGER": 1,
       "graphtrail": 5,
       "miseledger": 4
@@ -3440,7 +2819,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "miseledger": 22
+      "miseledger": 16
     }
   },
   {
@@ -3448,10 +2827,9 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "MISELEDGER": 7,
       "MiseLedger": 1,
       "graphtrail": 2,
-      "miseledger": 184
+      "miseledger": 124
     }
   },
   {
@@ -3505,7 +2883,7 @@
       "GraphTrail": 1,
       "MiseLedger": 1,
       "graphtrail": 30,
-      "miseledger": 28
+      "miseledger": 21
     }
   },
   {
@@ -3575,30 +2953,12 @@
     }
   },
   {
-    "path": "tests/test_native_release_packaging.py",
-    "kind": "fixture",
-    "reason": "Compatibility or persisted-identity fixture and regression coverage.",
-    "literals": {
-      "graphtrail": 6,
-      "miseledger": 2
-    }
-  },
-  {
     "path": "tests/test_operator_checkup.py",
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "graphtrail": 7,
-      "miseledger": 9
-    }
-  },
-  {
-    "path": "tests/test_publish_workflow.py",
-    "kind": "fixture",
-    "reason": "Compatibility or persisted-identity fixture and regression coverage.",
-    "literals": {
-      "graphtrail": 2,
-      "miseledger": 1
+      "graphtrail": 5,
+      "miseledger": 7
     }
   },
   {
@@ -3629,10 +2989,10 @@
   {
     "path": "tests/test_receipts_cmd.py",
     "kind": "fixture",
-    "reason": "Compatibility or persisted-identity fixture and regression coverage.",
+    "reason": "Compatibility, persisted identities and historical importer output regression coverage.",
     "literals": {
-      "MISELEDGER": 3,
-      "miseledger": 142
+      "MISELEDGER": 6,
+      "miseledger": 130
     }
   },
   {
@@ -3658,8 +3018,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "graphtrail": 5,
-      "miseledger": 1
+      "graphtrail": 1
     }
   },
   {
@@ -3710,7 +3069,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "GraphTrail": 1,
-      "graphtrail": 13
+      "graphtrail": 11
     }
   },
   {
@@ -3734,7 +3093,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "graphtrail": 5
+      "graphtrail": 3
     }
   },
   {
@@ -3750,7 +3109,7 @@
     "kind": "fixture",
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
-      "graphtrail": 37
+      "graphtrail": 27
     }
   },
   {
@@ -3776,7 +3135,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "GraphTrail": 1,
-      "graphtrail": 14
+      "graphtrail": 8
     }
   },
   {
@@ -3785,7 +3144,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "GraphTrail": 5,
-      "graphtrail": 10
+      "graphtrail": 8
     }
   },
   {
@@ -3794,7 +3153,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "GRAPHTRAIL": 18,
-      "graphtrail": 134,
+      "graphtrail": 130,
       "miseledger": 18
     }
   },
@@ -3804,7 +3163,7 @@
     "reason": "Compatibility or persisted-identity fixture and regression coverage.",
     "literals": {
       "GraphTrail": 2,
-      "graphtrail": 33
+      "graphtrail": 21
     }
   },
   {

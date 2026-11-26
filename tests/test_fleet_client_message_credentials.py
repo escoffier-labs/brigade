@@ -36,7 +36,11 @@ def configured(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "fixture-node", "admin_token": "fixture-admin"},
+        lambda **_kwargs: {
+            "hub_url": "https://hub.invalid",
+            "node_token": "fixture-node",
+            "admin_token": "fixture-admin",
+        },
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
 
@@ -102,7 +106,7 @@ def test_invalid_credential_files_are_secret_safe(configured, tmp_path, monkeypa
         monkeypatch.setattr(
             fleet_client,
             "load_fleet_settings",
-            lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": sentinel},
+            lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": sentinel},
         )
     with pytest.raises(fleet_client.FleetClientError) as error:
         credentials.message_settings(str(path))
@@ -118,7 +122,7 @@ def test_token_file_without_node_identity(configured, tmp_path, monkeypatch, mod
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ""},
     )
 
     def no_identity():
@@ -154,7 +158,7 @@ def test_cli_json_denial_and_stdin_retry(hub, tmp_path, monkeypatch, capsys):
     path = token_file(tmp_path, value=principal["token"])
     monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "state"))
     monkeypatch.setattr(
-        fleet_client, "load_fleet_settings", lambda: {"hub_url": base, "node_token": "", "admin_token": ""}
+        fleet_client, "load_fleet_settings", lambda **_kwargs: {"hub_url": base, "node_token": "", "admin_token": ""}
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     argv = [
@@ -277,7 +281,7 @@ def test_client_grants_and_show_use_admin(hub, tmp_path, monkeypatch):
     enroll(base)
     monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "state"))
     monkeypatch.setattr(
-        fleet_client, "load_fleet_settings", lambda: {"hub_url": base, "node_token": "", "admin_token": ADMIN}
+        fleet_client, "load_fleet_settings", lambda **_kwargs: {"hub_url": base, "node_token": "", "admin_token": ADMIN}
     )
     assert client.set_principal_grants("fixture", [NODE_A])["principal"]["may_send_to"] == [NODE_A]
     assert client.show_principal("fixture")["principal"]["may_send_to"] == [NODE_A]
@@ -330,7 +334,7 @@ def test_cli_agent_reply_list_and_ack(hub, tmp_path, monkeypatch, capsys):
     monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "state"))
     monkeypatch.setenv(credentials.ENV_TOKEN_FILE, str(path))
     monkeypatch.setattr(
-        fleet_client, "load_fleet_settings", lambda: {"hub_url": base, "node_token": "", "admin_token": ""}
+        fleet_client, "load_fleet_settings", lambda **_kwargs: {"hub_url": base, "node_token": "", "admin_token": ""}
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     assert cli.main(["fleet", "msg", "list", "--unacked", "--json"]) == 0
@@ -504,7 +508,11 @@ def test_cli_local_json_codes(configured, tmp_path, monkeypatch, capsys, failure
         monkeypatch.setattr(
             fleet_client,
             "load_fleet_settings",
-            lambda: {"hub_url": "https://hub.invalid", "node_token": "fixture-admin", "admin_token": "fixture-admin"},
+            lambda **_kwargs: {
+                "hub_url": "https://hub.invalid",
+                "node_token": "fixture-admin",
+                "admin_token": "fixture-admin",
+            },
         )
     elif failure == "body":
         raw = b""
@@ -535,7 +543,7 @@ def test_enrollment_grants_conflict_clears_stale_pending(hub, tmp_path, monkeypa
     base, _, _, _ = hub
     monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "state"))
     monkeypatch.setattr(
-        fleet_client, "load_fleet_settings", lambda: {"hub_url": base, "node_token": "", "admin_token": ADMIN}
+        fleet_client, "load_fleet_settings", lambda **_kwargs: {"hub_url": base, "node_token": "", "admin_token": ADMIN}
     )
     ids = []
     client.manage_principal(
@@ -668,7 +676,7 @@ def test_upstream_errors_never_expose_authority_in_errors_logs_or_spool(
 
 def test_deferred_cli_finalize_never_adopts_changed_endpoint(configured, tmp_path, monkeypatch, capsys):
     settings = dict(hub_url="https://hub.invalid", node_token="fixture-node", admin_token="fixture-admin")
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(settings))
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: dict(settings))
     requests = []
 
     def admin_request(hub, token, body):
@@ -764,7 +772,9 @@ def test_rotation_between_replay_requests_stops_and_retains_original_spool(confi
 
 
 def test_unconfigured_message_cli_keeps_local_error_contract(configured, monkeypatch, capsys):
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(hub_url="", node_token="", admin_token=""))
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda **_kwargs: dict(hub_url="", node_token="", admin_token="")
+    )
     assert cli.main(["fleet", "msg", "list", "--json"]) == 1
     result = json.loads(capsys.readouterr().out)
     assert result["status"] is None and result["code"] == "invalid_argument"
@@ -804,7 +814,9 @@ def test_client_node_grants_preserve_endpoint_guard_and_hub_error(configured, mo
         client.set_principal_grants(None, [], node_id="node-a")
     assert exc.value.status == 403 and exc.value.code == "message_recipient_not_permitted"
     monkeypatch.setattr(
-        fleet_client, "load_fleet_settings", lambda: {"hub_url": "http://hub.invalid", "admin_token": "fixture-admin"}
+        fleet_client,
+        "load_fleet_settings",
+        lambda **_kwargs: {"hub_url": "http://hub.invalid", "admin_token": "fixture-admin"},
     )
     with pytest.raises(fleet_client.FleetClientError):
         client.set_principal_grants(None, [], node_id="node-a")

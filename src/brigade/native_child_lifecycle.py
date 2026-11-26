@@ -20,6 +20,7 @@ from . import native_child_journal as journal_core
 from . import run_task_journal as journal
 from .native_child_host import NativeChildHost
 from .native_child_journal import refuse
+from .native_child_observations import RESOURCE_EVENT
 
 OwnedRun = Callable[[Path, Path], AbstractContextManager[Any]]
 
@@ -171,6 +172,11 @@ def status(
             rows[-1].update(holds_capacity=reason is not None, capacity_reason=reason)
             if refusal is not None:
                 rows[-1].update(start_refusal=refusal, result_id=result.result_id)
+            if refusal == "start-failed":
+                resource = journal_core.latest(events, RESOURCE_EVENT, task_id)
+                retained = resource.get("worktree_retained") if resource is not None else None
+                if type(retained) is bool:
+                    rows[-1]["worktree_retained"] = retained
     return {
         "schema": host.status_schema,
         "run_id": run_dir.name,

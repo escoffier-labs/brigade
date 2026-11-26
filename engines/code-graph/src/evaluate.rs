@@ -209,7 +209,7 @@ mod tests {
         assert_eq!(calls[0].source, "outer");
         assert_eq!(calls[0].target_name, "helper");
         // The dry run must not create a database or graph dir.
-        assert!(!dir.path().join(".graphtrail").exists());
+        assert!(!dir.path().join(".brigade/code-graph").exists());
     }
 
     #[test]
@@ -227,7 +227,7 @@ mod tests {
 
         assert_eq!(report.totals.files, 1);
         assert_eq!(report.files[0].path, "a.py");
-        assert!(!dir.path().join(".graphtrail").exists());
+        assert!(!dir.path().join(".brigade/code-graph").exists());
     }
 
     #[test]
@@ -248,7 +248,7 @@ mod tests {
         assert_eq!(single.totals.files, 0);
         assert_eq!(single.skipped[0].path, "bad.py");
         assert_eq!(single.skipped[0].reason, "unreadable_utf8");
-        assert!(!dir.path().join(".graphtrail").exists());
+        assert!(!dir.path().join(".brigade/code-graph").exists());
     }
 
     #[test]

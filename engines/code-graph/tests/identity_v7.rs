@@ -3,8 +3,8 @@
 
 use std::fs;
 
-use graphtrail::extractors::common::{hex_hash, symbol_id};
-use graphtrail::store::{init_schema, open_db, sync_repo};
+use brigade_code_graph::extractors::common::{hex_hash, symbol_id};
+use brigade_code_graph::store::{init_schema, open_db, sync_repo};
 use rusqlite::Connection;
 
 fn synced_fixture() -> (tempfile::TempDir, Connection) {

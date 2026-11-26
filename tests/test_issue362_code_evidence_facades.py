@@ -79,7 +79,7 @@ def _patch_miseledger(monkeypatch, *, run_calls: list | None = None):
         stdout = '{"matches": []}\n' if "--json" in args else "miseledger-stdout\n"
         return proc.Result(exit_code, stdout, "")
 
-    monkeypatch.setattr(evidence_brief, "_miseledger_bin", lambda: "/fake/miseledger")
+    monkeypatch.setattr(evidence_brief, "_evidence_bin", lambda: "/fake/miseledger")
     monkeypatch.setattr(proc, "run", fake_run)
 
 
@@ -364,24 +364,24 @@ def test_evidence_search_propagates_child_exit_code(monkeypatch):
     assert calls[0]["args"][:3] == ["/fake/miseledger", "search", "needle"]
 
 
-def test_evidence_crawl_missing_miseledger_exits_127_with_diagnostic(monkeypatch, tmp_path, capsys):
-    monkeypatch.setattr(evidence_brief, "_miseledger_bin", lambda: None)
+def test_evidence_crawl_missing_engine_exits_127_with_diagnostic(monkeypatch, tmp_path, capsys):
+    monkeypatch.setattr(evidence_brief, "_evidence_bin", lambda: None)
 
     rc = cli.main(["evidence", "crawl", "sessions"])
 
     assert rc == 127
     err = capsys.readouterr().err
-    assert "miseledger" in err.lower()
+    assert "brigade-evidence" in err.lower()
 
 
-def test_evidence_crawl_uses_miseledger_bin_override(monkeypatch, tmp_path):
+def test_evidence_crawl_uses_evidence_bin_override(monkeypatch, tmp_path):
     override = tmp_path / "miseledger"
     override.write_text("#!/bin/sh\n")
     override.chmod(override.stat().st_mode | stat.S_IXUSR)
     calls: list[list[str]] = []
 
     monkeypatch.setenv("BRIGADE_EVIDENCE_BIN", str(override))
-    monkeypatch.setattr(proc, "which", lambda _: pytest.fail("facade should use _miseledger_bin"))
+    monkeypatch.setattr(proc, "which", lambda _: pytest.fail("facade should use _evidence_bin"))
     monkeypatch.setattr(proc, "run", lambda args, **_: calls.append(args) or proc.Result(0, "", ""))
 
     assert cli.main(["evidence", "crawl", "sessions"]) == 0
@@ -458,7 +458,7 @@ def test_search_doctor_json_contract_unchanged(monkeypatch, tmp_path, capsys):
 
 
 def test_evidence_status_json_contract_unchanged(monkeypatch, tmp_path):
-    monkeypatch.setattr(evidence_cmd.evidence_brief, "_miseledger_bin", lambda: None)
+    monkeypatch.setattr(evidence_cmd.evidence_brief, "_evidence_bin", lambda: None)
     payload = evidence_cmd.status_payload(tmp_path)
     assert {
         "target",

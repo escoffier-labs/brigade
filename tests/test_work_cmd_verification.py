@@ -8,16 +8,19 @@ import stat
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
 from brigade import cli
 from brigade import fleet_client
-from brigade import code_graph_delta
+from brigade import code_graph_background, code_graph_delta, component_bins
+from brigade import proc, proc_group, runguard
 from brigade import localio
 from brigade import receipts_cmd
+from brigade import verify_manifest_git
 from brigade import work_cmd
-from brigade.work_cmd import verify_receipt_details
+from brigade.work_cmd import verification, verify_gate, verify_receipt_details, verify_runtime
 
 from tests.work_cmd_test_helpers import (
     _write_json,
@@ -1005,7 +1008,9 @@ def test_verify_reused_receipt_records_env_assignments_inside_command(tmp_target
 
     _init_verify_target_with_head(tmp_target)
     monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-graphtrail"))
-    command = f'FOO=bar BAZ=qux {sys.executable} -c "print(1)"'
+    monkeypatch.setenv("PATH", os.path.dirname(sys.executable) + os.pathsep + os.environ.get("PATH", ""))
+    program = shlex.quote(os.path.basename(sys.executable))
+    command = f'FOO=bar BAZ=qux {program} -c "print(1)"'
 
     assert verification.verify_run(target=tmp_target, commands=[command], timeout=60) == 0
     assert verification.verify_run(target=tmp_target, commands=[command], timeout=60) == 0
@@ -1853,13 +1858,15 @@ def _write_brigade_config(
     (brigade / "config.json").write_text(json.dumps(payload, indent=2) + "\n")
 
 
-def _seed_graphtrail_db(tmp_path: Path) -> Path:
-    db_dir = tmp_path / ".graphtrail"
+def _seed_code_graph_db(tmp_path: Path) -> Path:
+    db_dir = tmp_path / ".brigade" / "code-graph"
     db_dir.mkdir(parents=True, exist_ok=True)
-    db_path = db_dir / "graphtrail.db"
+    db_path = db_dir / "code-graph.db"
     with sqlite3.connect(db_path) as con:
         con.execute("create table if not exists symbols (name text)")
         con.execute("insert into symbols values ('stale-baseline')")
+        con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT, value TEXT)")
+        con.execute("INSERT INTO meta VALUES ('synced_at', '1')")
     return db_path
 
 
@@ -1922,7 +1929,7 @@ import time
 from pathlib import Path
 
 args = sys.argv[1:]
-db = Path(args[args.index("--db") + 1]) if "--db" in args else Path(".graphtrail/graphtrail.db")
+db = Path(args[args.index("--db") + 1]) if "--db" in args else Path(".brigade/code-graph/code-graph.db")
 command = args[args.index(str(db)) + 1] if str(db) in args and args.index(str(db)) + 1 < len(args) else ""
 mode = os.environ.get("FAKE_GRAPHTRAIL_MODE", "ok")
 sync_delay_seconds = float(os.environ.get("FAKE_GRAPHTRAIL_SYNC_SECONDS", "0"))
@@ -2082,6 +2089,7 @@ def test_work_verify_graphtrail_delta_sidecar_digest_cleanup_and_summary(tmp_pat
 def test_work_verify_compact_delta_emits_exportable_code_references(tmp_path, capsys, monkeypatch):
     """Exercise capture_after_and_diff, compaction, receipt storage, and export together."""
     _init_git_repo_with_head(tmp_path)
+    _seed_code_graph_db(tmp_path)
     subprocess.run(
         ["git", "remote", "add", "origin", "https://github.com/escoffier-labs/brigade.git"],
         cwd=tmp_path,
@@ -2282,6 +2290,124 @@ def test_work_verify_graphtrail_delta_malformed_diff_fails_open(tmp_path, capsys
     assert sidecar["ok"] is False
 
 
+@pytest.mark.parametrize("index_state", ["missing", "empty"])
+@pytest.mark.parametrize("has_start_time", [True, False])
+def test_work_verify_defers_graph_sync_once_and_recovers_a_dead_launcher(
+    tmp_path, capsys, monkeypatch, index_state, has_start_time
+):
+    _init_git_repo_with_head(tmp_path)
+    monkeypatch.setattr(component_bins, "resolve", lambda name: name if name == "brigade-code-graph" else None)
+    db = tmp_path / ".brigade/code-graph/code-graph.db"
+    if index_state == "empty":
+        db.parent.mkdir(parents=True)
+        with sqlite3.connect(db) as connection:
+            connection.execute("CREATE TABLE meta (key TEXT, value TEXT)")
+
+    launches = []
+    identity = {12345: 7} if has_start_time else {}
+    live_pids = {12345}
+    launch_order = []
+
+    def start_time(pid):
+        launch_order.append("read start time")
+        return identity.get(pid)
+
+    def reaper(**kwargs):
+        return SimpleNamespace(start=lambda: launch_order.append("start reaper"))
+
+    def spawn(argv, **kwargs):
+        launches.append((argv, kwargs))
+        return SimpleNamespace(pid=12345, wait=lambda: 0), "detached"
+
+    monkeypatch.setattr(proc, "spawn_detached", spawn)
+    monkeypatch.setattr(proc_group, "process_start_time", start_time)
+    monkeypatch.setattr(code_graph_background.nt_process, "process_creation_time", start_time)
+    monkeypatch.setattr(runguard, "_pid_is_active", live_pids.__contains__)
+    monkeypatch.setattr(code_graph_background, "Thread", reaper)
+
+    for step, expected in enumerate((1, 1, 2)):
+        if expected == 2:
+            # An old reservation for a reused PID does not own the worker.
+            if has_start_time:
+                identity[12345] = 9
+            else:
+                live_pids.clear()
+        assert (
+            work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True, reuse=False) == 0
+        )
+        receipt = json.loads(capsys.readouterr().out)
+        delta = receipt["code_graph_delta"]
+        assert delta["status"] == "sync_deferred"
+        assert delta["ok"] is False
+        assert delta["background_refresh"]["status"] == ("busy" if step == 1 else "started")
+        assert delta["commands"]["before_sync"] is None
+        assert receipt["tree_stable"] is True
+        assert len(launches) == expected
+    assert launch_order[:2] == ["read start time", "start reaper"]
+
+
+def test_work_verify_replaces_stale_legacy_graph_reservation_without_reporting_an_exit(tmp_path, capsys, monkeypatch):
+    _init_git_repo_with_head(tmp_path)
+    lock = tmp_path / ".brigade/code-graph/verify-sync.lock"
+    reservation = lock.with_suffix(".json")
+    localio.write_json(reservation, {"pid": 12345, "created": 0, "started": None})
+    lock.touch()
+    monkeypatch.setattr(component_bins, "resolve", lambda name: name if name == "brigade-code-graph" else None)
+    monkeypatch.setattr(
+        proc, "spawn_detached", lambda *args, **kwargs: (SimpleNamespace(pid=54321, wait=lambda: 0), "detached")
+    )
+
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True, reuse=False) == 0
+    delta = json.loads(capsys.readouterr().out)["code_graph_delta"]
+    assert delta["background_refresh"]["status"] == "started"
+    assert "background_refresh_last_exit" not in delta
+    assert not lock.with_suffix(".exit.json").exists()
+    claim = localio.read_json_dict(reservation)
+    assert claim["pid"] == 54321 and claim["token"]
+
+
+@pytest.mark.parametrize("post_timeout", [False, True])
+def test_work_verify_records_detached_launch_failure(tmp_path, capsys, monkeypatch, post_timeout):
+    _init_git_repo_with_head(tmp_path)
+    engine = _write_fake_graphtrail(tmp_path)
+    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(engine))
+    lock = code_graph_background._lock_path(tmp_path)
+    localio.write_json(lock.with_suffix(".exit.json"), {"reason": "previous failure"})
+
+    def fail(*args, **kwargs):
+        raise proc.DetachedLaunchError("detach refused")
+
+    real_run = subprocess.run
+    real_ignore = code_graph_background._ignored_for_refresh
+    ignore_calls = []
+    sync_budgets = []
+
+    def check_ignore(*args):
+        ignore_calls.append(args)
+        return real_ignore(*args)
+
+    def check_initial_budget(argv, *args, **kwargs):
+        if isinstance(argv, list) and argv[:1] == [str(engine)] and argv[-1] == "sync":
+            sync_budgets.append(kwargs["timeout"])
+            if (post_timeout or len(sync_budgets) == 1) and kwargs["timeout"] < 1:
+                raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+            kwargs["timeout"] = None
+        return real_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(code_graph_background, "_ignored_for_refresh", check_ignore)
+    monkeypatch.setattr(proc, "spawn_detached", fail)
+    monkeypatch.setattr(subprocess, "run", check_initial_budget)
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True) == 0
+    delta = json.loads(capsys.readouterr().out)["code_graph_delta"]
+    assert delta["status"] == ("sync_timed_out" if post_timeout else "ok")
+    assert delta["background_refresh"]["status"] == "launch_failed"
+    assert delta["background_refresh"]["reason"] == "detach refused"
+    assert delta["foreground_fallback"] == {"reason": "detached launch refused", "timeout_seconds": 10.0}
+    assert sync_budgets == [10.0, 0.5]
+    assert "background_refresh_last_exit" not in delta
+    assert len(ignore_calls) == 1
+
+
 def test_work_verify_graphtrail_delta_config_timeout_reaches_pre_and_post_sync(tmp_path, capsys, monkeypatch):
     _init_git_repo(tmp_path)
     _write_brigade_config(tmp_path, code_graph_delta_timeout_seconds=25)
@@ -2446,8 +2572,18 @@ def test_work_verify_graphtrail_delta_invalid_config_timeout_returns_2_without_o
     assert _count_verify_run_dirs(tmp_path) == 0
 
 
-def test_work_verify_graphtrail_delta_post_sync_timeout_after_successful_pre_sync(tmp_path, capsys, monkeypatch):
-    _init_git_repo(tmp_path)
+@pytest.mark.parametrize("usable_index", [False, True])
+def test_work_verify_graphtrail_delta_post_sync_timeout_after_successful_pre_sync(
+    tmp_path, capsys, monkeypatch, usable_index
+):
+    if usable_index:
+        _init_git_repo_with_head(tmp_path)
+        _seed_code_graph_db(tmp_path)
+        monkeypatch.setattr(
+            proc, "spawn_detached", lambda *args, **kwargs: (SimpleNamespace(pid=12345, wait=lambda: 0), "test")
+        )
+    else:
+        _init_git_repo(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path)
     monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
     _derace_graphtrail_sync_timing(monkeypatch, graphtrail, time_out_sync_call=2)
@@ -2465,7 +2601,7 @@ def test_work_verify_graphtrail_delta_post_sync_timeout_after_successful_pre_syn
         work_cmd.verify_run(
             target=tmp_path,
             commands=["python3 -c \"print('ok')\""],
-            code_graph_timeout=_GRAPHTRAIL_TIGHT_TIMEOUT_SECONDS,
+            code_graph_timeout=None if usable_index else _GRAPHTRAIL_TIGHT_TIMEOUT_SECONDS,
             json_output=True,
         )
         == 0
@@ -2477,8 +2613,16 @@ def test_work_verify_graphtrail_delta_post_sync_timeout_after_successful_pre_syn
 
     assert receipt["commands"][0]["status"] == "completed"
     assert receipt["commands"][0]["exit_code"] == 0
-    assert receipt["code_graph_delta"]["status"] == "sync_timed_out"
-    assert sidecar["status"] == "sync_timed_out"
+    assert receipt["code_graph_delta"]["status"] == sidecar["status"]
+    if usable_index:
+        assert sidecar["status"] == "ok"
+        assert sidecar["stale_graph_used"] is True
+        assert sidecar["stale_after"] is True
+        assert sidecar["background_refresh"] == {"status": "started", "in_progress": True}
+        assert "timeout after 0.5s" in after_sync["stderr"]
+        assert sidecar["snapshots"]["after"]["timeout_seconds"] == 10.0
+    else:
+        assert sidecar["status"] == "sync_timed_out"
     assert before_sync["timed_out"] is False
     assert after_sync["stage"] == "incremental-sync"
     assert after_sync["timed_out"] is True
@@ -2506,11 +2650,13 @@ def test_work_verify_graphtrail_delta_rejects_invalid_per_invocation_timeout_ove
     assert _count_verify_run_dirs(tmp_path) == 0
 
 
-def test_work_verify_graph_snapshot_timeout_marks_delta_unavailable(tmp_path, capsys, monkeypatch):
+@pytest.mark.parametrize("sync_succeeds", [True, False])
+def test_work_verify_graph_snapshot_timeout_marks_delta_unavailable(tmp_path, capsys, monkeypatch, sync_succeeds):
     _init_git_repo(tmp_path)
-    _seed_graphtrail_db(tmp_path)
+    _seed_code_graph_db(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path, sync_delay_seconds=0.2)
     monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
+    _derace_graphtrail_sync_timing(monkeypatch, graphtrail, time_out_sync_call=None if sync_succeeds else 1)
 
     def timeout_backup(*args, **kwargs):
         raise TimeoutError("timeout after 0.05s")
@@ -2533,13 +2679,23 @@ def test_work_verify_graph_snapshot_timeout_marks_delta_unavailable(tmp_path, ca
     assert receipt["commands"][0]["status"] == "completed"
     assert receipt["commands"][0]["exit_code"] == 0
     assert compact_delta["ok"] is False
-    assert compact_delta["status"] == "sync_timed_out"
-    assert "timed out after 0.05s" in compact_delta["summary"]
+    assert compact_delta["commands"]["before_sync"]["timed_out"] is not sync_succeeds
+    if sync_succeeds:
+        assert compact_delta["status"] == "capture_failed"
+        assert "baseline snapshot timed out" in compact_delta["summary"]
+    else:
+        assert compact_delta["status"] == "sync_timed_out"
+        assert "timed out after 0.05s" in compact_delta["summary"]
 
 
-def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline(tmp_path, capsys, monkeypatch):
-    _init_git_repo(tmp_path)
-    _seed_graphtrail_db(tmp_path)
+@pytest.mark.parametrize("refresh_case", ["timeout", "active", "race"])
+def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline(
+    tmp_path, capsys, monkeypatch, refresh_case
+):
+    active_refresh = refresh_case == "active"
+    raced = refresh_case == "race"
+    _init_git_repo_with_head(tmp_path)
+    _seed_code_graph_db(tmp_path)
     graphtrail = _write_fake_graphtrail(tmp_path)
     monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(graphtrail))
     real_run = code_graph_delta._run_graphtrail
@@ -2551,10 +2707,10 @@ def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline
             if sync_calls["count"] == 1:
                 return code_graph_delta._command_result(
                     argv=[binary, "--db", str(db_path), command, *extra],
-                    returncode=124,
+                    returncode=5 if raced else 124,
                     stdout="",
                     stderr=f"timeout after {timeout:g}s",
-                    timed_out=True,
+                    timed_out=not raced,
                     duration_seconds=float(timeout),
                     timeout=timeout,
                     stage=stage,
@@ -2570,7 +2726,26 @@ def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline
             cwd=cwd,
         )
 
-    monkeypatch.setattr(code_graph_delta, "_run_graphtrail", timeout_first_sync)
+    if active_refresh or raced:
+
+        def observe(*args):
+            return {"status": "busy"} if active_refresh or sync_calls["count"] else None
+
+        monkeypatch.setattr(code_graph_background, "status_or_start", observe)
+
+        def unexpected_wait(*args):
+            pytest.fail("post-check capture must not wait for a refresh")
+
+        def diff_only(binary, db_path, command, *args, **kwargs):
+            assert command == "diff"
+            return real_run(binary, db_path, command, *args, **kwargs)
+
+        monkeypatch.setattr(code_graph_background, "wait_for_refresh", unexpected_wait, raising=False)
+    else:
+        monkeypatch.setattr(
+            proc, "spawn_detached", lambda *args, **kwargs: (SimpleNamespace(pid=12345, wait=lambda: 0), "test")
+        )
+    monkeypatch.setattr(code_graph_delta, "_run_graphtrail", diff_only if active_refresh else timeout_first_sync)
 
     assert (
         work_cmd.verify_run(
@@ -2586,10 +2761,26 @@ def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline
 
     assert receipt["commands"][0]["status"] == "completed"
     assert receipt["commands"][0]["exit_code"] == 0
+    assert receipt["code_graph_delta"]["status"] == "ok"
+    assert receipt["code_graph_delta"]["background_refresh"]["status"] == (
+        "busy" if active_refresh or raced else "started"
+    )
+    assert receipt["code_graph_delta"]["changed_symbol_count"] > 0
+    assert sidecar["snapshots"]["before"]["timeout_seconds"] == 10.0
     assert receipt["code_graph_delta"]["stale_graph_used"] is True
     assert sidecar["stale_graph_used"] is True
-    assert before_sync["stage"] == "incremental-sync"
-    assert before_sync["timed_out"] is True
+    if active_refresh:
+        assert before_sync is None
+        assert sidecar["commands"]["after_sync"] is None
+        assert sidecar["background_refresh"]["in_progress"] is True
+        assert sidecar["stale_after"] is True
+    else:
+        assert before_sync["duration_seconds"] == 0.5
+        assert before_sync["stage"] == "incremental-sync"
+        assert before_sync["timed_out"] is not raced
+        if raced:
+            assert before_sync["returncode"] == 5
+            assert sidecar["commands"]["after_sync"] is None
 
 
 def test_work_verify_graphtrail_delta_diff_timeout_is_distinct_from_sync_timeout(tmp_path, capsys, monkeypatch):
@@ -2853,6 +3044,266 @@ def test_work_closeout_blocks_failed_verification(tmp_path, capsys):
     assert payload["ready"] is False
     assert payload["status"] == "blocked"
     assert "latest verification did not complete" in payload["blockers"][0]
+
+
+@pytest.fixture
+def closeout_check(tmp_path):
+    _init_git_repo_with_head(tmp_path)
+    (tmp_path / "test_sample.py").write_text("def test_sample():\n    assert True\n", encoding="utf-8")
+    declaration = tmp_path / "verify" / "required-check.json"
+    declaration.parent.mkdir()
+    prefix = [sys.executable, "-B", "-m", "pytest", "-p", "no:cacheprovider"]
+
+    def declare(argv_prefix=prefix, *, malformed=False, commit=True):
+        payload = {
+            "schema": "brigade.verify_required_check.v1",
+            "argv_prefix": argv_prefix,
+            "needs_arguments": True,
+            "needs_passed_tests": True,
+        }
+        declaration.write_text("{" if malformed else json.dumps(payload), encoding="utf-8")
+        if commit:
+            subprocess.run(["git", "add", "."], cwd=tmp_path, check=True)
+            _init_git_repo_with_head(tmp_path)
+
+    return declare, prefix
+
+
+@pytest.mark.parametrize(
+    ("scenario", "reason"),
+    [
+        ("ad hoc", "did not run the required check"),
+        ("passing check", None),
+        ("newer ad hoc", "did not run the required check"),
+        ("no selector", "had no test selector"),
+        ("collect only", "passed no tests"),
+        ("changed rule", "rule changed since the run"),
+        ("old audit policy", "rule changed since the run"),
+        ("malformed", "could not load verify/required-check.json"),
+    ],
+)
+def test_work_closeout_required_check(tmp_path, closeout_check, capsys, monkeypatch, scenario, reason):
+    declare, prefix = closeout_check
+    if scenario != "old audit policy":
+        declare(malformed=scenario == "malformed")
+    expected_prefix = prefix
+    policy_changes = scenario in {"changed rule", "old audit policy"}
+    if policy_changes:
+        subprocess.run(["git", "remote", "add", "origin", "../origin.git"], cwd=tmp_path, check=True)
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True)
+        expected_prefix = [*prefix, "-q", "a path with a 'quote'"]
+        declare(expected_prefix)
+
+    assert work_cmd.start(target=tmp_path, title="Finish work", force=False) == 0
+    capsys.readouterr()
+    if scenario in {"passing check", "newer ad hoc", "changed rule", "old audit policy"}:
+        assert work_cmd.verify_run(target=tmp_path, commands=[[*prefix, "test_sample.py"]], json_output=True) == 0
+        receipt = json.loads(capsys.readouterr().out)
+        assert receipt["commands"][0]["test_outcomes"]["passed"] == 1
+    if scenario in {"ad hoc", "newer ad hoc"}:
+        if sys.platform == "win32":
+            # Windows has no standalone true command. Stub only its child process.
+            real_which = verification.shutil.which
+            monkeypatch.setattr(
+                verification.shutil,
+                "which",
+                lambda name, **kwargs: sys.executable if name == "true" else real_which(name, **kwargs),
+            )
+            monkeypatch.setattr(verify_runtime, "_run_verify_child_process", lambda *a, **kw: ("completed", 0, "", ""))
+        assert cli.main(["work", "verify", "run", "--target", str(tmp_path), "--command", "true", "--json"]) == 0
+        latest = json.loads(capsys.readouterr().out)
+        if scenario == "newer ad hoc":
+            assert latest["tree_fingerprint"] == receipt["tree_fingerprint"]
+        receipt = latest
+    if scenario in {"no selector", "collect only", "malformed"}:
+        args = {
+            "no selector": prefix,
+            "collect only": [*prefix, "--collect-only", "test_sample.py"],
+            "malformed": [sys.executable, "-V"],
+        }[scenario]
+        assert work_cmd.verify_run(target=tmp_path, commands=[args], json_output=True) == 0
+        receipt = json.loads(capsys.readouterr().out)
+    if policy_changes:
+        assert receipt["gating"]["mode"] == ("audit_only" if scenario == "old audit policy" else "required_check")
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True)
+        assert localio.tree_fingerprint(tmp_path) == receipt["tree_fingerprint"]
+
+    assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
+    capsys.readouterr()
+    assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == int(reason is not None)
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verification"]["run_id"] == receipt["run_id"]
+    if reason is None:
+        assert payload["ready"] is True
+    elif scenario == "malformed":
+        (blocker,) = payload["blockers"]
+        assert blocker.startswith("The repository's required check could not be read. Could not load ")
+        assert "verify/required-check.json" in blocker
+        assert "Expecting property name" in blocker
+        assert "--argv-json" not in blocker
+    else:
+        (blocker,) = payload["blockers"]
+        assert "latest verification run for this session is not the repository's required check" in blocker
+        assert reason in blocker
+        command = shlex.split(blocker.split("`")[1])
+        assert command[command.index("--target") + 1] == str(tmp_path)
+        assert json.loads(command[command.index("--argv-json") + 1]) == [*expected_prefix, "tests/test_example.py"]
+
+
+@pytest.mark.parametrize(
+    ("mode", "malformed_stamp"), [("audit only", False), ("declared", False), ("non-git", False), ("declared", True)]
+)
+def test_work_closeout_receipt_without_valid_stamp(tmp_path, capsys, mode, malformed_stamp):
+    if mode != "non-git":
+        _init_git_repo_with_head(tmp_path)
+    if mode == "declared":
+        declaration = tmp_path / "verify" / "required-check.json"
+        declaration.parent.mkdir()
+        _write_json(
+            declaration,
+            {
+                "schema": "brigade.verify_required_check.v1",
+                "argv_prefix": [sys.executable, "-V"],
+                "needs_arguments": False,
+                "needs_passed_tests": False,
+            },
+        )
+        subprocess.run(["git", "add", "verify"], cwd=tmp_path, check=True)
+        _init_git_repo_with_head(tmp_path)
+    assert work_cmd.start(target=tmp_path, title="Finish work", force=False) == 0
+    capsys.readouterr()
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["gating"]["eligible"] is True
+    if malformed_stamp:
+        receipt["gating"]["eligible"] = "yes"
+    else:
+        del receipt["gating"]
+    receipt["digests"]["receipt_sha256"] = localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    _write_json(Path(receipt["path"]) / "receipt.json", receipt)
+    assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
+    capsys.readouterr()
+
+    assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == int(mode != "audit only")
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["verification"]["run_id"] == receipt["run_id"]
+    if mode == "declared":
+        reason = "has an invalid required-check verdict" if malformed_stamp else "has no required-check verdict"
+        assert reason in payload["blockers"][0]
+    if mode == "non-git":
+        assert payload["blockers"] == ["could not read the current tree fingerprint"]
+
+
+@pytest.mark.parametrize("case", ["resolve base", "lose base", "malformed stamp"])
+def test_work_closeout_audit_ignores_receipt_stamp(tmp_path, capsys, case):
+    _init_git_repo_with_head(tmp_path)
+    subprocess.run(["git", "remote", "add", "origin", "../origin.git"], cwd=tmp_path, check=True)
+    ref = "refs/remotes/origin/main"
+    if case != "resolve base":
+        subprocess.run(["git", "update-ref", ref, "HEAD"], cwd=tmp_path, check=True)
+    assert work_cmd.start(target=tmp_path, title="Finish work", force=False) == 0
+    capsys.readouterr()
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["gating"]["mode"] == "audit_only"
+    assert receipt["gating"].get("fallback_source") == ("none" if case == "resolve base" else None)
+    if case == "resolve base":
+        subprocess.run(["git", "update-ref", ref, "HEAD"], cwd=tmp_path, check=True)
+    elif case == "lose base":
+        subprocess.run(["git", "update-ref", "-d", ref], cwd=tmp_path, check=True)
+    else:
+        receipt["gating"]["eligible"] = "yes"
+        receipt["digests"]["receipt_sha256"] = localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+        _write_json(Path(receipt["path"]) / "receipt.json", receipt)
+    assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
+    capsys.readouterr()
+
+    gate = verify_gate.StopGate(tmp_path)
+    started = localio.parse_iso_datetime(receipt["started_at"])
+    assert started is not None
+    assert gate.completion_in_window(receipt, started, None) is not None
+    assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["ready"] is True
+
+
+@pytest.mark.parametrize("git_command", ["ls-tree", "cat-file"])
+def test_work_closeout_blocks_policy_lookup_timeout(tmp_path, closeout_check, capsys, monkeypatch, git_command):
+    declare, _ = closeout_check
+    if git_command == "cat-file":
+        declare()
+    assert work_cmd.start(target=tmp_path, title="Finish work", force=False) == 0
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]]) == 0
+    assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
+    capsys.readouterr()
+
+    real_run = verify_manifest_git.subprocess.run
+
+    def slow_git(args, **kwargs):
+        if args[:2] == ["git", git_command] and "env" in kwargs:
+            raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+        return real_run(args, **kwargs)
+
+    monkeypatch.setattr(verify_manifest_git.subprocess, "run", slow_git)
+    assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == 1
+    assert json.loads(capsys.readouterr().out)["blockers"] == [
+        "Git timed out while reading the required check, so run closeout again."
+    ]
+
+
+@pytest.mark.parametrize("source", ["default_branch_tip", "head", "worktree"])
+def test_work_closeout_enforces_fallback_declaration(tmp_path, closeout_check, capsys, source):
+    declare, prefix = closeout_check
+    declare(commit=source != "worktree")
+    subprocess.run(["git", "remote", "add", "origin", "../origin.git"], cwd=tmp_path, check=True)
+    if source == "default_branch_tip":
+        tip = subprocess.check_output(
+            [
+                "git",
+                "-c",
+                "user.name=Test User",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit-tree",
+                "HEAD^{tree}",
+                "-m",
+                "unrelated tip",
+            ],
+            cwd=tmp_path,
+            text=True,
+        ).strip()
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", tip], cwd=tmp_path, check=True)
+    assert work_cmd.start(target=tmp_path, title="Finish work", force=False) == 0
+    capsys.readouterr()
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["gating"]["fallback_source"] == source
+    assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
+    capsys.readouterr()
+
+    assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == 1
+    (blocker,) = json.loads(capsys.readouterr().out)["blockers"]
+    assert "did not run the required check" in blocker
+    command = shlex.split(blocker.split("`")[1])
+    assert json.loads(command[command.index("--argv-json") + 1]) == [*prefix, "tests/test_example.py"]
+
+
+def test_work_closeout_accepts_manifest_under_required_check(tmp_path, closeout_check, capsys):
+    declare, _ = closeout_check
+    declare()
+    manifest_id = _register_tracked_verify_manifest(tmp_path, command=[sys.executable, "-V"])
+    assert work_cmd.start(target=tmp_path, title="Finish work", force=False) == 0
+    capsys.readouterr()
+    assert work_cmd.verify_run(target=tmp_path, manifest_id=manifest_id, json_output=True) == 0
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["gating"]["mode"] == "required_check"
+    assert receipt["gating"]["reason"] == "manifest_run"
+    assert work_cmd.end(target=tmp_path, note="done", handoff=False) == 0
+    capsys.readouterr()
+
+    assert work_cmd.closeout(target=tmp_path, session_id="latest", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ready"] is True
+    assert payload["verification"]["run_id"] == receipt["run_id"]
 
 
 @pytest.mark.parametrize(
@@ -3848,7 +4299,7 @@ def test_distinct_skill_captures_accumulate_separate_rank_signals(tmp_target, mo
     assert "brigade-work" not in by_id or by_id.get("brigade-work", {}).get("helped", 0) == 0
 
 
-def _register_tracked_verify_manifest(target, *, manifest_id="demo-verify"):
+def _register_tracked_verify_manifest(target, *, manifest_id="demo-verify", command="true"):
     """Track a patch-backed manifest so a --manifest run can be scoreable (#1378)."""
     skill_dir = target / "skills" / "demo"
     skill_dir.mkdir(parents=True, exist_ok=True)
@@ -3869,7 +4320,7 @@ def _register_tracked_verify_manifest(target, *, manifest_id="demo-verify"):
                 "subject_path": "skills/demo/SKILL.md",
                 "content_fingerprint": "sha256:demo",
             },
-            "checks": [{"check_id": "eff-1", "check_role": "effectiveness", "command": "true"}],
+            "checks": [{"check_id": "eff-1", "check_role": "effectiveness", "command": command}],
         },
     )
     subprocess.run(["git", "add", "-A"], cwd=target, check=True, stdout=subprocess.DEVNULL)

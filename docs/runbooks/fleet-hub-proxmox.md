@@ -126,7 +126,7 @@ python3 -c 'import sys; print(sys.version); raise SystemExit("Python 3.11+ requi
 
 PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin \
   pipx install --force \
-  "git+https://github.com/escoffier-labs/brigade.git@<BRIGADE_GIT_REF>"
+  "git+https://github.com/escoffier-labs/brigadestack.git@<BRIGADE_GIT_REF>"
 
 /usr/local/bin/brigade --version
 ```
@@ -611,7 +611,7 @@ Upgrade to a reviewed ref:
 systemctl stop brigade-fleet.service
 PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin \
   pipx install --force \
-  "git+https://github.com/escoffier-labs/brigade.git@<NEW_BRIGADE_GIT_REF>"
+  "git+https://github.com/escoffier-labs/brigadestack.git@<NEW_BRIGADE_GIT_REF>"
 systemctl start brigade-fleet.service
 systemctl status --no-pager brigade-fleet.service
 curl --fail --silent --show-error https://<HUB_TAILNET_FQDN>/health
@@ -623,7 +623,7 @@ Roll back the application to a known-good ref with the same sequence:
 systemctl stop brigade-fleet.service
 PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin \
   pipx install --force \
-  "git+https://github.com/escoffier-labs/brigade.git@<KNOWN_GOOD_BRIGADE_GIT_REF>"
+  "git+https://github.com/escoffier-labs/brigadestack.git@<KNOWN_GOOD_BRIGADE_GIT_REF>"
 systemctl start brigade-fleet.service
 journalctl -u brigade-fleet.service -n 50 --no-pager
 ```

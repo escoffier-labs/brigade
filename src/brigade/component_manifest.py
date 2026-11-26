@@ -455,6 +455,10 @@ def _validate_download_url(component: str, platform: str, asset_name: str, downl
             f"component {component!r} platform {platform!r} field 'download_url' "
             "must be an immutable https URL with a hostname"
         )
+    if parsed.netloc != "github.com":
+        raise ValueError(
+            f"component {component!r} platform {platform!r} field 'download_url' must use the allowed GitHub asset host"
+        )
     if parsed.query or parsed.fragment:
         raise ValueError(
             f"component {component!r} platform {platform!r} field 'download_url' "

@@ -13,7 +13,7 @@ import (
 
 func cmdCrawlMemory(args []string, out, errw io.Writer) int {
 	if hasBoolFlag(args, "help") || hasBoolFlag(args, "h") {
-		fmt.Fprintln(out, "usage: miseledger crawl memory <workspace> [--json] [--dry-run] [--rebuild] [--limit N]")
+		fmt.Fprintln(out, "usage: brigade-evidence crawl memory <workspace> [--json] [--dry-run] [--rebuild] [--limit N]")
 		return 0
 	}
 	values, bools, rest, err := splitFlags(args, map[string]bool{"limit": true}, map[string]bool{"json": true, "dry-run": true, "rebuild": true, "full": true})
@@ -21,7 +21,7 @@ func cmdCrawlMemory(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "crawl memory: %s", err)
 	}
 	if len(rest) != 1 {
-		return fatalf(errw, "usage: miseledger crawl memory <workspace> [--json] [--dry-run] [--rebuild] [--limit N]")
+		return fatalf(errw, "usage: brigade-evidence crawl memory <workspace> [--json] [--dry-run] [--rebuild] [--limit N]")
 	}
 	limit, err := parseLimit(values["limit"], 0)
 	if err != nil {

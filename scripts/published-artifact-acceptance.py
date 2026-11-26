@@ -385,13 +385,14 @@ def verify_release_assets(
     except (OSError, UnicodeDecodeError) as exc:
         raise AcceptanceError(f"could not fetch release checksums.txt: {exc}") from exc
     expected_checksum_names = set(expected) | {"component-manifest-v1.json"}
-    canonical_assets = {
+    historical_aliases = {
         f"{component}-{platform}" + (".exe" if platform == "windows-amd64" else ""): (component, platform)
         for component in LEGACY_IDS
         for platform in SUPPORTED_PLATFORMS
+        if re.match(r"^0\.(31|32)\.", version)
     }
-    if set(checksums) == expected_checksum_names | set(canonical_assets):
-        for name in canonical_assets:
+    if set(checksums) == expected_checksum_names | set(historical_aliases):
+        for name in historical_aliases:
             expected[name] = (checksums[name], _release_url(version, name, repository))
     elif set(checksums) != expected_checksum_names:
         raise AcceptanceError(
@@ -412,8 +413,8 @@ def verify_release_assets(
         path = release_dir / name
         path.write_bytes(body)
         component, platform = (
-            canonical_assets[name]
-            if name in canonical_assets
+            historical_aliases[name]
+            if name in historical_aliases
             else next(
                 (component, platform)
                 for component in released
@@ -925,18 +926,17 @@ def _write_poison_binaries(poison_dir: Path, marker: Path) -> None:
 def smoke_verified_canonical_release(
     release_dir: Path, version: str, *, runner: Runner, env: Mapping[str, str]
 ) -> None:
-    # The original validated inventory, not file presence, determines intent.
     checksums = _parse_checksums((release_dir / "checksums.txt").read_text(encoding="utf-8"))
-    if len(checksums) == 26:
+    historical = re.match(r"^0\.(?:[0-9]|[12][0-9]|3[0-2])\.", version) is not None
+    if historical and len(checksums) == 26:
         return
-    # 40 native assets and the manifest, plus brigade-hub's two Linux assets
-    # from the release that first ships it.
-    if len(checksums) not in (41, 43):
+    expected_counts = (41, 43) if historical else (26, 28)
+    if len(checksums) not in expected_counts:
         raise AcceptanceError("invalid cached release inventory")
     platform = host_platform_key()
     paths = {name: (release_dir / f"{name}-{platform}").resolve() for name in CANONICAL_IDS}
     if not all(path.is_file() for path in paths.values()):
-        raise AcceptanceError("missing canonical host asset in additive release")
+        raise AcceptanceError("missing canonical host asset in release")
     manifest_path = (release_dir / "component-manifest-v1.json").resolve()
     manifest = json.loads(manifest_path.read_bytes(), object_pairs_hook=_unique_json_object)
     revisions = [manifest["components"][name].get("component_revision") for name in COMPONENT_IDS]
@@ -945,7 +945,7 @@ def smoke_verified_canonical_release(
         or len(set(revisions)) != 1
     ):
         raise AcceptanceError("primary manifest must contain one valid source commit for all components")
-    # Bind the manifest itself as well as the aliases to signed source identity.
+    # Bind the manifest itself as well as the canonical binaries to signed source identity.
     # A checksum map alone is not provenance, and releases can be mutable.
     # The attestation is signed under the repository name the release was built in, which
     # the manifest records, so --repo and the signer workflow both follow the manifest.

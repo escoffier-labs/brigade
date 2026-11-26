@@ -10,10 +10,12 @@ homepage = "https://graphtrail.escoffierlabs.dev"
 readme = "README.md"
 keywords = ["code-graph", "mcp", "tree-sitter", "call-graph", "agents"]
 categories = ["development-tools", "command-line-utilities"]
-default-run = "graphtrail"
+default-run = "brigade-code-graph"
+autobins = false
 
-# Both canonical executables delegate to the existing application entry points.
-# Keep auto-discovery and default-run for the legacy executable contracts.
+[lib]
+name = "brigade_code_graph"
+
 [[bin]]
 name = "brigade-code-graph"
 path = "src/bin/brigade-code-graph.rs"

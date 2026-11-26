@@ -19,6 +19,9 @@ target = _target
 
 
 def test_capture_never_spawns(target, monkeypatch):
+    # Verify subprocess behavior even if a loaded CI worker would skip capture
+    # because its wall-clock budget expired.
+    monkeypatch.setattr(observed_checks, "_capture_clock", lambda: 0.0)
     spawns = [Mock(side_effect=AssertionError("process spawned")) for _ in range(3)]
     capture = check_events._on_event
 

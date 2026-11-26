@@ -1,0 +1,1 @@
+- Serialize cassette purge with publication and record the full sequence range affected by partial redaction.

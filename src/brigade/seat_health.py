@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Callable, Literal, Protocol
 from urllib.parse import urlsplit
 
-from . import acpx_adapter, agents, model_inventory, proc
+from . import acpx_adapter, agents, codex_appserver, model_inventory, proc
 from .worker_failure import (
     FAILURE_CLASS_SPECS,
     FailureClass,
@@ -48,6 +48,7 @@ _ANTIGRAVITY_PROBE_TIMEOUT_SECONDS = 2.0
 # margin without spending the entire 30-second seat deadline on metadata.
 # The caller also caps this budget at the remaining per-seat deadline.
 _ANTIGRAVITY_METADATA_TIMEOUT_SECONDS = 10.0
+_CODEX_METADATA_TIMEOUT_SECONDS = 10.0
 _MODEL_SMOKE_MARKER = "BRIGADE_SEAT_HEALTH_EXACT_MARKER"
 _MODEL_SMOKE_PROMPT = (
     "Return exactly BRIGADE_SEAT_HEALTH_EXACT_MARKER and nothing else. Do not use tools. Do not write files."
@@ -93,6 +94,7 @@ ADAPTER_CHECK_MATRIX: dict[str, tuple[CheckName, ...]] = {
     "codex-app-server": CHECK_NAMES,
     "cursor-acpx": CHECK_NAMES,
 }
+_CODEX_METADATA_CHECKS = ("authentication-entitlement", "transport-liveness", "model-reachability")
 
 
 @dataclass(frozen=True)
@@ -255,11 +257,33 @@ class SeatHealthProbe:
         # Per invocation, never shared across concurrent seats, environments,
         # or uncached probes. Custom adapters retain ownership of every check.
         metadata: dict[str, tuple[proc.DelimitedResult | None, str]] = {}
-        for name in ADAPTER_CHECK_MATRIX[_adapter_kind(seat, roster)]:
+        adapter_kind = _adapter_kind(seat, roster)
+        use_codex_metadata = self._adapter is None and adapter_kind == "codex-app-server" and not allow_model_smoke
+        codex_checks: dict[CheckName, SeatHealthCheck] = {}
+        for name in ADAPTER_CHECK_MATRIX[adapter_kind]:
             remaining = deadline - self._clock()
             if remaining <= 0:
                 checks.append(_timeout_check(name))
                 break
+            if use_codex_metadata and name in _CODEX_METADATA_CHECKS:
+                if not codex_checks:
+                    executable_available = any(
+                        check.name == "executable-identity" and check.status == "passed" for check in checks
+                    )
+                    metadata_started = self._clock()
+                    observed = (
+                        codex_appserver.probe_readiness_metadata(
+                            cwd=workspace,
+                            model=seat.model if self._collect_model_inventory else None,
+                            timeout=min(remaining, _CODEX_METADATA_TIMEOUT_SECONDS),
+                        )
+                        if executable_available and seat.command is None and seat.env is None
+                        else codex_appserver.ReadinessMetadata()
+                    )
+                    codex_checks = _codex_metadata_checks(observed)
+                    codex_checks[name] = replace(codex_checks[name], duration_seconds=self._clock() - metadata_started)
+                checks.append(codex_checks[name])
+                continue
             budget = min(remaining, MODEL_REACHABILITY_TIMEOUT_SECONDS) if name == "model-reachability" else remaining
             checks.append(
                 self._run_check(
@@ -722,6 +746,40 @@ class SeatHealthProbe:
         return _model_smoke_result(result.ok, result.text, result.detail, cause, result.timed_out)
 
 
+def _codex_metadata_checks(observed: codex_appserver.ReadinessMetadata) -> dict[CheckName, SeatHealthCheck]:
+    auth: CheckName = "authentication-entitlement"
+    transport: CheckName = "transport-liveness"
+    model: CheckName = "model-reachability"
+    account_checks = {
+        "present": SeatHealthCheck(auth, "passed", "Codex reports a configured OpenAI account"),
+        "required": SeatHealthCheck(auth, "failed", "Codex requires an OpenAI account", cause_code="auth-required"),
+        "unknown": SeatHealthCheck(
+            auth, "degraded", "Codex account status is unavailable", cause_code="auth-status-unavailable"
+        ),
+    }
+    model_checks = {
+        "listed": SeatHealthCheck(model, "passed", "Codex inventory lists the exact configured model"),
+        "missing": SeatHealthCheck(
+            model, "failed", "Codex inventory omits the configured model", cause_code="model-unavailable"
+        ),
+        "partial": SeatHealthCheck(model, "degraded", "Codex inventory has more pages", cause_code="probe-incomplete"),
+        "unknown": SeatHealthCheck(
+            model, "degraded", "Codex exact-model inventory evidence is unavailable", cause_code="probe-incomplete"
+        ),
+    }
+    return {
+        auth: account_checks[observed.account],
+        transport: (
+            SeatHealthCheck(transport, "passed", "Codex app-server initialized over stdio")
+            if observed.initialized
+            else SeatHealthCheck(
+                transport, "failed", "Codex app-server could not initialize", cause_code="app-server-unavailable"
+            )
+        ),
+        model: model_checks[observed.model],
+    }
+
+
 def _antigravity_models(seat: Any, timeout_seconds: float) -> tuple[proc.DelimitedResult | None, str]:
     argv, env, env_error = _antigravity_probe_invocation(seat, "models")
     if env_error:
@@ -1045,7 +1103,5 @@ def _remove_temp_repo(root: Path) -> None:
     root.rmdir()
 
 
-def _app_server(root: Path):
-    from .codex_appserver import AppServer
-
-    return AppServer(cwd=root)
+def _app_server(root: Path) -> codex_appserver.AppServer:
+    return codex_appserver.AppServer(cwd=root)

@@ -257,3 +257,35 @@ def test_runtime_requires_exact_private_file_and_directory_walk(dot_private_dir,
     finally:
         root.chmod(0o700)
         parent.chmod(0o700)
+
+
+_ALL_CLASSES = '["read", "messaging", "dispatch", "memory_write"]'
+
+
+@requires_local_state
+@pytest.mark.parametrize(
+    ("grants", "valid"),
+    [
+        ('"tool_grants": {"classes": ["read"], "deny": []}', True),
+        (
+            '"tool_grants": {"classes": ["read"], "deny": []}, "tool_grants": {"classes": '
+            + _ALL_CLASSES
+            + ', "deny": []}',
+            False,
+        ),
+        ('"tool_grants": {"classes": ["read"], "classes": ' + _ALL_CLASSES + ', "deny": []}', False),
+        ('"tool_grants": {"classes": ["read"], "deny": ["inbox_ack"], "deny": []}', False),
+    ],
+)
+def test_load_runtime_rejects_duplicate_keys(dot_private_dir: Path, grants: str, valid: bool) -> None:
+    text = json.dumps(_document())
+    assert text.endswith("}")
+    path = dot_private_dir / "runtime.json"
+    _write_private(path, (text[:-1] + ", " + grants + "}").encode())
+
+    if valid:
+        assert load_runtime(path).tool_grants is not None
+        return
+    with pytest.raises(DotError) as error:
+        load_runtime(path)
+    assert error.value.code == "invalid_config"

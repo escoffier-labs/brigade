@@ -306,9 +306,11 @@ class TestClientNodeToken:
         lines = ["[fleet]", f'hub_url = "{url}"']
         if admin is not None:
             (self.home / "admin.token").write_text(admin + "\n")
+            (self.home / "admin.token").chmod(0o600)
             lines.append(f'token_file = "{(self.home / "admin.token").as_posix()}"')
         if node is not None:
             (self.home / "node.token").write_text(node + "\n")
+            (self.home / "node.token").chmod(0o600)
             lines.append(f'node_token_file = "{(self.home / "node.token").as_posix()}"')
         (self.home / "fleet.toml").write_text("\n".join(lines) + "\n")
 
@@ -472,6 +474,7 @@ class TestNodesCli:
 
     def _config(self, url: str, admin: str = ADMIN) -> None:
         (self.home / "admin.token").write_text(admin + "\n")
+        (self.home / "admin.token").chmod(0o600)
         (self.home / "fleet.toml").write_text(
             f'[fleet]\nhub_url = "{url}"\ntoken_file = "{(self.home / "admin.token").as_posix()}"\n'
         )

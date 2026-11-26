@@ -24,7 +24,7 @@ executable check while lacking the cookies needed for a live browser run, so:
 - If a run fails auth, expect Brigade's diagnostic to name this requirement;
   fix cookie sync before re-running rather than assuming a stale jar.
 - The adapter's command surface and read-only classification are tracked at
-  [`src/brigade/agents.py`](https://github.com/escoffier-labs/brigade/blob/main/src/brigade/agents.py).
+  [`src/brigade/agents.py`](https://github.com/escoffier-labs/brigadestack/blob/main/src/brigade/agents.py).
 
 ## Exact operator commands
 

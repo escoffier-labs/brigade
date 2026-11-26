@@ -37,6 +37,8 @@ def register(
         default=None,
         help="Filter by source (github, brigade, or native).",
     )
+    p_work_list.add_argument("--limit", type=int, default=None, help="Items per page (1-100).")
+    p_work_list.add_argument("--cursor", default=None, help="Page cursor from a previous Worklore listing.")
     p_work_list.add_argument("--json", action="store_true", help="Emit JSON instead of text.")
     p_work_list.set_defaults(func=handlers["list"])
     p_work_burn = work_sub.add_parser("burn", help="Show one page of the current burn queue.")

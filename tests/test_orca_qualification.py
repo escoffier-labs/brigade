@@ -294,16 +294,16 @@ def test_both_capacity_observations_must_be_clear(batch, live, row_held):
     assert record["verified_completion_seconds"] is None
 
 
-def test_cli_reports_unsupported_version(batch, monkeypatch, capsys):
-    paths = batch("orca", actual={"target": {"orca_version": "1.4.270"}})
+def test_cli_preserves_new_version_without_warning(batch, monkeypatch, capsys):
+    paths = batch("orca", actual={"target": {"orca_version": "1.4.271"}})
     sheet = json.loads(paths[2].read_bytes())
-    sheet["orca_version"] = "1.4.270"
+    sheet["orca_version"] = "1.4.271"
     write_json(paths[2], sheet)
     monkeypatch.setattr("sys.argv", ["qualification", "orca", *map(str, paths)])
     orca_qualification.main()
     output = capsys.readouterr()
-    assert json.loads(output.out)["orca_version"] == "1.4.270"
-    assert "outside Brigade's supported set" in output.err
+    assert json.loads(output.out)["orca_version"] == "1.4.271"
+    assert not output.err
 
 
 def test_cli_bounds_journal_errors(batch, monkeypatch, capsys):

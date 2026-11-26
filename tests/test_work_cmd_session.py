@@ -861,8 +861,8 @@ def test_work_brief_missing_or_invalid_suppression_cache_fails_open_without_scan
 
 def test_work_brief_json_attaches_graphtrail_context_for_selected_task(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
-    db.parent.mkdir()
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
+    db.parent.mkdir(parents=True)
     db.write_text("")
     graphtrail = tmp_path / "fake-graphtrail"
     graphtrail.write_text("#!/bin/sh\nprintf '%s\\n' '### Entry points' '- brigade.work_cmd.session._brief_payload'\n")

@@ -358,7 +358,7 @@ def test_registry_publisher_reconciles_immutable_archives_before_launcher(tmp_pa
             artifact["platform"] = f"test-{i}"
         packages.append(artifact)
     metadata = {
-        "runtime": {"version": "0.31.0", "payloadVersion": "0.31.0"},
+        "runtime": {"version": "0.32.0", "payloadVersion": "0.32.0"},
         "sourceCommit": "a" * 40,
         "artifacts": packages,
     }
@@ -380,7 +380,7 @@ if args[0]=='view':
     published=(root/(a['filename']+'.published')).exists()
     if args[2]=='versions':
         values={'string':'0.0.0-bootstrap','array':['0.0.0-bootstrap','0.28.0'],
-                'present':['0.0.0-bootstrap','0.31.0'],'null':None,'empty-array':[],
+                'present':['0.0.0-bootstrap','0.32.0'],'null':None,'empty-array':[],
                 'mixed-array':['0.0.0-bootstrap',None],'invalid-string':'unknown',
                 'invalid-semver':'0.0.0-01'}
         kind=mode.removeprefix('blank-versions-')
@@ -408,8 +408,8 @@ if args[0]=='view':
     if mode in ['absent','uncertain','no-attestation','deadline-after-read','slow-pre-publish-read'] and not published:
         print(json.dumps({'error':{'code':'E404'}}));sys.exit(1)
     if args[2]=='dist.integrity': print(json.dumps('sha512-wrong' if mode=='mismatch' else a['integrity']))
-    elif args[2]=='dist.attestations': print(json.dumps(None if mode=='no-attestation' else {'url':'https://registry.npmjs.org/-/npm/v1/attestations/'+name+'@0.31.0'}))
-    elif args[2]=='dist-tags.latest': print(json.dumps('0.29.0' if mode=='latest-mismatch' else '0.31.0'))
+    elif args[2]=='dist.attestations': print(json.dumps(None if mode=='no-attestation' else {'url':'https://registry.npmjs.org/-/npm/v1/attestations/'+name+'@0.32.0'}))
+    elif args[2]=='dist-tags.latest': print(json.dumps('0.29.0' if mode=='latest-mismatch' else '0.32.0'))
 else:
     assert args[0]=='publish' and '--provenance' in args and '--access' in args and 'public' in args
     archive=Path(args[1])

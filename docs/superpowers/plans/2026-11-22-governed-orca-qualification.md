@@ -55,8 +55,11 @@ for changes after execution and before release or disposal.
 | beta.txt | `Item: pear` | `Count: 5` | `beta\|pear\|5` |
 | gamma.txt | `Item: plum` | `Count: 3` | `gamma\|plum\|3` |
 
-Use the following batch template. Replace only `request_id` with a unique
-identifier per attempt (for example, `pair-01-a`). Copy each exact `text`
+Use the following batch template. Give each attempt a unique `request_id`
+(for example, `pair-01-a`). The example uses `sol62`. On an enrolled workspace,
+select a seat the Hub has enabled and admitted for the pinned provider, model
+and effort. If its name differs, use that same name in every task, both roster
+tables and every preflight and snapshot command. Copy each exact `text`
 to its matching existing task in the local coordinator's Orca Run. Stage a
 fresh Run and its three Tasks in Orca for each planned arm A attempt before
 timing. Do not start the workers during staging.
@@ -66,23 +69,24 @@ timing. Do not start the workers during staging.
   "schema": "brigade.run_batch.v1",
   "request_id": "pair-01-a",
   "tasks": [
-    {"task_id": "alpha", "seat": "worker", "isolation": "worktree", "read_only": true, "text": "Read only qualification-inputs/alpha.txt. Do not edit files. Return one line: alpha|<Item value>|<Count value>."},
-    {"task_id": "beta", "seat": "worker", "isolation": "worktree", "read_only": true, "text": "Read only qualification-inputs/beta.txt. Do not edit files. Return one line: beta|<Item value>|<Count value>."},
-    {"task_id": "gamma", "seat": "worker", "isolation": "worktree", "read_only": true, "text": "Read only qualification-inputs/gamma.txt. Do not edit files. Return one line: gamma|<Item value>|<Count value>."}
+    {"task_id": "alpha", "seat": "sol62", "isolation": "worktree", "read_only": true, "text": "Read only qualification-inputs/alpha.txt. Do not edit files. Return one line: alpha|<Item value>|<Count value>."},
+    {"task_id": "beta", "seat": "sol62", "isolation": "worktree", "read_only": true, "text": "Read only qualification-inputs/beta.txt. Do not edit files. Return one line: beta|<Item value>|<Count value>."},
+    {"task_id": "gamma", "seat": "sol62", "isolation": "worktree", "read_only": true, "text": "Read only qualification-inputs/gamma.txt. Do not edit files. Return one line: gamma|<Item value>|<Count value>."}
   ],
   "synthesis": null
 }
 ```
 
 Use the workspace's `.brigade/roster.toml` for both arms, including status
-queries. Configure `limits.max_workers = 3` and `limits.sandbox = "read-only"`.
-Pin the worker's Codex model and
-`reasoning = "medium"` in `[agents.worker]`. Set the following native binding.
+queries. Set top-level `codex_transport = "app-server"` for Brigade's Codex
+worker and its prompt-free readiness checks. Configure `limits.max_workers = 3`
+and `limits.sandbox = "read-only"`. Pin the worker's Codex model and
+`reasoning = "medium"` in `[agents.sol62]`. Set the following native binding.
 Use the exact model identifier accepted by both providers and confirm the
 effective model and effort from local evidence before accepting a match.
 
 ```toml
-[orca_targets.worker]
+[orca_targets.sol62]
 agent = "codex"
 orca_version = "1.4.269"
 worktree = "new-child"
@@ -91,7 +95,7 @@ effort = "medium"
 max_live = 3
 ```
 
-In the commands below, set `ws` to the source checkout, `batch` to the
+In the commands below, set `seat` to the selected seat, `ws` to the source checkout, `batch` to the
 attempt's input JSON and `out` to a private per-attempt receipt directory.
 Use the same pinned `brigade` executable for all commands. From the
 qualification checkout, use its Python environment to run the collector.
@@ -99,8 +103,8 @@ Verify version and readiness outside the timed interval.
 
 ```bash
 orca-ide --version
-brigade roster ready --route orca --worker worker --concurrency 3 --isolation worktree --target "$ws" --json
-brigade roster ready --route brigade --worker worker --concurrency 3 --isolation worktree --target "$ws" --json
+brigade roster ready --route orca --worker "$seat" --concurrency 3 --isolation worktree --target "$ws" --json
+brigade roster ready --route brigade --worker "$seat" --concurrency 3 --isolation worktree --target "$ws" --json
 ```
 
 ## Task 2: Execute each matched pair
@@ -113,7 +117,7 @@ The snapshot helper writes only the qualification fields. If it fails, stop
 before launching.
 
 ```bash
-python -m brigade.orca_qualification snapshot-roster "$arm" "$ws/.brigade/roster.toml" worker > "$out/pre-batch-roster.json"
+python -m brigade.orca_qualification snapshot-roster "$arm" "$ws/.brigade/roster.toml" "$seat" > "$out/pre-batch-roster.json"
 ```
 
 

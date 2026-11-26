@@ -14,9 +14,9 @@ import (
 	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/toolpath"
 )
 
-// nativeExporter describes a crawler binary that emits miseledger.adapter.v1
+// nativeExporter describes a crawler binary that emits adapter.SchemaV1
 // JSONL via a `<binary> export adapter` subcommand. Each entry in the crawl
-// router that maps to such a crawler shares cmdCrawlExporter, so MiseLedger
+// router that maps to such a crawler shares cmdCrawlExporter, so Brigade Evidence
 // never duplicates a crawler's SQLite schema; the crawler owns its own mapping.
 type nativeExporter struct {
 	binary     string   // executable on PATH, e.g. "discrawl"
@@ -44,7 +44,7 @@ var nativeExporters = map[string]nativeExporter{
 }
 
 // cmdCrawlExporter shells out to a crawler's `export adapter` subcommand and
-// streams its miseledger.adapter.v1 JSONL straight into the adapter importer.
+// streams its adapter.SchemaV1 JSONL straight into the adapter importer.
 // It mirrors cmdImportSourceHarvest but talks to a source-owned exporter binary.
 // Pass-through flags go to the crawler unchanged; --json and --dry-run are
 // handled here.

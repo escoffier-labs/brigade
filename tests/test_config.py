@@ -85,67 +85,14 @@ def test_write_produces_pretty_json(tmp_path):
     assert text.endswith("\n")
 
 
-def test_load_config_reads_legacy_solo_mise_dir(tmp_path):
-    from brigade.config import load_config
+@pytest.mark.parametrize("value", [25, 0, -1, "slow"])
+def test_load_config_ignores_retired_timeout_key(tmp_path, value):
+    from brigade import config
 
-    legacy = tmp_path / ".solo-mise"
-    legacy.mkdir()
-    (legacy / "config.json").write_text(
-        '{"version": 1, "depth": "repo", "harnesses": ["claude"], "owner": "claude", "includes": []}'
-    )
-    cfg = load_config(tmp_path)
-    assert cfg is not None
-    assert cfg.selection.harnesses == ["claude"]
-
-
-def test_load_config_defaults_code_graph_delta_timeout_seconds(tmp_path):
-    sel = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
-    write_config(tmp_path, Config(version=1, selection=sel))
+    _write_raw_config(tmp_path, **{config.LEGACY_CODE_GRAPH_DELTA_TIMEOUT_KEY: value})
     loaded = load_config(tmp_path)
     assert loaded is not None
-    assert loaded.code_graph_delta_timeout_seconds == 10.0
-
-
-def test_load_config_reads_legacy_graphtrail_delta_timeout_seconds(tmp_path):
-    path = tmp_path / ".brigade" / "config.json"
-    path.parent.mkdir(parents=True)
-    path.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "depth": "repo",
-                "harnesses": ["claude"],
-                "owner": "claude",
-                "includes": [],
-                "graphtrail_delta_timeout_seconds": 25,
-            }
-        )
-        + "\n"
-    )
-    loaded = load_config(tmp_path)
-    assert loaded is not None
-    assert loaded.code_graph_delta_timeout_seconds == 25.0
-
-
-@pytest.mark.parametrize("value", [0, -1, "slow"])
-def test_load_config_rejects_invalid_legacy_graphtrail_delta_timeout_seconds(tmp_path, value):
-    path = tmp_path / ".brigade" / "config.json"
-    path.parent.mkdir(parents=True)
-    path.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "depth": "repo",
-                "harnesses": ["claude"],
-                "owner": "claude",
-                "includes": [],
-                "graphtrail_delta_timeout_seconds": value,
-            }
-        )
-        + "\n"
-    )
-    with pytest.raises(ValueError, match="graphtrail_delta_timeout_seconds must be a positive number"):
-        load_config(tmp_path)
+    assert loaded.code_graph_delta_timeout_seconds == config.DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS
 
 
 def test_load_config_defaults_capture_before_retry(tmp_path):
@@ -367,7 +314,6 @@ def test_code_graph_delta_timeout_canonical_key_wins_and_writer_drops_legacy_key
     path = _write_raw_config(tmp_path, **{config.CODE_GRAPH_DELTA_TIMEOUT_KEY: 30, legacy: 5})
     loaded = load_config(tmp_path)
     assert loaded is not None and loaded.code_graph_delta_timeout_seconds == 30.0
-    assert config.legacy_config_keys(tmp_path) == [(legacy, config.CODE_GRAPH_DELTA_TIMEOUT_KEY, True)]
 
     write_config(tmp_path, loaded)
     written = json.loads(path.read_text())
@@ -397,4 +343,4 @@ def test_a_byte_order_mark_does_not_break_the_config(tmp_path):
     path.write_bytes(b"\xef\xbb\xbf" + json.dumps(body).encode())
     loaded = load_config(tmp_path)
     assert loaded is not None and loaded.selection.depth == "repo"
-    assert config.legacy_config_keys(tmp_path) == [(legacy, config.CODE_GRAPH_DELTA_TIMEOUT_KEY, False)]
+    assert loaded.code_graph_delta_timeout_seconds == config.DEFAULT_CODE_GRAPH_DELTA_TIMEOUT_SECONDS

@@ -1,0 +1,2 @@
+- Dot's fleet work list follows up to 20 Worklore pages before filtering and reports when the page budget truncates results.
+- Dot pack doctor reports when its node credential is missing or the local node identity does not match its configured Hub node.

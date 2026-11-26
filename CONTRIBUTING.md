@@ -67,12 +67,14 @@ After applying the required repository label, use `@coderabbitai review` for an 
 An issue, pull request, or GitHub comment written by an agent ends with an attribution block. It names the orchestrator model and the models that did implementation, verification, and review. List only models that did each role, write `none` for a role no model filled, and keep the human author identity unchanged. Put the exact checks and their observed results in the body above the block. The `Test/verification` line names the model and points at them, or says `not run`.
 
 ```text
-Sent by: <orchestrator model> (via <client>)
+Sent on behalf of Solomon by <orchestrator model> via <harness> in <client>
 Models used:
-- Implementation/build: <model, or none>
-- Test/verification: <model, or none> (checks: <listed above, or not run>)
-- Review: <model, or none>
+- Implementation/build: <model> via <harness>, or none
+- Test/verification: <model> via <harness> (checks: listed above), or not run
+- Review: <model> via <harness> for each pass, or none
 ```
+
+Every agent-written review comment and review summary also identifies the model that wrote it. Use a line such as `Review by Gemini 4 Hydrogen via agy in T3 Code`.
 
 ## Changelog
 
@@ -123,8 +125,8 @@ Reviewed planning docs are public and tracked: the phase plans (`docs/phase-*.md
 From a repo clone with Python 3.11+:
 
 ```bash
-git clone https://github.com/escoffier-labs/brigade.git
-cd brigade
+git clone https://github.com/escoffier-labs/brigadestack.git
+cd brigadestack
 python -m venv .venv
 ```
 
@@ -293,7 +295,7 @@ High-traffic contracts are pinned in `tests/test_error_refusal_copy.py`.
 
 ## Where things go
 
-Questions (setup, behavior, how do I) and ideas go to [Discussions](https://github.com/escoffier-labs/brigade/discussions). Reproducible bugs go to Issues, using the bug form under `.github/ISSUE_TEMPLATE/`. Security reports follow [SECURITY.md](SECURITY.md) and never go in a public thread.
+Questions (setup, behavior, how do I) and ideas go to [Discussions](https://github.com/escoffier-labs/brigadestack/discussions). Reproducible bugs go to Issues, using the bug form under `.github/ISSUE_TEMPLATE/`. Security reports follow [SECURITY.md](SECURITY.md) and never go in a public thread.
 
 For agents:
 

@@ -1,0 +1,1 @@
+- Brigade checks fleet token file ownership and permissions on POSIX and reports configured token files in doctor.

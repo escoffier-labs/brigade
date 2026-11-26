@@ -5,7 +5,7 @@ use std::{
     time::Instant,
 };
 
-use graphtrail::{
+use brigade_code_graph::{
     model::SearchRow,
     query::{
         build_context_pack_from_entry_points,

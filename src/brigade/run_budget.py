@@ -176,8 +176,12 @@ VERIFICATION_BUDGET_META_FIELDS = frozenset({"schema", "schema_version"})
 # Payload allowlists mirrored into run_events.EVENT_TYPES.
 RUN_BUDGET_EVENT_PAYLOADS: dict[str, frozenset[str]] = {
     EVENT_THRESHOLD: frozenset({"dimension", "mode", "declared", "used", "remaining", "threshold_pct", "reason_class"}),
-    EVENT_DENIED: frozenset({"dimension", "mode", "declared", "used", "remaining", "request_id", "reason_class"}),
-    EVENT_EXHAUSTED: frozenset({"dimension", "mode", "declared", "used", "remaining", "reason_class"}),
+    EVENT_DENIED: frozenset(
+        {"dimension", "mode", "declared", "used", "remaining", "request_id", "reason_class", "task_id", "attempt_id"}
+    ),
+    EVENT_EXHAUSTED: frozenset(
+        {"dimension", "mode", "declared", "used", "remaining", "reason_class", "task_id", "attempt_id"}
+    ),
     EVENT_CANCEL_REQUESTED: frozenset({"request_id", "reason_class", "transport_capability", "dimension"}),
     EVENT_CANCELLED: frozenset(
         {
@@ -201,6 +205,8 @@ RUN_BUDGET_EVENT_PAYLOADS: dict[str, frozenset[str]] = {
             "used",
             "request_id",
             "reason_class",
+            "task_id",
+            "attempt_id",
         }
     ),
 }
@@ -1241,6 +1247,13 @@ def validate_run_budget_payload(event_type: str, payload: Mapping[str, Any]) -> 
     """Extra closed-enum checks invoked from run_events._validate_payload."""
     if event_type not in RUN_BUDGET_EVENT_TYPES:
         return
+    if "task_id" in payload or "attempt_id" in payload:
+        from . import run_task_journal
+
+        if not run_task_journal.task_id(payload.get("task_id")) or not run_task_journal.digest(
+            payload.get("attempt_id")
+        ):
+            raise run_events.CanonicalizationError("invalid run budget task attempt")
     dimension = payload.get("dimension")
     if dimension is not None:
         if not isinstance(dimension, str) or (dimension and dimension not in ALL_DIMENSIONS):
@@ -1400,15 +1413,30 @@ class BudgetCoordinator:
         used["worker_dispatch_count"] = used.get("worker_dispatch_count", 0) + self._pending_dispatch_units
         return replace(self._projection, used=used)
 
-    def _commit(self, event_specs: Sequence[Mapping[str, Any]]) -> None:
+    def _commit(
+        self,
+        event_specs: Sequence[Mapping[str, Any]],
+        *,
+        task_attempt: tuple[str, str] | None = None,
+    ) -> None:
         recorded: list[dict[str, Any]] = []
         for spec in event_specs:
-            self.append_event(str(spec["event_type"]), dict(spec["payload"]), str(spec["idempotency_key"]))
-            recorded.append({"event_type": spec["event_type"], "payload": dict(spec["payload"])})
+            event_type = str(spec["event_type"])
+            payload = dict(spec["payload"])
+            key = str(spec["idempotency_key"])
+            if task_attempt is not None and event_type in {EVENT_DENIED, EVENT_EXHAUSTED, EVENT_RECONCILED}:
+                payload.update(task_id=task_attempt[0], attempt_id=task_attempt[1])
+                if event_type == EVENT_EXHAUSTED:
+                    # Exhaustion remains a run-wide policy verdict, but each denied batch attempt gets its own fact.
+                    key = _idempotency_key(key, task_attempt[1])
+            self.append_event(event_type, payload, key)
+            recorded.append({"event_type": event_type, "payload": payload})
         self._events_cache.extend(recorded)
         self._projection = project_budget_state(self.declaration, self._events_cache)
 
-    def _reserve_unlocked(self, *, request_id: str, units: int = 1) -> ReservationDecision:
+    def _reserve_unlocked(
+        self, *, request_id: str, units: int = 1, task_attempt: tuple[str, str] | None = None
+    ) -> ReservationDecision:
         if request_id in self._projection.denied_request_ids:
             exhausted = bool(self._projection.exhausted_dimensions)
             raise BudgetPolicyError(
@@ -1437,7 +1465,7 @@ class BudgetCoordinator:
             units=units,
         )
         if decision.events:
-            self._commit(decision.events)
+            self._commit(decision.events, task_attempt=task_attempt)
         if not decision.allowed:
             raise BudgetPolicyError(
                 _bound(
@@ -1665,7 +1693,9 @@ class BudgetCoordinator:
                 attempts.append(attempt)
         return max(attempts, default=0)
 
-    def _ensure_wall_clock_allows_unlocked(self, *, request_id: str) -> None:
+    def _ensure_wall_clock_allows_unlocked(
+        self, *, request_id: str, task_attempt: tuple[str, str] | None = None
+    ) -> None:
         """Deny authorization when the wall-clock ceiling is already exhausted.
 
         Used before reauthorizing a durable or retained pending identity.
@@ -1685,7 +1715,7 @@ class BudgetCoordinator:
             units=1,
         )
         if decision.events:
-            self._commit(decision.events)
+            self._commit(decision.events, task_attempt=task_attempt)
         if not decision.allowed:
             raise BudgetPolicyError(
                 _bound(
@@ -1705,6 +1735,7 @@ class BudgetCoordinator:
         allocate_attempt: Callable[[], int],
         record_requested: Callable[[int], int | None],
         reclaim_pending: bool = True,
+        task_attempt: tuple[str, str] | None = None,
     ) -> int | None:
         """Atomically allocate attempt, reserve, and durably record requested.
 
@@ -1743,14 +1774,22 @@ class BudgetCoordinator:
             # Guard against a stale allocator that reuses an already-claimed id.
             while True:
                 request_id = dispatch_reservation_request_id(seat, attempt)
-                if request_id not in self._launch_claims and not self._has_durable_dispatch_requested(seat, attempt):
+                if (
+                    request_id not in self._launch_claims
+                    and not self._has_durable_dispatch_requested(seat, attempt)
+                    and (
+                        task_attempt is None
+                        or request_id not in self._projection.denied_request_ids
+                        or self._dispatch_task_attempt(request_id) == task_attempt
+                    )
+                ):
                     break
                 attempt = max(attempt, self._max_attempt_unlocked(seat)) + 1
 
             request_id = dispatch_reservation_request_id(seat, attempt)
-            decision = self._reserve_unlocked(request_id=request_id, units=1)
+            decision = self._reserve_unlocked(request_id=request_id, units=1, task_attempt=task_attempt)
             if not reclaim_pending and decision.replayed:
-                self._ensure_wall_clock_allows_unlocked(request_id=request_id)
+                self._ensure_wall_clock_allows_unlocked(request_id=request_id, task_attempt=task_attempt)
             try:
                 recorded_attempt = record_requested(attempt)
             except Exception:
@@ -1774,6 +1813,20 @@ class BudgetCoordinator:
                     "payload": {"seat": seat, "attempt": recorded_attempt, "detail": "requested"},
                 }
             )
+            if task_attempt is not None:
+                # The batch recorder has already persisted this claim. Cache the same
+                # join used on replay, so immediate reconciliation can resolve it too.
+                self._events_cache.append(
+                    {
+                        "event_type": "task.launch-claimed",
+                        "payload": {
+                            "seat": seat,
+                            "dispatch_attempt": recorded_attempt,
+                            "task_id": task_attempt[0],
+                            "attempt_id": task_attempt[1],
+                        },
+                    },
+                )
             self._projection = project_budget_state(self.declaration, self._events_cache)
             recorded_id = dispatch_reservation_request_id(seat, recorded_attempt)
             self._reserved_request_ids.add(recorded_id)
@@ -1842,6 +1895,23 @@ class BudgetCoordinator:
                 active_seats=active_seats,
             )
 
+    def _dispatch_task_attempt(self, request_id: str) -> tuple[str, str] | None:
+        """Join a dispatch reservation to its durable claim or denial."""
+        binding = parse_dispatch_reservation_request_id(request_id)
+        if binding is None:
+            return None
+        for event in reversed(self._events_cache):
+            payload = _event_payload(event)
+            event_type = _event_type(event)
+            if (
+                event_type == "task.launch-claimed"
+                and (payload.get("seat"), payload.get("dispatch_attempt")) == binding
+            ) or (event_type == EVENT_DENIED and payload.get("request_id") == request_id):
+                task_id, attempt_id = payload.get("task_id"), payload.get("attempt_id")
+                if isinstance(task_id, str) and isinstance(attempt_id, str):
+                    return task_id, attempt_id
+        return None
+
     def reconcile_usage(
         self,
         *,
@@ -1866,7 +1936,14 @@ class BudgetCoordinator:
                 estimated_used=estimated_used,
                 provider_used=provider_used,
             )
-            self._commit([event])
+            # A replay of a pre-correlation receipt must retain its original
+            # payload, since the journal binds the request digest to the key.
+            legacy = any(
+                _event_type(prior) == EVENT_RECONCILED and _event_payload(prior) == event["payload"]
+                for prior in self._events_cache
+            )
+            task_attempt = None if legacy else self._dispatch_task_attempt(request_id)
+            self._commit([event], task_attempt=task_attempt)
 
 
 def terminal_status_for_policy(terminal_policy: str | None) -> tuple[str, str]:

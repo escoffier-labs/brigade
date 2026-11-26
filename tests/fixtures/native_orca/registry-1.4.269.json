@@ -1,0 +1,109 @@
+{
+  "orca_version": "1.4.269",
+  "source": "orca-ide agent-context --json (five-command CLI registry projection)",
+  "registry": {
+    "schemaVersion": 1,
+    "commands": [
+      {
+        "path": [
+          "orchestration",
+          "inbox"
+        ],
+        "flags": [
+          "help",
+          "json",
+          "pairing-code",
+          "environment",
+          "limit",
+          "terminal",
+          "run",
+          "full"
+        ]
+      },
+      {
+        "path": [
+          "orchestration",
+          "worker-read"
+        ],
+        "flags": [
+          "help",
+          "json",
+          "pairing-code",
+          "environment",
+          "dispatch",
+          "source",
+          "cursor",
+          "limit",
+          "full"
+        ]
+      },
+      {
+        "path": [
+          "orchestration",
+          "worker-show"
+        ],
+        "flags": [
+          "help",
+          "json",
+          "pairing-code",
+          "environment",
+          "dispatch",
+          "full"
+        ]
+      },
+      {
+        "path": [
+          "orchestration",
+          "worker-start"
+        ],
+        "flags": [
+          "help",
+          "json",
+          "pairing-code",
+          "environment",
+          "task",
+          "spec",
+          "spec-file",
+          "keep-open",
+          "task-title",
+          "deps",
+          "parent",
+          "on",
+          "worktree",
+          "name",
+          "repo",
+          "base-branch",
+          "display-name",
+          "comment",
+          "setup",
+          "agent",
+          "model",
+          "effort",
+          "terminal",
+          "retry-of",
+          "timeout-ms",
+          "run",
+          "from",
+          "retry-request",
+          "item",
+          "full"
+        ]
+      },
+      {
+        "path": [
+          "orchestration",
+          "worker-stop"
+        ],
+        "flags": [
+          "help",
+          "json",
+          "pairing-code",
+          "environment",
+          "dispatch",
+          "retry-request",
+          "full"
+        ]
+      }
+    ]
+  }
+}

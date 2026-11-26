@@ -99,6 +99,9 @@ def load_kernel32() -> Any:
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
     kernel32.OpenProcess.restype = wintypes.HANDLE
+    filetime_pointer = ctypes.POINTER(wintypes.FILETIME)
+    kernel32.GetProcessTimes.argtypes = (wintypes.HANDLE,) + (filetime_pointer,) * 4
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
     kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
     kernel32.GetExitCodeProcess.restype = wintypes.BOOL
     kernel32.CreateFileW.argtypes = (
@@ -126,6 +129,23 @@ def load_kernel32() -> Any:
 
 def _last_error() -> int:
     return ctypes.get_last_error()  # type: ignore[attr-defined]
+
+
+def process_creation_time(pid: int) -> int | None:
+    """Return the Windows FILETIME creation stamp, if accessible."""
+    kernel32 = load_kernel32()
+    handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
+    if not handle:
+        return None
+    try:
+        created, exited, kernel, user = (wintypes.FILETIME() for _ in range(4))
+        if not kernel32.GetProcessTimes(
+            handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(kernel), ctypes.byref(user)
+        ):
+            return None
+        return (created.dwHighDateTime << 32) | created.dwLowDateTime
+    finally:
+        kernel32.CloseHandle(handle)
 
 
 def pid_is_active(pid: int) -> bool:

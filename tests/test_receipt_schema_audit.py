@@ -120,6 +120,47 @@ def test_verify_receipt_emits_schema_version(tmp_path, capsys):
     }
 
 
+def test_verify_receipt_plan_stamp_is_additive(tmp_path, capsys):
+    from tests.test_verify_required import commit, write
+
+    _init_git_repo(tmp_path)
+    prefix = [sys.executable, "-c"]
+    write(
+        tmp_path,
+        "verify/required-check.json",
+        json.dumps(
+            {
+                "schema": "brigade.verify_required_check.v1",
+                "argv_prefix": prefix,
+                "needs_arguments": True,
+                "needs_passed_tests": True,
+                "needs_plan_coverage": True,
+            }
+        ),
+    )
+    base = commit(tmp_path, "opt in")
+    rc = verify_mod.verify_run(
+        target=tmp_path,
+        commands=[[*prefix, "print('1 passed in 0.01s')"]],
+        json_output=True,
+    )
+    assert rc == 0
+    receipt = json.loads(capsys.readouterr().out)
+    stored = json.loads((Path(receipt["path"]) / "receipt.json").read_text(encoding="utf-8"))
+    assert stored["schema_version"] == receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION
+    assert stored["gating"]["plan"] == {
+        "schema_version": 1,
+        "mode": "unconfigured",
+        "base_commit": base,
+        "snapshot_tree": stored["tree_fingerprint"],
+        "required_files": [],
+        "missing_files": [],
+        "run_argv": [],
+        "reason": "A required-test planner is not configured at the base.",
+    }
+    assert stored["digests"]["receipt_sha256"] == localio.canonical_json_digest(stored, exclude_keys={"digests"})
+
+
 def test_verify_receipt_legacy_without_schema_version_still_loads(tmp_path):
     run_dir = tmp_path / ".brigade" / "work" / "verify-runs" / "legacy-run"
     run_dir.mkdir(parents=True)

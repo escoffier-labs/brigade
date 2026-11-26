@@ -66,6 +66,68 @@ def test_run_budget_events_reject_raw_diagnostic_payload_keys():
     assert len(str(exc.value)) <= run_events.MAX_DIAGNOSTIC_LEN
 
 
+@pytest.mark.parametrize("replay", [False, True])
+def test_dispatch_usage_reconciliation_joins_claim(replay):
+    records = []
+    budget = run_budget.BudgetCoordinator(
+        run_budget.parse_declaration(_declaration_payload()),
+        lambda event_type, payload, key: records.append(_build_event(1, event_type, payload, key, RECORDED_AT, None)),
+    )
+    binding = ("task-a", "a" * 64)
+    if replay:
+        budget.reload(
+            [
+                {
+                    "event_type": "task.launch-claimed",
+                    "payload": {
+                        "task_id": binding[0],
+                        "attempt_id": binding[1],
+                        "seat": "worker",
+                        "dispatch_attempt": 1,
+                    },
+                }
+            ]
+        )
+    else:
+        assert (
+            budget.reserve_and_record_dispatch(
+                seat="worker",
+                allocate_attempt=lambda: 1,
+                record_requested=lambda attempt: attempt,
+                reclaim_pending=False,
+                task_attempt=binding,
+            )
+            == 1
+        )
+    request_id = run_budget.dispatch_reservation_request_id("worker", 1)
+    budget.reconcile_usage(dimension="output_tokens", usage_source="provider_reconciled", used=5, request_id=request_id)
+    payload = records[-1]["payload"]
+    assert (payload["task_id"], payload["attempt_id"]) == binding
+    assert payload["request_id"] == request_id
+
+
+def test_dispatch_usage_reconciliation_preserves_legacy_replay():
+    records = []
+    budget = run_budget.BudgetCoordinator(
+        run_budget.parse_declaration(_declaration_payload()),
+        lambda event_type, payload, key: records.append((event_type, payload, key)),
+    )
+    request_id = run_budget.dispatch_reservation_request_id("worker", 1)
+    usage = {"dimension": "output_tokens", "usage_source": "provider_reconciled", "used": 5, "request_id": request_id}
+    event = run_budget.build_usage_reconciled_event(**usage)
+    budget.reload(
+        [
+            {
+                "event_type": "task.launch-claimed",
+                "payload": {"task_id": "task-a", "attempt_id": "a" * 64, "seat": "worker", "dispatch_attempt": 1},
+            },
+            event,
+        ]
+    )
+    budget.reconcile_usage(**usage)
+    assert records == [(event["event_type"], event["payload"], event["idempotency_key"])]
+
+
 def test_load_declaration_file_is_versioned_strict_and_canonical(tmp_path):
     declaration_path = tmp_path / "budget.json"
     declaration_path.write_text(json.dumps(_declaration_payload()))

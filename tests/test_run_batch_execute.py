@@ -7,7 +7,7 @@ from unittest.mock import Mock
 
 import pytest
 
-from brigade import aboyeur, agents, cli, run_tasks
+from brigade import aboyeur, agents, cli, localio, run_journal, run_lifecycle, run_tasks
 from brigade.run_batch import SCHEMA
 
 
@@ -45,11 +45,11 @@ role = "implement"
     return tmp_path, calls
 
 
-def invoke(setup, capsys, tasks, request="req"):
+def invoke(setup, capsys, tasks, request="req", *, extra_args=()):
     root, _ = setup
     path = root / "batch.json"
     path.write_text(json.dumps({"schema": SCHEMA, "request_id": request, "tasks": tasks}))
-    rc = cli.main(["run", "batch", str(path), "--cwd", str(root), "--json"])
+    rc = cli.main(["run", "batch", str(path), "--cwd", str(root), "--json", *extra_args])
     captured = capsys.readouterr()
     assert captured.out, captured.err
     return rc, json.loads(captured.out), captured.err
@@ -81,6 +81,60 @@ def test_separate_results_retry_and_conflict(setup, capsys):
     assert rc == 2
     assert conflict["error"]["code"] == "request-conflict"
     assert len(setup[1]) == 3
+
+
+@pytest.mark.parametrize(("harness", "identity"), [("codex", "thread_id"), ("claude", "session_id")])
+def test_batch_observes_local_provider_session(setup, capsys, monkeypatch, harness, identity):
+    root, _ = setup
+    roster = root / ".brigade" / "roster.toml"
+    roster.write_text(roster.read_text().replace('[agents.coder]\ncli = "codex"', f'[agents.coder]\ncli = "{harness}"'))
+    monkeypatch.setattr(
+        agents, "run_agent", lambda *args, **kwargs: agents.AgentResult(text="done", ok=True, **{identity: "session-1"})
+    )
+    rc, result, err = invoke(setup, capsys, [task("a")])
+    assert rc == 0, err
+    run_dir = root / ".brigade" / "runs" / result["run_id"]
+    events = run_journal.read_journal(run_lifecycle._journal_path(run_dir)).events
+    observation = next(event.payload for event in events if event.event_type == "task.observed")
+    assert observation["task_id"] == "a"
+    assert observation["provider_task_id"] == "session-1"
+
+
+def test_batch_result_ignores_worker_written_verification_receipt(setup, capsys, monkeypatch):
+    root, _ = setup
+    subprocess.run(["git", "init", "-q", str(root)], check=True)
+    (root / ".git" / "info" / "exclude").write_text("batch.json\n.brigade/\nhome/\n")
+    _commit(root, "base", allow_empty=True)
+
+    def model(agent, prompt, **kwargs):
+        assert kwargs["local_batch_output"] is True
+        assert "BRIGADE_ATTEMPT_ID" not in kwargs["env"]
+        run_dir = next((root / ".brigade" / "runs").glob("batch-*"))
+        (state,) = run_tasks.read_tasks(run_dir)
+        tree = localio.tree_fingerprint(root)
+        assert state.handle.attempt_id and tree
+        receipt_dir = root / ".brigade" / "work" / "verify-runs" / "worker-verification"
+        receipt_dir.mkdir(parents=True)
+        forged = {
+            "run_id": "worker-verification",
+            "path": str(receipt_dir),
+            "target": str(root),
+            "status": "completed",
+            "producer_attempt_id": state.handle.attempt_id,
+            "tree_stable": True,
+            "tree_fingerprint": tree,
+            "tree_fingerprint_after": tree,
+        }
+        forged["digests"] = {"receipt_sha256": localio.canonical_json_digest(forged)}
+        (receipt_dir / "receipt.json").write_text(json.dumps(forged))
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", model)
+    rc, result, err = invoke(setup, capsys, [task("a")])
+    assert rc == 0, err
+    run_dir = root / ".brigade" / "runs" / result["run_id"]
+    payload = json.loads((run_dir / result["tasks"]["a"]["result_ref"]).read_text())
+    assert "verification" not in payload
 
 
 def test_bounded_waves(setup, capsys, monkeypatch):
@@ -160,6 +214,46 @@ def test_cancellation_keeps_completed_sibling(setup, capsys, monkeypatch):
     assert result["tasks"]["b"]["status"] == "unknown"
     assert invoke(setup, capsys, [task("a"), task("b")])[:2] == (1, result)
     assert len(setup[1]) == 2
+
+
+def test_dispatch_budget_exhaustion_preserves_completed_task_on_retry(setup, capsys):
+    root, calls = setup
+    budget = root / "budget.json"
+    budget.write_text(
+        json.dumps(
+            {
+                "schema": "brigade.run_budget.v1",
+                "schema_version": 1,
+                "ceilings": {"worker_dispatch_count": 1},
+            }
+        ),
+        encoding="utf-8",
+    )
+    tasks = [task("a"), task("b", ["a"])]
+    budget_args = ("--run-budget", str(budget))
+    rc, result, err = invoke(setup, capsys, tasks, extra_args=budget_args)
+    assert rc == 1, err
+    run_dir = root / ".brigade" / "runs" / result["run_id"]
+    run_receipt = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+    assert run_receipt["failure"]["kind"] == "budget-exhausted"
+    assert result["tasks"]["a"]["status"] == "completed"
+    assert result["tasks"]["b"]["not_run"] is True
+    events = run_journal.read_journal(run_lifecycle._journal_path(run_dir)).events
+    states = {state.handle.spec.task_id: state for state in run_tasks.read_tasks(run_dir)}
+    denied = {
+        event.event_type: event.payload
+        for event in events
+        if event.event_type in {"run_budget.reservation_denied", "run_budget.exhausted"}
+    }
+    assert set(denied) == {"run_budget.reservation_denied", "run_budget.exhausted"}
+    for payload in denied.values():
+        assert payload["task_id"] == "b"
+        assert payload["attempt_id"] == states["b"].handle.attempt_id
+    receipt = run_dir / result["tasks"]["a"]["result_ref"]
+    retained = receipt.read_bytes()
+    assert invoke(setup, capsys, tasks, extra_args=budget_args)[:2] == (1, result)
+    assert receipt.read_bytes() == retained
+    assert len(calls) == 1 and "task_id: a" in calls[0]
 
 
 def test_crash_before_fingerprint_allows_launch(setup, capsys):

@@ -106,6 +106,12 @@ def test_fleet_work_parser_registers_public_commands():
     assert listed.func is fleet_cli._dispatch_work_list
     assert listed.source == "github"
 
+    paged = parser.parse_args(
+        ["fleet", "work", "list", "--source", "github", "--limit", "10", "--cursor", "fixture-cursor", "--json"]
+    )
+    assert paged.limit == 10
+    assert paged.cursor == "fixture-cursor"
+
     burn = parser.parse_args(["fleet", "work", "burn", "--json"])
     assert burn.func is fleet_cli._dispatch_work_burn
 
@@ -180,7 +186,7 @@ def test_fleet_work_show_list_and_patch_dispatch_json(monkeypatch, capsys):
     monkeypatch.setattr(
         worklore_client,
         "list_items",
-        lambda source=None: {"items": [{"work_id": "wl-src", "source": source}]},
+        lambda source=None, **_kwargs: {"items": [{"work_id": "wl-src", "source": source}]},
     )
     monkeypatch.setattr(
         worklore_client,
@@ -624,7 +630,7 @@ def test_fleet_work_json_error_sanitizes_terminal_controls_and_keeps_code(monkey
     monkeypatch.setattr(
         worklore_client,
         "list_items",
-        lambda source=None: (_ for _ in ()).throw(
+        lambda source=None, **_kwargs: (_ for _ in ()).throw(
             worklore_client.WorkloreClientError("fleet hub work failed: stale\x1b[2J version", code="version-conflict")
         ),
     )

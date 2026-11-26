@@ -469,8 +469,8 @@ def test_worker_prompt_without_prior_context_keeps_original_contract():
 
 
 def test_code_graph_brief_attaches_markdown_pack(tmp_path, monkeypatch):
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
-    db.parent.mkdir()
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
+    db.parent.mkdir(parents=True)
     db.write_text("")
     calls = []
 
@@ -517,8 +517,8 @@ def test_code_graph_brief_missing_db_is_not_attached(tmp_path, monkeypatch):
 
 
 def test_code_graph_brief_nonzero_exit_is_not_attached(tmp_path, monkeypatch):
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
-    db.parent.mkdir()
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
+    db.parent.mkdir(parents=True)
     db.write_text("")
     monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: "/bin/graphtrail")
     monkeypatch.setattr(aboyeur.proc, "run", lambda args, **kw: proc.Result(code=2, stdout="partial", stderr="boom"))
@@ -531,8 +531,8 @@ def test_code_graph_brief_nonzero_exit_is_not_attached(tmp_path, monkeypatch):
 
 
 def test_code_graph_brief_timeout_is_not_attached(tmp_path, monkeypatch):
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
-    db.parent.mkdir()
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
+    db.parent.mkdir(parents=True)
     db.write_text("")
     monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: "/bin/graphtrail")
     monkeypatch.setattr(aboyeur.proc, "run", lambda args, **kw: proc.Result(code=124, stdout="", stderr="timeout"))
@@ -545,8 +545,8 @@ def test_code_graph_brief_timeout_is_not_attached(tmp_path, monkeypatch):
 
 
 def test_code_graph_brief_missing_binary_is_not_attached(tmp_path, monkeypatch):
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
-    db.parent.mkdir()
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
+    db.parent.mkdir(parents=True)
     db.write_text("")
     monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: None)
     monkeypatch.setattr(aboyeur.proc, "run", lambda *args, **kw: (_ for _ in ()).throw(AssertionError("no run")))
@@ -559,8 +559,8 @@ def test_code_graph_brief_missing_binary_is_not_attached(tmp_path, monkeypatch):
 
 
 def test_code_graph_brief_empty_or_whitespace_output_is_not_attached(tmp_path, monkeypatch):
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
-    db.parent.mkdir()
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
+    db.parent.mkdir(parents=True)
     db.write_text("")
     monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: "/bin/graphtrail")
 
@@ -717,8 +717,8 @@ def test_ground_truth_facts_surface_context_eval_metric_once():
 
 
 def test_code_graph_brief_truncates_on_line_boundary(tmp_path, monkeypatch):
-    db = tmp_path / ".graphtrail" / "graphtrail.db"
-    db.parent.mkdir()
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
+    db.parent.mkdir(parents=True)
     db.write_text("")
     monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: "/bin/graphtrail")
     monkeypatch.setattr(
@@ -735,7 +735,7 @@ def test_code_graph_brief_truncates_on_line_boundary(tmp_path, monkeypatch):
 
 def test_drift_impact_brief_attaches_pending_drift_and_graph_impact(tmp_path, monkeypatch):
     work = tmp_path / "work"
-    db = work / ".graphtrail" / "graphtrail.db"
+    db = work / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_text("")
     state = tmp_path / "state.json"
@@ -792,7 +792,7 @@ def test_drift_impact_brief_attaches_pending_drift_and_graph_impact(tmp_path, mo
 
 def test_drift_impact_brief_keeps_report_when_graph_candidates_have_no_edges(tmp_path, monkeypatch):
     work = tmp_path / "work"
-    db = work / ".graphtrail" / "graphtrail.db"
+    db = work / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.touch()
     state = tmp_path / "state.json"
@@ -823,7 +823,7 @@ def test_drift_impact_brief_keeps_report_when_graph_candidates_have_no_edges(tmp
 
 def test_drift_impact_brief_missing_state_is_not_attached(tmp_path, monkeypatch):
     work = tmp_path / "work"
-    db = work / ".graphtrail" / "graphtrail.db"
+    db = work / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_text("")
     monkeypatch.setenv("UPSTREAM_DRIFT_STATE_PATH", str(tmp_path / "missing.json"))
@@ -1553,7 +1553,7 @@ def test_evidence_context_is_prepended_once_to_plan_worker_and_synthesis(monkeyp
 
 
 def test_run_json_records_code_graph_brief_fields(monkeypatch, tmp_path):
-    db = tmp_path / "work" / ".graphtrail" / "graphtrail.db"
+    db = tmp_path / "work" / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_text("")
     calls = []
@@ -1637,7 +1637,7 @@ def test_run_json_records_evidence_brief_fields(monkeypatch, tmp_path):
 
 
 def test_run_json_records_disabled_code_graph(monkeypatch, tmp_path):
-    db = tmp_path / "work" / ".graphtrail" / "graphtrail.db"
+    db = tmp_path / "work" / ".brigade" / "code-graph" / "code-graph.db"
     db.parent.mkdir(parents=True)
     db.write_text("")
     monkeypatch.setattr(aboyeur, "_graphtrail_bin", lambda: "/bin/graphtrail")

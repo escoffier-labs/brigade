@@ -140,9 +140,9 @@ Existing repository mechanisms can support a local evidence index:
 Link existing adopter-supplied entity/authority mappings, historical trust and
 time evidence, custody records, and official receipts when available. Record
 producer, scope, timestamps, verification method and limitations for each.
-[#1619](https://github.com/escoffier-labs/brigade/issues/1619) tracks organizational
+[#1619](https://github.com/escoffier-labs/brigadestack/issues/1619) tracks organizational
 identity, historical trust and time prerequisites;
-[#1407](https://github.com/escoffier-labs/brigade/issues/1407) tracks further
+[#1407](https://github.com/escoffier-labs/brigadestack/issues/1407) tracks further
 custody links. Neither must land before this worksheet can use existing evidence.
 It requires no new identity, WORM/SIEM, retention, reporting or runtime service,
 no universal separate-human rule, and no universal retention period. Record

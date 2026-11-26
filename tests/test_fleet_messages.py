@@ -873,7 +873,7 @@ def test_online_message_operations_reject_redirects(action, monkeypatch):
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-token", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-token", "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (302, {"error": "redirected"}))
 
@@ -927,7 +927,7 @@ def test_principal_management_rejects_redirects(action, monkeypatch):
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": "admin-token"},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": "admin-token"},
     )
 
     class Response:
@@ -952,7 +952,7 @@ def test_principal_add_reuses_pending_request_after_ambiguous_timeout(tmp_path, 
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": "admin-token"},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": "admin-token"},
     )
     requests = []
 
@@ -1024,7 +1024,7 @@ def test_principal_add_reuses_pending_request_after_ambiguous_timeout(tmp_path, 
 def test_node_prefixed_principal_retry_cannot_resurrect_after_interruption(tmp_path, monkeypatch, interruption):
     settings = {"hub_url": "https://a.invalid", "node_token": "", "admin_token": "fixture-admin"}
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(settings))
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: dict(settings))
     pending = fleet_client_messages._pending_principal_request(
         "fixture", settings["admin_token"], None, hub_url=fleet_client.load_fleet_settings()["hub_url"]
     )
@@ -1100,7 +1100,7 @@ def test_principal_add_keeps_retry_state_until_response_matches_request(tmp_path
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": "admin-token"},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": "admin-token"},
     )
     requests = []
 
@@ -1182,7 +1182,7 @@ def test_stale_principal_finalizer_preserves_new_enrollment_generation(tmp_path,
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": "admin-token"},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": "admin-token"},
     )
     path = fleet_client_messages._principal_pending_path(
         "researcher", "admin-token", hub_url=fleet_client.load_fleet_settings()["hub_url"]
@@ -1210,7 +1210,7 @@ def test_principal_revoke_reuses_generation_after_ambiguous_timeout(tmp_path, mo
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ADMIN},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ADMIN},
     )
 
     def request(_hub, _admin, body):
@@ -1303,7 +1303,7 @@ def test_offline_send_is_spooled_and_delivered_by_flush(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     attempts = []
 
@@ -1341,7 +1341,7 @@ def test_send_refuses_before_post_when_full_spool_cannot_retain_retry(tmp_path, 
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     path = fleet_client_messages._spool_path(
         NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
@@ -1394,7 +1394,7 @@ def test_send_does_not_post_until_spool_fsync_succeeds(tmp_path, monkeypatch, fa
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     path = fleet_client_messages._spool_path(
         NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
@@ -1438,7 +1438,7 @@ def test_ambiguous_spool_append_surfaces_client_id_without_posting(tmp_path, mon
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     real_append = fleet_client._spool_append_locked
     attempts = []
@@ -1517,7 +1517,7 @@ def test_new_send_reports_unauthorized_without_cross_credential_spooling(tmp_pat
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (status, response))
 
@@ -1548,7 +1548,7 @@ def test_send_surfaces_unauthorized_while_draining_existing_spool(tmp_path, monk
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     path = fleet_client_messages._spool_path(
         NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
@@ -1593,7 +1593,7 @@ def test_send_surfaces_unauthorized_reply_lookup_while_draining(tmp_path, monkey
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     path = fleet_client_messages._spool_path(
         NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
@@ -1652,7 +1652,7 @@ def test_new_reply_surfaces_unauthorized_parent_lookup(tmp_path, monkeypatch, st
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     path = fleet_client_messages._spool_path(
         NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
@@ -1690,7 +1690,7 @@ def test_spool_flush_keeps_message_during_recipient_revocation(message_hub, tmp_
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": base, "node_token": token_a, "admin_token": ""},
+        lambda **_kwargs: {"hub_url": base, "node_token": token_a, "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": base})
     request = fleet_client_messages._request
@@ -1729,7 +1729,7 @@ def test_retryable_send_is_spooled_instead_of_reported_delivered(status, tmp_pat
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     monkeypatch.setattr(
         fleet_client_messages,
@@ -1760,7 +1760,7 @@ def test_send_spools_success_response_without_matching_client_id(tmp_path, monke
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (201, {}))
 
@@ -1788,7 +1788,7 @@ def test_retryable_spool_flush_keeps_message_queued(status, tmp_path, monkeypatc
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     path = fleet_client_messages._spool_path(
         NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
@@ -1819,7 +1819,7 @@ def test_spool_flush_keeps_message_when_success_response_does_not_confirm_client
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     path = fleet_client_messages._spool_path(
         NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
@@ -1844,7 +1844,7 @@ def test_spool_flush_drops_forbidden_send_and_delivers_next_message(tmp_path, mo
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     path = fleet_client_messages._spool_path(
         NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
@@ -1879,7 +1879,7 @@ def test_queued_messages_are_not_replayed_with_replaced_node_credentials(tmp_pat
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": token, "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": token, "admin_token": ""},
     )
     attempts = []
 
@@ -1925,7 +1925,7 @@ def test_queued_messages_survive_home_node_identity_change(tmp_path, monkeypatch
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     attempts = []
 
@@ -1980,7 +1980,7 @@ def test_flush_reports_legacy_unscoped_message_spool(tmp_path, monkeypatch, capl
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     legacy_path = fleet_client.spool_path(NODE_A).with_name(f"{NODE_A}.messages.jsonl")
     legacy_message = {
@@ -2014,7 +2014,7 @@ def test_message_flush_preserves_malformed_spool(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     path = fleet_client_messages._spool_path(
         NODE_A, fleet_client.load_fleet_settings()["node_token"], hub_url=fleet_client.load_fleet_settings()["hub_url"]
@@ -2035,7 +2035,7 @@ def test_flush_reports_spools_scoped_to_replaced_credentials(tmp_path, monkeypat
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-token-b", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-token-b", "admin_token": ""},
     )
     old_path = fleet_client_messages._spool_path(
         NODE_A, "node-token-a", hub_url=fleet_client.load_fleet_settings()["hub_url"]
@@ -2106,7 +2106,7 @@ def test_principal_management_uses_hard_wall_clock_deadline(monkeypatch):
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": "admin-token"},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": "admin-token"},
     )
     monkeypatch.setattr(fleet_client, "_hub_open", lambda *_args, **_kwargs: Response())
     monkeypatch.setattr(fleet_client, "_read_bounded_response", lambda *_args, **_kwargs: b"{}")
@@ -2129,7 +2129,7 @@ def test_spool_flush_obeys_aggregate_wall_clock_budget(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: dict(hub_url="https://hub.invalid", node_token="node-token", admin_token=""),
+        lambda **_kwargs: dict(hub_url="https://hub.invalid", node_token="node-token", admin_token=""),
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     message_authority = MessageAuthority.capture()
@@ -2174,7 +2174,7 @@ def test_new_send_flushes_older_spooled_messages_first(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
     attempts = []
@@ -2226,7 +2226,7 @@ def test_spool_flush_skips_recipient_quota_without_reordering_that_recipient(tmp
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: dict(hub_url="https://hub.invalid", node_token="node-token", admin_token=""),
+        lambda **_kwargs: dict(hub_url="https://hub.invalid", node_token="node-token", admin_token=""),
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     message_authority = MessageAuthority.capture()
@@ -2267,7 +2267,7 @@ def test_spool_flush_resolves_reply_before_blocked_recipient_delivery(tmp_path, 
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: dict(hub_url="https://hub.invalid", node_token="node-token", admin_token=""),
+        lambda **_kwargs: dict(hub_url="https://hub.invalid", node_token="node-token", admin_token=""),
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     message_authority = MessageAuthority.capture()
@@ -2309,7 +2309,7 @@ def test_spool_reply_recipient_lookup_obeys_drain_deadline_and_batch_limit(tmp_p
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: dict(hub_url="https://hub.invalid", node_token="node-token", admin_token=""),
+        lambda **_kwargs: dict(hub_url="https://hub.invalid", node_token="node-token", admin_token=""),
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     message_authority = MessageAuthority.capture()
@@ -2358,7 +2358,7 @@ def test_spool_drops_reply_when_parent_is_gone_and_continues_other_recipients(tm
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: dict(hub_url="https://hub.invalid", node_token="node-token", admin_token=""),
+        lambda **_kwargs: dict(hub_url="https://hub.invalid", node_token="node-token", admin_token=""),
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     message_authority = MessageAuthority.capture()
@@ -2401,7 +2401,7 @@ def test_new_send_does_not_probe_unresolved_replies_after_spool_batch_limit(tmp_
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
     monkeypatch.setattr(fleet_client_messages, "MESSAGE_BATCH_SIZE", 1)
@@ -2447,7 +2447,7 @@ def test_new_send_only_waits_behind_blocked_messages_for_its_recipient(tmp_path,
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
     path = fleet_client_messages._spool_path(
@@ -2499,7 +2499,7 @@ def test_new_reply_waits_only_behind_blocked_messages_for_its_recipient(tmp_path
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
     path = fleet_client_messages._spool_path(
@@ -2548,7 +2548,7 @@ def test_interrupted_spool_drain_preserves_new_message(tmp_path, monkeypatch, ac
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
     attempts = []
@@ -2605,7 +2605,7 @@ def test_reply_flushes_older_spooled_messages_first(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     attempts = []
     offline = True
@@ -2641,7 +2641,7 @@ def test_ordered_send_uses_the_locked_directory_descriptor(tmp_path, monkeypatch
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: dict(hub_url="https://hub.invalid", node_token="node-secret", admin_token=""),
+        lambda **_kwargs: dict(hub_url="https://hub.invalid", node_token="node-secret", admin_token=""),
     )
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     spool = fleet_client_messages._spool_path(NODE_A, "node-secret", hub_url="https://hub.invalid")
@@ -2683,7 +2683,7 @@ def test_new_send_bounds_opportunistic_spool_drain(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
     spool = fleet_client_messages._spool_path(
@@ -2735,7 +2735,7 @@ def test_future_timestamp_rejection_keeps_queued_message_for_retry(tmp_path, mon
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
     attempts = []
@@ -2775,7 +2775,7 @@ def test_interrupted_send_is_spooled_before_reraising(tmp_path, monkeypatch, act
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
     attempted = []
@@ -2811,7 +2811,7 @@ def test_ambiguous_reply_is_spooled_and_retried_with_same_client_id(tmp_path, mo
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
     attempts = []
@@ -2852,7 +2852,7 @@ def test_invalid_offline_reply_is_not_claimed_queued(
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     monkeypatch.setattr(
         fleet_client_messages,
@@ -3061,7 +3061,7 @@ def test_spool_rejection_log_escapes_hub_control_characters(tmp_path, monkeypatc
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: dict(hub_url="https://hub.invalid", node_token="node-token", admin_token=""),
+        lambda **_kwargs: dict(hub_url="https://hub.invalid", node_token="node-token", admin_token=""),
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     message_authority = MessageAuthority.capture()
@@ -3110,7 +3110,7 @@ def test_offline_send_does_not_claim_queued_when_spool_is_unsafe(tmp_path, monke
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     spool = fleet_client_messages._spool_path(
         NODE_A, fleet_client.load_fleet_settings()["node_token"], hub_url=fleet_client.load_fleet_settings()["hub_url"]
@@ -3146,7 +3146,7 @@ def test_offline_send_validates_fields_before_claiming_queued(tmp_path, monkeypa
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args: (503, {"error": "offline"}))
     with pytest.raises(fleet_client.FleetClientError, match="subject"):
@@ -3167,7 +3167,7 @@ def test_flush_discards_messages_older_than_retention(tmp_path, monkeypatch):
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     spool = fleet_client_messages._spool_path(
         NODE_A, fleet_client.load_fleet_settings()["node_token"], hub_url=fleet_client.load_fleet_settings()["hub_url"]
@@ -3235,7 +3235,7 @@ def test_message_transports_guard_bearer_urls_before_request(action, hub_url, tm
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": hub_url, "node_token": "node-token", "admin_token": ADMIN},
+        lambda **_kwargs: {"hub_url": hub_url, "node_token": "node-token", "admin_token": ADMIN},
     )
     requests = []
     opened = []
@@ -3305,7 +3305,7 @@ def test_principal_add_recovers_committed_request_after_label_change_and_conflic
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": base, "node_token": "", "admin_token": ADMIN},
+        lambda **_kwargs: {"hub_url": base, "node_token": "", "admin_token": ADMIN},
     )
     requests = []
     add_requests = []
@@ -3361,7 +3361,7 @@ def test_principal_add_clears_pending_request_after_definitive_validation_error(
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ADMIN},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ADMIN},
     )
     requests = []
 
@@ -3408,7 +3408,7 @@ def test_principal_add_retries_after_revoked_pending_enrollment(tmp_path, monkey
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ADMIN},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ADMIN},
     )
     requests = []
 
@@ -3463,7 +3463,7 @@ def test_principal_revoke_clears_local_pending_enrollment(tmp_path, monkeypatch)
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ADMIN},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ADMIN},
     )
     pending_path = fleet_client_messages._principal_pending_path(
         "researcher", ADMIN, hub_url=fleet_client.load_fleet_settings()["hub_url"]
@@ -3501,7 +3501,7 @@ def test_principal_revoke_preserves_concurrent_replacement_add(tmp_path, monkeyp
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ADMIN},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ADMIN},
     )
     add_path = fleet_client_messages._principal_pending_path(
         "researcher", ADMIN, hub_url=fleet_client.load_fleet_settings()["hub_url"]
@@ -3559,7 +3559,7 @@ def test_principal_revoke_requires_matching_success_identity(payload, monkeypatc
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
-        lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ADMIN},
+        lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ADMIN},
     )
 
     class Response(BytesIO):
@@ -4309,7 +4309,7 @@ def test_list_wait_rechecks_auth_and_releases_reservations_on_error(message_hub,
 
 def test_message_identity_is_authenticated_even_with_empty_inbox(message_hub, tmp_path, monkeypatch, capsys):
     base, token_a, _token_b, db = message_hub
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": base, "node_token": token_a})
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: {"hub_url": base, "node_token": token_a})
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     with fleet_hub.init_db(db) as conn:
         principal = fleet_hub_messages.add_principal(conn, {"name": "duet", "label": "Duet fixture"})
@@ -4550,7 +4550,7 @@ def identity_authority(tmp_path, monkeypatch):
     token.write_text("t" * 40)
     token.chmod(0o600)
     monkeypatch.setattr(
-        fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.invalid", "node_token": ""}
+        fleet_client, "load_fleet_settings", lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": ""}
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     return credentials.MessageAuthority.capture(str(token))
@@ -4763,7 +4763,7 @@ def test_identity_client_real_http_contract(message_hub, tmp_path, monkeypatch):
     token = tmp_path / "caller.token"
     token.write_text(caller["token"])
     token.chmod(0o600)
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": base, "node_token": token_a})
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: {"hub_url": base, "node_token": token_a})
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     authority = credentials.MessageAuthority.capture(str(token))
     result = fleet_client_messages.identity(
@@ -4837,7 +4837,9 @@ def test_identity_snapshot_coherence(message_hub, monkeypatch, mutation):
 def test_identity_node_client_preserves_bounded_error_without_fallback(message_hub, monkeypatch, wire_code):
     base, token_a, _, _ = message_hub
     monkeypatch.setattr(
-        fleet_client, "load_fleet_settings", lambda: {"hub_url": base, "node_token": token_a, "admin_token": ADMIN}
+        fleet_client,
+        "load_fleet_settings",
+        lambda **_kwargs: {"hub_url": base, "node_token": token_a, "admin_token": ADMIN},
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     handle = fleet_hub_messages.handle
@@ -4877,7 +4879,9 @@ def test_principal_client_preserves_epoch_failure_code_and_transaction(message_h
     base, token_a, _, db = message_hub
     _identity_pair(db)
     monkeypatch.setattr(
-        fleet_client, "load_fleet_settings", lambda: {"hub_url": base, "node_token": token_a, "admin_token": ADMIN}
+        fleet_client,
+        "load_fleet_settings",
+        lambda **_kwargs: {"hub_url": base, "node_token": token_a, "admin_token": ADMIN},
     )
     conn = fleet_hub.open_db(db)
     try:

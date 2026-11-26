@@ -8,12 +8,13 @@ require.cache[target].exports={...real,createVerifier:(cli)=>{
   const purl=(name,version)=>`pkg:npm/${name.replace(/^@/,'%40')}@${version}`;
   return {purl,verifyRegistry:async(url,sha512,expected)=>{
     const root=process.env.PUBLISH_FIXTURE,metadata=JSON.parse(fs.readFileSync(path.join(root,'artifacts.json')));
-    const artifact=metadata.artifacts.find(a=>purl(a.name,metadata.runtime.version)===expected.purl);
+    const version=metadata.runtime.version;
+    const artifact=metadata.artifacts.find(a=>purl(a.name,version)===expected.purl);
     assert.ok(artifact);
     assert.equal(sha512,crypto.createHash('sha512').update(fs.readFileSync(path.join(root,artifact.filename))).digest('hex'));
     const repository='https://github.com/'+(process.env.ATTESTED_REPOSITORY || 'escoffier-labs/brigade');
-    assert.deepEqual(expected,{purl:purl(artifact.name,'0.31.0'),sourceCommit:metadata.sourceCommit,repository,repositoryId:'1238165856',workflow:'.github/workflows/npm-publish.yml',ref:'refs/heads/main',san:`${repository}/.github/workflows/npm-publish.yml@refs/heads/main`,issuer:'https://token.actions.githubusercontent.com',builder:'https://github.com/actions/runner/github-hosted'});
-    assert.equal(url,'https://registry.npmjs.org/-/npm/v1/attestations/'+artifact.name+'@0.31.0');
+    assert.deepEqual(expected,{purl:purl(artifact.name,version),sourceCommit:metadata.sourceCommit,repository,repositoryId:'1238165856',workflow:'.github/workflows/npm-publish.yml',ref:'refs/heads/main',san:`${repository}/.github/workflows/npm-publish.yml@refs/heads/main`,issuer:'https://token.actions.githubusercontent.com',builder:'https://github.com/actions/runner/github-hosted'});
+    assert.equal(url,'https://registry.npmjs.org/-/npm/v1/attestations/'+artifact.name+'@'+version);
     fs.appendFileSync(path.join(root,'calls.jsonl'),JSON.stringify(['verify',artifact.name,sha512,expected])+'\n');
     const state=process.env.PUBLISH_STATE;
     if(state==='wrong-commit') throw new Error('certificate source commit mismatch');

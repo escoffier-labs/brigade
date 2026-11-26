@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::SystemTime;
 
-use graphtrail::store::{init_schema, open_db, sync_repo};
+use brigade_code_graph::store::{init_schema, open_db, sync_repo};
 use sha2::{Digest, Sha256};
 
 #[cfg(feature = "miseledger")]
@@ -15,10 +15,6 @@ const MISELEDGER_DEPRECATION_WARNING: &str = "warning: GraphTrail's direct MiseL
 /// The canonical entry point. Legacy behavior has its own tests below.
 fn engine() -> &'static str {
     env!("CARGO_BIN_EXE_brigade-code-graph")
-}
-
-fn legacy_engine() -> &'static str {
-    env!("CARGO_BIN_EXE_graphtrail")
 }
 
 fn index_dirs_absent(root: &Path) -> bool {
@@ -375,7 +371,7 @@ fn doctor_withholds_stale_resolver_coverage_until_sync() {
     let dir = tempfile::tempdir().unwrap();
     let db = build_db(dir.path());
     let conn = open_db(&db).unwrap();
-    graphtrail::store::meta::upsert(&conn, "resolver_version", "0").unwrap();
+    brigade_code_graph::store::meta::upsert(&conn, "resolver_version", "0").unwrap();
     drop(conn);
 
     for stale in [true, false] {
@@ -747,103 +743,70 @@ fn context_help_lists_join_layer_flags() {
 
 /// Exercise real executables: target metadata alone cannot provide compatibility.
 #[test]
-fn canonical_and_legacy_cli_contracts() {
+fn canonical_cli_contract() {
     let dir = tempfile::tempdir().unwrap();
     let db = build_db(dir.path());
-    // Only the legacy entry point prints the deprecation notice.
-    for (binary, name) in [
-        (legacy_engine(), "graphtrail"),
-        (engine(), "brigade-code-graph"),
+    let name = "brigade-code-graph";
+    let invoke = |args: &[&str]| {
+        Command::new(engine())
+            .current_dir(dir.path())
+            .env("HOME", dir.path())
+            .args(args)
+            .output()
+            .unwrap()
+    };
+    let help = invoke(&["--help"]);
+    assert_eq!(help.status.code(), Some(0), "{help:?}");
+    let text = String::from_utf8_lossy(&help.stdout);
+    assert!(text.contains("--db <PATH>"), "{text}");
+    assert!(text.contains("sync"), "{text}");
+    assert!(text.contains(&format!("Usage: {name} ")), "{text}");
+    assert!(help.stderr.is_empty(), "{help:?}");
+    let version = invoke(&["--version"]);
+    assert_eq!(version.status.code(), Some(0));
+    assert_eq!(
+        String::from_utf8_lossy(&version.stdout),
+        format!("{name} {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(version.stderr.is_empty(), "{version:?}");
+    for args in [
+        vec!["--unknown-option"],
+        vec!["--db"],
+        vec!["unknown-command"],
     ] {
-        let invoke = |args: &[&str]| {
-            Command::new(binary)
-                .current_dir(dir.path())
-                .env("HOME", dir.path())
-                .args(args)
-                .output()
-                .unwrap()
-        };
-        let help = invoke(&["--help"]);
-        assert_eq!(help.status.code(), Some(0), "{help:?}");
-        let text = String::from_utf8_lossy(&help.stdout);
-        assert!(text.contains("--db <PATH>"), "{text}");
-        assert!(text.contains("sync"), "{text}");
-        assert!(text.contains(&format!("Usage: {name} ")), "{text}");
-        assert_eq!(
-            String::from_utf8_lossy(&help.stderr).contains("deprecated"),
-            binary == legacy_engine(),
-            "{help:?}"
-        );
-
-        let version = invoke(&["--version"]);
-        assert_eq!(version.status.code(), Some(0));
-        assert_eq!(
-            String::from_utf8_lossy(&version.stdout),
-            format!("{name} {}\n", env!("CARGO_PKG_VERSION"))
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&version.stderr).contains("deprecated"),
-            binary == legacy_engine(),
-            "{version:?}"
-        );
-
-        for args in [
-            vec!["--unknown-option"],
-            vec!["--db"],
-            vec!["unknown-command"],
-        ] {
-            let error = invoke(&args);
-            assert_eq!(error.status.code(), Some(2), "{error:?}");
-            assert!(error.stdout.is_empty(), "{error:?}");
-            let stderr = String::from_utf8_lossy(&error.stderr);
-            assert!(
-                stderr.starts_with(if binary == legacy_engine() {
-                    "graphtrail is deprecated;"
-                } else {
-                    "error:"
-                }),
-                "{error:?}"
-            );
-            assert!(stderr.contains("error:"), "{error:?}");
-        }
-        let stats = invoke(&["--db", db.to_str().unwrap(), "stats", "--json"]);
-        assert_eq!(stats.status.code(), Some(0), "{stats:?}");
-        let value: serde_json::Value = serde_json::from_slice(&stats.stdout).unwrap();
-        assert_eq!(value["symbols"], 2, "{value}");
-
-        let missing = invoke(&["--db", "absent.db", "search", "helper", "--json"]);
-        assert_eq!(missing.status.code(), Some(1), "{missing:?}");
-        assert!(!dir.path().join("absent.db").exists());
+        let error = invoke(&args);
+        assert_eq!(error.status.code(), Some(2), "{error:?}");
+        assert!(error.stdout.is_empty(), "{error:?}");
+        let stderr = String::from_utf8_lossy(&error.stderr);
+        assert!(stderr.starts_with("error:"), "{error:?}");
     }
+    let stats = invoke(&["--db", db.to_str().unwrap(), "stats", "--json"]);
+    assert_eq!(stats.status.code(), Some(0), "{stats:?}");
+    let value: serde_json::Value = serde_json::from_slice(&stats.stdout).unwrap();
+    assert_eq!(value["symbols"], 2, "{value}");
+
+    let missing = invoke(&["--db", "absent.db", "search", "helper", "--json"]);
+    assert_eq!(missing.status.code(), Some(1), "{missing:?}");
+    assert!(!dir.path().join("absent.db").exists());
 }
 
-/// Identity comes from the basename of `argv[0]`: any other name, such as a renamed copy, takes
-/// the canonical identity, and the legacy name matches with `.exe` and in any case.
+/// A renamed copy still reports the canonical name.
 #[cfg(unix)]
 #[test]
-fn argv0_selects_the_entry_point_identity() {
+fn argv0_cannot_change_the_entry_point_identity() {
     use std::os::unix::process::CommandExt;
 
-    for (argv0, banner) in [
-        ("/opt/tools/code-graph-copy", "brigade-code-graph"),
-        ("/opt/tools/GraphTrail.EXE", "graphtrail"),
-    ] {
-        let output = Command::new(legacy_engine())
-            .arg0(argv0)
-            .arg("--version")
-            .output()
-            .unwrap();
-        assert_eq!(output.status.code(), Some(0), "{output:?}");
-        assert_eq!(
-            String::from_utf8_lossy(&output.stdout),
-            format!("{banner} {}\n", env!("CARGO_PKG_VERSION"))
-        );
-        assert_eq!(
-            String::from_utf8_lossy(&output.stderr).contains("deprecated"),
-            banner == "graphtrail",
-            "{output:?}"
-        );
-    }
+    let output = Command::new(engine())
+        .arg0("/opt/tools/GraphTrail.EXE")
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("brigade-code-graph {}\n", env!("CARGO_PKG_VERSION"))
+    );
+    assert!(output.stderr.is_empty(), "{output:?}");
 }
 
 fn write_app(root: &Path) {
@@ -864,44 +827,26 @@ fn engine_in(root: &Path, args: &[&str]) -> std::process::Output {
         .unwrap()
 }
 
-/// A repository indexed before the rename answers queries with no reindex, and later syncs keep
-/// writing the legacy index in place.
+/// A repository indexed before the rename gets a fresh canonical index on sync.
 #[test]
-fn legacy_only_repository_is_read_and_written_in_place() {
+fn legacy_only_repository_rebuilds_in_the_canonical_location() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
-    fs::create_dir(root.join(".git")).unwrap();
-    fs::write(root.join(".git").join("HEAD"), "ref: refs/heads/main\n").unwrap();
     let legacy_db = build_db(root);
-    let gitignore_before = fs::read_to_string(root.join(".gitignore")).ok();
+    let legacy_bytes = fs::read(&legacy_db).unwrap();
+
+    let callers = engine_in(root, &["callers", "helper"]);
+    assert_ne!(callers.status.code(), Some(0), "{callers:?}");
+    assert!(!root.join(".brigade").exists());
+
+    let sync = engine_in(root, &["sync", "."]);
+    assert_eq!(sync.status.code(), Some(0), "{sync:?}");
+    assert!(root.join(".brigade/code-graph/code-graph.db").is_file());
+    assert_eq!(fs::read(&legacy_db).unwrap(), legacy_bytes);
 
     let callers = engine_in(root, &["callers", "helper"]);
     assert_eq!(callers.status.code(), Some(0), "{callers:?}");
-    assert!(
-        String::from_utf8_lossy(&callers.stdout).contains("run"),
-        "{callers:?}"
-    );
-
-    fs::write(root.join("extra.py"), "def extra():\n    return helper()\n").unwrap();
-    let sync = engine_in(root, &["sync", "."]);
-    assert_eq!(sync.status.code(), Some(0), "{sync:?}");
-    // Windows prints the relative path with backslashes.
-    let stdout = String::from_utf8_lossy(&sync.stdout).replace('\\', "/");
-    assert!(
-        stdout.contains("db=./.graphtrail/graphtrail.db"),
-        "{stdout}"
-    );
-    assert!(!root.join(".brigade").exists());
-    assert_eq!(
-        fs::read_to_string(root.join(".gitignore")).ok(),
-        gitignore_before
-    );
-
-    let conn = rusqlite::Connection::open(&legacy_db).unwrap();
-    let files: i64 = conn
-        .query_row("SELECT COUNT(*) FROM files", [], |row| row.get(0))
-        .unwrap();
-    assert_eq!(files, 2);
+    assert!(String::from_utf8_lossy(&callers.stdout).contains("run"));
 }
 
 /// A fresh repository gets the canonical index and its ignore entry.
@@ -966,7 +911,7 @@ fn canonical_index_wins_when_both_exist() {
 }
 
 #[test]
-fn database_variables_dual_read_silently_and_refuse_conflicts() {
+fn database_resolution_ignores_the_retired_variable() {
     let dir = tempfile::tempdir().unwrap();
     let db = build_db(dir.path());
     let other = tempfile::tempdir().unwrap();
@@ -988,38 +933,17 @@ fn database_variables_dual_read_silently_and_refuse_conflicts() {
     assert_eq!(canonical.status.code(), Some(0), "{canonical:?}");
     assert!(canonical.stderr.is_empty(), "{canonical:?}");
 
-    // A legacy variable works and prints one deprecation notice.
     let legacy = stats(&[("GRAPHTRAIL_DB", db)]);
-    assert_eq!(legacy.status.code(), Some(0), "{legacy:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&legacy.stderr).lines().count(),
-        1,
-        "{legacy:?}"
-    );
-    assert!(String::from_utf8_lossy(&legacy.stderr).contains("deprecated"));
-    let value: serde_json::Value = serde_json::from_slice(&legacy.stdout).unwrap();
-    assert_eq!(value["symbols"], 2, "{value}");
+    assert_ne!(legacy.status.code(), Some(0), "{legacy:?}");
 
-    let same = stats(&[("BRIGADE_CODE_GRAPH_DB", db), ("GRAPHTRAIL_DB", db)]);
-    assert_eq!(same.status.code(), Some(0), "{same:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&same.stderr).lines().count(),
-        1,
-        "{same:?}"
-    );
-
-    let conflict = stats(&[("BRIGADE_CODE_GRAPH_DB", db), ("GRAPHTRAIL_DB", "other.db")]);
-    assert_ne!(conflict.status.code(), Some(0), "{conflict:?}");
-    assert!(conflict.stdout.is_empty(), "{conflict:?}");
-    assert!(
-        String::from_utf8_lossy(&conflict.stderr).contains("conflicting values"),
-        "{conflict:?}"
-    );
+    let both = stats(&[("BRIGADE_CODE_GRAPH_DB", db), ("GRAPHTRAIL_DB", "other.db")]);
+    assert_eq!(both.status.code(), Some(0), "{both:?}");
+    assert!(both.stderr.is_empty(), "{both:?}");
     assert!(!other.path().join("other.db").exists());
 }
 
 #[test]
-fn unsafe_root_variables_dual_read_silently_and_refuse_conflicts() {
+fn unsafe_root_guard_ignores_the_retired_variable() {
     let home = tempfile::tempdir().unwrap();
     write_app(home.path());
     let sync = |vars: &[(&str, &str)]| {
@@ -1050,23 +974,7 @@ fn unsafe_root_variables_dual_read_silently_and_refuse_conflicts() {
     assert_eq!(canonical.status.code(), Some(0), "{canonical:?}");
     assert!(canonical.stderr.is_empty(), "{canonical:?}");
 
-    // A legacy variable works and prints one deprecation notice.
     let legacy = sync(&[("GRAPHTRAIL_ALLOW_UNSAFE_ROOT", "1")]);
-    assert_eq!(legacy.status.code(), Some(0), "{legacy:?}");
-    assert_eq!(
-        String::from_utf8_lossy(&legacy.stderr).lines().count(),
-        1,
-        "{legacy:?}"
-    );
-    assert!(String::from_utf8_lossy(&legacy.stderr).contains("deprecated"));
-
-    let conflict = sync(&[
-        ("BRIGADE_CODE_GRAPH_ALLOW_UNSAFE_ROOT", "1"),
-        ("GRAPHTRAIL_ALLOW_UNSAFE_ROOT", "0"),
-    ]);
-    assert_ne!(conflict.status.code(), Some(0), "{conflict:?}");
-    assert!(
-        String::from_utf8_lossy(&conflict.stderr).contains("conflicting values"),
-        "{conflict:?}"
-    );
+    assert_ne!(legacy.status.code(), Some(0), "{legacy:?}");
+    assert!(String::from_utf8_lossy(&legacy.stderr).contains("root is the home directory"));
 }

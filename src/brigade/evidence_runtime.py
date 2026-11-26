@@ -2,11 +2,11 @@
 
 Brigade does not embed the crawler.  It discovers the crawler on PATH (or via
 an explicit override), checks that the resolved binary is compatible, and only
-then asks MiseLedger to crawl.  All destructive or archive-mutating crawler
-subcommands are driven by MiseLedger; this module only runs the read-only
+then asks Brigade Evidence to crawl.  All destructive or archive-mutating crawler
+subcommands are driven by Brigade Evidence; this module only runs the read-only
 ``version`` and ``doctor --json`` probes.
 
-Memory projection (#844 F1) probes the configured MiseLedger engine itself for
+Memory projection (#844 F1) probes the configured Brigade Evidence engine itself for
 the authoritative ``memory-projection.v1`` capability before any crawl
 delegation. Discord/Discrawl keeps the external-crawler contract below.
 """
@@ -62,7 +62,7 @@ class CompatResult:
 
 @dataclass(frozen=True)
 class MemoryProjectionProbe:
-    """Read-only MiseLedger probe for the memory projection capability gate."""
+    """Read-only Brigade Evidence probe for the memory projection capability gate."""
 
     resolved_path: str | None
     version: str | None
@@ -93,7 +93,7 @@ MEMORY_PROJECTION_CAPABILITY = "memory-projection.v1"
 # are 0.6.0. Capability memory-projection.v1 is authoritative; a version floor
 # alone cannot distinguish the published pre-feature 0.6.0 release. Do not
 # invent a newer release pin here — that decision is a separate package.
-MISELEDGER_VERSION_FLOOR = "0.6.0"
+EVIDENCE_VERSION_FLOOR = "0.6.0"
 
 MEMORY_HEALTH_SAFE_KEYS = (
     "capability",
@@ -400,8 +400,8 @@ def register_memory_facade_extensions(evidence_sub: Any = None) -> None:
     audit.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
 
 
-def resolve_miseledger(env: dict[str, str] | None = None) -> str | None:
-    """Resolve the configured MiseLedger engine binary, or None when missing."""
+def resolve_evidence(env: dict[str, str] | None = None) -> str | None:
+    """Resolve the configured Brigade Evidence engine binary, or None when missing."""
 
     return component_bins.resolve("brigade-evidence", env=env)
 
@@ -448,7 +448,7 @@ def _extract_memory_capability(payload: dict[str, Any]) -> tuple[str | None, str
 
 
 def _archive_readable_from_doctor(payload: dict[str, Any], exit_code: int) -> tuple[bool, str | None]:
-    """Interpret MiseLedger doctor JSON for archive readability.
+    """Interpret Brigade Evidence doctor JSON for archive readability.
 
     Preflight accepts a readable archive even when memory health is unhealthy
     (so a stale projection can be re-crawled). Exit 0/1 alone is not enough:
@@ -504,7 +504,7 @@ def probe_memory_projection(
     binary_path: str | None,
     env: dict[str, str] | None = None,
 ) -> MemoryProjectionProbe:
-    """Read-only probe of MiseLedger for ``memory-projection.v1``.
+    """Read-only probe of Brigade Evidence for ``memory-projection.v1``.
 
     Invokes only ``version`` and ``doctor --json``. Never runs crawl/import.
     """
@@ -521,7 +521,7 @@ def probe_memory_projection(
             archive_ok=False,
             probe_exit_code=None,
             missing_capabilities=[MEMORY_PROJECTION_CAPABILITY],
-            detail="miseledger binary not found; run `brigade setup`",
+            detail="brigade-evidence binary not found; run `brigade setup`",
             error="missing binary",
         )
 
@@ -538,7 +538,7 @@ def probe_memory_projection(
             probe_exit_code=result.code,
             missing_capabilities=[MEMORY_PROJECTION_CAPABILITY],
             detail=(
-                f"malformed miseledger doctor probe: expected JSON object, exit_code={result.code}, version={version!r}"
+                f"malformed brigade-evidence doctor probe: expected JSON object, exit_code={result.code}, version={version!r}"
             ),
             error="malformed probe",
         )
@@ -583,7 +583,7 @@ def check_memory_projection_preflight(probe: MemoryProjectionProbe) -> CompatRes
 
     Failures (missing binary, failed/malformed probe, absent/old/future
     capability, below-floor version, unreadable archive) must refuse
-    delegation. Version floor is the documented ``MISELEDGER_VERSION_FLOOR``;
+    delegation. Version floor is the documented ``EVIDENCE_VERSION_FLOOR``;
     capability match remains authoritative.
     """
 
@@ -604,7 +604,7 @@ def check_memory_projection_preflight(probe: MemoryProjectionProbe) -> CompatRes
             database=None,
             config_path=None,
             missing_capabilities=[MEMORY_PROJECTION_CAPABILITY],
-            detail=probe.detail or "miseledger binary not found",
+            detail=probe.detail or "brigade-evidence binary not found",
         )
     if probe.error == "malformed probe" or (probe.probe_exit_code not in (0, 1) and not probe.archive_ok):
         return base
@@ -615,7 +615,7 @@ def check_memory_projection_preflight(probe: MemoryProjectionProbe) -> CompatRes
 
     observed_raw = probe.engine_version or probe.version
     observed = _parse_version(observed_raw)
-    required = _parse_version(MISELEDGER_VERSION_FLOOR)
+    required = _parse_version(EVIDENCE_VERSION_FLOOR)
     detail_parts: list[str] = []
     state = "ok"
     if observed_raw is None or observed is None:
@@ -626,7 +626,7 @@ def check_memory_projection_preflight(probe: MemoryProjectionProbe) -> CompatRes
             database="ok",
             config_path=None,
             missing_capabilities=[],
-            detail=(f"version not parseable: expected >= {MISELEDGER_VERSION_FLOOR}, observed {observed_raw!r}"),
+            detail=(f"version not parseable: expected >= {EVIDENCE_VERSION_FLOOR}, observed {observed_raw!r}"),
         )
     if required is not None and observed < required:
         return CompatResult(
@@ -636,12 +636,12 @@ def check_memory_projection_preflight(probe: MemoryProjectionProbe) -> CompatRes
             database="ok",
             config_path=None,
             missing_capabilities=[],
-            detail=(f"version below floor: expected >= {MISELEDGER_VERSION_FLOOR}, observed {observed_raw}"),
+            detail=(f"version below floor: expected >= {EVIDENCE_VERSION_FLOOR}, observed {observed_raw}"),
         )
-    if observed_raw != MISELEDGER_VERSION_FLOOR:
+    if observed_raw != EVIDENCE_VERSION_FLOOR:
         state = "warn"
         detail_parts.append(
-            f"version drift: expected {MISELEDGER_VERSION_FLOOR}, observed {observed_raw}; "
+            f"version drift: expected {EVIDENCE_VERSION_FLOOR}, observed {observed_raw}; "
             f"capability={MEMORY_PROJECTION_CAPABILITY}"
         )
     else:

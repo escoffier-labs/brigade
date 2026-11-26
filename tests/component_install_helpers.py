@@ -91,6 +91,18 @@ def fixture_component_revision(component_id: str) -> str:
     return GRAPHTRAIL_SHA
 
 
+def pin_test_release_manifest(monkeypatch, content: bytes, *, tag: str, commit: str) -> str:
+    from brigade import component_release_pins
+
+    digest = hashlib.sha256(content).hexdigest()
+    monkeypatch.setitem(component_release_pins.MANIFEST_DIGESTS, f"{tag}+{commit}", digest)
+    # Fixtures may stand in for a shipped tag with a different release commit.
+    for revision in tuple(component_release_pins.MANIFEST_DIGESTS):
+        if revision.startswith(f"{tag}+") and revision != f"{tag}+{commit}":
+            monkeypatch.delitem(component_release_pins.MANIFEST_DIGESTS, revision)
+    return digest
+
+
 def write_verified_cache(cache_path: Path, *, payload: bytes) -> None:
     cache_path.parent.mkdir(parents=True, exist_ok=True)
     cache_path.write_bytes(payload)
@@ -104,7 +116,7 @@ def test_manifest_asset(component_id: str, *, platform: str = "linux-amd64") -> 
         asset_name=asset_name,
         byte_size=byte_size,
         sha256=sha256,
-        download_url=f"https://example.invalid/components/{asset_name}",
+        download_url=f"https://github.com/example/components/{asset_name}",
     )
 
 
