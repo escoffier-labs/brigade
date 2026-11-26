@@ -40,6 +40,7 @@ PYTHON_PAYLOADS = (
     ),
     (f"{RUNBOOK_INSTALL_DIR}/memory-closeout.json", "src/brigade/care_cmd.py", "MEMORY_CLOSEOUT_RUNBOOK_PAYLOAD"),
     (".brigade/runbooks/run-patrol.json", "src/brigade/care_patrol.py", "RUNBOOK_PAYLOAD"),
+    (".brigade/runbooks/codex-cloud-sync.json", "src/brigade/care_cmd.py", "CODEX_CLOUD_SYNC_RUNBOOK_PAYLOAD"),
 )
 BASE_REF_ENV = "BRIGADE_SHIPPED_HISTORY_BASE_REF"
 DEFAULT_BASE_REF = "origin/main"

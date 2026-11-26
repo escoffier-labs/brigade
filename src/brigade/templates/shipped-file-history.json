@@ -57,6 +57,12 @@
         "tag": null
       }
     ],
+    "runbook:.brigade/runbooks/codex-cloud-sync.json": [
+      {
+        "sha256": "9253f0eb1b2e2ae9f25e5022bc34f66b94a3eaa312d8be74dec79f57b6b1491f",
+        "tag": null
+      }
+    ],
     "runbook:.brigade/runbooks/run-patrol.json": [
       {
         "sha256": "d411dc5ccec87c0e4f2f573db01eb5a12b777ee46af65af821daf6919053af41",
