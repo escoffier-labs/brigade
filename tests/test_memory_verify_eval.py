@@ -245,6 +245,157 @@ def test_feedback_packet_becomes_a_private_labeled_case(verify_hub, resolver, ca
     assert len(json.loads((target / gate.FEEDBACK).read_bytes())["cases"]) == 1
 
 
+def test_feedback_retains_nested_claim_with_its_markdown_parent(verify_hub, resolver, monkeypatch):
+    from brigade import memory_verify_feedback as feedback
+    from brigade import memory_verify_run as verify_run
+    from brigade import memory_verify_show as show
+    from types import SimpleNamespace
+
+    target, _, _, _ = verify_hub
+    value = case()
+    value["card"]["text"] = f"---\nevidence: []\n---\n- Sibling context.\n- Parent context.\n    - {CLAIM} ^{BLOCK}\n"
+    card, assembly = evaluation.inputs(value)
+    nested_fixed = "- " + FIXED
+    operation = {"type": "replace_block", "block_id": BLOCK, "text": nested_fixed}
+    proposal = SimpleNamespace(
+        ops=[SimpleNamespace(type="replace_block", block_id=BLOCK, text=nested_fixed)],
+        payload_ops=lambda: [operation],
+    )
+    result = SimpleNamespace(proposal=proposal, outcomes=[], prompt_sha256="a" * 64)
+    built = verify_run.review(
+        card,
+        result,
+        assembly,
+        SimpleNamespace(records=[{"role": "propose", "reply": json.dumps(block_entry()), "prompt": "fixture"}]),
+        [seat("propose", "test-small"), seat("confirm", "test-large")],
+    )
+    manifest, packet = built.manifest, built.packet
+    monkeypatch.setattr(show, "_local", lambda *args: (manifest, packet))
+    shown = {"verifier_manifests": [{"artifact_sha256": io.sha256(manifest)}]}
+
+    feedback.retain_case(target, "nested-claim", "applied", shown)
+
+    saved = json.loads((target / gate.FEEDBACK).read_bytes())
+    assert len(saved["cases"]) == 1
+    assert saved["cases"][0]["expected"] == "correct"
+    assert "Sibling context." not in saved["cases"][0]["card"]["text"]
+    assert "- Parent context.\n\n    - " in saved["cases"][0]["card"]["text"]
+    replay = evaluation.evaluate(
+        saved["cases"],
+        propose=FakeSeat(block_entry(replacement=nested_fixed)),
+        confirm=FakeSeat(block_entry(replacement=nested_fixed)),
+        resolve_commit=RESOLVER.get,
+        repeats=2,
+    )
+    assert replay["classes"]["correct"]["recall"] == 1, replay
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            f"- Grandparent ^c-111111\n    - Parent ^c-222222\n        - {CLAIM} ^c-abcdef\n",
+            f"- Grandparent\n\n    - Parent\n\n        - {CLAIM} ^c-abcdef",
+        ),
+        (
+            f"- Parent\n  - sibling ^c-111111\n  - {CLAIM} ^c-abcdef\n",
+            f"- Parent\n\n  - {CLAIM} ^c-abcdef",
+        ),
+        (
+            f"- sibling ^c-111111\n - {CLAIM} ^c-abcdef\n",
+            f" - {CLAIM} ^c-abcdef",
+        ),
+        (
+            f"- Loose parent\n\n  - {CLAIM} ^c-abcdef\n",
+            f"- Loose parent\n\n  - {CLAIM} ^c-abcdef",
+        ),
+        (
+            f"- Parent first line ^c-111111\n  Parent continuation\n    - {CLAIM} ^c-abcdef\n",
+            f"- Parent first line\n  Parent continuation\n\n    - {CLAIM} ^c-abcdef",
+        ),
+        (
+            f"- Tab parent\n\t- {CLAIM} ^c-abcdef\n",
+            f"- Tab parent\n\n\t- {CLAIM} ^c-abcdef",
+        ),
+    ],
+    ids=[
+        "deep-ancestors-remove-parent-anchors",
+        "exclude-sibling",
+        "exclude-intervening-sibling",
+        "loose-list",
+        "multiline-parent",
+        "tab-indent",
+    ],
+)
+def test_evaluation_text_uses_claim_parser_context_without_other_claims(source, expected):
+    value = case()
+    value["card"]["text"] = f"---\nevidence: []\n---\n{source}"
+    card, _ = evaluation.inputs(value)
+
+    text = card.evaluation_text({BLOCK})
+
+    assert text == expected
+    assert text.count(f"^{BLOCK}") == 1
+    assert all(anchor not in text for anchor in ("^c-111111", "^c-222222"))
+    replacement = "- " + FIXED
+    replay_case = {
+        **value,
+        "id": "nested-context",
+        "card": {**value["card"], "text": f"---\nevidence: []\n---\n{text}\n"},
+        "expected_ops": [{"type": "replace_block", "block_id": BLOCK, "text": replacement}],
+    }
+    replay = evaluation.evaluate(
+        [replay_case],
+        propose=FakeSeat(block_entry(replacement=replacement)),
+        confirm=FakeSeat(block_entry(replacement=replacement)),
+        resolve_commit=RESOLVER.get,
+        repeats=2,
+    )
+    assert replay["classes"]["correct"]["recall"] == 1, replay
+
+
+@pytest.mark.parametrize(
+    "first",
+    [
+        "First paragraph. ^c-111111",
+        "- First list item. ^c-111111",
+        "- Parent.\n  - First nested item. ^c-111111",
+    ],
+    ids=["separate-paragraphs", "list-then-paragraph", "nested-list-then-paragraph"],
+)
+def test_evaluation_text_round_trips_selected_claim_ids_and_text(first):
+    value = case()
+    second = "Second paragraph. ^c-abcdef"
+    header = "---\nevidence: []\n---\n"
+    value["card"]["text"] = f"{header}{first}\n\n{second}\n"
+    card, _ = evaluation.inputs(value)
+
+    excerpt = card.evaluation_text({"c-111111", BLOCK})
+    value["card"]["text"] = f"{header}{excerpt}\n"
+    replayed, _ = evaluation.inputs(value)
+
+    assert [(block.block_id, block.text) for block in replayed.blocks] == [
+        ("c-111111", first.splitlines()[-1]),
+        (BLOCK, second),
+    ]
+
+
+def test_evaluation_text_keeps_selected_claims_once_in_source_order():
+    value = case()
+    value["card"]["text"] = (
+        "---\nevidence: []\n---\n- Parent context.\n"
+        "  - first selected ^c-111111\n"
+        "  - omitted sibling ^c-222222\n"
+        "  - second selected ^c-abcdef\n"
+    )
+    card, _ = evaluation.inputs(value)
+
+    text = card.evaluation_text({"c-abcdef", "c-111111"})
+
+    assert text == "- Parent context.\n\n  - first selected ^c-111111\n\n  - second selected ^c-abcdef"
+    assert text.count("Parent context.") == 1
+
+
 def test_failed_run_never_attempts_automatic_application(verify_hub, capsys, monkeypatch):
     from brigade import memory_verify_auto as automatic
     from tests.test_memory_verify_run import verify

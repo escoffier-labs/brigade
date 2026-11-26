@@ -324,6 +324,8 @@ class CardInput:
     # Log time of the head revision, for check 3. None fails it closed.
     updated_ms: int | None
     blocks: tuple[ClaimBlock, ...]
+    _source_text: str = field(default="", init=False, repr=False, compare=False)
+    _source_context: dict[int, tuple[int, ...]] = field(default_factory=dict, init=False, repr=False, compare=False)
 
     @classmethod
     def from_text(
@@ -338,17 +340,61 @@ class CardInput:
         """The anchored claim blocks of a replica head's text, or `Abstain(verify_card_invalid)`."""
         if not isinstance(text, str) or len(text.encode()) > MAX_CARD_TEXT_BYTES:
             raise Abstain(CARD_INVALID)
+        normalized = text.replace("\r\n", "\n")
         try:
-            found = delta.blocks(text.replace("\r\n", "\n"))
+            found = delta.blocks(normalized)
+            from .memory_claim_blocks import claim_spans
+
+            source_context = {
+                span.start: span.list_context for span in claim_spans(normalized, delta.legacy._body_offset(normalized))
+            }
         except ValueError:
             raise Abstain(CARD_INVALID) from None
         anchored = tuple(ClaimBlock(b.block_id, b.text, b.sha256) for b in found if b.block_id)
         if not anchored or len(anchored) > MAX_BLOCKS or type(revision) is not int or revision <= 0:
             raise Abstain(CARD_INVALID)
-        return cls(scope, card_id, revision, updated_ms, anchored)
+        card = cls(scope, card_id, revision, updated_ms, anchored)
+        object.__setattr__(card, "_source_text", normalized)
+        object.__setattr__(card, "_source_context", source_context)
+        return card
 
     def block(self, block_id: str) -> ClaimBlock | None:
         return next((block for block in self.blocks if block.block_id == block_id), None)
+
+    def evaluation_text(self, block_ids: set[str]) -> str:
+        """Serialize selected claims with only the list markers needed to keep them valid Markdown."""
+        from .memory_proposal_v2_ops import blocks
+
+        source = self._source_text
+        found = blocks(source)
+        selected = [block for block in found if block.block_id in block_ids]
+        if {block.block_id for block in selected} != block_ids:
+            return ""
+        included_starts = {block.start for block in selected}
+        for claim in selected:
+            claim_context = self._source_context.get(claim.start, ())
+            for context in found:
+                context_path = self._source_context.get(context.start, ())
+                if (
+                    context.end <= claim.start
+                    and context_path
+                    and len(context_path) < len(claim_context)
+                    and claim_context[: len(context_path)] == context_path
+                ):
+                    included_starts.add(context.start)
+
+        text = []
+        for block in found:
+            if block.start not in included_starts:
+                continue
+            value = (
+                block.text
+                if block.block_id in block_ids
+                else re.sub(r" \^c-[0-9a-f]{6}(?=[ \t]*(?:\n|$))", "", block.text)
+            )
+            text.append(value)
+        # A blank line ends the current claim while preserving list containers.
+        return "\n\n".join(text)
 
 
 # --- Prompt -------------------------------------------------------------------------------
