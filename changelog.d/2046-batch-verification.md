@@ -1,1 +1,1 @@
-- Set `"verify": true` on an explicit batch to run required checks in local isolated task worktrees and record the coordinator's receipt digest with each verified attempt.
+- Set `"verify": true` on an explicit batch to run base-trusted required checks on a disposable copy of each eligible candidate tree and record the coordinator's receipt digest with the attempt.

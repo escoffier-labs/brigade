@@ -296,11 +296,28 @@ Known limits:
 ## Coordinator verification
 
 Set `"verify": true` to run the repository's required tests after local workers
-exit in their isolated worktrees. The coordinator uses the snapshot planner
-behind `brigade work verify required --worktree`, with the batch's pinned base
-and each task's current Git tree. It runs the selective plan's argv through the
-same runner as `brigade work verify run`. The checkout needs any dependencies
-required by that command. The command executes code from the task checkout.
+exit and their isolated worktrees are quiescent. The coordinator computes the
+candidate tree, then uses the planner behind `brigade work verify required
+--worktree` with the configuration and planner files from the pinned batch
+base. It materializes the exact candidate Git tree in a private, temporary
+checkout and removes that checkout after the run. Files outside the candidate
+tree, including an ignored `.venv`, stay in the worker's original checkout.
+
+The selective argv must name a tool in the coordinator's trusted environment
+or the base's regular `scripts/verify-focused` launcher. The launcher and its
+tracked script helpers must match the base. The runner uses the coordinator's
+Python and tools with a fresh home, a separate temporary directory, and a
+restricted environment. Install any required tools and dependencies in the
+coordinator environment. A verifier that requires an editable install tied to
+its working directory can fail in a disposable checkout.
+
+The infrastructure check covers `scripts/`, `verify/`, the configured
+planner files, `conftest.py`, `pyproject.toml`, pytest and tool configuration,
+and Python startup files such as `sitecustomize.py`, `usercustomize.py`, and
+`.pth` files. A recorded failure reflects the coordinator's check. A recorded
+pass means the base-trusted runner passed on the recorded candidate tree.
+Tests and application code come from that candidate. Review the diff before
+accepting or integrating it.
 
 Verification holds the task's existing run lock and finishes before artifact
 collection. The coordinator compares the Git tree and HEAD on both sides of
@@ -322,6 +339,13 @@ A task with a result sidecar and no eligible run records a
 - `not-launched` when no launch claim exists.
 - `worktree-unlocked` when a fallback observation occurs after the worktree lock is released.
 - `ci-required` when the repository planner calls for CI without a local argv.
+- `workspace-invalid` when the bound checkout cannot be validated.
+- `tree-unavailable` when the candidate tree cannot be captured or materialized faithfully.
+- `tree-changed` when the worker tree changes during planning or snapshot preparation.
+- `planner-unconfigured` when the pinned base has no required-test planner.
+- `plan-unavailable` when required-test planning fails.
+- `verify-infra-modified` when the candidate changes verification infrastructure.
+- `verifier-unavailable` when the coordinator cannot prepare or start the verifier.
 
 An omitted or false `verify` leaves both fields absent.
 

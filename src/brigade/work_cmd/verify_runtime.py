@@ -51,6 +51,7 @@ class _VerifyCancellation:
         self.deferred = 0
         self.interruption: dict[str, str] | None = None
         self.owned_receipt: tuple[Path, Path, dict[str, Any], Any] | None = None
+        self.git_env: dict[str, str] | None = None
 
     def raise_if_pending(self) -> None:
         if self.received is not None and not self.raised and not self.deferred:
@@ -61,6 +62,11 @@ class _VerifyCancellation:
 
 
 _ACTIVE_VERIFY_CANCEL: ContextVar[_VerifyCancellation | None] = ContextVar("verify_cancellation", default=None)
+
+
+def receipt_git_environment() -> dict[str, str] | None:
+    state = _ACTIVE_VERIFY_CANCEL.get()
+    return state.git_env if state is not None else None
 
 
 @contextmanager

@@ -500,7 +500,7 @@ def _finalize_verify_receipt(
         rc = verify_runtime._VERIFY_CANCELED_RC
     else:
         receipt["status"], rc = verify_receipt_details.terminal_status(receipt, rc)
-        verify_receipt_details.stamp_tree_after(target, receipt)
+        verify_receipt_details.stamp_tree_after(target, receipt, git_env=verify_runtime.receipt_git_environment())
     if "producer_attempt_id" not in receipt:
         verify_gate.stamp_gating(target, receipt)
     commands = receipt.get("commands")
@@ -510,12 +510,10 @@ def _finalize_verify_receipt(
                 verify_trial.stamp_verify_command_failure_taxonomy(command)
     verify_trial.stamp_verify_receipt_failure_taxonomy(receipt)
     _stamp_verification_contract_outcomes(receipt)
-    try:
-        git = _receipt_git_snapshot(target)
+    with suppress(Exception):
+        git = _receipt_git_snapshot(target) if "producer_attempt_id" not in receipt else None
         if git is not None:
             receipt["git"] = git
-    except Exception:
-        pass
     log_digests: dict[str, str] = {}
     for command in [] if receipt.get("reused_from") else receipt["commands"]:
         if not isinstance(command, dict):
@@ -562,10 +560,8 @@ def _finalize_verify_receipt(
     except Exception:
         receipt.pop("digests", None)
     helpers._write_json(run_dir / "receipt.json", receipt)
-    try:
+    with suppress(Exception):
         _write_verify_markdown(run_dir, receipt)
-    except Exception:
-        pass
     if "producer_attempt_id" not in receipt:
         with suppress(Exception):
             _prune_verify_runs(target)
@@ -1549,7 +1545,11 @@ def _run_verify_commands(
     canceled = False
     try:
         run_dir.mkdir(parents=True, exist_ok=False)
-        identity = _capture_verify_identity(target, run_dir)
+        identity = (
+            verify_receipt_details.capture_batch_identity(target, run_dir, command_env)
+            if command_env is not None
+            else _capture_verify_identity(target, run_dir)
+        )
         argv_hashes, _ = verify_argv_files.argv_file_hashes(target, commands)
         receipt = {
             "run_id": run_id,
@@ -1570,6 +1570,7 @@ def _run_verify_commands(
         state = verify_runtime._ACTIVE_VERIFY_CANCEL.get()
         if state is not None:
             state.owned_receipt = (target, run_dir, receipt, started)
+            state.git_env = command_env
         if batch_receipt is None:
             receipt_schema.stamp_optional_producer_run_id(receipt)
             _stamp_harness_session(receipt, target)
