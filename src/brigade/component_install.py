@@ -24,8 +24,18 @@ from typing import Any
 from urllib.parse import urlparse
 
 import brigade
-from brigade import component_manifest, component_paths, component_shims, component_state, localio, templates
+from brigade import (
+    component_manifest,
+    component_paths,
+    component_shims,
+    component_state,
+    distribution,
+    localio,
+    receipts_import_contract,
+    templates,
+)
 
+_EXPLICIT_ENGINE_REPAIR = "`brigade setup --manifest <verified manifest> --allow-compatible-stable-manifest <version>`"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _READ_CHUNK = 1024 * 1024
 _EXECUTABLE_MODE = 0o755
@@ -114,23 +124,30 @@ def uses_bundled_compatibility_manifest() -> bool:
 def engine_repair_hint(roots: SetupRoots | None = None) -> str:
     """Describe setup routes without resolving or downloading a release."""
     from brigade import update_cmd
-    from brigade import distribution
 
-    explicit = "`brigade setup --manifest <verified manifest> --allow-compatible-stable-manifest <version>`"
     docs = "See docs/update-channels.md#repair-managed-engines."
+    bundled = uses_bundled_compatibility_manifest()
     try:
         roots = roots or resolve_roots()
     except ValueError:
-        state = None
-    else:
+        roots = None
+    if bundled and roots is not None:
         state = update_cmd.load_update_state(Path(component_paths.update_state_path(roots.data_root)))
-    if state is not None and state.channel == "beta" and uses_bundled_compatibility_manifest():
-        return f"Beta setup can reuse its {state.component_tag} pin. Use {explicit} with a compatible release. {docs}"
-    if re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", brigade.__version__) is None or (
-        not distribution.is_npm() and _is_direct_install()
+        if state is not None and state.channel == "beta":
+            installed = component_state.load_installed_state(
+                Path(component_paths.installed_state_path(roots.data_root))
+            )
+            return (
+                "Plain setup refuses an incompatible or downgrading beta pin. "
+                f"{_beta_pin_repair_hint(roots, installed)} {docs}"
+            )
+    if (
+        not bundled
+        or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", brigade.__version__) is None
+        or (not distribution.is_npm() and _is_direct_install())
     ):
-        return f"Use {explicit} with a compatible release. {docs}"
-    return f"Run `brigade setup` on a released stable CLI. For an unreleased source build, use {explicit}. {docs}"
+        return f"Use {_EXPLICIT_ENGINE_REPAIR} with a verified compatible stable release. {docs}"
+    return f"Run `brigade setup` on this released stable CLI to match the managed engines. {docs}"
 
 
 def _is_direct_install() -> bool:
@@ -160,10 +177,9 @@ def load_verified_exact_release_manifest(
     re-resolves the release (online) or fails (offline).
 
     For ``beta`` state the update transaction persisted the verified
-    last-stable release manifest coordinates. A later ``brigade setup``
-    reuses that stable cache instead of resolving an unreleased
-    ``v{brigade.__version__}`` tag (which fails online) or rejecting the
-    state as stale (which fails offline). The beta path validates the cached
+    last-stable release manifest coordinates. This reader exposes the cache
+    for diagnostics and setup. Automatic setup checks compatibility and
+    downgrade protection before reusing the pin. The reader validates the cached
     manifest against its recorded stable ``component_tag``/version with
     compatible missing-unpublished handling enabled, so a pre-agent-notify
     stable manifest is accepted while every published component still pins.
@@ -1210,9 +1226,27 @@ def cached_release_manifests(cache_root: str) -> Iterator[tuple[component_manife
             continue
 
 
-def _beta_pin_repair_hint(
-    roots: SetupRoots, installed: component_state.InstalledState | None, minimum: tuple[int, ...]
-) -> str:
+def _evidence_ack_floor() -> tuple[int, ...]:
+    version = receipts_import_contract.MIN_EVIDENCE_ACK_RELEASE
+    minimum = release_version_tuple(version)
+    if minimum is None:
+        raise ComponentInstallError(f"invalid evidence acknowledgement release {version!r}")
+    return minimum
+
+
+def _installed_engine_version(installed: component_state.InstalledState) -> str:
+    tag = installed.manifest_revision.partition("+")[0]
+    return tag if tag.startswith("v") else installed.brigade_version
+
+
+def _beta_pin_repair_hint(roots: SetupRoots, installed: component_state.InstalledState | None) -> str:
+    minimum = _evidence_ack_floor()
+    if installed is not None:
+        recorded = release_version_tuple(_installed_engine_version(installed))
+        if recorded is not None:
+            minimum = max(minimum, recorded)
+    npm = distribution.is_npm()
+    online = "With network access, run `brigade update --channel beta`."
     for candidate, path in cached_release_manifests(roots.cache_root):
         version = release_version_tuple(candidate.brigade_version)
         if version is None or version < minimum:
@@ -1232,8 +1266,11 @@ def _beta_pin_repair_hint(
             candidate.brigade_version,
         ]
         command = subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
-        return f"Use the cached manifest with: {command}"
-    return "A compatible manifest is not cached. With network access, run `brigade update --channel beta`."
+        cached = f"Use the cached manifest with `{command}`."
+        return cached if npm else f"{cached} {online}"
+    if npm:
+        online = f"With network access, obtain a verified compatible stable manifest and use {_EXPLICIT_ENGINE_REPAIR}."
+    return f"A compatible manifest is not cached. {online}"
 
 
 def _check_saved_beta_pin(roots: SetupRoots, manifest: component_manifest.ComponentManifest) -> None:
@@ -1246,14 +1283,12 @@ def _check_saved_beta_pin(roots: SetupRoots, manifest: component_manifest.Compon
         )
     if pin is None:
         raise ComponentInstallError(f"invalid beta engine release version: {manifest.brigade_version}")
-    # v0.31.0 first shipped the explicit completion status required by the receipt importer.
-    importer_floor = (0, 31, 0)
+    importer_floor = _evidence_ack_floor()
     minimum: tuple[int, ...] = importer_floor if running >= importer_floor else (0, 0, 0)
-    reason = "the receipt importer requires engines from v0.31.0 or newer"
+    reason = f"the receipt importer requires engines from v{receipts_import_contract.MIN_EVIDENCE_ACK_RELEASE} or newer"
     installed = component_state.load_installed_state(Path(component_paths.installed_state_path(roots.data_root)))
     if installed is not None:
-        tag = installed.manifest_revision.partition("+")[0]
-        installed_version = tag if tag.startswith("v") else installed.brigade_version
+        installed_version = _installed_engine_version(installed)
         version = release_version_tuple(installed_version)
         if version is not None and version > max(minimum, pin):
             for component_id, record in installed.components.items():
@@ -1265,7 +1300,7 @@ def _check_saved_beta_pin(roots: SetupRoots, manifest: component_manifest.Compon
     if pin < minimum:
         raise ComponentInstallError(
             f"saved beta pin v{manifest.brigade_version} in {pin_path} refused: {reason}. "
-            f"{_beta_pin_repair_hint(roots, installed, minimum)}"
+            f"{_beta_pin_repair_hint(roots, installed)}"
         )
 
 
@@ -1294,8 +1329,7 @@ def _load_setup_manifest(
     to the ``--manifest`` branch used by the beta handoff, which reuses the
     verified last-stable release manifest. The auto branch resolves the exact
     release for the installed Brigade version and stays strict, except that a
-    persisted beta-handoff state is the explicit compatible-stable-manifest
-    path and is reused rather than re-resolved.
+    compatible persisted beta-handoff state can supply a verified cached manifest.
     """
     if manifest_path is not None:
         return (

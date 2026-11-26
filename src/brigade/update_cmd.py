@@ -995,7 +995,10 @@ def run_update(
             "For a global install, run `npm install --global <package>@latest` then `brigade setup`. "
             "For a project install, run `npm install <package>@latest` from that project, "
             "then `npm exec -- brigade setup`. "
-            "For npx, run `npx --package <package>@latest brigade setup`.",
+            "For npx, run `npx --package <package>@latest brigade setup`. "
+            "These setup commands assume a stable or absent update pin. "
+            "For a stale beta pin, use a compatible manifest as described in "
+            "docs/update-channels.md#repair-managed-engines.",
             file=sys.stderr,
         )
         return 1

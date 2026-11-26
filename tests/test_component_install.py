@@ -15,7 +15,14 @@ from pathlib import Path
 import pytest
 
 import brigade
-from brigade import component_install, component_manifest, component_paths, component_state, update_cmd
+from brigade import (
+    component_install,
+    component_manifest,
+    component_paths,
+    component_state,
+    receipts_import_contract,
+    update_cmd,
+)
 from brigade.component_install import (
     ComponentInstallError,
     _WINDOWS_HTTPS_PRIME_COMMAND,
@@ -1425,6 +1432,27 @@ def test_first_beta_setup_checks_pin_against_cli_release(tmp_path, monkeypatch, 
         assert "cannot parse running Brigade version" in capsys.readouterr().err
 
 
+def test_beta_setup_floor_follows_receipt_import_contract(tmp_path, monkeypatch, capsys):
+    pinned = tmp_path / "pinned.json"
+    pin = receipts_import_contract.MIN_EVIDENCE_ACK_RELEASE
+    write_test_manifest(pinned, brigade_version=pin)
+    env, _ = _persist_beta_state(
+        tmp_path,
+        monkeypatch,
+        stable_version=pin,
+        manifest_bytes=pinned.read_bytes(),
+        target_commit=fixture_component_revision("brigade-code-graph"),
+        cli_version="1.0.0rc1",
+    )
+    assert setup_native_components(env=env, dry_run=True) == 0
+    version = component_install.release_version_tuple(pin)
+    assert version is not None
+    raised_floor = f"{version[0]}.{version[1]}.{version[2] + 1}"
+    monkeypatch.setattr(receipts_import_contract, "MIN_EVIDENCE_ACK_RELEASE", raised_floor)
+    assert setup_native_components(env=env, dry_run=True) == 1
+    assert f"engines from v{raised_floor} or newer" in capsys.readouterr().err
+
+
 def test_refused_pin_names_a_usable_cached_manifest(tmp_path, monkeypatch, capsys):
     workspace = tmp_path / "space here"
     workspace.mkdir()
@@ -1449,7 +1477,8 @@ def test_refused_pin_names_a_usable_cached_manifest(tmp_path, monkeypatch, capsy
     error = capsys.readouterr().err
     argv = ["brigade", "setup", "--manifest", str(cached_path), "--allow-compatible-stable-manifest", "0.32.0"]
     command = subprocess.list2cmdline(argv) if os.name == "nt" else shlex.join(argv)
-    assert f"Use the cached manifest with: {command}" in error
+    assert f"Use the cached manifest with `{command}`" in error
+    assert "brigade update --channel beta" in error
     assert (
         setup_native_components(
             env=env,

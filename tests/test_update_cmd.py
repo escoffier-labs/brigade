@@ -1302,6 +1302,7 @@ def test_npm_update_refuses_before_side_effects(tmp_path, monkeypatch, capsys, c
     assert "npm install --global <package>@latest" in message
     assert "brigadestack" in message and "@escoffier-labs/brigade" in message
     assert "brigade setup" in message
+    assert "for a stale beta pin, use a compatible manifest" in message
 
 
 def test_distribution_identity_is_process_local_and_ignores_environment(monkeypatch):
