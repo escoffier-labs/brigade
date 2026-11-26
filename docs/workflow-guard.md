@@ -32,6 +32,8 @@ A protected-file change needs one such review at the pull request head. A push t
 
 ## Approval
 
+The approval label counts only when a repository admin or maintainer applied it.
+
 When protected files change, the pull request conductor applies the
 `workflow-change-approved` label after an independent security review of the
 protected-path changes at the current head says to ship. The workflow

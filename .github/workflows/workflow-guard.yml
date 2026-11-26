@@ -29,6 +29,7 @@ jobs:
           PR_NUMBER: ${{ github.event.number }}
         run: python3 scripts/workflow_guard.py --repo "$GITHUB_REPOSITORY" --pr "$PR_NUMBER" --clear-approval
 
+  # Both approval jobs use the implicit read access to repository metadata.
   record-approval:
     # Re-running a check must not replay a past approval or revocation.
     if: >-

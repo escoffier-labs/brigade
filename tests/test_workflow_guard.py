@@ -80,6 +80,7 @@ def pull_request_event(monkeypatch, tmp_path):
                 {
                     "number": number,
                     "action": "opened",
+                    "sender": {"login": "reviewer", "type": "User"},
                     "label": {"name": APPROVAL},
                     "repository": {"full_name": event_repo, "default_branch": "main"},
                     "pull_request": {
@@ -110,6 +111,7 @@ def fake_gh(monkeypatch):
         statuses=([],),
         heads=(HEAD, HEAD),
         fail_statuses=False,
+        role="maintain",
         number=42,
         bases=("main", "main", "main"),
         base_shas=("b" * 40, "b" * 40, "b" * 40),
@@ -146,6 +148,16 @@ def fake_gh(monkeypatch):
             elif args[2].startswith("repos/example/project/statuses/"):
                 assert args[3:5] == ["-X", "POST"]
                 payload = {}
+            elif args[2] in (
+                "repos/example/project/collaborators/reviewer/permission",
+                "repos/example/project/collaborators/contributor/permission",
+            ):
+                if role is None:
+                    raise subprocess.CalledProcessError(1, args, stderr="API unavailable")
+                payload = {
+                    "role_name": "write" if "/contributor/" in args[2] else role,
+                    "permission": "write",
+                }
             elif args[2] == STATUSES:
                 assert args[3:] == ["--paginate", "--slurp"]
                 assert workflow_guard.protected_paths(
@@ -185,13 +197,68 @@ def approval_status(
     }
 
 
-def approval_event(action="labeled", *, event_id=100, second=1):
+def approval_event(action="labeled", *, event_id=100, second=1, login="reviewer", actor_type="User"):
     return {
         "id": event_id,
         "event": action,
+        "actor": {"login": login, "type": actor_type},
         "created_at": f"2026-01-01T00:00:{second:02}Z",
         "label": {"name": APPROVAL},
     }
+
+
+@pytest.mark.parametrize("record", [False, True], ids=["check", "record"])
+@pytest.mark.parametrize(
+    ("role", "login", "actor_type", "eligible"),
+    [
+        ("maintain", "reviewer", "User", True),
+        ("admin", "reviewer", "User", True),
+        ("write", "reviewer", "User", False),
+        ("triage", "reviewer", "User", False),
+        ("read", "reviewer", "User", False),
+        ("custom", "reviewer", "User", False),
+        ("maintain", "reviewer", "Bot", False),
+        ("maintain", "reviewer", "Organization", False),
+        ("maintain", "reviewer[bot]", "User", False),
+        (None, "reviewer", "User", False),
+    ],
+)
+def test_approval_label_requires_repository_maintainer(
+    fake_gh, pull_request_event, record, role, login, actor_type, eligible
+):
+    pull_request_event(action="labeled", sender={"login": login, "type": actor_type})
+    calls = fake_gh(
+        [[{"filename": ".github/workflows/ci.yml"}]],
+        labels=[APPROVAL],
+        statuses=[[approval_status()]],
+        history=[[approval_event(login=login, actor_type=actor_type)]],
+        role=role,
+    )
+    if record:
+        assert workflow_guard.main([*CLI_ARGS, "--record-approval"]) == (2 if role is None else 0)
+        assert any("POST" in call for call in calls) == eligible
+    else:
+        assert workflow_guard.main(CLI_ARGS) == (2 if role is None else int(not eligible))
+
+
+def test_latest_label_requires_repository_maintainer(fake_gh):
+    scope = workflow_guard.base_scope("main")
+    fake_gh(
+        [[{"filename": ".github/workflows/ci.yml"}]],
+        statuses=[[dict(approval_status(), description=f"pull request 42 approved [{scope}:102]")]],
+        history=[
+            [approval_event(), approval_event("unlabeled", event_id=101, second=2)],
+            [approval_event(event_id=102, second=3, login="contributor")],
+        ],
+    )
+    assert workflow_guard.main(CLI_ARGS) == 1
+
+
+def test_record_approval_uses_maintainer_for_current_label_event(fake_gh, pull_request_event):
+    pull_request_event(action="labeled", sender={"login": "contributor", "type": "User"})
+    calls = fake_gh([[]], labels=[APPROVAL])
+    assert workflow_guard.main([*CLI_ARGS, "--record-approval"]) == 0
+    assert all("POST" not in call for call in calls)
 
 
 @pytest.mark.parametrize("base", ["release/0.32", "release/0.32-extra", "Release/0.32", "refs/heads/release/0.32"])
@@ -590,7 +657,10 @@ def test_record_approval_keeps_latest_label_state(
         [[]],
         bases=(base,) * 3,
         labels=[APPROVAL] if present else [],
-        history=[[approval_event()], [approval_event(latest, event_id=101, second=3)]],
+        history=[
+            [approval_event()],
+            [approval_event(latest, event_id=101, second=3, login="reviewer" if present else "contributor")],
+        ],
     )
 
     assert workflow_guard.main([*CLI_ARGS, "--record-approval"]) == exit_code
