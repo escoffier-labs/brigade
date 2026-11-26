@@ -42,7 +42,15 @@ privacy_mode = "safe-summary"
 
 Replace `review-wrapper` with your local reviewer command. It must write the normalized findings JSON to `findings_path`. Brigade does not convert raw reviewer stdout into findings.
 
-The command is parsed with `shlex` and executed directly without a shell. High-risk shell commands and shell metacharacters are refused. All review state and logs stay under `.brigade/` and should remain gitignored.
+Brigade splits the string form shown above with POSIX `shlex`. Use the array form for Windows paths, especially paths that contain spaces or backslashes.
+
+```toml
+command = ['C:\Program Files\Python\python.exe', "scripts/review.py", "--findings", ".brigade/reviews/codex-review-findings.json"]
+```
+
+The array must contain at least one string, and each string must be non-empty. The first element is the executable. Brigade passes the remaining elements as arguments exactly as written. Text plans and receipt command labels use `shlex.join` to display arrays. JSON plans and receipts also contain the exact argument list in `argv`.
+
+Brigade runs both forms directly without a shell and refuses high-risk shell commands and shell metacharacters. On Windows, array commands also refuse batch files because Windows can launch them through a shell. All review state and logs stay under `.brigade/` and should remain gitignored.
 
 ## Findings Contract
 
