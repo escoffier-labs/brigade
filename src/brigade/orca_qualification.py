@@ -12,12 +12,13 @@ from pathlib import Path
 from typing import Any
 
 from . import native_orca_enrollment, native_orca_host, roster, run_batch, run_journal, run_task_journal, run_tasks
-from .native_child_host import NativeChildCustodyError, NativeChildError
+from . import t3_qualification_evidence
+from .native_child_host import NativeChildCapacityError, NativeChildCustodyError, NativeChildError
 
 TASKS = frozenset({"alpha", "beta", "gamma"})
 MODELS = ("gpt-6-luna", "gpt-6.2-sol", "deepseek-v4.1-flash")
 EFFORTS = ("default", "minimal", "low", "medium", "high", "xhigh", "max", "ultra")
-ARMS = ("orca", "run-batch")
+ARMS = ("orca", "run-batch", "t3")
 PHASES = ("queue", "startup", "planning", "execution", "synthesis", "delivery")
 COUNTERS = ("input_tokens", "output_tokens", "cached_input_tokens")
 REVISION = r"[0-9a-f]{40}|[0-9a-f]{64}"
@@ -163,6 +164,14 @@ def _matched_configuration(
 def collect(arm: str, run_dir: Path, status_path: Path, measurements_path: Path) -> dict[str, Any]:
     """Read the durable task ledger and the saved post-batch observations."""
     measurements = _read(measurements_path)
+    if arm == "t3" or (
+        arm == "run-batch" and measurements.get("schema") == t3_qualification_evidence.MEASUREMENTS_SCHEMA
+    ):
+        if measurements.get("schema") != t3_qualification_evidence.MEASUREMENTS_SCHEMA:
+            raise ValueError("expected matched qualification measurements")
+        return t3_qualification_evidence.collect(
+            arm, run_dir, _read(status_path), measurements, measurements_path.parent
+        )
     model, effort = measurements["model"], measurements["effort"]
     concurrency = _count(measurements["concurrency"])
     if arm not in ARMS or model not in MODELS or effort not in EFFORTS or not 1 <= concurrency <= len(TASKS):
@@ -271,7 +280,7 @@ def collect(arm: str, run_dir: Path, status_path: Path, measurements_path: Path)
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     if sys.argv[1:2] == ["snapshot-roster"]:
-        parser.add_argument("arm", choices=ARMS)
+        parser.add_argument("arm", choices=("orca", "run-batch"))
         parser.add_argument("roster", type=Path)
         parser.add_argument("seat")
         args = parser.parse_args(sys.argv[2:])
@@ -283,11 +292,11 @@ def main() -> None:
         return
     parser.add_argument("arm", choices=ARMS)
     parser.add_argument("run_dir", type=Path)
-    parser.add_argument("orca_status", type=Path)
+    parser.add_argument("status", type=Path)
     parser.add_argument("measurements", type=Path)
     args = parser.parse_args()
     try:
-        record = collect(args.arm, args.run_dir, args.orca_status, args.measurements)
+        record = collect(args.arm, args.run_dir, args.status, args.measurements)
     except (
         OSError,
         ValueError,
@@ -298,6 +307,7 @@ def main() -> None:
         run_journal.RunJournalError,
         NativeChildError,
         NativeChildCustodyError,
+        NativeChildCapacityError,
     ):
         parser.exit(2, "Qualification evidence is missing or invalid. Check the local inputs.\n")
     print(json.dumps(record, sort_keys=True, allow_nan=False))

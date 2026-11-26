@@ -1,0 +1,1 @@
+- Add a five-pair qualification harness for governed native T3 and explicit Brigade batches, with shared inputs, verified timing, and complete-pair reporting.
