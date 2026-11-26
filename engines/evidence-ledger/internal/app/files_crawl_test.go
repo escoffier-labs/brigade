@@ -39,6 +39,7 @@ exec 1>&-
 while [ ! -f "$FILES_CRAWL_GATE" ]; do sleep 0.01; done
 fi
 if [ -n "$FILES_CRAWL_WARN" ]; then printf '{"warnings":["fixture warning"]}\n' >&2; fi
+if [ -n "$FILES_CRAWL_TRUNCATED" ]; then printf '{"schema":'; exit 1; fi
 if [ -n "$FILES_CRAWL_BAD" ]; then printf 'invalid record\n'; fi
 if [ -z "$FILES_CRAWL_WARN" ]; then printf '{"path":"%s","records":1}\n' "$path" >&2; fi
 `
@@ -47,6 +48,26 @@ if [ -z "$FILES_CRAWL_WARN" ]; then printf '{"path":"%s","records":1}\n' "$path"
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+func TestFilesCrawlRetriesTruncatedExport(t *testing.T) {
+	withTempHome(t)
+	filesExporter(t)
+	path := filepath.Join(t.TempDir(), "fixture.txt")
+	if err := os.WriteFile(path, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FILES_CRAWL_TRUNCATED", "1")
+	var out, errw bytes.Buffer
+	if code := cmdCrawlFiles([]string{path, "--json"}, &out, &errw); code == 0 ||
+		!strings.Contains(errw.String(), "line 2: truncated final record") {
+		t.Fatalf("expected a truncation failure, got exit %d, stdout %s, stderr %s", code, &out, &errw)
+	}
+	t.Setenv("FILES_CRAWL_TRUNCATED", "")
+	got := runJSON(t, "crawl", "files", path, "--json")
+	if got["complete"] != true || got["files_parsed"] != float64(1) || got["inserted_items"] != float64(1) {
+		t.Fatalf("retry did not import the truncated file: %v", got)
+	}
 }
 
 func TestFilesCrawlResumesAndSkipsUnchanged(t *testing.T) {

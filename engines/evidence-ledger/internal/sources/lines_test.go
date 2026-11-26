@@ -14,7 +14,7 @@ type collectedLine struct {
 func collectLines(t *testing.T, input string, max int) []collectedLine {
 	t.Helper()
 	var out []collectedLine
-	err := EachLine(strings.NewReader(input), max, func(line []byte, tooLong bool, size int64) error {
+	err := EachLine(strings.NewReader(input), max, func(line []byte, tooLong bool, size int64, _ bool) error {
 		out = append(out, collectedLine{line: string(line), tooLong: tooLong, size: size})
 		return nil
 	})

@@ -147,19 +147,19 @@ const MaxLineBytes = 10 * 1024 * 1024
 // ScanLines but without a fatal length limit: a line longer than max is
 // drained and delivered with tooLong=true and a nil line, and reading
 // continues on the next line. size is the line's full byte count (terminator
-// excluded). The line slice is reused between calls; callers must copy it if
-// they retain it.
-func EachLine(r io.Reader, max int, each func(line []byte, tooLong bool, size int64) error) error {
+// excluded). terminated reports whether the line ended with a newline.
+// The line slice is reused between calls; callers must copy it if they retain it.
+func EachLine(r io.Reader, max int, each func(line []byte, tooLong bool, size int64, terminated bool) error) error {
 	br := bufio.NewReaderSize(r, 64*1024)
 	var line []byte
 	var size int64
 	tooLong := false
-	emit := func() error {
+	emit := func(terminated bool) error {
 		var l []byte
 		if !tooLong {
 			l = line
 		}
-		err := each(l, tooLong, size)
+		err := each(l, tooLong, size, terminated)
 		line = line[:0]
 		size = 0
 		tooLong = false
@@ -185,7 +185,7 @@ func EachLine(r io.Reader, max int, each func(line []byte, tooLong bool, size in
 		}
 		switch {
 		case endOfLine:
-			if err := emit(); err != nil {
+			if err := emit(true); err != nil {
 				return err
 			}
 		case err == bufio.ErrBufferFull:
@@ -196,7 +196,7 @@ func EachLine(r io.Reader, max int, each func(line []byte, tooLong bool, size in
 					line = line[:len(line)-1]
 					size--
 				}
-				if err := emit(); err != nil {
+				if err := emit(false); err != nil {
 					return err
 				}
 			}
@@ -234,7 +234,7 @@ func scanJSONL(path string, each func(RawEvent) error) error {
 		callbackErr = each(ev)
 		return callbackErr
 	}
-	err = EachLine(reader, MaxLineBytes, func(raw []byte, tooLong bool, size int64) error {
+	err = EachLine(reader, MaxLineBytes, func(raw []byte, tooLong bool, size int64, _ bool) error {
 		ordinal++
 		if tooLong {
 			warning := fmt.Sprintf("line too long (%d bytes > %d limit), skipped", size, MaxLineBytes)

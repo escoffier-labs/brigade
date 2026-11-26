@@ -1,0 +1,1 @@
+- Fail evidence imports with a truncated final JSONL record so a files crawl can retry the affected file.

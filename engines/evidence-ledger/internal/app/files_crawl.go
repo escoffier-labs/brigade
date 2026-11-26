@@ -325,7 +325,7 @@ func crawlFiles(args []string, out, errw io.Writer, walkDir func(string, fs.Walk
 			waitErr := cmd.Wait()
 			inserted += result.Inserted
 			if importErr != nil {
-				return importErr
+				return fmt.Errorf("%s: %w", path, importErr)
 			}
 			if ctx.Err() == context.DeadlineExceeded {
 				pending = true

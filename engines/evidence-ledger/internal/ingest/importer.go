@@ -1,6 +1,7 @@
 package ingest
 
 import (
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"database/sql"
@@ -165,8 +166,13 @@ func importAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 		return nil
 	}
 
-	scanErr := sources.EachLine(r, sources.MaxLineBytes, func(raw []byte, tooLong bool, size int64) error {
+	scanErr := sources.EachLine(r, sources.MaxLineBytes, func(raw []byte, tooLong bool, size int64, terminated bool) error {
 		ordinal++
+		// JSONL can end after a complete JSON value. At EOF an invalid or
+		// oversized fragment cannot establish that the last record is complete.
+		if !terminated && (tooLong || (len(bytes.TrimSpace(raw)) != 0 && !json.Valid(raw))) {
+			return fmt.Errorf("line %d: truncated final record", ordinal)
+		}
 		if tooLong {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("line %d: line too long (%d bytes > %d limit), skipped", ordinal, size, sources.MaxLineBytes))
 			return nil

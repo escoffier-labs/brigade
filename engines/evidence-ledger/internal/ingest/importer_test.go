@@ -17,6 +17,52 @@ import (
 	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources/opencode"
 )
 
+func TestImportAdapterReaderFinalRecord(t *testing.T) {
+	var stream bytes.Buffer
+	generated, err := opencode.Generate("../../testdata/harnesses/opencode-export.fixture.json", sources.Options{}, &stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := stream.String()
+	if generated.Records != 2 || !strings.HasSuffix(full, "\n") {
+		t.Fatalf("expected two newline-terminated producer records, got %d records", generated.Records)
+	}
+	first, tail, _ := strings.Cut(full, "\n")
+	last := strings.TrimSuffix(tail, "\n")
+	for _, tc := range []struct {
+		name, tail string
+		truncated  bool
+	}{
+		{"cut mid-record", last[:len(last)/2], true},
+		{"trailing newline", last + "\n", false},
+		{"empty final line", last + "\n\n", false},
+		// Strip the producer newline to model a complete record saved without it.
+		{"complete record without newline", last, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := archive.Open(t.TempDir() + "/miseledger.db")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if err := archive.Migrate(db); err != nil {
+				t.Fatal(err)
+			}
+			res, err := ImportAdapterReader(db, strings.NewReader(first+"\n"+tc.tail), "reader://fixture", "")
+			if tc.truncated {
+				if err == nil || res.Status != "failed" || res.Inserted != 0 ||
+					!strings.Contains(strings.Join(res.Errors, " "), "line 2: truncated final record") {
+					t.Fatalf("expected a failed import with the truncation reason, got %+v, %v", res, err)
+				}
+				res, err = ImportAdapterReader(db, strings.NewReader(full), "reader://fixture", "")
+			}
+			if err != nil || res.Status != "complete" || res.Inserted != 2 || len(res.Warnings) != 0 {
+				t.Fatalf("expected a complete import of two records, got %+v, %v", res, err)
+			}
+		})
+	}
+}
+
 func TestImportAdapterReaderIdempotent(t *testing.T) {
 	db, err := archive.Open(t.TempDir() + "/miseledger.db")
 	if err != nil {
