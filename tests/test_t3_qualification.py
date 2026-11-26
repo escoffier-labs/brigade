@@ -113,6 +113,7 @@ def test_rejects_invalid_pairs(matched_records, change, message):
         ("t3", "missing-readiness", "readiness.json"),
         ("t3", "missing-delegate-start", "delegate-start.json"),
         ("t3", "missing-delegate-replies", "delegate-replies.json"),
+        ("t3", "missing-delegate-reply-guide", "delegate-reply-guide.json"),
         ("t3", "missing-wake-guide", "wake-guide.json"),
         ("t3", "unordered-marks", "out of order"),
         ("t3", "wrong-parent-model", "parent must be"),
@@ -218,6 +219,7 @@ def test_collects_paired_route_with_bound_results(tmp_path, monkeypatch, arm, ca
         save(folder / "delegate-start.json", {"monotonic_ns": 1_100_000_000})
         save(folder / "delegate-replies.json", {"monotonic_ns": 2_000_000_000})
         for i, name in enumerate(ids):
+            save(folder / f"delegate-reply-{name}.json", {"monotonic_ns": 1_200_000_000 + i})
             wake = 7_000_000_000 + i
             if case == "unordered-marks" and name == "guide":
                 wake = 1_100_000_000
@@ -509,7 +511,15 @@ def test_coordinator_renders_single_marks_outside_task_loop(tmp_path):
     qualification._write_brief(tmp_path, context, tmp_path / "roster.toml")
     brief = (tmp_path / "coordinator.txt").read_text(encoding="utf-8")
     commands = [line.split()[-1] for line in brief.splitlines() if "brigade.t3_qualification mark " in line]
-    assert commands == ["opened", "delegate-start", "delegate-replies", "wake-guide", "wake-package", "wake-runner"]
+    assert commands == [
+        "opened",
+        "delegate-start",
+        "delegate-reply-TASK",
+        "delegate-replies",
+        "wake-guide",
+        "wake-package",
+        "wake-runner",
+    ]
     assert brief.index(" delegate-start") < brief.index("For each task ID")
     assert brief.index(" delegate-replies") > brief.index("accepted-TASK.json")
     assert "Run only the command for that task" in brief
@@ -575,3 +585,30 @@ def test_collect_row_binds_directory_and_explicit_route(tmp_path, monkeypatch):
         localio.write_json(folder / "expected.json", {**context, key: changed})
         with pytest.raises(ValueError, match="pair directory"):
             qualification._collect_row(tmp_path, pair, arm)
+
+
+@pytest.mark.parametrize("early_wake", [False, True])
+def test_t3_marks_allow_wakes_during_launch_after_own_reply(tmp_path, early_wake):
+    from brigade import t3_qualification_evidence as evidence
+
+    # Tenths of a second after opened. Guide and package finish before the
+    # last launch reply, while runner finishes after the launch closes.
+    marks = {
+        "delegate-start": 84,
+        "delegate-reply-guide": 350,
+        "wake-guide": 340 if early_wake else 464,
+        "delegate-reply-package": 620,
+        "wake-package": 720,
+        "delegate-reply-runner": 890,
+        "delegate-replies": 909,
+        "wake-runner": 966,
+    }
+    for name, stamp in marks.items():
+        (tmp_path / f"{name}.json").write_text(json.dumps({"monotonic_ns": stamp}), encoding="utf-8")
+
+    args = (tmp_path, {"monotonic_ns": 0}, {"monotonic_ns": 1000}, {"guide", "package", "runner"})
+    if early_wake:
+        with pytest.raises(ValueError, match="out of order"):
+            evidence._validate_t3_marks(*args)
+    else:
+        evidence._validate_t3_marks(*args)

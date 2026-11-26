@@ -540,7 +540,13 @@ def main() -> None:
         action.add_argument("folder", type=Path)
         if name == "mark":
             action.add_argument(
-                "name", choices=("opened", "delegate-start", "delegate-replies", *(f"wake-{task}" for task in WORKLOAD))
+                "name",
+                choices=(
+                    "opened",
+                    "delegate-start",
+                    "delegate-replies",
+                    *(f"{kind}-{task}" for kind in ("delegate-reply", "wake") for task in WORKLOAD),
+                ),
             )
         elif name == "abort-t3":
             action.add_argument("error")

@@ -51,13 +51,15 @@ python -m brigade.t3_qualification run \
 For each T3 arm, give the printed `coordinator.txt` to the designated parent.
 The runner stages the shared batch, expected run and task identities, and
 independent expected answers. The parent checks readiness, opens the run,
-claims and delegates the three tasks, then records observations from native
-completion wakes. It verifies and acknowledges the exact results before
+claims and delegates the three tasks, and records observations from native
+completion wakes. A wake can arrive during the launch turn. The parent marks
+and processes it after saving that task's delegate reply, then resumes launch.
+It verifies and acknowledges the exact results before
 finalizing. The parent's finish command verifies the retained outputs and
 publishes `measurements.json` atomically. The runner checks the readiness
-receipt and capabilities report, requires the launch and per-task wake marks
-in monotonic order, and checks the measurements against the durable evidence
-before advancing. It waits up to one hour by default for each parent
+receipt and capabilities report and checks the measurements against the
+durable evidence before advancing. Each wake must follow its own task's reply
+mark. A wake can precede the batch-wide launch-complete mark. It waits up to one hour by default for each parent
 submission. `--parent-timeout` sets that limit in seconds.
 
 A refusal, inconclusive observation, evidence mismatch, or timeout stops the
