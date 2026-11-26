@@ -30,6 +30,8 @@ class LandError(ValueError):
 # A pushed landing whose branch is gone is never rebuilt: publishing again could
 # move the branch to different content, so the operator chooses the recovery.
 _PUBLISHED_STATES = frozenset({"branch-pushed", "pr-created"})
+_TASK_ID = re.compile(r"task_[A-Za-z0-9_-]{3,160}")
+_LANDING_BRANCH = re.compile(r"codex/(?:issue-(?P<issue>[1-9][0-9]*)|task)-[a-f0-9]{12}")
 
 
 _CREDENTIALS = {
@@ -738,11 +740,11 @@ def _resume_without_workspace(entry: dict[str, Any]) -> bool:
     return False
 
 
-def land(target: Path, task_id: str, issue: int, *, closes: bool = False) -> dict[str, str]:
+def land(target: Path, task_id: str, issue: int | None = None, *, closes: bool | None = None) -> dict[str, str]:
     """Apply one pinned attempt in isolation, then publish its verified commit for review."""
     if os.name != "posix":
         raise LandError("unsupported-platform")
-    if not re.fullmatch(r"task_[A-Za-z0-9_-]{3,160}", task_id) or issue < 1:
+    if not _TASK_ID.fullmatch(task_id) or (issue is not None and issue < 1):
         raise LandError("invalid-task-or-issue")
     target = target.resolve()
     try:
@@ -757,6 +759,24 @@ def land(target: Path, task_id: str, issue: int, *, closes: bool = False) -> dic
                 if len(entries) != 1:
                     raise LandError("task-not-uniquely-registered")
                 entry = dict(entries[0])
+            saved_issue = entry.get("landing_issue", issue)
+            if "landing_issue" not in entry and isinstance(saved_branch := entry.get("landing_branch"), str):
+                match = _LANDING_BRANCH.fullmatch(saved_branch)
+                if match:
+                    saved_issue = int(match["issue"]) if match["issue"] else None
+            if saved_issue is not None and (type(saved_issue) is not int or saved_issue < 1):
+                raise LandError("invalid-landing-issue")
+            if issue is not None and issue != saved_issue:
+                raise LandError("issue-mismatch")
+            issue = saved_issue
+            saved_closes = entry.get("landing_closes", closes is True)
+            if not isinstance(saved_closes, bool):
+                raise LandError("invalid-landing-closes")
+            if closes is not None and closes != saved_closes:
+                raise LandError("closes-mismatch")
+            closes = saved_closes
+            if closes and issue is None:
+                raise LandError("closes-requires-issue")
             if entry.get("pr_url"):
                 return {"task_id": task_id, "branch": entry["branch"], "pr_url": entry["pr_url"]}
             common = _caller_git_dir(target)
@@ -808,25 +828,35 @@ def land(target: Path, task_id: str, issue: int, *, closes: bool = False) -> dic
         raise LandError("landing-busy") from exc
 
 
-def _land_command(task_id: str, issue: int) -> str:
+def _land_command(task_id: str, issue: int | None = None, *, closes: bool = False, target: Path | None = None) -> str:
     """The exact CLI command that resumes this landing."""
-    return shlex.join(
-        [
-            "brigade",
-            "run",
-            "cloud",
-            "land",
-            "--provider",
-            "codex-cloud",
-            "--task-id",
-            task_id,
-            "--issue",
-            str(issue),
-        ]
-    )
+    argv = ["brigade", "run", "cloud", "land", "--provider", "codex-cloud", "--task-id", task_id]
+    if issue is not None:
+        argv.extend(("--issue", str(issue)))
+    if closes:
+        argv.append("--closes")
+    if target is not None:
+        argv.extend(("--target", str(target.resolve())))
+    return shlex.join(argv)
 
 
-def _missing_ref_message(canonical: str, branch: str, commit: str, task_id: str, issue: int) -> str:
+def add_landing_commands(target: Path, rows: list[dict[str, Any]], entries: list[dict[str, Any]]) -> None:
+    close_on_merge = {entry.get("id") for entry in entries if entry.get("landing_closes") is True}
+    for row in rows:
+        task_id = row.get("task_id")
+        if (
+            row.get("provider") == "codex-cloud"
+            and isinstance(task_id, str)
+            and _TASK_ID.fullmatch(task_id)
+            and row.get("launch_state") not in {"needs-reconcile", "not-launched"}
+            and not (row.get("pr") or row.get("pr_url"))
+            and row.get("classification") in {"ready-to-land", "stale"}
+            and row.get("provider_state") in cloud_tracker.FINISHED_STATES
+        ):
+            row["next_command"] = _land_command(task_id, closes=row.get("id") in close_on_merge, target=target)
+
+
+def _missing_ref_message(canonical: str, branch: str, commit: str, task_id: str, issue: int | None) -> str:
     """A recovery an operator can run today: restore the ref, then rerun land."""
     restore = shlex.join(["git", "push", canonical, f"{commit}:refs/heads/{branch}"])
     return (
@@ -835,7 +865,7 @@ def _missing_ref_message(canonical: str, branch: str, commit: str, task_id: str,
     )
 
 
-def _missing_commit_message(canonical: str, branch: str, task_id: str, issue: int) -> str:
+def _missing_commit_message(canonical: str, branch: str, task_id: str, issue: int | None) -> str:
     inspect = shlex.join(["git", "ls-remote", "--refs", canonical, f"refs/heads/{branch}"])
     return (
         "landing-ref-missing: the registry records a published landing without its commit; "
@@ -844,7 +874,7 @@ def _missing_commit_message(canonical: str, branch: str, task_id: str, issue: in
     )
 
 
-def _conflict_pr_message(repo: str, branch: str, url: str, task_id: str, issue: int) -> str:
+def _conflict_pr_message(repo: str, branch: str, url: str, task_id: str, issue: int | None) -> str:
     inspect = shlex.join(["gh", "pr", "list", "--repo", repo, "--head", branch, "--state", "all"])
     return (
         f"pr-recovery-conflict: {url} is open for the landing branch at a different commit; "
@@ -856,7 +886,7 @@ def _conflict_pr_message(repo: str, branch: str, url: str, task_id: str, issue: 
 _PR_QUERY_LIMIT = 100
 
 
-def _recover_pr(found: str, repo: str, branch: str, commit: str, task_id: str, issue: int) -> str | None:
+def _recover_pr(found: str, repo: str, branch: str, commit: str, task_id: str, issue: int | None) -> str | None:
     """The existing PR that already carries the recorded commit, if any.
 
     A merged PR with the recorded commit already landed it and is recorded as
@@ -898,7 +928,7 @@ def _recover_pr(found: str, repo: str, branch: str, commit: str, task_id: str, i
 def _land_locked(
     target: Path,
     entry: dict[str, Any],
-    issue: int,
+    issue: int | None,
     closes: bool,
     git: _LandingGit,
     root: Path,
@@ -907,10 +937,16 @@ def _land_locked(
     *,
     resumed: bool = False,
 ) -> dict[str, str]:
-    branch = entry.get("landing_branch") or f"codex/issue-{issue}-{uuid4().hex[:12]}"
-    if not re.fullmatch(r"codex/issue-[1-9][0-9]*-[a-f0-9]{12}", branch):
+    branch_prefix = "codex/task" if issue is None else f"codex/issue-{issue}"
+    branch = entry.get("landing_branch") or f"{branch_prefix}-{uuid4().hex[:12]}"
+    if not isinstance(branch, str) or not _LANDING_BRANCH.fullmatch(branch):
         raise LandError("invalid-landing-branch")
-    _update(target, entry, landing_branch=branch)
+    updates: dict[str, Any] = {"landing_branch": branch}
+    if "landing_issue" not in entry:
+        updates["landing_issue"] = issue
+    if "landing_closes" not in entry:
+        updates["landing_closes"] = closes
+    _update(target, entry, **updates)
     commit = entry.get("landing_commit")
     published = entry.get("landing_state") in _PUBLISHED_STATES
     if published and not commit:
@@ -980,8 +1016,9 @@ def _land_locked(
         # Unrecorded preparation refs belong only to this private repository.
         git.git(["branch", "-D", branch], git.repository, "branch-cleanup-failed")
     body = root / "pr-body.md"
+    issue_ref = f"{'Closes' if closes else 'Refs'} #{issue}.\n\n" if issue is not None else ""
     body.write_text(
-        f"{'Closes' if closes else 'Refs'} #{issue}.\n\nCodex Cloud task {entry['task_id']}.\n\n"
+        f"{issue_ref}Codex Cloud task {entry['task_id']}.\n\n"
         "Applied in an isolated worktree from main. Content guard passed.\n"
         "Conductor review and merge required.\n",
         encoding="utf-8",
@@ -1335,7 +1372,7 @@ def _copy_vale_styles(git: _LandingGit, base: str, directory: Path, styles: Pure
 
 
 def _prepare(
-    target: Path, entry: dict[str, Any], issue: int, git: _LandingGit, root: Path, branch: str, base: str
+    target: Path, entry: dict[str, Any], issue: int | None, git: _LandingGit, root: Path, branch: str, base: str
 ) -> str:
     status = git.tool("codex", ["cloud", "status", entry["task_id"]], git.repository, "status-failed")
     if codex_cloud._verified_status(status) not in codex_cloud.TERMINAL_OK:
@@ -1344,7 +1381,8 @@ def _prepare(
     title = " ".join(title_match[1].split()) if title_match else ""
     title = "".join(c for c in title if ord(c) >= 32 and not 127 <= ord(c) <= 159)[:200]
     if not re.match(r"^(fix|feat)(\([^)]+\))?:\s", title):
-        title = "fix: " + re.sub(r"^[a-z]+(?:\([^)]+\))?:\s*", "", title) if title else f"fix: address #{issue}"
+        fallback = "fix: apply Codex Cloud changes" if issue is None else f"fix: address #{issue}"
+        title = "fix: " + re.sub(r"^[a-z]+(?:\([^)]+\))?:\s*", "", title) if title else fallback
     message = f"{title}\n\nCo-Authored-By: Codex <codex@openai.com>"  # content-guard: allow pii/email
     git.scan_publication_text(title, message, (root / "pr-body.md").read_text(encoding="utf-8"))
     _update(target, entry, landing_base=base, landing_title=title, landing_attempt=1)

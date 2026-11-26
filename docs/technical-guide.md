@@ -884,7 +884,7 @@ The `cli` values are adapters for installed command-line tools:
 `codex`, `claude`, `opencode`, `antigravity`, `pi`, `cursor`, `aider`, `goose`,
 `continue`, `copilot`, `qwen`, `kimi`, `adal`, `openhands`, `grok`, `amp`, `crush`,
 `oracle`, and `ollama:<model>`. BrigadeStack shells out to those tools and keeps no provider keys.
-A `codex-cloud:<env-id>` seat is different: it submits the task to Codex Cloud with `codex cloud exec`, polls `codex cloud status` until the task reaches a terminal state (bounded by the seat timeout), and returns the final status plus the unified diff as the worker text. The diff is never applied to the local tree. Land it deliberately with `codex cloud apply <task-id>`; the task id is recorded on the worker result. When a fleet hub is configured, BrigadeStack admits the task before `exec`, using the hub's `codex` provider policy and a prompt-hash lease label; uncertain submits or provider state retain the lease for later inspection. Local tracking remains `codex-cloud`, and its bounded `codex cloud list --json` observation stores only task id, state, and environment id. `codex cloud list --json` omits environment ids; copy the id from the Codex Cloud workspace UI, not from task JSON. Prefer a local setup surface over putting that id in a roster:
+A `codex-cloud:<env-id>` seat is different: it submits the task to Codex Cloud with `codex cloud exec`, polls `codex cloud status` until the task reaches a terminal state (bounded by the seat timeout), and returns the final status plus the unified diff as the worker text. The diff is never applied to the local tree. When a fleet hub is configured, BrigadeStack admits the task before `exec`, using the hub's `codex` provider policy and a prompt-hash lease label; uncertain submits or provider state retain the lease for later inspection. Local tracking remains `codex-cloud`, and its bounded `codex cloud list --json` observation stores only task id, state, and environment id. `codex cloud list --json` omits environment ids; copy the id from the Codex Cloud workspace UI, not from task JSON. Prefer a local setup surface over putting that id in a roster:
 
 ```bash
 export CODEX_CLOUD_ENV='<env-id>'
@@ -892,6 +892,22 @@ brigade run cloud setup --provider codex-cloud --env-var CODEX_CLOUD_ENV --targe
 brigade run cloud doctor --provider codex-cloud --target . --json
 brigade run cloud canary --provider codex-cloud --target . --json
 ```
+
+To collect a finished, registered task, run the following from the repository
+checkout that has the registry and authenticated Codex and GitHub tools. The
+polling worker can already have exited.
+
+```bash
+brigade run cloud land --provider codex-cloud --task-id task_example
+```
+
+Landing fetches the pinned diff, applies it in an isolated worktree, and opens
+a pull request for review. Add `--issue 123` to reference an issue and
+`--closes` to request closing it on merge. A retry reuses the recorded landing
+branch and keeps the issue reference or close-on-merge request. Regular `cloud status` and
+`cloud sync` print the landing command for finished Codex tasks awaiting
+collection. In JSON it is the row's `next_command`, under `entries` for
+status and `ready_landings` for sync.
 
 For detached Codex Cloud tasks, install the opt-in Care entry on the launching
 host, with `--target` set to the workspace that stores the task registry:
