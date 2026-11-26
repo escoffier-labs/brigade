@@ -4,6 +4,7 @@ pub mod affected;
 pub mod blend;
 pub mod context;
 pub mod diff;
+pub mod digest;
 pub mod doctor;
 pub mod export;
 pub mod graph;

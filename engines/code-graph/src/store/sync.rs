@@ -12,7 +12,7 @@ use rusqlite::Connection;
 
 use crate::extractors::index_file;
 use crate::model::{IgnoredSummary, PendingChanges};
-use crate::store::db::now_ts;
+use crate::store::db::{lock_connection, now_ts};
 use crate::store::persist::{
     EntryFreshness, entry_freshness, load_db_files, purge_file_graph, stale_plan, table_counts,
     write_file_graph,
@@ -51,7 +51,7 @@ pub fn sync_repo(conn: &Connection, root: &Path) -> Result<SyncSummary> {
 pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<SyncSummary> {
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     guard_unsafe_root(&root)?;
-    let _lock = acquire_sync_lock(conn)?;
+    let _lock = lock_connection(conn)?;
     // The first sync that created an index directory adds it to `.gitignore`; check both layouts
     // so neither creation record lingers.
     let created_index_dir = {
@@ -189,15 +189,4 @@ pub fn pending_changes(conn: &Connection, root: &Path) -> Result<(PendingChanges
         }
     }
     Ok((pending, walk.ignored))
-}
-
-/// Take the advisory sync lock for the database behind `conn`, when it has an
-/// on-disk path (in-memory databases need no cross-process exclusion).
-fn acquire_sync_lock(conn: &Connection) -> Result<Option<crate::store::lock::SyncLock>> {
-    match conn.path() {
-        Some(path) if !path.is_empty() => Ok(Some(crate::store::lock::SyncLock::acquire(
-            Path::new(path),
-        )?)),
-        _ => Ok(None),
-    }
 }

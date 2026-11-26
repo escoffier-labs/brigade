@@ -128,6 +128,24 @@
               {
                 "command": [
                   "brigade-code-graph",
+                  "digest",
+                  "--json"
+                ],
+                "kind": "digest-json",
+                "probe": [
+                  "brigade-code-graph",
+                  "digest",
+                  "--help"
+                ],
+                "probe_contains": [
+                  "--json"
+                ],
+                "read_only": true,
+                "timeout_seconds": 30
+              },
+              {
+                "command": [
+                  "brigade-code-graph",
                   "doctor",
                   "--json"
                 ],
@@ -149,7 +167,7 @@
       },
       "source": {
         "kind": "in-tree",
-        "manifest_sha256": "64cc7f28df4fb2edf3c1fb6ec5a1917abe2132e209c6240e2518dcccb2986794",
+        "manifest_sha256": "65aa7c0ef503d4a835a1cc48d636cc4c437597ba4b7dc05a77295eafcd7f1dd7",
         "path": "engines/code-graph/station.json",
         "repository": "brigade"
       }

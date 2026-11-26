@@ -10,7 +10,10 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, config::DbConfig};
+
+use super::lock::SyncLock;
+use super::schema::checked_schema_version;
 
 static CREATED_DB_DIRS: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
@@ -154,10 +157,31 @@ pub fn open_db(path: &Path) -> Result<Connection> {
             record_created_db_dir(parent);
         }
     }
+    let _lock = SyncLock::acquire(path)?;
+    if path.try_exists()? {
+        // A read-only probe cannot checkpoint a newer database's WAL.
+        open_read_only(path)?;
+    }
     let conn =
         Connection::open(path).with_context(|| format!("failed to open {}", path.display()))?;
+    // Revalidate on the actual writable handle. Even if a writer that
+    // does not use our advisory lock races the probe, a rejected handle
+    // must not checkpoint that database on close.
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, true)?;
+    {
+        let snapshot = conn.unchecked_transaction()?;
+        checked_schema_version(&snapshot)?;
+    }
+    conn.set_db_config(DbConfig::SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE, false)?;
     conn.pragma_update(None, "journal_mode", "WAL")?;
     Ok(conn)
+}
+
+pub(super) fn lock_connection(conn: &Connection) -> Result<Option<SyncLock>> {
+    conn.path()
+        .filter(|path| !path.is_empty())
+        .map(|path| SyncLock::acquire(Path::new(path)))
+        .transpose()
 }
 
 pub(crate) fn take_created_graph_dir(path: &Path) -> bool {
@@ -186,13 +210,27 @@ fn normalize_dir(path: &Path) -> PathBuf {
 /// Open an existing db read-only. Used by the MCP server and query commands so they can never
 /// mutate the graph. Deliberately NOT `immutable=1`: these dbs are rewritten by a background
 /// sync, and immutable connections skip locking entirely, so a concurrent write could serve
-/// torn reads. SQLite (3.22+) reads a quiescent WAL db without creating sidecar files.
+/// torn reads. SQLite may open or create WAL and shared-memory sidecars.
 pub fn open_read_only(path: &Path) -> Result<Connection> {
     let conn = Connection::open_with_flags(
         path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .with_context(|| format!("failed to open {} read-only", path.display()))?;
+    {
+        let snapshot = conn.unchecked_transaction()?;
+        checked_schema_version(&snapshot).map_err(|error| {
+            match error
+                .downcast_ref::<rusqlite::Error>()
+                .and_then(rusqlite::Error::sqlite_error_code)
+            {
+                Some(rusqlite::ErrorCode::ReadOnly | rusqlite::ErrorCode::CannotOpen) => {
+                    error.context("cannot read database: SQLite WAL sidecars must be accessible")
+                }
+                _ => error,
+            }
+        })?;
+    }
     Ok(conn)
 }
 

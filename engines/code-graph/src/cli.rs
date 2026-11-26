@@ -49,6 +49,11 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Hash the committed graph content without syncing.
+    Digest {
+        #[arg(long)]
+        json: bool,
+    },
     Search {
         query: String,
         #[arg(long, value_name = "PATH")]
@@ -279,6 +284,17 @@ pub fn run(cli: Cli) -> Result<()> {
                     summary.skipped,
                     reasons.join(" ")
                 );
+            }
+        }
+        Command::Digest { json } => {
+            let conn = open_default_read_only(cli.db)?;
+            let digest = crate::query::digest::graph_digest(&conn)?;
+            if json {
+                println!("{}", serde_json::to_string(&digest)?);
+            } else {
+                println!("format_version: {}", digest.format_version);
+                println!("schema_version: {}", digest.schema_version);
+                println!("sha256: {}", digest.sha256);
             }
         }
         Command::Search {

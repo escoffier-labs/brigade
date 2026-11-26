@@ -28,6 +28,14 @@
           "timeout_seconds": 10
         },
         {
+          "kind": "digest-json",
+          "command": ["brigade-code-graph", "digest", "--json"],
+          "read_only": true,
+          "timeout_seconds": 30,
+          "probe": ["brigade-code-graph", "digest", "--help"],
+          "probe_contains": ["--json"]
+        },
+        {
           "kind": "doctor-json",
           "command": ["brigade-code-graph", "doctor", "--json"],
           "read_only": true,
