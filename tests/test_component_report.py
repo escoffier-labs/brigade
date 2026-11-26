@@ -346,6 +346,33 @@ def _write_healthy_install(env: dict[str, str], manifest_path: Path) -> None:
     )
 
 
+def test_bundled_v0321_manifest_verifies_current_evidence_without_historical_pin(tmp_path, monkeypatch):
+    monkeypatch.setattr(brigade, "__version__", "0.32.1")
+    env = _install_fixture_manifest(tmp_path, monkeypatch)
+    manifest_path = component_manifest.manifest_path()
+    data = json.loads(manifest_path.read_text())
+    revision = "v0.32.1+" + "a" * 40
+    data["manifest_revision"] = revision
+    manifest_path.write_text(json.dumps(data))
+    _write_healthy_install(env, manifest_path)
+
+    assert component_report.release_asset_pin(revision, "brigade-evidence", "linux-amd64") is None
+    report = component_report.inspect_components(env=env, system="linux")
+    evidence = next(row for row in report.components if row.component_id == "brigade-evidence")
+    assert report.manifest_revision == report.installed_manifest_revision == revision
+    assert evidence.status == "healthy"
+    assert evidence.actual_sha256 == evidence.expected_sha256
+    assert not evidence.outdated
+
+    path = Path(evidence.managed_executable_path)
+    path.write_bytes(b"x" * path.stat().st_size)
+    report = component_report.inspect_components(env=env, system="linux")
+    evidence = next(row for row in report.components if row.component_id == "brigade-evidence")
+    assert evidence.status == "corrupt"
+    assert "sha256 mismatch" in evidence.detail
+    assert not evidence.outdated
+
+
 def test_status_precedence_is_documented_and_stable():
     assert component_report.STATUS_PRECEDENCE == (
         "unsupported",
