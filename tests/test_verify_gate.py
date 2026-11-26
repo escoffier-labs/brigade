@@ -112,6 +112,7 @@ def _verdict(receipt, mode, eligible, reason):
         (PREFIX + [SELECTOR], "1 passed, 1 failed in 0.01s\n", 0, False, "no_tests_passed"),
         (PREFIX + [SELECTOR], "1 passed, 1 error in 0.01s\n", 0, False, "no_tests_passed"),
         (PREFIX + [SELECTOR], "1 passed, 3 subtests passed in 0.03s\n", 0, False, "passed_required_check"),
+        (PREFIX + [SELECTOR], "2 failed, 1 passed, 3 subtests passed in 0.01s\n", 0, False, "no_tests_passed"),
         (PREFIX + [SELECTOR], "1 passed, 2 subtests failed in 0.03s\n", 0, False, "no_tests_passed"),
         (PREFIX + [SELECTOR], "3 subtests passed in 0.03s\n", 0, False, "no_tests_passed"),
         (PREFIX + [SELECTOR], "1 failed in 0.01s\n", 1, False, "not_completed"),

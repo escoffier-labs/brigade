@@ -71,15 +71,14 @@ def pytest_outcomes(stdout: str) -> dict[str, int | bool] | None:
         if match is None:
             continue
         counts = dict.fromkeys(_OUTCOMES, 0)
-        failed_subtests = 0
         for item in _COUNT.finditer(match.group("body")):
-            name = "errors" if item.group("name") == "error" else item.group("name")
-            if name == "subtests failed":
-                failed_subtests = int(item.group("count"))
-            elif name in counts:
-                counts[name] = int(item.group("count"))
-        # A failed subtest disqualifies the run. Only top-level passes count as passed tests.
-        counts["failed"] += failed_subtests
+            name = item.group("name")
+            if name == "error":
+                name = "errors"
+            elif name == "subtests failed":
+                name = "failed"
+            if name in counts:
+                counts[name] += int(item.group("count"))
         return {**counts, "no_tests_ran": sum(counts[name] for name in _RAN) == 0}
     return None
 
