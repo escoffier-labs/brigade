@@ -110,11 +110,11 @@ def message_settings(token_file: str | None, *, node_credential: bool = False) -
     # A relative BRIGADE_HOME would let the working directory choose the hub and the node
     # credential, so message operations refuse it before reading anything (#2423).
     fleet_home_guard.fleet_config_path(strict=True)
-    settings = fleet_client.load_fleet_settings()
+    path = None if node_credential else token_file if token_file is not None else os.environ.get(ENV_TOKEN_FILE)
+    settings = fleet_client.load_fleet_settings(include_node=path is None, optional_admin=True)
     hub = settings.get("hub_url", "")
     if not hub:
         raise MessageNotConfiguredError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
-    path = None if node_credential else token_file if token_file is not None else os.environ.get(ENV_TOKEN_FILE)
     if path is not None:
         token = read_message_token_file(path)
     else:
@@ -185,6 +185,8 @@ class MessageAuthority:
             )
         except MessageNotConfiguredError:
             raise
+        except fleet_home_guard.FleetTokenFileError as error:
+            raise MessageAuthorityError(str(error), code="token_file_invalid") from None
         except fleet_client.FleetClientError as error:
             raise MessageAuthorityError(
                 "message credential invalid", code=getattr(error, "code", None) or "token_file_invalid"
@@ -201,6 +203,8 @@ class MessageAuthority:
                 if self.node_credential
                 else message_settings(self.token_file)
             )
+        except fleet_home_guard.FleetTokenFileError as error:
+            raise MessageAuthorityError(str(error), code="token_file_invalid") from None
         except fleet_client.FleetClientError as error:
             raise MessageAuthorityError(
                 "message credential invalid", code=getattr(error, "code", None) or "token_file_invalid"

@@ -1602,7 +1602,7 @@ def test_initial_acquire_retry_uses_a_token_rotated_during_the_first_attempt(mon
     assert posts[0][2] == posts[1][2]
 
 
-@pytest.mark.parametrize("file_state", ["empty", "unreadable"])
+@pytest.mark.parametrize("file_state", ["empty", "missing"])
 def test_exit_orphan_release_keeps_node_credential_when_its_file_is_unavailable(tmp_path, monkeypatch, file_state):
     """Orphan cleanup must retain the claim's node credential kind (#1781)."""
     home = tmp_path / "home"
@@ -1633,7 +1633,6 @@ def test_exit_orphan_release_keeps_node_credential_when_its_file_is_unavailable(
             token_file.write_text("", encoding="utf-8")
         else:
             token_file.unlink()
-            token_file.mkdir()  # Reading a directory fails even for privileged test runners.
     assert done.wait(5), "exit cleanup did not hand off to orphan release"
     assert len(releases) == 2
     assert [(hub, token) for hub, token, _ in releases] == [(HUB_ONE, "fake-node-token")] * 2

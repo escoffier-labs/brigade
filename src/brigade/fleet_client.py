@@ -236,38 +236,13 @@ def brigade_home() -> Path:
     return Path.home() / ".brigade"
 
 
-def load_fleet_settings(*, strict: bool = False) -> dict[str, str]:
-    """Return {"hub_url", "admin_token", "node_token"}; values may be empty.
+def load_fleet_settings(
+    *, strict: bool = False, include_node: bool = True, include_admin: bool = True, optional_admin: bool = False
+) -> dict[str, str]:
+    """Load the hub endpoint and requested fleet credentials."""
+    from .fleet_home_guard import load_fleet_settings as load
 
-    Precedence: ``BRIGADE_FLEET_HUB_URL`` over ``[fleet] hub_url``;
-    ``BRIGADE_FLEET_TOKEN`` over the contents of ``[fleet] token_file``
-    (the admin token); ``BRIGADE_FLEET_NODE_TOKEN`` over the contents of
-    ``[fleet] node_token_file`` (this machine's node token). An empty or
-    whitespace-only environment value is treated as unset. The file is
-    consulted for whichever value the environment did not set. No fallback
-    between the two token kinds happens here (see ``load_fleet_config``).
-    Strict callers refuse read or parsing failures when consulting that file.
-    A relative ``BRIGADE_HOME`` never selects that file (#2423): strict callers get
-    ``RelativeBrigadeHomeError``, and others get the environment values only.
-    """
-    hub_url = os.environ.get("BRIGADE_FLEET_HUB_URL", "").strip()
-    admin_token = os.environ.get("BRIGADE_FLEET_TOKEN", "").strip()
-    node_token = os.environ.get("BRIGADE_FLEET_NODE_TOKEN", "").strip()
-    if not (hub_url and admin_token and node_token):
-        from .fleet_home_guard import read_token_file, user_fleet_config
-
-        config_path, section = user_fleet_config(strict=strict)
-        if not hub_url and isinstance(section.get("hub_url"), str):
-            hub_url = section["hub_url"].strip()
-        if not admin_token:
-            token_file = section.get("token_file")
-            if isinstance(token_file, str) and token_file.strip():
-                admin_token = read_token_file(token_file, config_path)
-        if not node_token:
-            node_token_file = section.get("node_token_file")
-            if isinstance(node_token_file, str) and node_token_file.strip():
-                node_token = read_token_file(node_token_file, config_path)
-    return {"hub_url": hub_url, "admin_token": admin_token, "node_token": node_token}
+    return load(strict=strict, include_node=include_node, include_admin=include_admin, optional_admin=optional_admin)
 
 
 def load_fleet_config(*, strict: bool = False) -> dict[str, str]:
@@ -1120,7 +1095,7 @@ def _claim_op(
     recorded on the row at acquire; ``supersede`` is the dead lease a
     node-scoped acquire presents (see ``lease_from_lock_owner``).
     """
-    from .fleet_home_guard import RELATIVE_HOME_REFUSAL, absolute_brigade_home
+    from .fleet_home_guard import FleetTokenFileError, RELATIVE_HOME_REFUSAL, absolute_brigade_home
 
     if absolute_brigade_home() is None:
         # No trusted home identity, so no claim request leaves, whatever key or node id is reused (#2423).
@@ -1165,6 +1140,8 @@ def _claim_op(
             lambda: _post_claim_blocking(hub, tok, body, timeout=CLAIM_TIMEOUT_SECONDS),
             timeout=CLAIM_TIMEOUT_SECONDS,
         )
+    except FleetTokenFileError as exc:
+        return ClaimDecision(granted=False, reason=exc.code, detail=str(exc), holder=holder)
     except Exception as exc:
         return ClaimDecision(granted=False, reason="hub-unavailable", detail=str(exc), holder=holder)
     payload = payload if isinstance(payload, dict) else {}
@@ -1354,9 +1331,11 @@ def _classify_session_write_error(exc: BaseException) -> str:
 
 def _post_session(snapshot: SessionSnapshot, *, action: str, hub_url: str | None) -> SessionWriteResult:
     """POST /sessions. Never spools; ordinary failures return a bounded reason."""
+    from .fleet_home_guard import FleetTokenFileError
+
     try:
         if snapshot.cloud_context is not None:
-            settings = load_fleet_settings()
+            settings = load_fleet_settings(include_admin=False)
             if not settings["node_token"]:
                 return SessionWriteResult(ok=False, reason="node_auth_required")
             config = {"hub_url": settings["hub_url"], "token": settings["node_token"]}
@@ -1382,6 +1361,9 @@ def _post_session(snapshot: SessionSnapshot, *, action: str, hub_url: str | None
             if response.status == 200:
                 return SessionWriteResult(ok=True)
             return SessionWriteResult(ok=False, reason=f"http_status:{response.status}")
+    except FleetTokenFileError as exc:
+        _LOG.warning("fleet session %s: %s", action, exc)
+        return SessionWriteResult(ok=False, reason=exc.code)
     except Exception as exc:
         return SessionWriteResult(ok=False, reason=_classify_session_write_error(exc))
 
@@ -1695,9 +1677,19 @@ def repo_claim(
     run in another directory or under a newer lease holds) and logs the
     supersede once. The heartbeat's re-acquire never supersedes.
     """
+    from .fleet_home_guard import FleetTokenFileError
+    from .fleet_claim_lifecycle import claim_token_refusal, with_claim_connection
+
     try:
         config = load_fleet_config(strict=True) if require_claim else load_fleet_config()
         hub_configured = bool(config["hub_url"])
+        if hub_configured:
+            connection = _claim_lifecycle._bound_connection(
+                config["hub_url"], config.get("token", ""), shared=getattr(config, "shared_token", None)
+            )
+    except FleetTokenFileError as exc:
+        yield claim_token_refusal(target, require_claim, str(exc))
+        return
     except Exception:
         if require_claim:
             raise FleetClaimRequiredError(f"fleet claim on {target!r} required: configuration-error") from None
@@ -1707,9 +1699,6 @@ def repo_claim(
             raise FleetClaimRequiredError(f"fleet claim on {target!r} required: no-hub")
         yield ClaimDecision(granted=False, reason="no-hub")
         return
-    connection = _claim_lifecycle._bound_connection(
-        config["hub_url"], config.get("token", ""), shared=getattr(config, "shared_token", None)
-    )
     node_id = resolve_node_id(base_path)
     if not _node_id_is_claimable(node_id):
         if require_claim:
@@ -1726,18 +1715,27 @@ def repo_claim(
         "conductor": conductor,
         "ttl_seconds": ttl_seconds,
         "lock_owner": lock_owner,
-        **connection(),
     }
     pending_orphan_release = threading.Event()
     request_start = time.monotonic()
-    decision = acquire_claim(target, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs)
+    decision = with_claim_connection(
+        acquire_claim, target, connection, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs
+    )
     ambiguous_initial_acquire = not decision.granted and decision.reason == "hub-unavailable"
     if not decision.granted and decision.reason in ("hub-unavailable", "missing"):
         # One retry, same fencing token, current credential: a lost response may have committed the row
         # (idempotent for this holder), and a 409 with no owner means the target freed mid-request.
         request_start = time.monotonic()
-        acquire_kwargs.update(connection())
-        decision = acquire_claim(target, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs)
+        decision = with_claim_connection(
+            acquire_claim, target, connection, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs
+        )
+    if not decision.granted and decision.reason == FleetTokenFileError.code:
+        if ambiguous_initial_acquire:
+            _schedule_orphan_release(
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
+            )
+        yield claim_token_refusal(target, require_claim, decision.detail)
+        return
     if not decision.granted and decision.reason == "quota":
         if ambiguous_initial_acquire:
             _schedule_orphan_release(
@@ -1873,7 +1871,9 @@ def repo_claim(
                 reason,
                 owner_thread=owner_thread,
                 cancel_event=cancel_event,
-                on_claim_lost=_credential_loss if require_claim and reason == "auth-failed" else on_claim_lost,
+                on_claim_lost=_credential_loss
+                if require_claim and reason in ("auth-failed", FleetTokenFileError.code)
+                else on_claim_lost,
                 stop_event=lease.stopped,
                 _interrupt_dispatcher=lease._dispatch_interrupt,
             )
@@ -1885,7 +1885,9 @@ def repo_claim(
         lease_for_cleanup = lease
 
         def _release_rejected_grant() -> None:
-            release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor, **connection())
+            release_outcome = with_claim_connection(
+                release_claim, target, connection, holder=holder, node_id=node_id, conductor=conductor
+            )
             if release_outcome.reason in CLEANUP_RETRY_REASONS:
                 _schedule_orphan_release(
                     target,
@@ -1903,8 +1905,14 @@ def repo_claim(
                 if not lease.active():
                     return
                 attempt_start = time.monotonic()
-                outcome = renew_claim(
-                    target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds, **connection()
+                outcome = with_claim_connection(
+                    renew_claim,
+                    target,
+                    connection,
+                    holder=holder,
+                    node_id=node_id,
+                    conductor=conductor,
+                    ttl_seconds=ttl_seconds,
                 )
                 if not outcome.granted and outcome.reason == "missing":
                     # Check deadline and authority, and mark the possible orphan,
@@ -1912,7 +1920,7 @@ def repo_claim(
                     if not lease.active(pending_orphan=pending_orphan_release):
                         return
                     attempt_start = time.monotonic()
-                    outcome = acquire_claim(target, **{**acquire_kwargs, **connection()})
+                    outcome = with_claim_connection(acquire_claim, target, connection, **acquire_kwargs)
                 next_request = attempt_start + _claim_renew_interval(ttl_seconds)
                 if outcome.granted:
                     if not lease.confirm(attempt_start, on_rejected=_release_rejected_grant):
@@ -1926,7 +1934,7 @@ def repo_claim(
                         _LOG.warning("fleet claim heartbeat for %s: hub unreachable; retrying", target)
                         warned_unavailable = True
                     continue
-                if outcome.reason == "auth-failed":
+                if outcome.reason in ("auth-failed", FleetTokenFileError.code):
                     if require_claim:
                         # Keep the credential channel, with the same bounded abort
                         # that prevents a blocking loss callback from suppressing cancellation.
@@ -1938,8 +1946,7 @@ def repo_claim(
                     if not lease.terminate(outcome.reason):
                         return
                     _LOG.warning(
-                        "fleet claim heartbeat for %s: the hub rejected this node's credentials (%s); "
-                        "canceling the guarded run",
+                        "fleet claim heartbeat for %s: credential failure (%s), canceling the guarded run",
                         target,
                         outcome.detail,
                     )

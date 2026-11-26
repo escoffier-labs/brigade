@@ -263,10 +263,12 @@ def _cloud_op(
     **fields: Any,
 ) -> CloudDecision:
     """One bounded cloud operation that fails closed on every uncertainty."""
+    from .fleet_home_guard import FleetTokenFileError
+
     lease = lease_id or uuid4().hex
     fence = holder or uuid4().hex
     try:
-        config = load_fleet_config()
+        config = {} if hub_url and token else load_fleet_config()
         hub = hub_url or config["hub_url"]
         if not hub:
             return CloudDecision(False, "no-hub", holder=fence)
@@ -284,6 +286,9 @@ def _cloud_op(
             lambda: _client._post_cloud_blocking(hub, token or config["token"], body, timeout=CLOUD_TIMEOUT_SECONDS),
             timeout=CLOUD_TIMEOUT_SECONDS,
         )
+    except FleetTokenFileError as exc:
+        _client._LOG.warning("fleet cloud %s: %s", action, exc)
+        return CloudDecision(False, exc.code, detail=str(exc), holder=fence)
     except Exception:
         return CloudDecision(False, "hub-unavailable", holder=fence)
     payload = payload if isinstance(payload, dict) else {}

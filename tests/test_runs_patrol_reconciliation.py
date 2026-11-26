@@ -69,7 +69,7 @@ def test_failed_run_outcome_precedes_old_dirty_claim(tmp_path):
 def hub(monkeypatch):
     rows = []
     monkeypatch.setattr(
-        fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.invalid", "node_token": "fake"}
+        fleet_client, "load_fleet_settings", lambda **_kwargs: {"hub_url": "https://hub.invalid", "node_token": "fake"}
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: "local-node")
     monkeypatch.setattr(
@@ -370,7 +370,7 @@ def test_timed_out_hub_inspection_does_not_delay_process_exit(tmp_path):
         from brigade import cli, fleet_client
 
         fleet_client.REPORT_TIMEOUT_SECONDS = 0.05
-        fleet_client.load_fleet_settings = lambda: {
+        fleet_client.load_fleet_settings = lambda **_kwargs: {
             "hub_url": "https://hub.example.invalid", "node_token": "fake"
         }
         fleet_client.resolve_node_id = lambda: "local-node"

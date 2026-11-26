@@ -12,6 +12,7 @@ is read under the directory of that ``fleet.toml``, never under the working dire
 
 from __future__ import annotations
 
+import errno
 import os
 import shlex
 import stat
@@ -119,6 +120,8 @@ def open_token_fd(path: str) -> int:
 class FleetTokenFileError(fleet_client.FleetClientError):
     """A configured fleet token file failed validation or could not be read."""
 
+    code = "token-file-refused"
+
 
 class FleetTokenPermissionError(FleetTokenFileError):
     """A fleet token file has the wrong owner or mode."""
@@ -137,16 +140,20 @@ def _open_configured_token(raw: str, config_path: Path) -> tuple[int, str] | Non
         try:
             path = token_path(candidate, config_path)
         except (OSError, ValueError, RuntimeError):
-            raise FleetTokenFileError(f"{candidate}: invalid token file path. Update the configured path.") from None
+            raise FleetTokenFileError(
+                f"{candidate}: unresolvable token file path. Update the configured path."
+            ) from None
         if path is None:
-            continue
+            raise FleetTokenFileError(f"{candidate}: unresolvable token file path. Update the configured path.")
         try:
             # Configured symlinks resolve to a target whose descriptor is checked below.
             target = path.resolve(strict=True)
             fd = open_token_fd(str(target))
         except FileNotFoundError:
             continue
-        except (OSError, ValueError, RuntimeError):
+        except (OSError, ValueError, RuntimeError) as exc:
+            if isinstance(exc, (RuntimeError, ValueError)) or exc.errno == errno.ELOOP:
+                raise FleetTokenFileError(f"{path}: unresolvable token file path. Check the configured path.") from None
             raise FleetTokenFileError(
                 f"{path}: cannot open token file. Check the path and access permissions."
             ) from None
@@ -156,12 +163,18 @@ def _open_configured_token(raw: str, config_path: Path) -> tuple[int, str] | Non
             if not stat.S_ISREG(info.st_mode):
                 raise FleetTokenFileError(f"{label}: expected a regular token file. Update the configured path.")
             if _checks_posix_permissions():
-                uid = os.getuid()
+                uid = os.geteuid()
                 quoted = shlex.quote(str(target))
                 mode = stat.S_IMODE(info.st_mode)
                 if info.st_uid != uid:
+                    import pwd
+
+                    try:
+                        owner = shlex.quote(pwd.getpwuid(uid).pw_name)
+                    except (KeyError, OSError):
+                        owner = str(uid)
                     raise FleetTokenPermissionError(
-                        f"{label}: wrong owner (UID {info.st_uid}). Run chown {uid} {quoted}."
+                        f"{label}: wrong owner (UID {info.st_uid}). Run chown {owner} {quoted}."
                     )
                 if mode & 0o077:
                     raise FleetTokenPermissionError(
@@ -171,6 +184,9 @@ def _open_configured_token(raw: str, config_path: Path) -> tuple[int, str] | Non
             else:
                 detail = f"{label}: ok (POSIX ownership and mode checks skipped)"
             return fd, detail
+        except OSError:
+            os.close(fd)
+            raise FleetTokenFileError(f"{path}: cannot inspect token file. Check access permissions.") from None
         except BaseException:
             os.close(fd)
             raise
@@ -192,27 +208,33 @@ def read_token_file(raw: str, config_path: Path | None) -> str:
         os.close(fd)
 
 
-def token_file_doctor_checks() -> list[tuple[str, str, str]]:
-    """Report each configured token path without reading its contents."""
-    config_path, section = user_fleet_config()
-    if config_path is None:
-        return []
-    checks = []
-    for key in ("token_file", "node_token_file"):
-        raw = section.get(key)
-        if not isinstance(raw, str) or not raw.strip():
-            continue
-        name = f"fleet token file: {key}"
-        try:
-            opened = _open_configured_token(raw, config_path)
-        except FleetTokenFileError as exc:
-            checks.append(("FAIL", name, str(exc)))
-            continue
-        if opened is None:
-            path = token_path(raw, config_path)
-            checks.append(("WARN", name, f"{path or raw}: missing. Supply the token file or update {key}."))
-        else:
-            fd, detail = opened
-            os.close(fd)
-            checks.append(("OK", name, detail))
-    return checks
+def load_fleet_settings(
+    *, strict: bool = False, include_node: bool = True, include_admin: bool = True, optional_admin: bool = False
+) -> dict[str, str]:
+    """Resolve the endpoint and requested credentials from the environment or guarded config.
+
+    Nonempty environment settings override their file settings. Excluded
+    credentials remain empty. Strict mode applies to reading the config.
+    Message authentication can compare an available admin credential without
+    requiring its file to be usable.
+    """
+    hub_url = os.environ.get("BRIGADE_FLEET_HUB_URL", "").strip()
+    admin_token = os.environ.get("BRIGADE_FLEET_TOKEN", "").strip() if include_admin else ""
+    node_token = os.environ.get("BRIGADE_FLEET_NODE_TOKEN", "").strip() if include_node else ""
+    if not hub_url or (include_admin and not admin_token) or (include_node and not node_token):
+        config_path, section = user_fleet_config(strict=strict)
+        if not hub_url and isinstance(section.get("hub_url"), str):
+            hub_url = section["hub_url"].strip()
+        if include_admin and not admin_token:
+            token_file = section.get("token_file")
+            if isinstance(token_file, str) and token_file.strip():
+                try:
+                    admin_token = read_token_file(token_file, config_path)
+                except FleetTokenFileError:
+                    if not optional_admin:
+                        raise
+        if include_node and not node_token:
+            node_token_file = section.get("node_token_file")
+            if isinstance(node_token_file, str) and node_token_file.strip():
+                node_token = read_token_file(node_token_file, config_path)
+    return {"hub_url": hub_url, "admin_token": admin_token, "node_token": node_token}

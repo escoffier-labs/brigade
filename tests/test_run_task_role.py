@@ -13,7 +13,7 @@ _REAL_RUN = aboyeur.run
 @pytest.fixture
 def run_task(tmp_path, monkeypatch):
     monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "home"))
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.example.test"})
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: {"hub_url": "https://hub.example.test"})
     roster = tmp_path / "roster.toml"
     roster.write_text("""orchestrator = "chef"
 [agents.chef]
@@ -186,7 +186,7 @@ def test_classified_role_runtime_refusal_never_launches_fallback(run_task, monke
 @pytest.mark.parametrize("task", ["Draft a blog post", "Redesign the login page"])
 def test_standalone_classified_task_keeps_existing_routing_without_policy_network(run_task, monkeypatch, task):
     invoke, seen = run_task
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": ""})
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: {"hub_url": ""})
 
     def no_policy(**kwargs):
         raise AssertionError("standalone task must not resolve central roles")
@@ -199,7 +199,7 @@ def test_standalone_classified_task_keeps_existing_routing_without_policy_networ
 
 def test_detached_required_role_does_not_downgrade_when_hub_configuration_disappears(run_task, monkeypatch):
     invoke, seen = run_task
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": ""})
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda **_kwargs: {"hub_url": ""})
 
     def missing(**kwargs):
         raise fleet_client_policy.FleetPolicyClientError("network", "no fleet hub configured")
@@ -409,7 +409,7 @@ def test_writing_health_fallback_dispatches_and_leases_its_own_seat(run_task, mo
     assert invoke("Draft a blog post") == 0
     effective = seen[0][1]
     monkeypatch.setattr(
-        fleet_client, "load_fleet_settings", lambda: {"hub_url": "", "node_token": "", "admin_token": ""}
+        fleet_client, "load_fleet_settings", lambda **_kwargs: {"hub_url": "", "node_token": "", "admin_token": ""}
     )
     monkeypatch.setattr(aboyeur, "run", _REAL_RUN)
     snapshot = _versioned_snapshot(

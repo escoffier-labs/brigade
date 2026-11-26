@@ -36,6 +36,12 @@ status of each phase.
 - A relative `token_file` or `node_token_file` is read from the directory
   that holds `fleet.toml`, never from the working directory. `~` expands.
   Memory sync reads `[memory_hub]` from the same guarded file.
+- On POSIX, the effective user must own `token_file` and `node_token_file`,
+  and neither file may grant permissions to group or other users. Use mode
+  `0600`. Configured symlinks use the resolved file for these checks.
+  `brigade doctor` reports the configured files and repair hints. On Windows,
+  Brigade checks that the target is a regular file and skips POSIX ownership
+  and mode checks.
 
 ## Cloud concurrency controls
 

@@ -15,11 +15,13 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     import threading
 
+    from .fleet_client import ClaimDecision
+
 
 CLAIM_FENCE_REFUSALS = ("claim-fence-refused", "claim-target-too-long")
 STALE_CLAIM_REFUSALS = ("stale-holder", "stale-generation")
 TERMINAL_CLAIM_REFUSALS = STALE_CLAIM_REFUSALS + CLAIM_FENCE_REFUSALS
-CLEANUP_RETRY_REASONS = ("hub-unavailable", "claim-fence-refused")
+CLEANUP_RETRY_REASONS = ("hub-unavailable", "claim-fence-refused", "token-file-refused")
 UNCERTAIN_CLEANUP_REASONS = CLEANUP_RETRY_REASONS + ("missing",)
 _ORPHAN_RELEASE_LOCK = Lock()
 _ORPHAN_RELEASES: dict[threading.Thread, threading.Event] = {}
@@ -36,8 +38,7 @@ def _token_snapshot() -> tuple[str, str, str]:
     """``(hub_url, node_token, admin_token)`` from one ``fleet.toml`` read.
 
     Mirrors ``load_fleet_settings`` precedence, but a token read from a file
-    is dropped when that same read names a hub other than the effective one,
-    so an environment hub never pairs with another hub's file token.
+    is dropped when that same read names a hub other than the effective one.
     """
     from .fleet_home_guard import read_token_file, user_fleet_config
 
@@ -79,31 +80,56 @@ def _bound_connection(hub_url: str, token: str, *, shared: bool | None = None) -
     A per-binding lock orders each complete read, cache update, and return;
     callers perform network requests after the lock is released.
     """
-    from .fleet_home_guard import FleetTokenPermissionError
+    from .fleet_home_guard import FleetTokenFileError
 
     latest = token
+    refusal: str | None = None
     lock = Lock()
 
     def current() -> dict[str, Any]:
-        nonlocal latest, shared
+        nonlocal latest, shared, refusal
         with lock:
             try:
                 configured_hub, node_token, admin_token = _token_snapshot()
-            except FleetTokenPermissionError:
-                latest = ""
+            except FleetTokenFileError as exc:
+                latest, refusal = "", str(exc)
                 raise
             except Exception:
                 configured_hub, node_token, admin_token = "", "", ""
             if configured_hub == hub_url:
                 if node_token:
-                    latest, shared = node_token, False
+                    latest, shared, refusal = node_token, False, None
                 elif admin_token and shared is not False:
-                    latest, shared = admin_token, True
+                    latest, shared, refusal = admin_token, True, None
+            if refusal is not None:
+                raise FleetTokenFileError(refusal)
             return {"hub_url": hub_url, "token": latest}
 
     current()
 
     return current
+
+
+def with_claim_connection(
+    operation: Callable[..., ClaimDecision], target: str, connect: Callable[[], dict[str, Any]], **kwargs: Any
+) -> ClaimDecision:
+    from .fleet_home_guard import FleetTokenFileError
+
+    try:
+        connection = connect()
+    except FleetTokenFileError as exc:
+        return _client().ClaimDecision(False, reason=exc.code, detail=str(exc), holder=kwargs.get("holder"))
+    return operation(target, **kwargs, **connection)
+
+
+def claim_token_refusal(target: str, required: bool, detail: str | None) -> ClaimDecision:
+    from .fleet_home_guard import FleetTokenFileError
+
+    client = _client()
+    if required:
+        raise client.FleetClaimRequiredError(f"fleet claim on {target!r} required: {detail}") from None
+    client._LOG.warning("fleet claim skipped for %s: %s", target, detail)
+    return client.ClaimDecision(False, reason=FleetTokenFileError.code, detail=detail)
 
 
 def _force_release(target: str, *, holder: str | None, acquired_at: str | None, **kwargs: Any) -> Any:
@@ -288,9 +314,17 @@ def release_confirmed_claim(
 ) -> None:
     """Release the exact holder and retry while a late acquire could still land."""
     client = _client()
+    warned = False
 
     def release() -> Any:
-        return client.release_claim(target, holder=holder, node_id=node_id, conductor=conductor, **connect())
+        nonlocal warned
+        outcome = with_claim_connection(
+            client.release_claim, target, connect, holder=holder, node_id=node_id, conductor=conductor
+        )
+        if outcome.reason == "token-file-refused" and not warned:
+            client._LOG.warning("fleet claim release for %s: %s", target, outcome.detail)
+            warned = True
+        return outcome
 
     outcome = release()
     if initial_acquire_uncertain or (reacquire_uncertain and outcome.reason in UNCERTAIN_CLEANUP_REASONS):
@@ -352,7 +386,9 @@ def _schedule_orphan_release(
         started = _client().time.monotonic()
         deadline = started + ttl_seconds
         while not stop.is_set() and _client().time.monotonic() < deadline:
-            outcome = _client().release_claim(target, node_id=node_id, holder=holder, conductor=conductor, **connect())
+            outcome = with_claim_connection(
+                _client().release_claim, target, connect, node_id=node_id, holder=holder, conductor=conductor
+            )
             if outcome.reason in CLEANUP_RETRY_REASONS:
                 stop.wait(min(_client().ORPHAN_RELEASE_RETRY_SECONDS, max(0.0, deadline - _client().time.monotonic())))
                 continue
