@@ -168,7 +168,7 @@ def _snapshot_tree(receipt: dict[str, Any]) -> str | None:
 
 
 def _move_out_command(path: Path) -> str:
-    return f'mv -- {shlex.quote(str(path))} "$(mktemp -d)"'
+    return f'mv -- {shlex.quote(path.as_posix())} "$(mktemp -d)"'
 
 
 class _Receipts:

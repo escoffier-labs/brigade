@@ -16,6 +16,7 @@ from brigade import localio
 from brigade.cli import main
 from brigade.work_cmd import verify_gate, verify_push, verify_required, verify_runtime
 
+from tests.test_pre_push_hook import _hook_shell
 from tests.test_verify_gate import DECLARATION, PREFIX, SELECTOR, _declaration, _git
 
 EXTRA_SELECTOR = "tests/test_other.py"
@@ -689,11 +690,11 @@ def test_exact_store_remedy_restores_verdict(push_repo, capsys, monkeypatch, pro
             bad.parent.rename(offending)
     sandbox = push_repo / "scratch folder"
     sandbox.mkdir()
-    monkeypatch.setenv("TMPDIR", str(sandbox))
+    monkeypatch.setenv("TMPDIR", sandbox.as_posix())
     code, result = _single(push_repo, capsys)
     assert (code, result["status"]) == (3, "indeterminate")
-    assert str(offending) in result["reason"] and result["remedy"].startswith("mv -- ")
-    subprocess.run(["bash", "-c", result["remedy"]], cwd=push_repo, check=True)
+    assert repr(str(offending)) in result["reason"] and result["remedy"].startswith("mv -- ")
+    subprocess.run([_hook_shell(), "-c", result["remedy"]], cwd=push_repo, check=True)
     assert not offending.exists()
     assert _single(push_repo, capsys)[0] == 0
 
@@ -717,15 +718,22 @@ def test_cap_remedy_uses_configured_archive_and_restores_verdict(push_repo, caps
     assert (code, result["status"]) == (3, "indeterminate")
     assert all(
         value in result["reason"]
-        for value in ("verify_runs_keep", str(gate_config), ".brigade/custom-archive", str(old.parent.parent))
+        for value in ("verify_runs_keep", repr(str(gate_config)), "custom-archive", repr(str(old.parent.parent)))
     )
     archive = push_repo / ".brigade" / "custom-archive"
-    archive.mkdir(mode=0o500)
+    if sys.platform == "win32":
+        archive.write_text("fixture archive path conflict", encoding="utf-8")
+    else:
+        archive.mkdir(mode=0o500)
     assert main(shlex.split(result["remedy"])[1:]) == 1
     failure = capsys.readouterr().err
-    assert str(archive) in failure and "Could not write" in failure and "no write permissions" in failure
+    assert repr(str(archive)) in failure and "Could not write" in failure
     assert old.is_file()
-    archive.chmod(0o700)
+    if sys.platform == "win32":
+        archive.unlink()
+    else:
+        assert "no write permissions" in failure
+        archive.chmod(0o700)
     assert main(shlex.split(result["remedy"])[1:]) == 0
     assert (archive / old.parent.name / "receipt.json").is_file()
     assert "Pruned 1 local verify run(s)." in capsys.readouterr().out
@@ -741,5 +749,5 @@ def test_stray_malformed_receipt_warns_without_masking_pass(push_repo, capsys):
     code = main(["work", "verify", "push-check", "--target", str(push_repo), "--ref", "HEAD", "--json"])
     output = capsys.readouterr()
     assert (code, json.loads(output.out)["refs"][0]["status"]) == (0, "ok")
-    assert "ignoring malformed receipt in a non-run directory" in output.err and str(stray) in output.err
+    assert "ignoring malformed receipt in a non-run directory" in output.err and repr(str(stray)) in output.err
     assert stray.is_dir()

@@ -251,7 +251,10 @@ The log records outcomes only when the gate can start and write the log.
 The gate requires a `timeout` command that supports the GNU coreutils `-k`
 option. Stock macOS and Git for Windows may lack that command. Windows'
 own `timeout.exe` does not support this invocation. Bash bounds the readiness
-probe independently of the `timeout` command being checked. The hook asks the
+probe independently of the `timeout` command being checked. When Git for
+Windows supplies Bash, status and install probe from that Git environment.
+Git config and hook setup have a separate deadline from the two-second receipt
+evaluation. The hook asks the
 gate process to stop after five seconds and kills it one second later if
 needed. Warn mode reports indeterminate verdicts and gate errors and lets
 the push continue. In enforce mode a gate error blocks

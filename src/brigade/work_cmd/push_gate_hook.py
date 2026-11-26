@@ -67,7 +67,9 @@ def run(*, hook_v2: bool = False) -> int:
 
     log = push_gate_log.log_path(Path(os.fsdecode(common.stdout.rstrip(b"\r\n"))))
     try:
-        results = verify_push._check(target, updates, None, deadline, details=True)
+        # Give the shared evaluator its full budget, as the advisory command
+        # does. Git config and telemetry-path probes have a separate deadline.
+        results = verify_push._check(target, updates, None, monotonic() + verify_push._BUDGET_SECONDS, details=True)
     except Exception:
         results = [
             {

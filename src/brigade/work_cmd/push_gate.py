@@ -99,12 +99,34 @@ def _normalized_mode(mode: str | None) -> str:
 
 
 def _timeout_state() -> str:
-    executable = which("timeout")
-    if executable is None:
-        return "missing"
+    command: list[str] = []
+    via_git_bash = False
+    if sys.platform == "win32" and (git := which("git")):
+        # Git for Windows runs hooks in Git Bash, whose tool lookup can
+        # select GNU timeout even when native PATH finds System32 first.
+        for root in Path(git).resolve().parents:
+            bash = root / "bin" / "bash.exe"
+            if (root / "cmd" / "git.exe").is_file() and bash.is_file():
+                command = [
+                    str(bash),
+                    "-c",
+                    'PATH="/usr/bin:$PATH"; command -v timeout >/dev/null 2>&1 || exit 127; timeout "$@" || exit 1',
+                    "push-gate-timeout-probe",
+                    *_TIMEOUT_PROBE,
+                ]
+                via_git_bash = True
+                break
+    if not command:
+        executable = which("timeout")
+        if executable is None:
+            return "missing"
+        command = [executable, *_TIMEOUT_PROBE]
     try:
-        if subprocess.run([executable, *_TIMEOUT_PROBE], capture_output=True, timeout=2, check=False).returncode == 0:
+        result = subprocess.run(command, capture_output=True, timeout=2, check=False)
+        if result.returncode == 0:
             return "usable"
+        if via_git_bash and result.returncode == 127:
+            return "missing"
     except (OSError, subprocess.TimeoutExpired):
         pass
     return "incompatible"
