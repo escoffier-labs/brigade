@@ -9,12 +9,14 @@ def test_release_checklist_bumps_then_verifies_then_tags():
 
     write = text.index(".venv/bin/python scripts/version_sync.py --write")
     check = text.index(".venv/bin/python scripts/version_sync.py --check")
-    verify = text.index("./scripts/verify")
+    audit = text.index("brigade security template-audit --target .")
     cold_start = text.index("brigade runbook run docs/runbooks/cold-start-gate.json --target . --approved")
     merge = text.index("## 4. Merge the release commit")
-    tag = text.index("## 5. Tag the merged commit")
+    tag_section = text.index("## 5. Tag the merged commit")
+    hosted_gate = text.index("confirm that the hosted `ci-gate` passed\nfor that exact commit")
+    tag = text.index('git tag -a "v$version" "$release_commit"')
 
-    assert write < check < verify < cold_start < merge < tag
+    assert write < check < audit < cold_start < merge < tag_section < hosted_gate < tag
 
 
 def test_release_checklist_cleans_up_isolated_pipx_state():

@@ -213,7 +213,8 @@ workers, and the merge queue also runs Python 3.11. The local gate runs one
 pytest process per shard on one interpreter, without the Windows jobs. A failure
 that needs parallel workers, Python 3.11 or Windows may not reproduce.
 
-A release is the other time the full gate runs locally. See `RELEASE.md`.
+For a release, hosted `ci-gate` on the exact release commit supplies suite
+verification. See [the release checklist](RELEASE.md#2-pre-release-verification).
 
 To smoke-test an install end-to-end the same way CI does:
 

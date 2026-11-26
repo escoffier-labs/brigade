@@ -31,10 +31,16 @@ git fetch origin --tags
 
 The file is append-only. The release cut leaves the new texts marked unreleased, and the first `--write` after the tag exists records the tag.
 
-## 2. Full verification
+## 2. Pre-release verification
+
+A successful hosted `ci-gate` on the exact release commit supplies suite
+verification. Confirm that result before tagging in step 5. If you need to
+[reproduce CI locally](CONTRIBUTING.md#reproducing-ci-locally), run
+`./scripts/verify` through Brigade.
+
+Run the security template audit and cold-start gate before merging.
 
 ```bash
-brigade work verify run --target . --argv-json '["./scripts/verify"]' --timeout 3600 --capture brigade-work
 brigade security template-audit --target .
 BRIGADE_EXTRAS=1 brigade runbook run docs/runbooks/cold-start-gate.json --target . --approved
 ```
@@ -65,7 +71,9 @@ Commit on a feature branch, push it, open a PR, wait for required checks, and me
 ## 5. Tag the merged commit
 
 Start in a clean checkout of the merged release commit. Fetch `origin/main`,
-confirm the checkout matches it, and run the shim expiry guard before tagging.
+confirm the checkout matches it, and confirm that the hosted `ci-gate` passed
+for that exact commit. Use the merge queue result if it is recorded on that
+commit. Run the shim expiry guard before tagging.
 The stable publish workflow repeats the guard after validating tag identity.
 
 ```bash
@@ -101,7 +109,19 @@ cover 28 files, comprising the native binaries and the manifest. Package
 assembly bundles the generated manifest for the exact tag. Historical tags
 retain their original asset inventories.
 
-The release body names `brigadestack==<version>` and mentions `brigade-cli==<version>` as the same code under the old name. The `build-python-dist` job builds both distributions from one tree: the root project as `brigadestack`, then a temporary copy stamped by `scripts/stamp_brigade_cli.py` as `brigade-cli` (same version, dependencies, extras and package files; only the name and console scripts differ). Before the PyPI upload, the separate `check-cli-upgrade` job (no OIDC token) runs `scripts/check_cli_upgrade.py`, which installs the newest older stable `brigade-cli` from PyPI in a fresh venv, upgrades it to the built wheel and requires `brigade --version` and `brigade-hook --help` to work, so an in-place `pipx upgrade brigade-cli` cannot ship broken. `build-and-publish` downloads the built artifact by ID and checks it against the build job's SHA-256 manifest before it uploads. Through 0.33 `brigade-cli` stays a full build. After 0.33, add the final stub release: a `brigade-cli` with no `brigadestack` dependency whose `brigade` command prints the migration command (`pipx uninstall brigade-cli` then `pipx install brigadestack`), and drop the stamped build and this gate in the same change. Rust builds run on the exact native runner
+The `create-release` job verifies the existing tag and creates or resumes a
+draft for it. The job checks the assets already on the draft, uploads only
+missing assets, and validates the complete inventory and SHA-256 hashes before
+publishing. On a rerun, a published release with the exact expected inventory
+and hashes is a no-op. Any difference on a published release fails the job
+without writes.
+
+Release immutability applies to new releases. Existing releases through
+`v0.32.1` retain their previous mutability. Before tagging another release from
+`release/0.32`, backport the draft-first flow using that branch's own asset
+inventory.
+
+The release body names `brigadestack==<version>` and mentions `brigade-cli==<version>` as the same code under the old name. The `build-python-dist` job builds both distributions from one tree: the root project as `brigadestack`, then a temporary copy stamped by `scripts/stamp_brigade_cli.py` as `brigade-cli` with the same version, dependencies, extras and package files. Only the name and console scripts differ. Before the PyPI upload, the separate `check-cli-upgrade` job (no OIDC token) runs `scripts/check_cli_upgrade.py`, which installs the newest older stable `brigade-cli` from PyPI in a fresh venv, upgrades it to the built wheel and requires `brigade --version` and `brigade-hook --help` to work, so an in-place `pipx upgrade brigade-cli` cannot ship broken. `build-and-publish` downloads the built artifact by ID and checks it against the build job's SHA-256 manifest before it uploads. Through 0.33 `brigade-cli` stays a full build. After 0.33, add the final stub release: a `brigade-cli` with no `brigadestack` dependency whose `brigade` command prints the migration command (`pipx uninstall brigade-cli` then `pipx install brigadestack`), and drop the stamped build and this gate in the same change. Rust builds run on the exact native runner
 for each platform. Go builds are pure-Go cross builds with `CGO_ENABLED=0`.
 
 The generated manifest and all component URLs use the repository name
