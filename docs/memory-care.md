@@ -904,9 +904,10 @@ Unsigned, edited or incomplete daily histories cannot authorize transitions.
 The receipt-key environment override does not supply lifecycle authority.
 The key must be a private, current-user-owned, single-link regular file reached
 without symlinks. Recording never creates a key. A missing or unsafe key blocks
-automatic retirement. Windows also blocks it until key ACL confinement is
-supported. Provision the workspace key through `brigade receipts keygen` before
-starting the observation window, with the receipt-key override unset.
+automatic retirement. On Windows, the recorder accepts a key with a protected,
+owner-only access control list. Provision the workspace key through
+`brigade receipts keygen` before starting the observation window, with the
+receipt-key override unset.
 The signing process and key are trusted. This prevents direct JSON forgery,
 but does not isolate the key from a process with the same user's shell access.
 A missing or unavailable hub blocks automatic archiving and reports

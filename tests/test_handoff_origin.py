@@ -540,7 +540,6 @@ def windows_key_api(tmp_path, monkeypatch):
     system = bytes.fromhex("010100000000000512000000")
     administrators = bytes.fromhex("01020000000000052000000020020000")
     state = SimpleNamespace(defect="", opened=[], descriptors=[])
-    key = tmp_path / ".brigade" / receipt_signing.KEY_NAME
 
     def convert(text, revision, output, size):
         state.descriptors.append(text)
@@ -576,10 +575,14 @@ def windows_key_api(tmp_path, monkeypatch):
 
     def nt_create(api, parent, name, *, access, share_access, disposition, options, attributes, security_descriptor):
         state.opened.append((disposition, share_access, security_descriptor))
+        if state.defect == "sharing":
+            nt_dirfd._raise_ntstatus(0xC0000043)
+        if state.defect == "race" and disposition == nt_dirfd._FILE_OPEN:
+            raise FileNotFoundError
         flags = os.O_WRONLY if access & nt_dirfd._FILE_WRITE_DATA else os.O_RDONLY
         if disposition == nt_dirfd._FILE_CREATE:
             flags |= os.O_CREAT | os.O_EXCL
-        return os.open(key, flags, 0o600)
+        return os.open(name, flags, 0o600, dir_fd=parent)
 
     api = SimpleNamespace(
         ConvertStringSecurityDescriptorToSecurityDescriptorW=convert,
@@ -639,7 +642,8 @@ def test_windows_refused_origin_key_requires_review_and_shows_repair(tmp_path, w
     original_identity = key.stat()
     windows_key_api.defect = defect
     assert dispatch(Namespace(receipts_command="keygen", target=tmp_path, force=True)) == 1
-    assert "Move .brigade/receipt-signing-key aside" in capsys.readouterr().err
+    hint = "remove the reparse point" if defect == "reparse" else "Move .brigade/receipt-signing-key aside"
+    assert hint in capsys.readouterr().err
 
     assert origin.verify_handoff(tmp_path, path, path.read_bytes()) is None
     stats = ingest.IngestStats()
@@ -647,8 +651,7 @@ def test_windows_refused_origin_key_requires_review_and_shows_repair(tmp_path, w
     assert stats.inboxed == 1 and stats.routed == 0
     assert "origin-review-required" in stats.actions[0]
     message = capsys.readouterr().err
-    assert "Move .brigade/receipt-signing-key aside" in message
-    assert "brigade receipts keygen" in message
+    assert hint in message
     assert key.stat() == original_identity
 
     # Follow the repair hint, then sign a fresh handoff with the replacement.
@@ -658,6 +661,94 @@ def test_windows_refused_origin_key_requires_review_and_shows_repair(tmp_path, w
     fresh = handoff(tmp_path)
     stamp(tmp_path, fresh)
     assert origin.verify_handoff(tmp_path, fresh, fresh.read_bytes()) is not None
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="portable Windows API simulation uses POSIX directory handles")
+@pytest.mark.parametrize("spelling", [".brigade/../.brigade/receipt-signing-key", ".brigade/RECEIP~1"])
+def test_windows_keygen_refuses_override_spellings(tmp_path, windows_key_api, monkeypatch, capsys, spelling):
+    from brigade.receipts_cmd import keygen
+
+    (tmp_path / ".brigade").mkdir()
+    monkeypatch.setenv(receipt_signing.KEY_ENV, str(tmp_path / spelling))
+    assert keygen(target=tmp_path) == 1
+    assert "Unset BRIGADE_RECEIPT_SIGNING_KEY_FILE" in capsys.readouterr().err
+    assert not windows_key_api.opened
+    assert not list((tmp_path / ".brigade").iterdir())
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="portable Windows API simulation uses POSIX directory handles")
+@pytest.mark.parametrize(
+    ("defect", "hint"),
+    [
+        ("owner", "Move .brigade/receipt-signing-key aside"),
+        ("reparse", "remove the reparse point"),
+        ("sharing", "retry"),
+        ("race", "retry"),
+    ],
+)
+def test_windows_direct_keygen_reports_actionable_refusal(tmp_path, windows_key_api, capsys, defect, hint):
+    from brigade.receipts_cmd import keygen
+
+    receipt_signing.generate_key(tmp_path)
+    windows_key_api.defect = defect
+    assert keygen(target=tmp_path, force=True) == 1
+    message = capsys.readouterr().err
+    assert hint in message
+    if defect != "owner":
+        assert "Move .brigade/receipt-signing-key aside" not in message
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="portable Windows API simulation uses POSIX directory handles")
+def test_windows_key_refuses_reparse_parent_with_path_hint(tmp_path, windows_key_api, monkeypatch, capsys):
+    from brigade.receipts_cmd import keygen
+    from brigade.work_cmd.nt_dirfd import ReparsePointRefusedError
+
+    def refuse(*args, **kwargs):
+        raise ReparsePointRefusedError
+
+    monkeypatch.setattr(receipt_signing.dirfd, "open_directory_chain", refuse)
+    assert keygen(target=tmp_path) == 1
+    assert receipt_signing.workspace_key(tmp_path) is None
+    assert capsys.readouterr().err.count("remove the reparse point") == 2
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="portable Windows API simulation uses POSIX directory handles")
+def test_windows_key_authorizes_read_coverage_and_refusal_blocks_it(tmp_path, windows_key_api):
+    from datetime import date
+
+    from brigade import memory_card_reads as reads
+
+    receipt_signing.generate_key(tmp_path)
+    today = date(2026, 11, 26)
+    assert reads.record(tmp_path, ["test-card"], today=today)
+    assert reads.covered(reads.load(tmp_path), today=today, days=0)
+    windows_key_api.defect = "owner"
+    assert not reads.record(tmp_path, ["test-card"], today=today)
+    assert not reads.covered(reads.load(tmp_path), today=today, days=0)
+
+
+def test_windows_claim_sweeps_stale_temporary(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from brigade.work_cmd import nt_dirfd
+
+    if sys.platform != "win32":
+
+        def names(parent, limit, *, pattern):
+            assert pattern == ".claim-*.tmp"
+            return [name for name in origin.dirfd.child_names(parent, limit) if name.startswith(".claim-")]
+
+        monkeypatch.setattr(nt_dirfd, "child_names", names)
+        monkeypatch.setitem(sys.modules, "msvcrt", SimpleNamespace(LK_LOCK=1, locking=lambda *args: None))
+    parent = tmp_path / "handoffs/consumed-stamps"
+    parent.mkdir(parents=True)
+    stale = parent / origin._temporary_name("a" * 32)
+    stale.write_text("old decision")
+    kept = parent / ("b" * 64)
+    kept.write_text("previous decision")
+    assert origin._windows_claim(parent / ("c" * 64), "", create=True)
+    assert not stale.exists()
+    assert kept.is_file()
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows key and claim operations")

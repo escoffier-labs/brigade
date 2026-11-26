@@ -33,8 +33,8 @@ def coverage(root, start, end):
     reads._write_json(root, reads.READS_REL, value)
 
 
-# Protocol tests inject a trusted key on Windows. Production key confinement is
-# tested separately and remains unavailable until its ACL checks are supported.
+# Protocol tests inject a trusted key on Windows. Production ACL checks are
+# covered separately by the Windows key tests.
 @pytest.fixture(autouse=True)
 def signed_memory_authority(monkeypatch):
     if sys.platform == "win32":

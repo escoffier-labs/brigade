@@ -59,9 +59,11 @@ _FileRenameInformation = 10
 _FileDispositionInformation = 13
 
 _STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034
+_STATUS_NO_SUCH_FILE = 0xC000000F
 _STATUS_OBJECT_PATH_NOT_FOUND = 0xC000003A
 _STATUS_OBJECT_NAME_COLLISION = 0xC0000035
 _STATUS_ACCESS_DENIED = 0xC0000022
+_STATUS_SHARING_VIOLATION = 0xC0000043
 _STATUS_OBJECT_NAME_INVALID = 0xC0000033
 _STATUS_OBJECT_PATH_INVALID = 0xC0000039
 _STATUS_NOT_A_DIRECTORY = 0xC0000103
@@ -217,7 +219,7 @@ def open_child_directory(parent: int, name: str, *, writable: bool = True) -> in
         raise
 
 
-def child_names(parent: int, limit: int) -> list[str]:
+def child_names(parent: int, limit: int, *, pattern: str | None = None) -> list[str]:
     """Bounded FILE_NAMES_INFORMATION enumeration on the held directory.
 
     Single-entry queries avoid allocating a population-sized buffer. Refuse
@@ -231,6 +233,8 @@ def child_names(parent: int, limit: int) -> list[str]:
     if not callable(query):
         raise OSError("handle-relative directory enumeration is unavailable")
     handle = _handle_from_fd(parent)
+    # Keep the backing buffer alive through the first query, which sets the filter.
+    search, search_buffer = _make_unicode(pattern) if pattern is not None else (None, None)
     names: list[str] = []
     restart = True
     queries = 0
@@ -251,12 +255,12 @@ def child_names(parent: int, limit: int) -> list[str]:
             len(buffer),
             12,
             True,
-            None,
+            ctypes.byref(search) if restart and search is not None else None,
             restart,
         )
         restart = False
         status = int(status) & 0xFFFFFFFF
-        if status == 0x80000006:  # STATUS_NO_MORE_FILES
+        if status == 0x80000006 or (pattern is not None and status == _STATUS_NO_SUCH_FILE):
             break
         if status != 0:
             _raise_ntstatus(status)
@@ -599,6 +603,10 @@ class ReparsePointRefusedError(OSError):
     """A handle-relative operation refused to follow a reparse point."""
 
 
+class SharingViolationError(OSError):
+    """An open handle has incompatible access or sharing rights."""
+
+
 def _reject_reparse(
     api: Any,
     handle: Any,
@@ -694,6 +702,8 @@ def _raise_ntstatus(status: int, *, name: str | None = None) -> None:
         raise FileExistsError(f"path component already exists{suffix}")
     if code == _STATUS_ACCESS_DENIED:
         raise PermissionError(f"path component access denied{suffix}")
+    if code == _STATUS_SHARING_VIOLATION:
+        raise SharingViolationError(f"path component is in use{suffix}")
     if code in {_STATUS_OBJECT_NAME_INVALID, _STATUS_OBJECT_PATH_INVALID}:
         raise OSError("path component is not a single contained name")
     if code == _STATUS_NOT_A_DIRECTORY:

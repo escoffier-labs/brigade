@@ -117,21 +117,17 @@ def test_verify_receipt_records_producing_work_session(tmp_path, capsys, monkeyp
 def test_confined_key_ignores_environment_override(tmp_path, monkeypatch):
     trusted = tmp_path / ".brigade/receipt-signing-key"
     other = tmp_path / "other-key"
-    _write_key(trusted, "01" * 32)
+    _, key_id = receipt_signing.generate_key(tmp_path)
     _write_key(other, "02" * 32)
     monkeypatch.setenv(receipt_signing.KEY_ENV, str(other))
-    if sys.platform == "win32":
-        assert receipt_signing.load_workspace_key(tmp_path) is None
-    else:
-        key = bytes.fromhex("01" * 32)
-        assert receipt_signing.load_workspace_key(tmp_path) == (key, receipt_signing.key_id(key))
+    loaded = receipt_signing.load_workspace_key(tmp_path)
+    assert loaded is not None and loaded[1] == key_id
     trusted.unlink()
     assert receipt_signing.load_workspace_key(tmp_path) is None
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode and symlink coverage")
 def test_confined_key_rejects_links_and_public_permissions(tmp_path):
-    if sys.platform == "win32":
-        return  # Windows cannot establish this authority without ACL confinement.
     path = tmp_path / ".brigade/receipt-signing-key"
     outside = tmp_path / "key"
     _write_key(outside, "01" * 32)
@@ -187,15 +183,14 @@ def test_unconfined_workspace_key_never_authenticates_a_receipt(tmp_path, monkey
 
 
 def test_workspace_authority_is_separate_from_audit_override(tmp_path, capsys, monkeypatch):
-    fixed = tmp_path / ".brigade/receipt-signing-key"
     audit = tmp_path / "audit-key"
-    _write_key(fixed, "01" * 32)
+    receipt_signing.generate_key(tmp_path)
     _write_key(audit, "02" * 32)
     monkeypatch.setenv(receipt_signing.KEY_ENV, str(audit))
     assert work_cmd.verify_run(target=tmp_path, commands=[f'{sys.executable} -c "print(1)"'], json_output=True) == 0
     receipt = json.loads(capsys.readouterr().out)
     assert receipt["digests"]["key_id"] == receipt_signing.key_id(bytes.fromhex("02" * 32))
-    assert receipt_signing.authentic_workspace_receipt(tmp_path, receipt) is (sys.platform != "win32")
+    assert receipt_signing.authentic_workspace_receipt(tmp_path, receipt)
     assert not receipt_signing.authentic_workspace_receipt(tmp_path, {**receipt, "producer_work_session_id": "forged"})
 
 

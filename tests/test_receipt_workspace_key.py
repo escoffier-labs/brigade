@@ -1,7 +1,6 @@
 """The fixed workspace authority key never trusts receipt overrides or links."""
 
 import os
-import sys
 
 import pytest
 
@@ -18,12 +17,13 @@ def test_missing_fixed_key_never_uses_override_or_creates_key(tmp_path, monkeypa
 
 
 def test_fixed_key_platform_confinement(tmp_path, monkeypatch):
-    signing_key(tmp_path)
+    _, key_id = receipt_signing.generate_key(tmp_path)
     override = tmp_path / "override"
     override.write_text("34" * 32)
     monkeypatch.setenv(receipt_signing.KEY_ENV, str(override))
-    expected = None if sys.platform == "win32" else bytes.fromhex("12" * 32)
-    assert receipt_signing.workspace_key(tmp_path) == expected
+    key = receipt_signing.workspace_key(tmp_path)
+    assert key is not None
+    assert receipt_signing.key_id(key) == key_id
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX key confinement probes")

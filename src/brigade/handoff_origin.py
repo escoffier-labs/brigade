@@ -15,6 +15,7 @@ import secrets
 import stat
 import sys
 import re
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
@@ -206,53 +207,73 @@ def _resume_claim(parent: int, name: str, data: bytes) -> bool:
         os.close(fd)
 
 
+def _sweep_windows_claim_temporaries(parent: int) -> None:
+    from .work_cmd import nt_dirfd
+
+    # Filter on the held directory so permanent markers do not spend the sweep budget.
+    for name in nt_dirfd.child_names(parent, 64, pattern=".claim-*.tmp"):
+        if re.fullmatch(r"\.claim-[a-f0-9]{32}\.tmp", name) is None:
+            continue
+        try:
+            info = dirfd.stat_child(parent, name)
+            if stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
+                dirfd.unlink_child(parent, name)
+        except (FileNotFoundError, nt_dirfd.ReparsePointRefusedError):
+            pass
+    dirfd.fsync_directory(parent)
+
+
+def _publish_windows_claim(parent: int, name: str, data: bytes) -> bool:
+    temporary = _temporary_name(secrets.token_hex(16))
+    fd = dirfd.open_child_file(parent, temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            dirfd.replace_children(parent, temporary, name, replace=False)
+        except FileExistsError:
+            return False
+        return True
+    finally:
+        try:
+            dirfd.unlink_child(parent, temporary)
+        except FileNotFoundError:
+            pass
+
+
 def _windows_claim(consumed: Path, decision_id: str, *, create: bool) -> bool:
-    """Publish a complete marker with a held-directory, no-replace rename."""
+    """Serialize cleanup and publish a complete marker with a no-replace rename."""
+    import msvcrt
+
     try:
         data = decision_id.encode("ascii")
-        state = dirfd.open_directory_chain(consumed.parent.parent, writable=create)
-        try:
+        with ExitStack() as held:
+            state = dirfd.open_directory_chain(consumed.parent.parent, writable=create)
+            held.callback(os.close, state)
             if create:
                 try:
                     dirfd.mkdir_child(state, consumed.parent.name)
                 except FileExistsError:
                     pass
-            parent = dirfd.open_child_directory(state, consumed.parent.name, writable=create)
-            try:
-                if create:
-                    temporary = _temporary_name(secrets.token_hex(16))
-                    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-                    fd = dirfd.open_child_file(parent, temporary, flags)
-                    try:
-                        with os.fdopen(fd, "wb") as handle:
-                            handle.write(data)
-                            handle.flush()
-                            os.fsync(handle.fileno())
-                        try:
-                            dirfd.replace_children(parent, temporary, consumed.name, replace=False)
-                        except FileExistsError:
-                            pass
-                        else:
-                            dirfd.fsync_directory(parent)
-                            dirfd.fsync_directory(state)
-                            return True
-                    finally:
-                        try:
-                            dirfd.unlink_child(parent, temporary)
-                        except FileNotFoundError:
-                            pass
-                if not decision_id:
-                    return False
-                fd = dirfd.open_child_file(parent, consumed.name, os.O_RDONLY, share_write=False)
-                try:
-                    info = os.fstat(fd)
-                    return stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and os.read(fd, 257) == data
-                finally:
-                    os.close(fd)
-            finally:
-                os.close(parent)
-        finally:
-            os.close(state)
+            parent = dirfd.open_child_directory(state, consumed.parent.name)
+            held.callback(os.close, parent)
+            lock = dirfd.open_child_lock_file(parent, ".claims.lock")
+            held.callback(os.close, lock)
+            # Closing the descriptor releases the byte-range lock on every exit.
+            msvcrt.locking(lock, msvcrt.LK_LOCK, 1)  # type: ignore[attr-defined]
+            _sweep_windows_claim_temporaries(parent)
+            if create and _publish_windows_claim(parent, consumed.name, data):
+                dirfd.fsync_directory(parent)
+                dirfd.fsync_directory(state)
+                return True
+            if not decision_id:
+                return False
+            fd = dirfd.open_child_file(parent, consumed.name, os.O_RDONLY, share_write=False)
+            held.callback(os.close, fd)
+            info = os.fstat(fd)
+            return stat.S_ISREG(info.st_mode) and info.st_nlink == 1 and os.read(fd, 257) == data
     except (OSError, ValueError):
         return False
 

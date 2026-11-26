@@ -20,6 +20,7 @@ _WINDOWS_KEY_REPAIR = (
     "Move .brigade/receipt-signing-key aside and run brigade receipts keygen in the workspace "
     "with BRIGADE_RECEIPT_SIGNING_KEY_FILE unset."
 )
+_WINDOWS_KEY_RETRY = "The Windows signing key is in use or changed during access. Close other key operations and retry."
 
 
 class WindowsKeyRefused(OSError):
@@ -110,11 +111,11 @@ def _windows_workspace_key(target: Path) -> bytes | None:
     from .work_cmd import nt_private
 
     try:
-        parent = dirfd.open_directory_chain(target.expanduser().resolve() / ".brigade", writable=False)
+        parent = dirfd.open_directory_chain(target.expanduser().absolute() / ".brigade", writable=False)
     except FileNotFoundError:
         return None
-    except (OSError, ValueError):
-        print(_WINDOWS_KEY_REPAIR, file=sys.stderr)
+    except (OSError, ValueError) as exc:
+        print(_windows_key_message(exc), file=sys.stderr)
         return None
     try:
         # Distinguish an absent key from a failure in an API that verifies it.
@@ -129,14 +130,16 @@ def _windows_workspace_key(target: Path) -> bytes | None:
             nt_private.verify_fd(fd, directory=False)
             held = os.fstat(fd)
             named = dirfd.stat_child(parent, KEY_NAME)
-            if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino) or len(raw) != held.st_size or len(raw) > 256:
-                raise ValueError("unstable or oversized workspace signing key")
+            if held.st_size > 256:
+                raise ValueError("oversized workspace signing key")
+            if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino) or len(raw) != held.st_size:
+                raise BlockingIOError("workspace signing key changed")
             key = bytes.fromhex(raw.decode("ascii").strip())
             if len(key) != 32:
                 raise ValueError("invalid workspace signing key length")
             return key
-    except (OSError, ValueError):
-        print(_WINDOWS_KEY_REPAIR, file=sys.stderr)
+    except (OSError, ValueError) as exc:
+        print(_windows_key_message(exc), file=sys.stderr)
         return None
     finally:
         os.close(parent)
@@ -165,16 +168,31 @@ def _write_windows_key(path: Path, key: bytes, *, force: bool) -> None:
             os.close(parent)
     except FileExistsError:
         raise
-    except (OSError, ValueError):
-        raise WindowsKeyRefused(_WINDOWS_KEY_REPAIR) from None
+    except (OSError, ValueError) as exc:
+        raise WindowsKeyRefused(_windows_key_message(exc)) from None
+
+
+def _windows_key_message(error: OSError | ValueError) -> str:
+    from .work_cmd.nt_dirfd import ReparsePointRefusedError, SharingViolationError
+
+    if isinstance(error, ReparsePointRefusedError):
+        return "The Windows signing key path contains a reparse point. Move the workspace or remove the reparse point."
+    if isinstance(error, (SharingViolationError, FileNotFoundError, BlockingIOError)) or getattr(
+        error, "winerror", None
+    ) in (32, 33):
+        return _WINDOWS_KEY_RETRY
+    return _WINDOWS_KEY_REPAIR
 
 
 def generate_key(target: Path, *, force: bool = False) -> tuple[Path, str]:
-    path = key_path(target)
-    if sys.platform == "win32" and path.absolute() == target.expanduser().resolve() / ".brigade" / KEY_NAME:
+    if sys.platform == "win32":
+        if os.environ.get(KEY_ENV):
+            raise WindowsKeyRefused(f"Unset {KEY_ENV} before running brigade receipts keygen on Windows.")
+        path = target.expanduser().absolute() / ".brigade" / KEY_NAME
         key = secrets.token_bytes(32)
-        _write_windows_key(path.absolute(), key, force=force)
+        _write_windows_key(path, key, force=force)
         return path, key_id(key)
+    path = key_path(target)
     path.parent.mkdir(parents=True, exist_ok=True)
     flags = os.O_WRONLY | os.O_CREAT
     flags |= os.O_TRUNC if force else os.O_EXCL
@@ -184,6 +202,27 @@ def generate_key(target: Path, *, force: bool = False) -> tuple[Path, str]:
         handle.write(key.hex() + "\n")
     os.chmod(path, 0o600)
     return path, key_id(key)
+
+
+def keygen(*, target: Path, force: bool = False) -> int:
+    target = target.expanduser().absolute() if sys.platform == "win32" else target.expanduser().resolve()
+    if not target.is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
+    try:
+        path, key_id = generate_key(target, force=force)
+    except FileExistsError:
+        print(f"error: receipt signing key already exists: {key_path(target)}", file=sys.stderr)
+        print("hint: leaving the existing key unchanged", file=sys.stderr)
+        return 1
+    except WindowsKeyRefused as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    print(f"receipt signing key: {path}")
+    print(f"key_id: {key_id}")
+    print("lesson authority uses only .brigade/receipt-signing-key. Unset BRIGADE_RECEIPT_SIGNING_KEY_FILE for it.")
+    print("reminder: keep this key gitignored. Brigade's .brigade/ ignore convention covers it.")
+    return 0
 
 
 def load_workspace_key(target: Path) -> tuple[bytes, str] | None:

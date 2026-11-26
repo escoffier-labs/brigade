@@ -195,7 +195,8 @@ different owner. The key must be a single-link regular file owned by the
 current OS user. On POSIX, it must have no group or world permission bits.
 On Windows, key generation gives the file a protected access control list
 that grants access only to the current user. No-follow opens reject links
-in the key path.
+in the key path. Windows key generation requires the receipt-key override
+to be unset.
 
 Default Windows profile permissions often include SYSTEM and Administrators.
 An older or copied key may have inherited those entries. Brigade prints a
