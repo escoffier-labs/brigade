@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shlex
@@ -17,7 +18,7 @@ import pytest
 from types import SimpleNamespace
 
 from brigade import cli, localio
-from brigade.claude_hooks import envelope
+from brigade.claude_hooks import command_tokens, envelope
 from brigade.claude_hooks.package import PACKAGE_REF
 from brigade.claude_hooks import fingerprint as hook_fingerprint
 from brigade.claude_hooks import runtime
@@ -4226,17 +4227,38 @@ def test_stop_keeps_own_incomplete_bash_write_after_later_foreign_write(tmp_path
     assert result and result["decision"] == "block"
 
 
+def _mock_windows_component_lookup(monkeypatch, winerror):
+    original = Path.lstat
+
+    def missing(path):
+        if path.name == "x" * 300:
+            error = FileNotFoundError(errno.ENOENT, "fixture Windows path error")
+            error.winerror = winerror
+            raise error
+        return original(path)
+
+    monkeypatch.setattr(command_tokens, "_WINDOWS", True)
+    monkeypatch.setattr(command_tokens, "_windows_component_max", lambda _anchor: 255)
+    monkeypatch.setattr(Path, "lstat", missing)
+
+
 @pytest.mark.parametrize("mode", ["strict", "observe", "off"])
-@pytest.mark.parametrize("case", ["surrogate", "null", "long-component", "attribution", "known-verifier"])
+@pytest.mark.parametrize(
+    "case", ["surrogate", "null", "long-component", "windows-missing-component", "attribution", "known-verifier"]
+)
 def test_bash_pretooluse_unreadable_command_is_denied_only_in_strict(target, monkeypatch, mode, case):
     monkeypatch.setattr(runtime.work_mode, "resolve_mode", lambda _target: mode)
+    long_component = "echo " + shlex.quote(str(target / ("x" * 300)))
     commands = {
         "surrogate": "pytest /\ud800",
         "null": "echo a\x00b",
-        "long-component": "echo " + shlex.quote(str(target / ("x" * 300))),
+        "long-component": long_component,
+        "windows-missing-component": long_component,
         "attribution": "echo done",
         "known-verifier": "pytest -q",
     }
+    if case == "windows-missing-component":
+        _mock_windows_component_lookup(monkeypatch, winerror=3)
     if case in {"attribution", "known-verifier"}:
 
         def unavailable(*_args, **_kwargs):

@@ -18,6 +18,7 @@ from tests.test_claude_hooks_runtime import (
     _assert_hook_steps,
     _hook_commands_at_both_sizes,
     _measure_event_budget,
+    _mock_windows_component_lookup,
 )
 from tests.test_work_mode import _wired, _set_mode
 
@@ -471,7 +472,10 @@ def test_codex_bash_event_work_bound(target, monkeypatch, shape):
 
 
 @pytest.mark.parametrize("mode", ["strict", "observe", "off"])
-@pytest.mark.parametrize("case", ["surrogate", "null", "long-component", "attribution"])
+@pytest.mark.parametrize(
+    "case",
+    ["surrogate", "null", "long-component", "windows-missing-component", "windows-invalid-component", "attribution"],
+)
 def test_codex_observation_does_not_classify_unreadable_commands(target, monkeypatch, capsys, mode, case):
     from brigade.claude_hooks import verification_mode
 
@@ -482,10 +486,15 @@ def test_codex_observation_does_not_classify_unreadable_commands(target, monkeyp
             raise RuntimeError("fixture attribution error")
 
         monkeypatch.setattr(verification_mode, "governing_modes", unavailable)
+    if case.startswith("windows-"):
+        _mock_windows_component_lookup(monkeypatch, winerror=3 if case == "windows-missing-component" else 123)
+    long_component = "cd ./" + "x" * 300 + " && pytest"
     command = {
         "surrogate": "pytest /\ud800",
         "null": "echo a\x00b",
-        "long-component": "cd ./" + "x" * 300 + " && pytest",
+        "long-component": long_component,
+        "windows-missing-component": long_component,
+        "windows-invalid-component": long_component,
         "attribution": "pytest -q",
     }[case]
     assert run(monkeypatch, "codex", payload(target, "codex", tool_input={"command": command})) == 0

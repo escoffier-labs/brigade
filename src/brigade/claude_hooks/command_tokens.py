@@ -20,6 +20,7 @@ MAX_RECOGNITION_STEPS = 2_097_152
 MAX_COMMAND_CHARS = 65_536
 MAX_PATH_WORK = 65_536
 MAX_OBSERVED_ROOTS = 32
+_WINDOWS = os.name == "nt"
 
 
 class RecognitionLimit(Exception):
@@ -46,6 +47,7 @@ class RecognitionBudget:
         self.unreadable = False
         self.verdicts: dict[str, Recognition] = {}
         self.paths: dict[tuple[Path, str, bool], Path] = {}
+        self.component_maxima: dict[str, int] = {}
         self.wired: dict[tuple[str, str | None], Path | None] = {}
         self.path_work = 0
         self.shell_pending: list[str] = []
@@ -101,6 +103,7 @@ class RecognitionBudget:
         self.verifier_targets.clear()
         self.verdicts.clear()
         self.paths.clear()
+        self.component_maxima.clear()
         self.wired.clear()
 
 
@@ -150,12 +153,52 @@ def event_wired_target(cwd: object, *, harness: str | None = "claude") -> Path |
     return budget.wired[key]
 
 
+def _windows_component_max(anchor: str) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    loader = getattr(ctypes, "WinDLL", None)
+    if loader is None:
+        return 0
+    maximum = wintypes.DWORD()
+    kernel = loader("kernel32")
+    previous = wintypes.DWORD()
+    fail_critical_errors = 0x0001  # Suppress a removable-drive prompt.
+    if not kernel.SetThreadErrorMode(kernel.GetThreadErrorMode() | fail_critical_errors, ctypes.byref(previous)):
+        return 0
+    try:
+        if kernel.GetVolumeInformationW(ctypes.c_wchar_p(anchor), None, 0, None, ctypes.byref(maximum), None, None, 0):
+            return maximum.value
+        return 0
+    finally:
+        kernel.SetThreadErrorMode(previous, None)
+
+
 def _path_status(path: Path) -> os.stat_result | None:
     try:
         return path.lstat()
     except OSError as exc:
-        if exc.errno == errno.ENAMETOOLONG or getattr(exc, "winerror", None) == 206:
+        # Windows reports invalid names, bad paths and overlong names with
+        # different native codes, some of which Python maps to ENOENT.
+        if exc.errno in {errno.EINVAL, errno.ENAMETOOLONG} or getattr(exc, "winerror", None) in {123, 161, 206}:
             raise UnreadableCommand from exc
+        if _WINDOWS and exc.errno in {errno.ENOENT, errno.ENOTDIR} and path.anchor:
+            # Windows can also report an overlong component as a missing path.
+            # Use the volume's filename maximum, in UTF-16 code units.
+            anchor = path.anchor
+            budget = EVENT_BUDGET.get()
+            if budget is None:
+                maximum = _windows_component_max(anchor)
+            else:
+                if anchor not in budget.component_maxima:
+                    budget.charge_path(32 + len(anchor))
+                    budget.component_maxima[anchor] = _windows_component_max(anchor)
+                maximum = budget.component_maxima[anchor]
+            if maximum:
+                if budget is not None:
+                    budget.charge_path(len(str(path)))
+                if any(len(part.encode("utf-16-le")) // 2 > maximum for part in path.parts[1:]):
+                    raise UnreadableCommand from exc
         return None
 
 
