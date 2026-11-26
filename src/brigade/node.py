@@ -11,6 +11,7 @@ import tomllib
 
 import json
 import socket
+import stat
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -133,7 +134,10 @@ def load_identity(target: Path) -> NodeIdentity | None:
     """
     path = node_path(target)
     try:
-        if not path.is_file():
+        try:
+            if not stat.S_ISREG(path.stat().st_mode):
+                return None
+        except (FileNotFoundError, NotADirectoryError):
             return None
         text = path.read_text()
     except OSError as exc:

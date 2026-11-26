@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from brigade import cli
 from brigade.config import Config, write_config
 from brigade.selection import Selection
@@ -60,6 +62,31 @@ def test_home_roster_does_not_shadow_child_project(tmp_path: Path, monkeypatch):
 
     assert resolve_wired_target(str(repo), harness="grok") == repo.resolve()
     assert resolve_wired_target(str(home), harness="grok") is None
+
+
+@pytest.mark.parametrize("blocked_part", ["workspace", "config"])
+def test_unreadable_nested_workspace_does_not_fall_through(tmp_path, monkeypatch, blocked_part):
+    parent = tmp_path.resolve()
+    child = parent / "child"
+    child.mkdir()
+    _write_config(parent, ["claude"])
+    assert resolve_wired_target(str(child)) == parent
+    _write_config(child, ["claude"])
+
+    blocked = child if blocked_part == "workspace" else child / ".brigade" / "config.json"
+    original_stat, is_dir, is_file, resolve = Path.stat, Path.is_dir, Path.is_file, Path.resolve
+
+    def fail_stat(path, *args, **kwargs):
+        if path == blocked:
+            raise PermissionError("nested workspace unavailable")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", lambda path: child if path == child else resolve(path))
+    monkeypatch.setattr(Path, "is_dir", lambda path: False if path == blocked else is_dir(path))
+    monkeypatch.setattr(Path, "is_file", lambda path: False if path == blocked else is_file(path))
+    monkeypatch.setattr(Path, "stat", fail_stat)
+
+    assert resolve_wired_target(str(child)) is None
 
 
 def test_work_resolve_target_cli(tmp_path: Path, capsys):

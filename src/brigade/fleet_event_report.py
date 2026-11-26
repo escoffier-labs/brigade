@@ -69,7 +69,7 @@ def _report(event: dict[str, Any], *, detailed: bool) -> ReportResult:
         delivered = delivered or event in batch
 
     try:
-        if not detailed and spool.is_file():
+        if not detailed and client._has_regular_spool(spool):
             with client._spool_lock(spool) as dir_fd:
                 appended = client._spool_append_locked(spool, event, dir_fd=dir_fd)
                 persisted = appended
@@ -89,7 +89,7 @@ def _report(event: dict[str, Any], *, detailed: bool) -> ReportResult:
                     except (KeyboardInterrupt, SystemExit) as exc:
                         interrupted = exc
                 if not detailed:
-                    delivered = appended and not spool.is_file()
+                    delivered = appended and not client._has_regular_spool(spool)
                 persisted = appended and not delivered
         else:
             try:

@@ -8,6 +8,7 @@ config.json and must never be treated as a project target by harness hooks.
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 
 from .config import load_config
@@ -41,12 +42,22 @@ def resolve_wired_target(cwd: object, *, harness: str | None = "claude") -> Path
         current = expand_user_path(Path(cwd)).resolve()
     except (OSError, RuntimeError):
         return None
-    if not current.is_dir():
+    try:
+        if not stat.S_ISDIR(current.stat().st_mode):
+            current = current.parent
+    except (FileNotFoundError, NotADirectoryError):
         current = current.parent
+    except OSError:
+        return None
     required = harness.strip().lower() if isinstance(harness, str) and harness.strip() else None
     for candidate in (current, *current.parents):
-        if not (candidate / ".brigade" / "config.json").is_file():
+        try:
+            if not stat.S_ISREG((candidate / ".brigade" / "config.json").stat().st_mode):
+                continue
+        except (FileNotFoundError, NotADirectoryError):
             continue
+        except OSError:
+            return None
         try:
             config = load_config(candidate)
         except (OSError, ValueError, json.JSONDecodeError):

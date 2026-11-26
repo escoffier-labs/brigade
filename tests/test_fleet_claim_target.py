@@ -168,6 +168,33 @@ def test_repo_under_home_with_only_the_home_identity_gets_its_own_key(tmp_path, 
     assert fleet_client.resolve_claim_target(repo / "src") == key
 
 
+@pytest.mark.parametrize("error", [FileNotFoundError, NotADirectoryError, PermissionError])
+def test_nested_workspace_marker_lookup_only_walks_past_missing_entries(tmp_path, monkeypatch, error):
+    home = _make_home(tmp_path, "fixture-home", monkeypatch)
+    parent = home / "repos" / "parent"
+    parent_marker = node_mod.node_path(parent)
+    parent_marker.parent.mkdir(parents=True)
+    parent_marker.touch()
+    child = _make_repo(parent, "child", "https://github.com/acme/child.git")
+    marker = node_mod.node_path(child)
+    original_stat, is_file = Path.stat, Path.is_file
+
+    def fail_stat(path, *args, **kwargs):
+        if path == marker:
+            raise error("nested workspace marker unavailable")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_file", lambda path: False if path == marker else is_file(path))
+    monkeypatch.setattr(Path, "stat", fail_stat)
+
+    if error is PermissionError:
+        assert fleet_client.find_workspace_for_path(child) is None
+        assert fleet_client.resolve_claim_target(child) == "acme/child"
+    else:
+        assert fleet_client.find_workspace_for_path(child) == parent
+        assert fleet_client.resolve_claim_target(child) == parent.name
+
+
 def test_unrelated_repos_under_one_home_get_different_keys(tmp_path, monkeypatch):
     home = _make_home(tmp_path, "homeA", monkeypatch)
     one = _make_repo(home / "repos", "one", "https://github.com/acme/one.git")
