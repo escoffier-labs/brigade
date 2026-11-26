@@ -232,6 +232,27 @@ for completion and follows its work with `fleet_status`, `fleet_wait` and
 Dot's runtime also accepts an optional `messaging_enabled`. When Dot omits it,
 `message_send` follows `dispatch_enabled` as before.
 
+### Tool grants
+
+Add `tool_grants` to the runtime JSON to choose which tool classes the approved
+identity can use. This example keeps reads and messaging available and excludes
+`inbox_ack`.
+
+```json
+"tool_grants": {"classes": ["read", "messaging"], "deny": ["inbox_ack"]}
+```
+
+Both arrays are required. The available classes are `read`, `messaging`,
+`dispatch`, and `memory_write`. Use `deny: []` to allow every tool in the
+listed classes, subject to the connector's existing checks. The `messaging`
+class has `message_send`, `inbox_reply`, and `inbox_ack`. The `memory_write`
+class has `handoff_write`. Dispatch tools still require `dispatch_enabled`
+and use the configured dispatch limits.
+
+Denied tools are omitted from MCP discovery and calls return
+`tool_not_permitted`. Omit `tool_grants` to keep the default tool set. Restart
+the listener to apply changes.
+
 ## Setup
 
 Install the MCP SDK with `pip install brigadestack[connector]` (the `grokbot` extra remains an alias during the removal window), plus `uvicorn` and

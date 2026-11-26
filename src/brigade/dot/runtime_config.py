@@ -12,8 +12,9 @@ from typing import Mapping
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from .contracts import DotError
+from .contracts import ALL_TOOL_SCHEMAS, DotError, ToolClass
 from .safe_state import private_directory, private_file, require_local_platform
+from .tool_grants import ToolGrants
 
 CLOUD_AGENT_RUNTIME_SCHEMA = "brigade.cloud-agent.runtime.v1"
 RUNTIME_SCHEMA = "brigade.dot.runtime.v1"
@@ -110,6 +111,7 @@ class Runtime:
     # Opt-out: false stops inbox_list and fleet_digest from carrying memory hits.
     memory_push: bool = True
     dispatch_limits: DispatchLimits | None = None
+    tool_grants: ToolGrants | None = None
 
 
 def _invalid() -> DotError:
@@ -249,6 +251,22 @@ def _boolean(value: object) -> bool:
     return value
 
 
+def _parse_tool_grants(root: Mapping[str, object]) -> ToolGrants | None:
+    if "tool_grants" not in root:
+        return None
+    policy = _object(root["tool_grants"], {"classes", "deny"})
+    classes, deny = policy["classes"], policy["deny"]
+    if not isinstance(classes, list) or not isinstance(deny, list):
+        raise _invalid()
+    class_names = frozenset(_string(name) for name in classes)
+    denied = frozenset(_string(name) for name in deny)
+    if len(class_names) != len(classes) or len(denied) != len(deny):
+        raise _invalid()
+    if not class_names <= {tool_class.value for tool_class in ToolClass} or not denied <= ALL_TOOL_SCHEMAS.keys():
+        raise _invalid()
+    return ToolGrants(frozenset(ToolClass(name) for name in class_names), denied)
+
+
 def parse_runtime(payload: object, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
     """Parse one runtime document. The expected schema comes from the pack, never the document."""
     if schema == CLOUD_AGENT_RUNTIME_SCHEMA:
@@ -270,7 +288,7 @@ def parse_runtime(payload: object, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
             "callback_hosts",
             "owner_authorization",
         },
-        optional={"notify_command", "messaging_enabled", "memory_push", "assignments"},
+        optional={"notify_command", "messaging_enabled", "memory_push", "assignments", "tool_grants"},
     )
     if root["schema"] != RUNTIME_SCHEMA:
         raise _invalid()
@@ -306,6 +324,7 @@ def parse_runtime(payload: object, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
         owner_authorization=owner_authorization,
         messaging_enabled=messaging_enabled,
         memory_push=_boolean(root["memory_push"]) if "memory_push" in root else True,
+        tool_grants=_parse_tool_grants(root),
     )
 
 
@@ -392,6 +411,7 @@ def _parse_duet_runtime(payload: object) -> Runtime:
             "owner_authorization",
             "dispatch_limits",
             "assignments",
+            "tool_grants",
         },
     )
     if root["schema"] != DUET_RUNTIME_SCHEMA:
@@ -436,6 +456,7 @@ def _parse_duet_runtime(payload: object) -> Runtime:
         schema=DUET_RUNTIME_SCHEMA,
         dispatch_limits=limits,
         memory_push=_boolean(root["memory_push"]) if "memory_push" in root else True,
+        tool_grants=_parse_tool_grants(root),
     )
 
 

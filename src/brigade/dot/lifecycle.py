@@ -26,11 +26,12 @@ from .access_auth import AccessVerifier, METADATA_PATH, bounded_headers, unique_
 from .adapter import DotTools, argument_problem, build_tools, validate_arguments
 from .events import EventService, EventsApp, IDENTITY
 from .hub_inbox import authenticated_authority
-from .profile import CLOUD_AGENT, DOT, PROFILES, ConnectorProfile, profile_for
+from .profile import CLOUD_AGENT, DOT, PROFILES, ConnectorProfile, profile_for, runtime_profile
 from .runtime_config import CLOUD_AGENT_RUNTIME_SCHEMA, Runtime, load_runtime
 from .safe_state import identity, require_local_platform
 from .server import register_tools
 from .state import BridgeState, call_label, client_label, summarize_arguments
+from .tool_grants import TOOL_NOT_PERMITTED, Denied, ToolGrants, authorize
 
 MAX_HTTP_BYTES = 32768
 WATCH_SERVICE = DOT.watch_service
@@ -61,9 +62,11 @@ class _DotGate:
         recorder: Any = None,
         *,
         profile: ConnectorProfile = DOT,
+        tool_grants: ToolGrants | None = None,
     ):
         self.app, self.config, self.verifier, self.recorder = app, config, verifier, recorder
         self.profile = profile
+        self.tool_grants = tool_grants
         self._auth_failures: list[float] = []
         self._auth_blocked_until = 0.0
         self._auth_cooldown_recorded = False
@@ -128,8 +131,8 @@ class _DotGate:
             self._auth_failures.clear()
         await self.record("authentication", False, now, error_code="authentication_required")
 
-    async def reject_arguments(self, send: Any, request_id: object, problem: str) -> None:
-        """Refuse a tools/call before the SDK with a JSON-RPC invalid-params error the client can act on."""
+    async def reject_tool_call(self, send: Any, request_id: object, message: str) -> None:
+        """Refuse a tools/call before the SDK with a JSON-RPC invalid-params error."""
         if isinstance(request_id, bool) or not (
             (isinstance(request_id, int) and abs(request_id) < 2**53)
             or (isinstance(request_id, str) and len(request_id) <= 128)
@@ -139,7 +142,7 @@ class _DotGate:
             {
                 "jsonrpc": "2.0",
                 "id": request_id,
-                "error": {"code": -32602, "message": "invalid arguments: " + problem},
+                "error": {"code": -32602, "message": message},
             }
         ).encode()
         headers = [(b"content-type", b"application/json"), (b"cache-control", b"no-store")]
@@ -237,6 +240,10 @@ class _DotGate:
                 label = name if isinstance(name, str) and name in tools else "tools/call"
                 arguments = params.get("arguments", {})
                 request_id = request.get("id")
+                decision = authorize(self.profile, self.tool_grants, name)
+                if isinstance(decision, Denied) and decision.code == TOOL_NOT_PERMITTED:
+                    await self.reject_tool_call(send, request_id, TOOL_NOT_PERMITTED)
+                    return
                 try:
                     validate_arguments(name, arguments, tools=tools)
                 except Exception:
@@ -249,7 +256,7 @@ class _DotGate:
             if problem is None:
                 await self.reject(send, 400)
             else:
-                await self.reject_arguments(send, request_id, problem)
+                await self.reject_tool_call(send, request_id, "invalid arguments: " + problem)
             return
         consumed = False
 
@@ -313,6 +320,15 @@ def build_app(
     # Judge by the profile argument and by the tools' own profile, so the two cannot disagree past this check.
     cloud = "cloud-agent" in (profile.pack_id, getattr(getattr(tools, "profile", None), "pack_id", None))
     c.require(not cloud or grokbot_mcp._is_loopback(config.bind_host), "invalid_config")
+    tool_grants = None
+    if isinstance(tools, DotTools) and tools.runtime.tool_grants is not None:
+        tool_grants = tools.runtime.tool_grants
+        profile = runtime_profile(
+            profile,
+            tools.runtime.dispatch_enabled,
+            messaging_enabled=bool(tools.runtime.messaging_enabled),
+            tool_grants=tool_grants,
+        )
     server = _server(config, tools, profile)
     allowed = list(dict.fromkeys([*config.allowed_hosts, f"{config.bind_host}:{config.bind_port}"]))
     if grokbot_mcp._is_loopback(config.bind_host):
@@ -333,6 +349,7 @@ def build_app(
         verifier,
         getattr(tools, "record_call", None),
         profile=profile,
+        tool_grants=tool_grants,
     )
 
 

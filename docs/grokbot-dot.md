@@ -111,6 +111,26 @@ Dot is one profile of this connector code. The duet pack runs the same code with
 its own runtime schema, identity and a smaller tool set. See
 [duet-connector.md](duet-connector.md).
 
+### Tool grants
+
+Add `tool_grants` to the runtime JSON to choose which tool classes the approved
+identity can use. This example keeps reads, messaging, and dispatch available
+and excludes `inbox_ack` and memory writes.
+
+```json
+"tool_grants": {"classes": ["read", "messaging", "dispatch"], "deny": ["inbox_ack"]}
+```
+
+Both arrays are required. Use `deny: []` to allow every tool in the listed
+classes, subject to the connector's existing checks. The `messaging` class has
+`message_send`, `inbox_reply`, and `inbox_ack`. The `dispatch` class includes
+`fleet_report_session` in both dry-run and publish mode. The `memory_write`
+class has `handoff_write`, and the remaining tools are `read`.
+
+Denied tools are omitted from MCP discovery and calls return
+`tool_not_permitted`. Omit `tool_grants` to keep the default tool set. Restart
+the listener to apply changes.
+
 ### Starting from the template
 
 `python -m brigade.dot runtime-template --pack dot` prints a complete runtime
