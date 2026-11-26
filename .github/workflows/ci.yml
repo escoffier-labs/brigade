@@ -719,6 +719,10 @@ jobs:
             git fetch --no-tags --filter=blob:none $deepen origin '+refs/heads/main:refs/remotes/origin/main'
             base=$(git merge-base HEAD refs/remotes/origin/main)
           else
+            if [[ "$EVENT_NAME" = "merge_group" && ! "$EVENT_BASE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+              echo "::error::Invalid merge group base SHA"
+              exit 1
+            fi
             base=$EVENT_BASE_SHA
           fi
           echo "sha=$base" >> "$GITHUB_OUTPUT"
@@ -744,12 +748,13 @@ jobs:
         # shipped it; the checkout above is shallow and carries no tags.
         run: git fetch --force --depth=1 origin 'refs/tags/v*:refs/tags/v*'
       - name: Fetch shipped file history base
+        if: ${{ github.event_name != 'merge_group' }}
         # The append-only comparison reads the manifest on the base branch; fetch that ref here
-        # instead of relying on an earlier step's side effect.
+        # for other events. The Windows allowlist ratchet already fetched the merge-group base SHA.
         run: git fetch --no-tags --depth=1 origin '+refs/heads/${{ github.base_ref || 'main' }}:refs/remotes/origin/${{ github.base_ref || 'main' }}'
       - name: Shipped file history
         env:
-          BRIGADE_SHIPPED_HISTORY_BASE_REF: origin/${{ github.base_ref || 'main' }}
+          BRIGADE_SHIPPED_HISTORY_BASE_REF: ${{ github.event_name == 'merge_group' && steps.allowlist-base.outputs.sha || format('origin/{0}', github.base_ref || 'main') }}
         run: python scripts/shipped_file_history.py --check --require-provenance
 
   test-shards:
