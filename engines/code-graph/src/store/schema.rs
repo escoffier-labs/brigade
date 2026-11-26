@@ -1,10 +1,93 @@
 //! SQLite schema definition.
 
-use anyhow::Result;
-use rusqlite::Connection;
+use anyhow::{Context, Result, ensure};
+use rusqlite::{Connection, Transaction};
+use serde::Serialize;
 
 /// Bumped when the on-disk schema changes; surfaced in JSON packs from Phase 2 on.
-pub const SCHEMA_VERSION: u32 = 9;
+pub const SCHEMA_VERSION: u32 = 10;
+
+/// Compare all three fields. A backup restores the counter and generation.
+/// A fresh random ID prevents writes on the restored history from reusing
+/// an identity previously seen at the same counter.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize)]
+pub struct GraphRevision {
+    pub graph_generation: String,
+    pub graph_revision: i64,
+    pub graph_revision_id: String,
+}
+
+/// Read the revision and compatibility marker in one SQLite snapshot.
+/// On a WAL connection this also works inside a caller's read transaction.
+pub fn graph_revision(conn: &Connection) -> Result<GraphRevision> {
+    let (revision, schema): (GraphRevision, Option<String>) = conn
+        .query_row(
+            "SELECT generation, counter, commit_id,
+                    (SELECT value FROM meta WHERE key = 'schema_version')
+             FROM graph_revision WHERE singleton = 1",
+            [],
+            |row| {
+                Ok((
+                    GraphRevision {
+                        graph_generation: row.get(0)?,
+                        graph_revision: row.get(1)?,
+                        graph_revision_id: row.get(2)?,
+                    },
+                    row.get(3)?,
+                ))
+            },
+        )
+        .context("graph revision unavailable; run sync to initialize it")?;
+    // Older engines can still open this additive schema. Their sync writes
+    // its own schema version atomically with the graph, invalidating the
+    // revision until the next supported sync rotates the generation.
+    ensure!(
+        schema.is_none_or(|version| version.parse() == Ok(SCHEMA_VERSION)),
+        "graph revision unavailable for the stored schema; run sync with the current engine"
+    );
+    Ok(revision)
+}
+
+fn prepare_graph_revision(tx: &Transaction<'_>) -> Result<bool> {
+    tx.execute_batch(
+        "CREATE TABLE IF NOT EXISTS graph_revision (
+             singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+             generation TEXT NOT NULL,
+             counter INTEGER NOT NULL CHECK (typeof(counter) = 'integer' AND counter >= 0),
+             commit_id TEXT NOT NULL
+         )",
+    )?;
+    let exists: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM graph_revision WHERE singleton = 1)",
+        [],
+        |row| row.get(0),
+    )?;
+    if !exists {
+        tx.execute(
+            "INSERT INTO graph_revision(singleton, generation, counter, commit_id)
+             VALUES (1, lower(hex(randomblob(16))), 0, lower(hex(randomblob(16))))",
+            [],
+        )?;
+    }
+    Ok(!exists)
+}
+
+pub(super) fn advance_graph_revision(tx: &Transaction<'_>, rotate_generation: bool) -> Result<()> {
+    let rows = tx.execute(
+        "UPDATE graph_revision
+         SET generation = CASE WHEN ?1 THEN lower(hex(randomblob(16))) ELSE generation END,
+             counter = counter + 1,
+             commit_id = lower(hex(randomblob(16)))
+         WHERE singleton = 1",
+        [rotate_generation],
+    )?;
+    ensure!(rows == 1, "graph revision row missing");
+    Ok(())
+}
+
+pub(super) fn schema_cookie(conn: &Connection) -> Result<i64> {
+    Ok(conn.pragma_query_value(None, "schema_version", |row| row.get(0))?)
+}
 
 /// v9 assignment rows are filled by the Python extractor fingerprint bump.
 const MODULE_ASSIGNMENTS_TABLE: &str = "
@@ -55,7 +138,9 @@ pub(crate) fn clear_parse_census_pending(tx: &Connection) -> Result<()> {
 }
 
 pub fn init_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
+    let tx = conn.unchecked_transaction()?;
+    let previous_schema = schema_cookie(&tx)?;
+    tx.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS files (
             path TEXT PRIMARY KEY,
@@ -151,15 +236,21 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_pending_calls_file ON pending_calls(file_path);
         "#,
     )?;
-    conn.execute_batch(SKIPPED_FILES_TABLE)?;
-    conn.execute_batch(MODULE_ASSIGNMENTS_TABLE)?;
-    ensure_import_columns(conn)?;
+    tx.execute_batch(SKIPPED_FILES_TABLE)?;
+    tx.execute_batch(MODULE_ASSIGNMENTS_TABLE)?;
+    ensure_import_columns(&tx)?;
+    let initialized = prepare_graph_revision(&tx)?;
+    if !initialized && schema_cookie(&tx)? != previous_schema {
+        advance_graph_revision(&tx, false)?;
+    }
+    tx.commit()?;
     Ok(())
 }
 
 /// Apply write-path schema upgrades needed before sync can insert current rows,
 /// returning how much derived state the caller must rebuild.
-pub fn upgrade_for_sync(conn: &Connection) -> Result<SchemaUpgrade> {
+pub(super) fn upgrade_for_sync(tx: &Transaction<'_>) -> Result<SchemaUpgrade> {
+    let conn: &Connection = tx;
     let mut upgrade = SchemaUpgrade::None;
     conn.execute_batch(MODULE_ASSIGNMENTS_TABLE)?;
     if !table_has_column(conn, "symbols", "body_hash")? {
@@ -207,26 +298,22 @@ pub fn upgrade_for_sync(conn: &Connection) -> Result<SchemaUpgrade> {
     // in place (symbols, pending_calls, FTS) and re-resolves edges, re-parsing
     // nothing. Pre-v5 databases skip this: their FullReindex regenerates ids.
     if stored_schema_version(conn)?.is_some_and(|version| (5..7).contains(&version)) {
-        rewrite_symbol_ids_v7(conn)?;
+        rewrite_symbol_ids_v7(tx)?;
         upgrade = upgrade.max(SchemaUpgrade::RebuildEdges);
     }
     // v8 records files sync could not index (skipped_files) and files that
     // tree-sitter parsed only by recovering from syntax errors
     // (files.parse_errors). Existing rows were never checked for parse errors,
-    // so reindex once to take the census. The column commits before the
-    // reindex does, so the column cannot be the signal: a sync that fails in
-    // between would lose the obligation. A meta marker written with the column
-    // carries it instead, and sync clears it only in the transaction that
-    // commits a full reindex.
+    // so reindex once to take the census. Older engines committed the column
+    // and the pending marker separately from the reindex. Honor their marker
+    // on retry. New upgrades commit the column and the census together.
     conn.execute_batch(SKIPPED_FILES_TABLE)?;
     if !table_has_column(conn, "files", "parse_errors")? {
-        let tx = conn.unchecked_transaction()?;
         tx.execute(
             "ALTER TABLE files ADD COLUMN parse_errors INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
-        super::meta::upsert(&tx, PARSE_CENSUS_PENDING, "1")?;
-        tx.commit()?;
+        upgrade = upgrade.max(SchemaUpgrade::FullReindex);
     }
     if table_exists(conn, "meta")? && super::meta::read(conn, PARSE_CENSUS_PENDING)?.is_some() {
         upgrade = upgrade.max(SchemaUpgrade::FullReindex);
@@ -245,11 +332,10 @@ pub fn upgrade_for_sync(conn: &Connection) -> Result<SchemaUpgrade> {
 /// `(start_line, old id)` order, which matches extraction's traversal order
 /// except for exotic same-line duplicates; those converge to traversal order
 /// the next time their file re-extracts, and edges rebuild either way.
-fn rewrite_symbol_ids_v7(conn: &Connection) -> Result<()> {
+fn rewrite_symbol_ids_v7(tx: &Transaction<'_>) -> Result<()> {
     use crate::extractors::common::symbol_id;
     use std::collections::HashMap;
 
-    let tx = conn.unchecked_transaction()?;
     let mut mapping: Vec<(String, String)> = Vec::new();
     {
         let mut stmt = tx.prepare(
@@ -292,11 +378,10 @@ fn rewrite_symbol_ids_v7(conn: &Connection) -> Result<()> {
             update_fts.execute(rusqlite::params![old_id, new_id])?;
         }
     }
-    tx.commit()?;
     Ok(())
 }
 
-fn stored_schema_version(conn: &Connection) -> Result<Option<u32>> {
+pub(super) fn stored_schema_version(conn: &Connection) -> Result<Option<u32>> {
     let meta_exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta')",
         [],

@@ -1,0 +1,1 @@
+- Add a transaction-bound code-graph revision to JSON sync output and a read-only command to retrieve it.

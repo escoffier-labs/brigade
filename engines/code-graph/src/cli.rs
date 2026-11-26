@@ -17,6 +17,7 @@ use crate::query::{
     personalize_context_pack, render_markdown, render_markdown_budgeted, search_symbols_with_path,
     stats,
 };
+use crate::store::schema::graph_revision;
 use crate::store::{
     db_path, init_schema, open_db, open_default_read_only, open_read_only, sync_repo_force,
 };
@@ -48,6 +49,14 @@ enum Command {
         /// Rebuild every file even if nothing changed.
         #[arg(long)]
         force: bool,
+        /// Print the sync summary and committed graph revision as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read the graph revision without synchronizing or taking the writer lock.
+    Revision {
+        #[arg(long)]
+        json: bool,
     },
     Search {
         query: String,
@@ -241,13 +250,17 @@ pub fn run(cli: Cli) -> Result<()> {
             init_schema(&conn)?;
             println!("initialized {}", db_path.display());
         }
-        Command::Sync { root, force } => {
+        Command::Sync { root, force, json } => {
             let canonical_root = root.canonicalize().unwrap_or_else(|_| root.clone());
             crate::store::guard_unsafe_root(&canonical_root)?;
             let db_path = db_path(cli.db, &root)?;
             let conn = open_db(&db_path)?;
             init_schema(&conn)?;
             let summary = sync_repo_force(&conn, &root, force)?;
+            if json {
+                println!("{}", serde_json::to_string(&summary)?);
+                return Ok(());
+            }
             if summary.unchanged {
                 println!(
                     "unchanged: files={} symbols={} edges={} imports={} db={}",
@@ -279,6 +292,17 @@ pub fn run(cli: Cli) -> Result<()> {
                     summary.skipped,
                     reasons.join(" ")
                 );
+            }
+        }
+        Command::Revision { json } => {
+            let conn = open_default_read_only(cli.db)?;
+            let revision = graph_revision(&conn)?;
+            if json {
+                println!("{}", serde_json::to_string(&revision)?);
+            } else {
+                println!("graph_generation: {}", revision.graph_generation);
+                println!("graph_revision: {}", revision.graph_revision);
+                println!("graph_revision_id: {}", revision.graph_revision_id);
             }
         }
         Command::Search {

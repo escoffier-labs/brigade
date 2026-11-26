@@ -9,6 +9,7 @@ use std::path::Path;
 
 use anyhow::Result;
 use rusqlite::Connection;
+use serde::Serialize;
 
 use crate::extractors::index_file;
 use crate::model::{IgnoredSummary, PendingChanges};
@@ -21,17 +22,21 @@ use crate::store::repo_policy::{
     ensure_index_ignored, guard_unsafe_root, has_git_marker, write_branch_meta,
 };
 use crate::store::resolve::rebuild_edges;
-use crate::store::schema::{SchemaUpgrade, clear_parse_census_pending};
+use crate::store::schema::{
+    GraphRevision, SCHEMA_VERSION, SchemaUpgrade, advance_graph_revision,
+    clear_parse_census_pending, graph_revision, schema_cookie, stored_schema_version,
+    upgrade_for_sync,
+};
 use crate::store::skipped::{clear_skipped, load_skipped, record_skipped, skipped_reason_counts};
 use crate::store::walk::{Entry, collect_sync_walk};
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Serialize)]
 pub struct SyncSummary {
     pub files: usize,
     pub symbols: usize,
     pub calls: usize,
     pub imports: usize,
-    /// True when nothing changed and the sync was a no-op (no parsing, meta write only).
+    /// Legacy summary flag: no indexed files changed and edges did not need a rebuild.
     pub unchanged: bool,
     /// Files removed from the index because they no longer exist on disk.
     pub deleted: usize,
@@ -40,6 +45,8 @@ pub struct SyncSummary {
     pub skipped: usize,
     /// `skipped` broken down by reason (`unreadable_utf8`, `io_error`, `parse_error`, `minified`).
     pub skipped_by_reason: BTreeMap<String, usize>,
+    #[serde(flatten)]
+    pub revision: GraphRevision,
 }
 
 /// Incremental sync (skips work when nothing changed).
@@ -64,12 +71,21 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
             legacy_created.then_some(legacy)
         }
     };
-    let upgrade = crate::store::schema::upgrade_for_sync(conn)?;
+    let tx = conn.unchecked_transaction()?;
+    let previous_schema = schema_cookie(&tx)?;
+    let previous_changes = tx.total_changes();
+    let stored_schema = stored_schema_version(&tx)?;
+    anyhow::ensure!(
+        stored_schema.is_none_or(|version| version <= SCHEMA_VERSION),
+        "database schema is newer than this engine"
+    );
+    let previous_engine = stored_schema.is_some_and(|version| version < SCHEMA_VERSION);
+    let upgrade = upgrade_for_sync(&tx)?;
     let force_full_reindex = force || upgrade == SchemaUpgrade::FullReindex;
 
     let entries = collect_sync_walk(&root, false)?.entries;
-    let db_files = load_db_files(conn)?;
-    let skipped = load_skipped(conn)?;
+    let db_files = load_db_files(&tx)?;
+    let skipped = load_skipped(&tx)?;
     if let Some(dir) = created_index_dir.filter(|_| db_files.is_empty() && has_git_marker(&root)) {
         ensure_index_ignored(&root, &dir)?;
     }
@@ -94,58 +110,50 @@ pub fn sync_repo_force(conn: &Connection, root: &Path, force: bool) -> Result<Sy
 
     let changed =
         !deleted.is_empty() || !files_to_index.is_empty() || upgrade == SchemaUpgrade::RebuildEdges;
-    if !changed {
-        let tx = conn.unchecked_transaction()?;
-        for path in &skipped_gone {
-            clear_skipped(&tx, path)?;
+    if changed {
+        let mut purge: Vec<&str> = files_to_index
+            .iter()
+            .map(|entry| entry.rel.as_str())
+            .collect();
+        purge.extend(deleted.iter().map(String::as_str));
+        for path in purge {
+            purge_file_graph(&tx, path)?;
         }
-        if force_full_reindex {
-            // A full reindex with no entries has nothing to census.
-            clear_parse_census_pending(&tx)?;
+
+        // Parse and IO failures are recorded (old rows were purged above).
+        // Database errors abort the transaction.
+        let now = now_ts();
+        for entry in files_to_index {
+            match index_file(&root, &entry.path, entry.lang) {
+                Ok(graph) => {
+                    write_file_graph(&tx, &graph, now)?;
+                    clear_skipped(&tx, &entry.rel)?;
+                }
+                Err(failure) => record_skipped(&tx, entry, &failure, now)?,
+            }
         }
-        crate::store::meta::write_sync_meta(&tx)?;
-        write_branch_meta(&tx, &root)?;
-        tx.commit()?;
-
-        return summarize(conn, true, 0);
+        rebuild_edges(&tx)?;
     }
-
-    let tx = conn.unchecked_transaction()?;
-
-    let mut purge: Vec<&str> = files_to_index
-        .iter()
-        .map(|entry| entry.rel.as_str())
-        .collect();
-    purge.extend(deleted.iter().map(String::as_str));
-    for path in &purge {
-        purge_file_graph(&tx, path)?;
-    }
-    for path in &skipped_gone {
+    for path in skipped_gone {
         clear_skipped(&tx, path)?;
     }
 
-    // A file that cannot be read or parsed is skipped and recorded (its old
-    // rows were purged above). Only database errors abort the transaction.
-    let now = now_ts();
-    for entry in files_to_index {
-        match index_file(&root, &entry.path, entry.lang) {
-            Ok(graph) => {
-                write_file_graph(&tx, &graph, now)?;
-                clear_skipped(&tx, &entry.rel)?;
-            }
-            Err(failure) => record_skipped(&tx, entry, &failure, now)?,
-        }
+    // Count every graph DML operation and DDL change, including migrations
+    // and skipped-only pruning, before writing sync provenance.
+    if tx.total_changes() != previous_changes
+        || schema_cookie(&tx)? != previous_schema
+        || previous_engine
+    {
+        advance_graph_revision(&tx, force || previous_engine)?;
     }
-
-    rebuild_edges(&tx)?;
     if force_full_reindex {
         clear_parse_census_pending(&tx)?;
     }
     crate::store::meta::write_sync_meta(&tx)?;
     write_branch_meta(&tx, &root)?;
+    let summary = summarize(&tx, !changed, deleted.len())?;
     tx.commit()?;
-
-    summarize(conn, false, deleted.len())
+    Ok(summary)
 }
 
 fn summarize(conn: &Connection, unchanged: bool, deleted: usize) -> Result<SyncSummary> {
@@ -160,6 +168,7 @@ fn summarize(conn: &Connection, unchanged: bool, deleted: usize) -> Result<SyncS
         deleted,
         skipped: skipped_by_reason.values().sum(),
         skipped_by_reason,
+        revision: graph_revision(conn)?,
     })
 }
 

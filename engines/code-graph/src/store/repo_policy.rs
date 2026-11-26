@@ -192,7 +192,7 @@ pub(super) fn ensure_index_ignored(root: &Path, index_dir: &Path) -> Result<()> 
         writeln!(file)?;
     }
     writeln!(file, "{entry}/")?;
-    println!("updated {} to ignore {entry}/", gitignore.display());
+    eprintln!("updated {} to ignore {entry}/", gitignore.display());
     Ok(())
 }
 
