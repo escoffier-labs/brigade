@@ -4,6 +4,7 @@ import json
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from threading import Barrier
+from unittest.mock import patch
 from dataclasses import replace
 
 import pytest
@@ -14,7 +15,7 @@ from brigade.dot.duet_dispatch import LimitedFleetTools
 from brigade.dot.fleet_tools import FleetTools
 from brigade.dot.runtime_config import DUET_RUNTIME_SCHEMA, parse_runtime
 from tests.dot_support import requires_local_state
-from tests.test_dot_fleet_tools import CONFIG, NOW, REQUEST, SHA, FakeRun
+from tests.test_dot_fleet_tools import CONFIG, NOW, REQUEST, SHA, FakeCommands, FakeRun
 from tests.test_dot_runtime import _document
 from tests.test_duet_dispatch import document as duet_document
 
@@ -265,3 +266,38 @@ def test_concurrent_submits_contend_for_last_open_slot(connector):
     assert sum(bool(result.get("ok")) for result in results) == 1
     assert sum(result.get("error") == "open_limit" for result in results) == 1
     assert len(run.calls) == 1
+
+
+@pytest.mark.parametrize("action", ["submit", "followup"])
+@requires_local_state
+def test_oversized_prompt_is_refused_before_fleet_io_or_state_writes(connector, action):
+    build, run = connector
+    tools, state = build()
+    fleet = tools.fleet
+    assert fleet is not None
+    commands = FakeCommands()
+    fleet.commands = commands
+    if action == "followup":
+        assert submit(tools)["ok"]
+        run.calls.clear()
+    operations = state.operations(20)
+
+    with (
+        patch.object(fleet, "_fleet_config", wraps=fleet._fleet_config) as read_config,
+        patch.object(state, "begin_operation", wraps=state.begin_operation) as begin_operation,
+        patch.object(state, "transaction", wraps=state.transaction) as transaction,
+    ):
+        if action == "submit":
+            result = fleet.fleet_submit("brigade", "Fixture", "a" * 129, host="alpha", seat="sol61", read_only=True)
+        else:
+            result = fleet.fleet_followup(REQUEST, "a" * 129, read_only=True)
+
+    assert result["error"] == "prompt_too_large"
+    assert (read_config.call_count, len(commands.calls), begin_operation.call_count, transaction.call_count) == (
+        0,
+        0,
+        0,
+        0,
+    )
+    assert not run.calls
+    assert state.operations(20) == operations
