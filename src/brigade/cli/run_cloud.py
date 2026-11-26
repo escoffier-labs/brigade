@@ -610,6 +610,11 @@ def dispatch(args) -> int:
         inventory_started = datetime.now(timezone.utc)
         observations, github = cloud_tracker.observe_provider_details(target)
         launch_intents = codex_cloud.reconcile_launches(target)
+        reconciled_codex_tasks = frozenset(
+            row["task_id"]
+            for row in launch_intents
+            if row["state"] == "tracked" and isinstance(row.get("task_id"), str)
+        )
         provider_tasks = cloud_tracker._legacy_provider_tasks(observations)  # noqa: SLF001 - compatibility projection
         cursor_wired = observations["cursor-cloud"].configured
         hub_leases: list[dict[str, Any]] = []
@@ -629,6 +634,7 @@ def dispatch(args) -> int:
             cursor_wired=cursor_wired,
             provider_observations=observations,
             hub_leases=hub_leases,
+            reconciled_codex_tasks=reconciled_codex_tasks,
         )
         if launch_intents:
             payload["launch_intents"] = launch_intents

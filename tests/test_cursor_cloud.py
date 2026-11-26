@@ -1031,3 +1031,17 @@ def test_list_agents_inventory_keeps_sightings_on_later_page_error():
     assert [row["id"] for row in inventory] == ["agent-seen"]
     assert not inventory.complete
     assert inventory.reason == "transport-failure"
+
+
+def test_list_agents_empty_cursor_ends_inventory():
+    opener = FakeOpener(
+        [
+            _json_response({"items": [{"id": "agent-first"}], "nextCursor": "next"}),
+            _json_response({"items": [{"id": "agent-last"}], "nextCursor": ""}),
+            _json_response({"items": [{"id": "agent-first"}]}),
+        ]
+    )
+    agents = cursor_cloud.list_agents(_FAKE_KEY, opener=opener.open)
+    assert agents.complete
+    assert [row["id"] for row in agents] == ["agent-first", "agent-last"]
+    assert len(opener.calls) == 2

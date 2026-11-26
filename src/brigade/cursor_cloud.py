@@ -410,7 +410,7 @@ def list_agents(
             agents.complete = valid_rows
         if on_page is not None:
             on_page(agents, agents.complete)
-        if not isinstance(next_cursor, str) or next_cursor in seen_cursors:
+        if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
             break
         if max_items is not None and len(agents) >= max(1, max_items):
             break

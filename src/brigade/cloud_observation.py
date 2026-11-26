@@ -6,6 +6,7 @@ import json
 import time
 from collections.abc import Callable
 from concurrent.futures import Future, TimeoutError
+from dataclasses import dataclass, replace
 from threading import Thread
 from typing import Any, TypeVar
 
@@ -15,6 +16,23 @@ GITHUB_BUDGET_SECONDS = 20.0
 
 T = TypeVar("T")
 PageReport = Callable[[list[dict[str, Any]], bool], None]
+
+
+@dataclass(frozen=True)
+class ProviderObservation:
+    """Bounded, sanitized health and inventory evidence for one provider."""
+
+    configured: bool
+    reachable: bool
+    reason: str | None
+    tasks: dict[str, dict[str, Any]]
+    complete: bool = False
+
+
+def provider_failure(reason: str, progress: ProviderObservation | None, configured: bool) -> ProviderObservation:
+    if progress is not None:
+        return replace(progress, reason=reason, complete=False)
+    return ProviderObservation(configured, False, reason, {})
 
 
 def start_observation(

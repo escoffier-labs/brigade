@@ -8,7 +8,6 @@ import re
 import subprocess
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ContextManager
@@ -17,6 +16,7 @@ from uuid import uuid4
 from . import localio
 from . import claude_cloud_routine, cloud_observation
 from .claude_cloud_identity import normalize_claude_cloud_identity
+from .cloud_observation import ProviderObservation as ProviderObservation
 from .inbox_lock import held_file_lock
 
 REGISTRY_SCHEMA = "brigade.run.cloud.registry.v1"
@@ -52,17 +52,6 @@ CLASSIFICATIONS = (
     "orphaned",
     "needs-investigation",
 )
-
-
-@dataclass(frozen=True)
-class ProviderObservation:
-    """Bounded, sanitized health and inventory evidence for one provider."""
-
-    configured: bool
-    reachable: bool
-    reason: str | None
-    tasks: dict[str, dict[str, Any]]
-    complete: bool = False
 
 
 def _root(target: Path) -> Path:
@@ -678,7 +667,7 @@ def _classify_entry(
         classification = "pending"
 
     seen = isinstance(provider_info, dict)
-    if entry.get("missing_confirmed") is True and not seen and not merged:
+    if entry.get("missing_confirmed") is True and not (seen or branch_exists or open_pr or merged):
         classification = "needs-investigation"
 
     if claude_lifecycle is not None:
@@ -1106,7 +1095,12 @@ def status_payload(
     }
 
 
-def _record_inventory(target: Path, observations: dict[str, ProviderObservation], observed: datetime) -> None:
+def _record_inventory(
+    target: Path,
+    observations: dict[str, ProviderObservation],
+    observed: datetime,
+    reconciled_codex_tasks: frozenset[str],
+) -> None:
     """Persist sightings and confirmed absences in one registry transaction."""
     timestamp = _now_iso(observed)
     with registry_lock(target):
@@ -1117,14 +1111,23 @@ def _record_inventory(target: Path, observations: dict[str, ProviderObservation]
             task_id = entry.get("task_id")
             if observation is None or not task_id or entry.get("provider") not in {"codex-cloud", "cursor-cloud"}:
                 continue
-            previous = _parse_time(entry.get("inventory_observed_at")) or _parse_time(entry.get("dispatched_at"))
-            if previous is not None and previous > observed:
+            previous = _parse_time(entry.get("inventory_observed_at"))
+            dispatched = _parse_time(entry.get("dispatched_at"))
+            if previous is None and dispatched is not None and dispatched > observed:
                 continue
-            if task_id in observation.tasks:
+            if previous is not None and previous > observed:
+                # Restart the clock baseline without counting this sample as an absence.
+                if not entry.get("missing_confirmed"):
+                    entry.pop("missing_since", None)
+            elif task_id in observation.tasks:
                 entry["last_seen_at"] = timestamp
                 entry.pop("missing_since", None)
                 entry.pop("missing_confirmed", None)
-            elif observation.configured and observation.reachable and observation.complete:
+            elif entry["provider"] == "codex-cloud" and task_id in reconciled_codex_tasks:
+                continue
+            elif (
+                observation.configured and observation.reachable and observation.complete and observation.reason is None
+            ):
                 missing_since = _parse_time(entry.get("missing_since")) or observed
                 entry["missing_since"] = _now_iso(missing_since)
                 if (observed - missing_since).total_seconds() >= MISSING_INVENTORY_HOURS * 3600:
@@ -1146,6 +1149,7 @@ def sync_payload(
     cursor_wired: bool = False,
     provider_observations: dict[str, ProviderObservation] | None = None,
     hub_leases: list[dict[str, Any]] | None = None,
+    reconciled_codex_tasks: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Reconcile registry observations with hub leases without secrets.
 
@@ -1161,7 +1165,7 @@ def sync_payload(
     if observed.tzinfo is None:
         observed = observed.replace(tzinfo=timezone.utc)
     if provider_observations:
-        _record_inventory(target, provider_observations, observed)
+        _record_inventory(target, provider_observations, observed, reconciled_codex_tasks)
     status = status_payload(
         target,
         now=observed,
@@ -1804,13 +1808,11 @@ def observe_provider_details(
     *,
     codex_max_items: int | None = None,
     github_budget_seconds: float | None = None,
+    cursor_budget_seconds: float | None = None,
     **_kwargs: Any,
 ) -> tuple[dict[str, ProviderObservation], dict[str, Any]]:
     """Start independently timed provider reads before collecting any result."""
     from .cloud_codex_probes import BRIEF_CODEX_BUDGET_SECONDS
-
-    def provider_failure(reason: str, progress: ProviderObservation | None, configured: bool) -> ProviderObservation:
-        return replace(progress, reason=reason) if progress else ProviderObservation(configured, False, reason, {})
 
     codex = cloud_observation.start_observation(
         "codex",
@@ -1818,13 +1820,13 @@ def observe_provider_details(
         lambda deadline, publish: observe_provider(
             "codex-cloud", target, codex_max_items=codex_max_items, deadline=deadline, publish=publish
         ),
-        lambda reason, progress: provider_failure(reason, progress, True),
+        lambda reason, progress: cloud_observation.provider_failure(reason, progress, True),
     )
     cursor = cloud_observation.start_observation(
         "cursor",
-        cloud_observation.CURSOR_BUDGET_SECONDS if github_budget_seconds is None else github_budget_seconds,
+        cloud_observation.CURSOR_BUDGET_SECONDS if cursor_budget_seconds is None else cursor_budget_seconds,
         lambda deadline, publish: observe_provider("cursor-cloud", target, deadline=deadline, publish=publish),
-        lambda reason, progress: provider_failure(reason, progress, cursor_cloud_wired()),
+        lambda reason, progress: cloud_observation.provider_failure(reason, progress, cursor_cloud_wired()),
     )
     github = cloud_observation.start_observation(
         "github",
@@ -1835,8 +1837,8 @@ def observe_provider_details(
             "prs": [],
             "branches_complete": False,
             "prs_complete": False,
-            "complete": False,
             **(progress or {}),
+            "complete": False,
             "reason": reason,
         },
     )
@@ -1859,11 +1861,15 @@ def observe_providers(
     *,
     codex_max_items: int | None = None,
     github_budget_seconds: float | None = None,
+    cursor_budget_seconds: float | None = None,
     **_kwargs: Any,
 ) -> tuple[dict[str, Any], dict[str, Any], bool]:
     """Compatibility wrapper for callers that only accept a flattened inventory."""
     observations, github = observe_provider_details(
-        target, codex_max_items=codex_max_items, github_budget_seconds=github_budget_seconds
+        target,
+        codex_max_items=codex_max_items,
+        github_budget_seconds=github_budget_seconds,
+        cursor_budget_seconds=cursor_budget_seconds,
     )
     return _legacy_provider_tasks(observations), github, observations["cursor-cloud"].configured
 

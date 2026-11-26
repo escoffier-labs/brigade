@@ -2377,7 +2377,7 @@ def test_observations_run_in_parallel_with_independent_deadlines(tmp_path, monke
 
     def observe(provider, target, **kwargs):
         if provider == "codex-cloud":
-            kwargs["publish"](cloud_tracker.ProviderObservation(True, True, None, {"codex-id": {}}))
+            kwargs["publish"](cloud_tracker.ProviderObservation(True, True, None, {"codex-id": {}}, complete=True))
             release_codex.wait(5)
             return cloud_tracker.ProviderObservation(True, True, None, {}, complete=True)
         if provider == "cursor-cloud":
@@ -2474,3 +2474,136 @@ def test_github_inventory_keeps_full_pages_and_partial_prs(tmp_path, monkeypatch
     assert len(result["prs"]) == 100
     assert result["prs"][0]["state"] == "MERGED"
     assert not result["complete"]
+
+
+@pytest.mark.parametrize("already_missing", [False, True])
+def test_failed_complete_inventory_does_not_advance_missing_window(tmp_path, already_missing):
+    cloud_tracker.register(
+        tmp_path, provider="codex-cloud", task_id="task_absent", label="task", dispatched_at=_iso(NOW)
+    )
+    if already_missing:
+        cloud_tracker.sync_payload(
+            tmp_path,
+            now=NOW,
+            provider_observations={
+                "codex-cloud": cloud_tracker.ProviderObservation(True, True, None, {}, complete=True)
+            },
+        )
+    cloud_tracker.sync_payload(
+        tmp_path,
+        now=NOW + timedelta(hours=8),
+        provider_observations={
+            "codex-cloud": cloud_tracker.ProviderObservation(True, True, "observation-timeout", {}, complete=True),
+        },
+    )
+
+    (entry,) = cloud_tracker.load_registry(tmp_path)["entries"]
+    assert "missing_since" not in entry
+    assert "missing_confirmed" not in entry
+
+
+@pytest.mark.parametrize(
+    "github",
+    [
+        {"branches": [{"name": "codex/active"}], "prs": []},
+        {"branches": [], "prs": [{"head": "codex/active", "state": "OPEN"}]},
+    ],
+    ids=["branch", "open-pr"],
+)
+def test_missing_task_with_live_github_artifact_keeps_classification(tmp_path, github):
+    cloud_tracker.register(
+        tmp_path,
+        provider="codex-cloud",
+        task_id="task_absent",
+        label="task",
+        branch="codex/active",
+        dispatched_at=_iso(NOW),
+    )
+    observations = {"codex-cloud": cloud_tracker.ProviderObservation(True, True, None, {}, complete=True)}
+    cloud_tracker.sync_payload(tmp_path, now=NOW, provider_observations=observations)
+    payload = cloud_tracker.sync_payload(
+        tmp_path, now=NOW + timedelta(hours=8), provider_observations=observations, github=github
+    )
+
+    (entry,) = cloud_tracker.load_registry(tmp_path)["entries"]
+    assert entry["missing_confirmed"]
+    assert not payload["needs_investigation"]
+    (row,) = cloud_tracker.status_payload(tmp_path, github=github)["entries"]
+    assert row["classification"] == "pending"
+
+
+def test_cursor_inventory_budget_is_independent_of_github(tmp_path, monkeypatch):
+    from brigade import cloud_observation
+
+    budgets = {}
+
+    def start(name, budget, observe, failure):
+        budgets[name] = budget
+        return lambda: failure("transport-failure", None)
+
+    monkeypatch.setattr(cloud_observation, "start_observation", start)
+    cloud_tracker.observe_provider_details(tmp_path, github_budget_seconds=0.1)
+    assert budgets["github"] == 0.1
+    assert budgets["cursor"] == cloud_observation.CURSOR_BUDGET_SECONDS
+
+    cloud_tracker.observe_providers(tmp_path, github_budget_seconds=0.1, cursor_budget_seconds=0.2)
+    assert budgets["github"] == 0.1
+    assert budgets["cursor"] == 0.2
+
+
+@pytest.mark.parametrize("already_missing", [False, True])
+def test_backwards_inventory_clock_restamps_without_counting_absence(tmp_path, already_missing):
+    cloud_tracker.register(
+        tmp_path, provider="codex-cloud", task_id="task_shift", label="task", dispatched_at=_iso(NOW)
+    )
+
+    def sync(hours, *, seen=False):
+        now = NOW + timedelta(hours=hours)
+        tasks = {"task_shift": {"state": "running"}} if seen else {}
+        cloud_tracker.sync_payload(
+            tmp_path,
+            now=now,
+            provider_observations={
+                "codex-cloud": cloud_tracker.ProviderObservation(True, True, None, tasks, complete=True)
+            },
+        )
+        (entry,) = cloud_tracker.load_registry(tmp_path)["entries"]
+        return entry
+
+    sync(1, seen=True)
+    sync(12, seen=not already_missing)
+    entry = sync(2)
+    assert entry["inventory_observed_at"] == _iso(NOW + timedelta(hours=2))
+    assert "missing_since" not in entry
+    assert "missing_confirmed" not in entry
+    entry = sync(3)
+    assert entry["missing_since"] == _iso(NOW + timedelta(hours=3))
+    assert "missing_confirmed" not in entry
+
+
+def test_sync_skips_missing_window_for_task_bound_by_launch_reconcile(tmp_path, monkeypatch, capsys):
+    task_id = "task_reconciled"
+    tag = "brigade-launch-" + "a" * 32
+    cloud_tracker.register(tmp_path, provider="codex-cloud", label="intent", launch_tag=tag, dispatched_at=_iso(NOW))
+    observations = {
+        "codex-cloud": cloud_tracker.ProviderObservation(True, True, None, {}, complete=True),
+        "cursor-cloud": cloud_tracker.ProviderObservation(False, False, "unconfigured", {}),
+    }
+    monkeypatch.setattr(cloud_tracker, "observe_provider_details", lambda *a, **k: (observations, {}))
+    monkeypatch.setattr(
+        codex_cloud,
+        "list_tasks",
+        lambda **kwargs: codex_cloud.ListTasksResult([{"id": task_id, "launch_tag": tag}]),
+    )
+    monkeypatch.setattr(fleet_client, "fetch_cloud", lambda: {"leases": []})
+
+    args = ["run", "cloud", "sync", "--target", str(tmp_path), "--json"]
+    assert cli.main(args) == 0
+    assert json.loads(capsys.readouterr().out)["launch_intents"][0]["state"] == "tracked"
+    (entry,) = cloud_tracker.load_registry(tmp_path)["entries"]
+    assert entry["task_id"] == task_id
+    assert "missing_since" not in entry
+
+    assert cli.main(args) == 0
+    (entry,) = cloud_tracker.load_registry(tmp_path)["entries"]
+    assert entry["missing_since"]
