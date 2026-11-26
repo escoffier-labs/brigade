@@ -33,6 +33,7 @@ from .runtime_config import Runtime
 from .duet_dispatch import DuetFleetTools
 from .safe_state import identity
 from .state import BridgeState, Clock, summarize_arguments, utc_now
+from .tool_grants import TOOL_NOT_PERMITTED, Denied, authorize
 
 MAX_UNACKED = 1000
 # Responses that carry memory hits, and how each derives its query from its own content.
@@ -108,7 +109,12 @@ class DotTools:
             runtime,
             state,
             clock,
-            runtime_profile(profile, runtime.dispatch_enabled, messaging_enabled=bool(runtime.messaging_enabled)),
+            runtime_profile(
+                profile,
+                runtime.dispatch_enabled,
+                messaging_enabled=bool(runtime.messaging_enabled),
+                tool_grants=runtime.tool_grants,
+            ),
         )
         self.fleet, self.hub, self.memory, self.inbox = fleet, hub, memory, inbox
         self.push = MemoryPush(
@@ -123,6 +129,9 @@ class DotTools:
         result: dict[str, Any] = {}
         try:
             identity(owner)
+            decision = authorize(self.profile, self.runtime.tool_grants, name)
+            if isinstance(decision, Denied) and decision.code == TOOL_NOT_PERMITTED:
+                raise DotError(decision.code, reason=decision.reason)
             values = validate_arguments(name, arguments, tools=self.profile.tools)
             if not self.profile.fleet_dispatch and name == "message_send":
                 if self.profile.strict_recipients and values["to"] not in self.runtime.hub.recipients:
@@ -186,20 +195,21 @@ class DotTools:
             error_code = "adapter_unavailable"
             raise
         finally:
-            nested = result.get("result")
-            request_id = arguments.get("request_id")
-            if request_id is None:
-                request_id = result.get("request_id") or (
-                    nested.get("request_id") if isinstance(nested, dict) else None
+            if error_code != TOOL_NOT_PERMITTED:
+                nested = result.get("result")
+                request_id = arguments.get("request_id")
+                if request_id is None:
+                    request_id = result.get("request_id") or (
+                        nested.get("request_id") if isinstance(nested, dict) else None
+                    )
+                self.record_call(
+                    name,
+                    error_code is None,
+                    (time.monotonic() - started) * 1000,
+                    request_id=request_id,
+                    arg_summary=summarize_arguments(arguments),
+                    error_code=error_code,
                 )
-            self.record_call(
-                name,
-                error_code is None,
-                (time.monotonic() - started) * 1000,
-                request_id=request_id,
-                arg_summary=summarize_arguments(arguments),
-                error_code=error_code,
-            )
 
     def record_call(
         self,
