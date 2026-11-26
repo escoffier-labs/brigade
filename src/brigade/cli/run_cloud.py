@@ -36,6 +36,9 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     )
     p_sync.add_argument("--target", type=Path, default=Path("."))
     p_sync.add_argument("--json", action="store_true", help="Emit the sync JSON contract.")
+    p_sync.add_argument(
+        "--codex-leases-only", action="store_true", help="Renew or release only this workspace's Codex Cloud leases."
+    )
 
     p_launch = cloud_sub.add_parser(
         "launch",
@@ -579,6 +582,16 @@ def dispatch(args) -> int:
         return 0
 
     if command == "sync":
+        if args.codex_leases_only:
+            from .. import codex_cloud
+
+            counts = codex_cloud.sync_leases(target)
+            if args.json:
+                print(json.dumps(counts, sort_keys=True))
+            else:
+                print("Codex Cloud leases " + " ".join(f"{name}={value}" for name, value in counts.items()))
+            return int(bool(counts["errors"]))
+
         from .. import fleet_client
 
         observations, github = cloud_tracker.observe_provider_details(target)

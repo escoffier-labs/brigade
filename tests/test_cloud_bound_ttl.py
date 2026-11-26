@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import json
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
-from brigade import cloud_tracker, fleet_client, fleet_command_deck as deck, fleet_hub
+from brigade import care_cmd, cloud_tracker, codex_cloud, fleet_client, fleet_command_deck as deck, fleet_hub, proc
+from brigade.cli import main
 
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
@@ -182,3 +185,84 @@ def test_sync_renews_active_leases_with_the_bound_ttl(monkeypatch, tmp_path: Pat
     assert renew_calls == [
         {"lease_id": "lease-long", "holder": "holder-a", "ttl_seconds": fleet_client.CLOUD_BOUND_TTL_SECONDS}
     ]
+
+
+@pytest.fixture()
+def codex_sync(monkeypatch, tmp_path, conn, clock, capsys):
+    task_id = "task_123"
+    cloud_tracker.register(
+        tmp_path, provider="codex-cloud", task_id=task_id, label="tracked task", lease_holder="holder-a"
+    )
+    _admitted(conn, provider="codex")
+    assert _handle(conn, _bind(provider_task_id=task_id))[0] == 200
+    mutations = []
+
+    def post(_hub, _token, body, *, timeout):
+        mutations.append(body["action"])
+        return _handle(conn, body)
+
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "http://hub", "token": "token"})
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda _base=None: NODE_A)
+    monkeypatch.setattr(fleet_client, "_run_with_deadline", lambda fn, *, timeout: fn())
+    monkeypatch.setattr(fleet_client, "fetch_cloud", lambda: {"leases": fleet_hub.list_cloud_leases(conn)})
+    monkeypatch.setattr(fleet_client, "_post_cloud_blocking", post)
+    monkeypatch.setattr(codex_cloud.time, "time", lambda: clock["now"])
+
+    def sync(state: str, *, probe_seconds: int = 0, code: int = 0):
+        def status(argv, **kwargs):
+            assert argv == ["codex", "cloud", "status", task_id]
+            clock["now"] += probe_seconds
+            return proc.Result(code, state, "")
+
+        monkeypatch.setattr(codex_cloud.proc, "run", status)
+        rc = main(["run", "cloud", "sync", "--codex-leases-only", "--target", str(tmp_path), "--json"])
+        return rc, json.loads(capsys.readouterr().out)
+
+    return sync, mutations
+
+
+def test_scheduled_codex_sync_renews_until_terminal(conn, clock, codex_sync):
+    sync, mutations = codex_sync
+    clock["now"] += 240
+    assert sync("[RUNNING]")[1]["renewed"] == 1
+    clock["now"] += 61
+    assert [row["lease_id"] for row in fleet_hub.list_cloud_leases(conn)] == ["lease-a"]
+    clock["now"] = CLOCK_START + fleet_client.CLOUD_BOUND_TTL_SECONDS
+    assert sync("[RUNNING]")[1]["renewed"] == 1
+    assert sync("[ERROR]", code=1)[1]["released"] == 1
+    assert sync("[RUNNING]")[1]["renewed"] == 0
+    assert mutations == ["renew", "renew", "release"]
+    assert fleet_hub.list_cloud_leases(conn) == []
+
+
+def test_scheduled_codex_sync_stops_renewing_without_fresh_status(conn, clock, codex_sync):
+    sync, mutations = codex_sync
+    clock["now"] += 240
+    assert sync("[RUNNING]")[1]["renewed"] == 1
+    clock["now"] += 120
+    assert sync("authentication failed", code=1)[0] == 1
+    clock["now"] = CLOCK_START + 240 + fleet_client.CLOUD_BOUND_TTL_SECONDS
+    assert fleet_hub.list_cloud_leases(conn) == []
+    assert sync("[RUNNING]")[1]["renewed"] == 0
+    assert mutations == ["renew"]
+
+
+def test_scheduled_codex_sync_lease_expiring_during_probe_is_not_renewed(conn, clock, codex_sync):
+    sync, mutations = codex_sync
+    clock["now"] += 299
+    assert sync("[RUNNING]", probe_seconds=1)[1]["renewed"] == 0
+    assert mutations == []
+    assert fleet_hub.list_cloud_leases(conn) == []
+
+
+def test_codex_cloud_sync_care_entry_is_opt_in_and_schedules_the_lease_only_command(tmp_path, monkeypatch, capsys):
+    from brigade import runbook_cmd
+
+    monkeypatch.setattr(runbook_cmd, "_resolve_step_argv0", lambda command, cwd: sys.executable)
+    assert "codex-cloud-sync" not in {entry.entry_id for entry in care_cmd.CARE_ENTRIES}
+    assert care_cmd.install(target=tmp_path, backend="schtasks", entry_ids=["codex-cloud-sync"], json_output=True) == 3
+    plan = json.loads(capsys.readouterr().out)
+    assert plan["mutates_scheduler"] is False
+    assert plan["tasks"][0]["schedule_flags"] == "/SC MINUTE /MO 2"
+    runbook = json.loads((tmp_path / ".brigade/runbooks/codex-cloud-sync.json").read_text())
+    assert runbook["steps"][0]["run"] == "brigade run cloud sync --codex-leases-only --target . --json"

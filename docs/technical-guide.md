@@ -893,6 +893,23 @@ brigade run cloud doctor --provider codex-cloud --target . --json
 brigade run cloud canary --provider codex-cloud --target . --json
 ```
 
+For detached Codex Cloud tasks, install the opt-in Care entry on the launching
+host, with `--target` set to the workspace that stores the task registry:
+
+```bash
+brigade care install --target . --entry codex-cloud-sync
+brigade care status --target . --entry codex-cloud-sync
+```
+
+The scheduler runs `brigade run cloud sync --codex-leases-only` every two
+minutes. It needs the host's fleet credentials and an authenticated `codex` on
+the scheduler's PATH. The command checks bound leases owned by that host and
+tracked in that workspace. A confirmed active task resets its lease to six
+hours, and a terminal state releases it. Failed or inconclusive status probes
+leave the expiry as it was. If the host stops syncing, the lease expires by its
+last deadline. An expired lease cannot be renewed. Attached workers also renew
+and release their own leases while polling. See [scheduler support](scheduled-care.md).
+
 `--env-var` stores only the variable name in `.brigade/cloud/codex.json`. `--env-id` stores the id locally (mode 0600) and is the fallback when an env var is not available. Seat the worker as `cli = "codex-cloud:configured"` or `cli = "codex-cloud:$CODEX_CLOUD_ENV"`. Literal `codex-cloud:<env-id>` still works. Allow the seat with a `"codex-cloud:*"` entry in `limits.allow_models`. Model pins are rejected because the cloud environment decides the model. `brigade run cloud doctor` and `brigade run cloud canary` accept `--selector` (`configured`, `$VAR`, or a literal id) and fail closed with a safe `reason` when the `codex` CLI is missing, unauthenticated, or returns unsupported list JSON; an empty inventory may pass. When the inventory is non-empty, canary reports `environment_seen` as `true`, `false`, or `unknown` by comparing sanitized task `environment_id` values against the resolved selector; an empty inventory leaves `environment_seen` at `unknown` and does not prove the execution selector is valid. Resolved environments are recorded on tracker rows and worker results as `environment_id` for literal seats or `environment_fingerprint` for configured/`$VAR` selectors. Read-only `brigade run` dispatch blocks `codex-cloud` unless the seat sets `cloud_safe_mode = true` after explicit review. `brigade run cloud canary` lists tasks only; it never calls `codex cloud exec` or `codex cloud apply`. Cloud config discovery stops at the git repo root or the operator home directory, whichever comes first while walking parents.
 
 The local adapters use explicit non-interactive execution modes. Writable Antigravity runs pass `--add-dir <cwd> --dangerously-skip-permissions`; read-only runs pass `--sandbox` without either write flag. When `agy --help` lists `--mode plan`, read-only runs add `--mode plan` and `--add-dir <cwd>`, because plan mode is what blocks file writes. A headless run that exits 0 after `jetski: no output produced` fails with agy's reason in the detail. Writable Kimi runs pass `--yolo`; read-only runs pass `--plan`. Cursor write runs use `cursor-agent -p --output-format text -f`. Direct read-only Cursor runs use `--trust --mode plan`, which keeps the workspace read-only but has model-specific output limits: Composer 2.5 findings go to Cursor's plan artifact instead of assistant stdout, so BrigadeStack rejects that combination before spawning the process. Grok 4.5 has also returned exit 0 with empty assistant text in this mode. BrigadeStack preserves the process stdout, stderr, and exit code, then reports the ACP alternative.

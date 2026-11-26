@@ -26,6 +26,7 @@ from urllib.parse import quote
 from uuid import uuid4
 
 from . import bug_io, cloud_tracker, dirfd, fleet_client, localio, proc
+from .isolated_exec import trusted_cwd
 
 SUBMIT_TIMEOUT = 120.0
 POLL_TIMEOUT = 60.0
@@ -588,6 +589,71 @@ def _verified_status(text: str) -> str | None:
         return None
     token = match.group(1).strip().lower().replace(" ", "_")
     return token if token in TERMINAL_FAIL + TERMINAL_OK + NONTERMINAL else None
+
+
+def sync_leases(target: Path) -> dict[str, int]:
+    """Renew or release live Codex leases held by this workspace."""
+    counts = {"renewed": 0, "released": 0, "errors": 0}
+    holders = {
+        entry["task_id"]: entry["lease_holder"]
+        for entry in cloud_tracker.load_registry(target)["entries"]
+        if entry.get("provider") == "codex-cloud"
+        and isinstance(entry.get("task_id"), str)
+        and isinstance(entry.get("lease_holder"), str)
+        and entry["lease_holder"]
+    }
+    if not holders:
+        return counts
+    try:
+        leases = fleet_client.fetch_cloud()["leases"]
+    except fleet_client.FleetClientError:
+        counts["errors"] += 1
+        return counts
+    node_id = fleet_client.resolve_node_id()
+    for lease in leases:
+        if (
+            lease.get("provider") != "codex"
+            or lease.get("owner_node") != node_id
+            or lease.get("state") != "bound"
+            or lease.get("released_at") is not None
+            or lease.get("expired")
+        ):
+            continue
+        task_id = lease.get("provider_task_id")
+        lease_id = lease.get("lease_id")
+        expires_at = cloud_tracker._parse_time(lease.get("expires_at"))  # noqa: SLF001 - shared timestamp parser
+        if (
+            not isinstance(task_id, str)
+            or re.fullmatch(r"task_[A-Za-z0-9][A-Za-z0-9_-]{2,}", task_id) is None
+            or task_id not in holders
+            or not isinstance(lease_id, str)
+            or not lease_id
+            or expires_at is None
+            or expires_at.timestamp() <= time.time()
+        ):
+            continue
+        try:
+            result = proc.run(["codex", "cloud", "status", task_id], timeout=DEFAULT_LIST_TIMEOUT, cwd=trusted_cwd())
+        except OSError:
+            counts["errors"] += 1
+            continue
+        state = _verified_status(result.stdout + "\n" + result.stderr)
+        if result.timed_out or result.code == 124:
+            counts["errors"] += 1
+        elif state is not None and state in TERMINAL_OK + TERMINAL_FAIL:
+            decision = fleet_client.release_cloud(lease_id, state=state, holder=holders[task_id], node_id=node_id)
+            counts["released" if decision.granted else "errors"] += 1
+        elif state in NONTERMINAL and result.code == 0:
+            # The probe may outlast the lease. The hub also checks expiry
+            # atomically with renewal to close the remaining race.
+            if expires_at.timestamp() > time.time():
+                decision = fleet_client.renew_cloud(
+                    lease_id, ttl_seconds=fleet_client.CLOUD_BOUND_TTL_SECONDS, holder=holders[task_id], node_id=node_id
+                )
+                counts["renewed" if decision.granted else "errors"] += 1
+        else:
+            counts["errors"] += 1
+    return counts
 
 
 def config_path(target: Path) -> Path:

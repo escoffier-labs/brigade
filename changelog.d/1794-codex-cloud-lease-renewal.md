@@ -1,0 +1,1 @@
+- Add an opt-in Care job that renews active Codex Cloud leases and releases them when tasks finish.
