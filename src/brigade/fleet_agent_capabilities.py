@@ -129,7 +129,8 @@ AGENT_CAPABILITIES = (
         + CLOUD_HANDOFF_LIMIT,
         memory_status=(
             "not yet: the connector has no memory scope granted. Read access to the shared fleet scope only "
-            "(never private scopes) was deferred on 2026-11-26 until Brigade can launch cloud workers (#2995). " + CLOUD_HANDOFF_LIMIT
+            "(never private scopes) was deferred on 2026-11-26 until Brigade can launch cloud workers (#2995). "
+            + CLOUD_HANDOFF_LIMIT
         ),
         work_status="not yet: the cloud-agent profile has no work view",
         evidence="https://github.com/escoffier-labs/brigadestack/issues/2592#issuecomment-7203762111",
