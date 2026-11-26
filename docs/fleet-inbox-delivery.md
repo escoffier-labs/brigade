@@ -18,15 +18,15 @@ Connector tools depend on runtime settings and grants. For a ChatGPT dot, `hoste
 
 ### Memory and work visibility
 
-The connector columns list tools the profile can expose. The status and limits cells describe current access. Dot and Duet write handoff files to the host inbox without a Hub principal. Local memory search uses the node credential by default and supports a memory hub override.
+The connector columns list tools the profile can expose. The status and limits cells describe current access. Dot and Duet write handoff files to the host inbox without a Hub principal. For local sessions, the target's `[hub]` table sets the memory mode and scopes. In `read` or `sync` mode, the memory Hub credential comes from `BRIGADE_MEMORY_HUB_TOKEN_FILE` (paired with `BRIGADE_MEMORY_HUB_URL`), then user-level `[memory_hub] node_token_file` (paired with `hub_url`), then the fleet node credential.
 
 | Agent kind | Memory principal | Memory read | Handoff write | Work view | Memory status | Work status |
 | --- | --- | --- | --- | --- | --- | --- |
-| `local-claude-code` | `node` | `brigade memory search` | `brigade handoff draft` | `brigade fleet work list`, `brigade fleet sessions`, `brigade fleet claims` | Hub search requires `[hub]` read or sync mode. Handoff drafts go to a local inbox. | - |
-| `local-codex` | `node` | `brigade memory search` | `brigade handoff draft` | `brigade fleet work list`, `brigade fleet sessions`, `brigade fleet claims` | Hub search requires `[hub]` read or sync mode. Handoff drafts go to a local inbox. | - |
+| `local-claude-code` | `configured memory Hub credential` | `brigade memory search` | `brigade handoff draft` | `brigade fleet work list`, `brigade fleet sessions`, `brigade fleet claims` | Only local cards are searched when `[hub] mode` is `off`. Handoff drafts go to a local inbox. | - |
+| `local-codex` | `configured memory Hub credential` | `brigade memory search` | `brigade handoff draft` | `brigade fleet work list`, `brigade fleet sessions`, `brigade fleet claims` | Only local cards are searched when `[hub] mode` is `off`. Handoff drafts go to a local inbox. | - |
 | `duet` | `host [memory_hub] read credential` | `memory_search`, `memory_card` | `handoff_write` | `fleet_work_list`, `fleet_sessions`, `fleet_overview` | - | - |
 | `dot` | `host [memory_hub] read credential` | `memory_search`, `memory_card` | `handoff_write` | `fleet_work_list`, `fleet_sessions`, `fleet_overview` | - | - |
-| `cloud-agent` | `agent:cloud-agent` | `memory_search`, `memory_card` | `handoff_write` | - | not yet: the connector has no memory scope granted. Read access to the shared fleet scope only (never private scopes) is a pending decision | not yet: the cloud-agent profile has no work view |
+| `cloud-agent` | `agent:cloud-agent` | `memory_search`, `memory_card` | `handoff_write` | - | not yet: the connector has no memory scope granted. Read access to the shared fleet scope only (never private scopes) is a pending decision. The deployed `tool_grants` deny `handoff_write`. | not yet: the cloud-agent profile has no work view |
 
 ## Wake limits
 

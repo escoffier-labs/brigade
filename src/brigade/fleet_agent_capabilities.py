@@ -9,6 +9,8 @@ from .dot.runtime_config import DUET_PRINCIPAL
 from .fleet_inbox_delivery import TOOL_POLL_INTERVAL_SECONDS
 
 Wake = Literal["next-event", "next-start", "hosted-subscription"]
+LOCAL_MEMORY_PRINCIPAL = "configured memory Hub credential"
+CLOUD_HANDOFF_LIMIT = "The deployed `tool_grants` deny `handoff_write`."
 
 
 @dataclass(frozen=True)
@@ -47,11 +49,11 @@ def _local(kind: str, evidence: str) -> AgentCapability:
         live_delivery=frozenset({"UserPromptSubmit", "PostToolUse"}),
         wake="next-event",
         limits=f"Tool-event polls are at least {TOOL_POLL_INTERVAL_SECONDS:g} seconds apart.",
-        memory_principal="node",
+        memory_principal=LOCAL_MEMORY_PRINCIPAL,
         memory_read=("brigade memory search",),
         handoff_write="brigade handoff draft",
         work_view=("brigade fleet work list", "brigade fleet sessions", "brigade fleet claims"),
-        memory_status="Hub search requires `[hub]` read or sync mode. Handoff drafts go to a local inbox.",
+        memory_status="Only local cards are searched when `[hub] mode` is `off`. Handoff drafts go to a local inbox.",
         work_status="",
         evidence=evidence,
     )
@@ -121,10 +123,10 @@ AGENT_CAPABILITIES = (
         "next-start",
         "`messaging_enabled: true` required for all messaging tools. "
         "All cloud workers share one principal, so the Hub cannot tell one cloud run from another. "
-        "The deployed `tool_grants` deny `handoff_write`.",
+        + CLOUD_HANDOFF_LIMIT,
         memory_status=(
             "not yet: the connector has no memory scope granted. Read access to the shared fleet scope only "
-            "(never private scopes) is a pending decision"
+            "(never private scopes) is a pending decision. " + CLOUD_HANDOFF_LIMIT
         ),
         work_status="not yet: the cloud-agent profile has no work view",
     ),
@@ -193,7 +195,10 @@ def render_markdown() -> str:
             "",
             "The connector columns list tools the profile can expose. The status and limits cells describe "
             "current access. Dot and Duet write handoff files to the host inbox without a Hub principal. "
-            "Local memory search uses the node credential by default and supports a memory hub override.",
+            "For local sessions, the target's `[hub]` table sets the memory mode and scopes. In `read` or "
+            "`sync` mode, the memory Hub credential comes from `BRIGADE_MEMORY_HUB_TOKEN_FILE` (paired with "
+            "`BRIGADE_MEMORY_HUB_URL`), then user-level `[memory_hub] node_token_file` (paired with `hub_url`), "
+            "then the fleet node credential.",
             "",
             "| Agent kind | Memory principal | Memory read | Handoff write | Work view | Memory status | Work status |",
             "| --- | --- | --- | --- | --- | --- | --- |",

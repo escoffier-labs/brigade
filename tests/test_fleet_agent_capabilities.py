@@ -40,21 +40,31 @@ def test_connector_messaging_tools_match_profiles():
 
 
 def test_connector_memory_and_work_roles_match_profiles():
+    expected_memory = ("memory_search", "memory_card")
+    expected_work = ("fleet_work_list", "fleet_sessions", "fleet_overview")
+    expected_roles = {
+        "dot": (expected_memory, "handoff_write", expected_work),
+        "duet": (expected_memory, "handoff_write", expected_work),
+        "cloud-agent": (expected_memory, "handoff_write", ()),
+    }
     for row in AGENT_CAPABILITIES:
         if row.connector_profile is None:
             continue
         profile = runtime_profile(PROFILES[row.connector_profile], dispatch_enabled=True, messaging_enabled=True)
-        assert row.memory_read == tuple(tool for tool in ("memory_search", "memory_card") if tool in profile.tools)
-        assert row.handoff_write == ("handoff_write" if "handoff_write" in profile.tools else None)
-        assert row.work_view == tuple(
-            tool for tool in ("fleet_work_list", "fleet_sessions", "fleet_overview") if tool in profile.tools
-        )
+        assert row.memory_read, row.kind
+        assert (row.memory_read, row.handoff_write, row.work_view) == expected_roles[row.kind]
+        assert row.handoff_write is not None
+        assert row.handoff_write in profile.tools
+        assert ALL_TOOL_SCHEMAS[row.handoff_write].tool_class == ToolClass.MEMORY_WRITE
+        for tool in (*row.memory_read, *row.work_view):
+            assert tool in profile.tools
+            assert ALL_TOOL_SCHEMAS[tool].tool_class == ToolClass.READ
 
 
 def test_memory_principals_match_agent_kinds():
     assert {row.kind: row.memory_principal for row in AGENT_CAPABILITIES} == {
-        "local-claude-code": "node",
-        "local-codex": "node",
+        "local-claude-code": "configured memory Hub credential",
+        "local-codex": "configured memory Hub credential",
         "dot": "host [memory_hub] read credential",
         "duet": "host [memory_hub] read credential",
         "cloud-agent": CLOUD_AGENT_PRINCIPAL,
@@ -66,12 +76,14 @@ def test_cloud_agent_records_deployed_memory_and_work_limits():
     assert cloud.memory_status.startswith("not yet")
     assert cloud.work_status.startswith("not yet")
     assert "The deployed `tool_grants` deny `handoff_write`." in cloud.limits
+    assert "The deployed `tool_grants` deny `handoff_write`." in cloud.memory_status
 
 
 def test_local_memory_and_work_roles_use_registered_cli_paths():
     for row in AGENT_CAPABILITIES:
         if row.connector_profile is not None:
             continue
+        assert "Only local cards are searched when `[hub] mode` is `off`." in row.memory_status
         assert row.memory_read == ("brigade memory search",)
         assert row.handoff_write == "brigade handoff draft"
         assert row.work_view == ("brigade fleet work list", "brigade fleet sessions", "brigade fleet claims")
