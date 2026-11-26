@@ -23,7 +23,7 @@ flowchart TD
     I --> J[brigade orca finalize]
     B -. recovery .-> K[cancel or hold-resolve]
     K --> E
-    A -. capacity .-> L[brigade orca status]
+    J --> L[brigade orca status]
 ```
 
 ## Before the first claim
@@ -45,6 +45,16 @@ The registry confirms command and flag availability. Brigade still validates
 the returned worker receipts against the existing wire contract.
 
 ## Observe and acknowledge
+
+After accepting all worker starts in the batch, the coordinator may run the
+closeout chains for different tasks concurrently. Within each task, follow
+the proof steps in order and use that task's own evidence files. Per-task
+verbs such as `observe`, `ack`, and `hold-resolve` may wait up to five
+seconds for the workspace run lock and return `run-busy` if it is still held.
+`finalize` fails immediately if the lock is held. Once every chain finishes,
+run `brigade orca finalize <run> --target <workspace>` once, then run
+`brigade orca status <run> --json --target <workspace>` once to confirm
+that the run closed with zero live capacity.
 
 After `accepted`, run its exact printed `observe_argv` to collect full
 `worker-show --json --full` evidence. Submit the show with

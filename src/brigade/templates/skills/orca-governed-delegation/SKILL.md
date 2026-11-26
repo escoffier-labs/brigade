@@ -26,6 +26,13 @@ on the coordinator with the PATH you will use to launch. Proceed only on
 installed version, rerun readiness, and use a fresh enrollment for new work.
 Keep the original enrollment and retry keys for retained work.
 
+For a batch, complete the start and acceptance steps for all tasks first.
+Once all worker starts are accepted, the coordinator may run steps 5 through 7
+concurrently across tasks. Keep those steps in order within each task and
+save the native replies separately for each task. Per-task verbs such as
+`observe`, `ack`, and `hold-resolve` may wait up to five seconds for the
+workspace run lock and return `run-busy` if it is still held.
+
 1. Enroll the batch: `brigade orca open <batch.json> --target <workspace>`. It prints a
    Brigade run and task identity and launches nothing. If it refuses with
    `orca-unsupported`, route that work through `brigade run batch`. Other
@@ -74,9 +81,14 @@ Keep the original enrollment and retry keys for retained work.
    alone to verify release:
    `brigade orca observe <run> <task> --native-json <show.json> --target <workspace>`.
    A cancelled worker may not produce a worker_done report or transcript.
-   Finalize only after the post-release observation proves release; otherwise
-   `release-unverified` blocks closeout. Then close the settled run explicitly:
-   `brigade orca finalize <run> --target <workspace>`.
+   `release-unverified` blocks closeout until the post-release observation
+   proves release.
+
+`finalize` fails immediately if the workspace run lock is held.
+After every task's closeout chain finishes, run
+`brigade orca finalize <run> --target <workspace>` once. Then run
+`brigade orca status <run> --json --target <workspace>` once to confirm
+that the run closed with zero live capacity.
 
 ## Recovery and capacity
 

@@ -6,6 +6,7 @@ import pytest
 
 from brigade import proc
 from brigade import runguard
+from brigade.native_child_custody import EnrollmentError, owned_run
 
 
 def _repo(tmp_path):
@@ -40,6 +41,52 @@ def _write_owner(lock, *, pid, run_dir):
             }
         )
     )
+
+
+@pytest.mark.parametrize("native", [False, True])
+def test_claim_wait_refuses_stale_foreign_lock_without_moving_it(tmp_path, monkeypatch, native):
+    repo = _repo(tmp_path)
+    run_dir = repo / ".brigade" / "runs" / "current"
+    foreign_run = run_dir.with_name("foreign")
+    lock = runguard.lock_path(repo)
+    _write_owner(lock, pid=43210, run_dir=foreign_run)
+    identity = lock.stat().st_ino
+    files = {path.name: path.read_bytes() for path in lock.iterdir()}
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: pid != 43210)
+    acquire = runguard._acquire_lock
+    rename = type(lock).rename
+    attempts = 0
+    moves = []
+
+    def count_acquire(*args, **kwargs):
+        nonlocal attempts
+        attempts += 1
+        assert attempts < 5
+        return acquire(*args, **kwargs)
+
+    def record_rename(path, target):
+        if path == lock:
+            moves.append(target)
+        return rename(path, target)
+
+    monkeypatch.setattr(runguard, "_acquire_lock", count_acquire)
+    monkeypatch.setattr(type(lock), "rename", record_rename)
+
+    if native:
+        with pytest.raises(EnrollmentError, match="stale run lock does not belong to this run") as exc:
+            with owned_run(repo, run_dir, wait_seconds=1):
+                pytest.fail("acquired another run's lock")
+        assert exc.value.code == "run-owner"
+    else:
+        with pytest.raises(runguard.RunLockError, match="stale run lock does not belong to this run"):
+            with runguard.run_lock(repo, run_dir=run_dir, wait_seconds=1, stale_action="claim"):
+                pytest.fail("acquired another run's lock")
+
+    assert attempts == 1
+    assert moves == []
+    assert lock.stat().st_ino == identity
+    assert {path.name: path.read_bytes() for path in lock.iterdir()} == files
+    assert not list(lock.parent.glob(f".{lock.name}.*.stale"))
 
 
 def test_run_lock_wait_fails_immediately_for_retained_claim_with_recovery_command(tmp_path, monkeypatch):

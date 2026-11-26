@@ -12,7 +12,7 @@ from .native_child_host import NativeChildCustodyError
 from .native_child_observations import RESOURCE_EVENT, NativeObservation, observation_diagnostic
 from .native_orca_dispatch import WorkerReference
 from .native_orca_host import HOST
-from .native_orca_verbs import CORRELATION_EVENT, ClaimedTask, claimed_task
+from .native_orca_verbs import CORRELATION_EVENT, ClaimedTask, claimed_task, owned_task_run
 from .native_child_custody import owned_run
 
 _OBSERVE_SCHEMA = "brigade.orca_observe.v1"
@@ -136,7 +136,7 @@ def cancel(
 
 def ack(*, workspace: Path, run_id: str, task_id: str, result_id: str) -> dict[str, Any]:
     return native_child_lifecycle.ack(
-        HOST, workspace=workspace, run_id=run_id, task_id=task_id, result_id=result_id, owned_run=owned_run
+        HOST, workspace=workspace, run_id=run_id, task_id=task_id, result_id=result_id, owned_run=owned_task_run
     )
 
 
