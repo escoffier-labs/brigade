@@ -1830,7 +1830,7 @@ def test_cli_accepts_managed_posttooluse_event(monkeypatch):
 
 
 def test_posttooluse_records_only_successful_confident_bash_writes(tmp_path: Path):
-    target = _wired_claude(tmp_path)
+    target = _git_wired_claude(tmp_path)
     command = "sed -i 's/old/new/' file.py"
     pretool = _payload(
         target,
@@ -4183,10 +4183,28 @@ def test_claude_unclassified_capture(target, monkeypatch, mode):
 
 
 @pytest.mark.parametrize(
-    "event, interrupted",
-    [("PostToolUse", False), ("PostToolUseFailure", False), ("PostToolUseFailure", True)],
+    "event, interrupted, scenario",
+    [
+        ("PostToolUse", False, "exhausted"),
+        ("PostToolUseFailure", False, "exhausted"),
+        ("PostToolUseFailure", True, "exhausted"),
+        ("PostToolUseFailure", False, "wrote"),
+        ("PostToolUseFailure", True, "wrote"),
+        ("PostToolUse", False, "attribution-error"),
+        ("PostToolUseFailure", False, "attribution-error"),
+        ("PostToolUse", False, "recognition-error"),
+        ("PostToolUseFailure", False, "recognition-error"),
+        ("PostToolUse", False, "write-detection-error"),
+        ("PostToolUseFailure", False, "write-detection-error"),
+        ("PostToolUse", False, "fingerprint-error"),
+        ("PostToolUseFailure", False, "fingerprint-error"),
+        ("PostToolUseFailure", False, "no-write"),
+        ("PostToolUse", False, "no-command"),
+    ],
 )
-def test_stop_keeps_own_incomplete_bash_write_after_later_foreign_write(tmp_path, monkeypatch, event, interrupted):
+def test_stop_distinguishes_own_bash_write_from_later_foreign_write(
+    tmp_path, monkeypatch, event, interrupted, scenario
+):
     target = _git_wired_claude(tmp_path)
     (target / "earlier.py").write_text("value = 0\n")
     subprocess.run(["git", "add", "earlier.py"], cwd=target, check=True, capture_output=True)
@@ -4209,29 +4227,72 @@ def test_stop_keeps_own_incomplete_bash_write_after_later_foreign_write(tmp_path
     tree = localio.tree_fingerprint(target)
     assert tree is not None
     before = _write_session_receipt(target, session, tree_fingerprint=tree)
-    command = "touch own.py; " + "cd a && " * 500 + ("false" if event == "PostToolUseFailure" else "true")
-    pre = _payload(target, "PreToolUse", session_id=session, tool_name="Bash", tool_input={"command": command})
-    assert runtime.handle_payload("PreToolUse", pre) is None
-    (target / "own.py").touch()
-    runtime.handle_payload(event, {**pre, "hook_event_name": event, "is_interrupt": interrupted})
+    wrote = scenario not in {"no-write", "no-command"}
+    if scenario != "no-command":
+        command = "touch own.py; " if wrote else "touch missing-dir/own.py; "
+        if scenario == "exhausted":
+            command += "cd a && " * 500
+        command += "false" if event == "PostToolUseFailure" else "true"
+        pre = _payload(target, "PreToolUse", session_id=session, tool_name="Bash", tool_input={"command": command})
+        assert runtime.handle_payload("PreToolUse", pre) is None
+        if wrote:
+            (target / "own.py").write_text("value = 2\n")
+        with monkeypatch.context() as patch:
+            if scenario.endswith("-error"):
+
+                def unavailable(*_args, **_kwargs):
+                    raise RuntimeError("fixture attribution error")
+
+                module, name = {
+                    "attribution-error": (runtime.write_attribution, "bash_scopes"),
+                    "recognition-error": (runtime, "_recognize"),
+                    "write-detection-error": (runtime.write_attribution, "touches_worktree"),
+                    "fingerprint-error": (runtime, "repo_worktree_fingerprint"),
+                }[scenario]
+                patch.setattr(module, name, unavailable)
+            runtime.handle_payload(event, {**pre, "hook_event_name": event, "is_interrupt": interrupted})
     state = runtime.read_session_state(target, session)
     assert state and state["write_observed"]
     stamp = state["last_write_at"]
-    assert stamp > before["last_write_at"]
+    assert (stamp > before["last_write_at"]) is wrote
     assert stamp == state["last_attributed_write_at"] == state["last_verification_write_at"]
     assert "pending_bash_fingerprint" not in state and "pending_bash_started_at" not in state
 
     edit("other.py", "other-session")
     assert runtime._foreign_write_since(target, session, datetime.fromisoformat(stamp))
     result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session, stop_hook_active=False))
-    assert result and result["decision"] == "block"
+    assert result
+    assert (result.get("decision") == "block") is wrote
+    if not wrote:
+        from brigade.work_cmd.verify_gate import StopGate
+
+        assert runtime._shared_tree_block_is_foreign(target, session, state, StopGate(target))
 
 
-def _mock_windows_component_lookup(monkeypatch, winerror):
+@pytest.mark.parametrize("event", ["PostToolUse", "PostToolUseFailure"])
+@pytest.mark.parametrize("integrity_error", [False, True])
+def test_bash_post_surfaces_state_errors(target, monkeypatch, event, integrity_error):
+    command = {"tool_name": "Bash", "tool_input": {"command": "touch own.py"}}
+    assert runtime.handle_payload("PreToolUse", _payload(target, "PreToolUse", **command)) is None
+    error_type = runtime.anchored_io.SessionIntegrityError if integrity_error else RuntimeError
+    (target / "own.py").touch()
+
+    def broken(*_args, **_kwargs):
+        raise error_type("fixture state error")
+
+    if integrity_error:
+        monkeypatch.setattr(runtime.write_attribution, "bash_scopes", broken)
+    else:
+        monkeypatch.setattr(runtime, "_write_session_state_preserving_latch", broken)
+    with pytest.raises(error_type, match="fixture state error"):
+        runtime.handle_payload(event, _payload(target, event, **command))
+
+
+def _mock_command_path_error(monkeypatch, winerror):
     original = Path.lstat
 
     def missing(path):
-        if path.name == "x" * 300:
+        if path.name == "unreadable.py":
             if winerror is None:
                 raise PermissionError(errno.EACCES, "fixture path access error")
             error = FileNotFoundError(errno.ENOENT, "fixture Windows path error")
@@ -4239,9 +4300,32 @@ def _mock_windows_component_lookup(monkeypatch, winerror):
             raise error
         return original(path)
 
-    monkeypatch.setattr(command_tokens, "_WINDOWS", True)
-    monkeypatch.setattr(command_tokens, "_windows_component_max", lambda _anchor: 255)
     monkeypatch.setattr(Path, "lstat", missing)
+
+
+@pytest.mark.parametrize("kind", ["component", "whole-path", "valid-component"])
+def test_windows_command_path_limits_precede_filesystem_probe(tmp_path, monkeypatch, kind):
+    monkeypatch.setattr(command_tokens, "_WINDOWS", True)
+    paths = []
+
+    def missing(path):
+        paths.append(path)
+        raise FileNotFoundError(errno.ENOENT, "fixture missing path")
+
+    monkeypatch.setattr(Path, "lstat", missing)
+    raw = {
+        "component": "🌱" * 128,
+        "whole-path": "/".join(["d" * 200] * 164),
+        "valid-component": "🌱" * 127 + "x",
+    }[kind]
+    with command_tokens.command_event():
+        if kind == "valid-component":
+            assert command_tokens.resolve_command_path(raw, tmp_path) == tmp_path / raw
+            assert paths == [tmp_path / raw]
+        else:
+            with pytest.raises(command_tokens.UnreadableCommand):
+                command_tokens.resolve_command_path(raw, tmp_path)
+            assert paths == []
 
 
 @pytest.mark.parametrize("mode", ["strict", "observe", "off"])
@@ -4257,14 +4341,14 @@ def test_bash_pretooluse_unreadable_command_is_denied_only_in_strict(target, mon
         "null": "echo a\x00b",
         "long-component": long_component,
         "windows-missing-component": long_component,
-        "path-io": long_component,
+        "path-io": "echo ./unreadable.py",
         "attribution": "echo done",
         "known-verifier": "pytest -q",
     }
     if case == "windows-missing-component":
-        _mock_windows_component_lookup(monkeypatch, winerror=3)
+        monkeypatch.setattr(command_tokens, "_WINDOWS", True)
     if case == "path-io":
-        _mock_windows_component_lookup(monkeypatch, winerror=None)
+        _mock_command_path_error(monkeypatch, winerror=None)
     if case in {"attribution", "known-verifier"}:
 
         def unavailable(*_args, **_kwargs):

@@ -47,7 +47,6 @@ class RecognitionBudget:
         self.unreadable = False
         self.verdicts: dict[str, Recognition] = {}
         self.paths: dict[tuple[Path, str, bool], Path] = {}
-        self.component_maxima: dict[str, int] = {}
         self.wired: dict[tuple[str, str | None], Path | None] = {}
         self.path_work = 0
         self.shell_pending: list[str] = []
@@ -103,7 +102,6 @@ class RecognitionBudget:
         self.verifier_targets.clear()
         self.verdicts.clear()
         self.paths.clear()
-        self.component_maxima.clear()
         self.wired.clear()
 
 
@@ -153,25 +151,14 @@ def event_wired_target(cwd: object, *, harness: str | None = "claude") -> Path |
     return budget.wired[key]
 
 
-def _windows_component_max(anchor: str) -> int:
-    import ctypes
-    from ctypes import wintypes
-
-    loader = getattr(ctypes, "WinDLL", None)
-    if loader is None:
-        return 0
-    maximum = wintypes.DWORD()
-    kernel = loader("kernel32")
-    previous = wintypes.DWORD()
-    fail_critical_errors = 0x0001  # Suppress a removable-drive prompt.
-    if not kernel.SetThreadErrorMode(kernel.GetThreadErrorMode() | fail_critical_errors, ctypes.byref(previous)):
-        return 0
-    try:
-        if kernel.GetVolumeInformationW(ctypes.c_wchar_p(anchor), None, 0, None, ctypes.byref(maximum), None, None, 0):
-            return maximum.value
-        return 0
-    finally:
-        kernel.SetThreadErrorMode(previous, None)
+def _check_windows_path(path: Path) -> None:
+    text = str(path)
+    charge_event(2 * len(text))
+    # Leave room for the terminator in the Win32 long-path maximum.
+    if len(text.encode("utf-16-le")) // 2 >= 32_767:
+        raise UnreadableCommand
+    if any(len(part.encode("utf-16-le")) // 2 > 255 for part in text.replace("/", "\\").split("\\")):
+        raise UnreadableCommand
 
 
 def _path_status(path: Path) -> os.stat_result | None:
@@ -182,23 +169,6 @@ def _path_status(path: Path) -> os.stat_result | None:
         # different native codes, some of which Python maps to ENOENT.
         if exc.errno not in {errno.ENOENT, errno.ENOTDIR} or getattr(exc, "winerror", None) in {123, 161, 206}:
             raise
-        if _WINDOWS and path.anchor:
-            # Windows can also report an overlong component as a missing path.
-            # Use the volume's filename maximum, in UTF-16 code units.
-            anchor = path.anchor
-            budget = EVENT_BUDGET.get()
-            if budget is None:
-                maximum = _windows_component_max(anchor)
-            else:
-                if anchor not in budget.component_maxima:
-                    budget.charge_path(32 + len(anchor))
-                    budget.component_maxima[anchor] = _windows_component_max(anchor)
-                maximum = budget.component_maxima[anchor]
-            if maximum:
-                if budget is not None:
-                    budget.charge_path(len(str(path)))
-                if any(len(part.encode("utf-16-le")) // 2 > maximum for part in path.parts[1:]):
-                    raise UnreadableCommand from exc
         return None
 
 
@@ -209,12 +179,14 @@ def resolve_command_path(raw: str, cwd: Path, *, expand_vars: bool = True) -> Pa
         return budget.paths[key]
     try:
         expanded = expand_user_path(Path(os.path.expandvars(raw) if expand_vars else raw))
+        candidate = cwd / expanded
+        if _WINDOWS:
+            _check_windows_path(candidate)
         if budget is not None:
             budget.charge_path(16 + len(raw) + len(str(cwd)) + len(str(expanded)))
-        candidate = cwd / expanded
-        status = _path_status(candidate)
-        simple_child = not expanded.is_absolute() and len(expanded.parts) == 1 and expanded.name != ".."
-        if budget is not None and simple_child and (status is None or not stat.S_ISLNK(status.st_mode)):
+        simple_child = budget is not None and len(expanded.parts) == 1 and not expanded.anchor and expanded.name != ".."
+        status = _path_status(candidate) if simple_child or not _WINDOWS else None
+        if simple_child and (status is None or not stat.S_ISLNK(status.st_mode)):
             result = candidate  # The hook already resolved the parent.
         else:
             result = candidate.resolve(strict=False)

@@ -2096,6 +2096,13 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
         return _handle_payload(event, payload, pin=pin)
     with command_event() as budget:
         command = _as_tool_input(payload.get("tool_input")).get("command")
+        if event != "PreToolUse":
+            try:
+                _recognize(command)
+            except Exception as exc:  # noqa: BLE001 - state updates are outside this handler
+                write_attribution.mark_analysis_failure(event, exc)
+            with budget.in_phase("attribution"):
+                return _handle_payload(event, payload, pin=pin)
         verdict = Recognition.UNDECIDED
         try:
             verdict = _recognize(command)
@@ -2104,15 +2111,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
         except anchored_io.SessionIntegrityError:
             raise
         except Exception as exc:  # noqa: BLE001 - strict returns a permission decision on analysis errors
-            if event != "PreToolUse" and not isinstance(exc, (RecognitionLimit, UnreadableCommand)):
-                raise
             target = budget.target or _bash_fallback_target(payload, pin)
-            if event != "PreToolUse":
-                if target is not None:
-                    budget.attribution_incomplete = True
-                    budget.unreadable |= isinstance(exc, UnreadableCommand)
-                    return _handle_event(event, payload, pin=pin, target_override=target)
-                return None
             return _bash_analysis_refusal(target, verdict, command, unreadable=not isinstance(exc, RecognitionLimit))
 
 
@@ -2363,12 +2362,10 @@ def _handle_event(
         }
 
     budget = EVENT_BUDGET.get()
-    incomplete = budget is not None and budget.attribution_incomplete
-    if event == "PostToolUse" or (event == "PostToolUseFailure" and incomplete):
+    if event == "PostToolUse" or (event == "PostToolUseFailure" and payload.get("tool_name") == "Bash"):
         tool_name = payload.get("tool_name")
         raw_post_tool_input = payload.get("tool_input")
         post_tool_input: dict[str, Any] = raw_post_tool_input if isinstance(raw_post_tool_input, dict) else {}
-        command = post_tool_input.get("command")
         if tool_name == "Skill":
             skill_invocations.handle(target, session_id, state, post_tool_input, payload.get("tool_response"))
             return None
@@ -2382,45 +2379,29 @@ def _handle_event(
                     target, session_id, state, log_target=target, patch_fields=("read_files",)
                 )
             return None
-        wrote = tool_name in _WRITE_TOOLS or (
-            tool_name == "Bash"
-            and (incomplete or write_attribution.touches_worktree(target, command, cwd=payload.get("cwd")))
-        )
+        wrote = tool_name in _WRITE_TOOLS
+        handoff_write = wrote and _is_handoff_tool_write(target, post_tool_input)
         capture_artifact_id = None
-        if tool_name == "Bash" and not incomplete and (_is_routed_verify(command) or _is_brigade_run(command)):
-            capture_artifact_id = _parse_capture_flag(command) if _is_routed_verify(command) else None
-            # Brigade's own metadata must not re-arm closeout, but an explicit
-            # source write elsewhere in the same Bash call still belongs to
-            # this session, including edits after a completed verification.
-            if not wrote:
+        updated_fp = event_fingerprint(target) if wrote else None
+        if tool_name == "Bash":
+            wrote, capture_artifact_id, handoff_write, metadata_only, updated_fp = write_attribution.post_bash_write(
+                event, target, payload, state, session_id, event_fingerprint
+            )
+            if metadata_only and event == "PostToolUse":
                 state.pop("pending_bash_fingerprint", None)
                 state.pop("pending_bash_started_at", None)
                 _write_session_state_preserving_latch(
                     target, session_id, state, log_target=target, capture_artifact_id=capture_artifact_id
                 )
                 return None
-        if not wrote and tool_name == "Bash":
-            wrote = _bash_write_detected(
-                target,
-                state.get("pending_bash_fingerprint"),
-                session_id=session_id,
-                started_at=state.get("pending_bash_started_at"),
-                fingerprint=event_fingerprint,
-            )
         if wrote:
             state["write_observed"] = True
             written_at = localio.utc_now_iso()
             producer_session.record_write(state, target, payload, written_at)
             state["last_write_at"] = written_at
             state["last_attributed_write_at"] = written_at
-            handoff_write = (tool_name in _WRITE_TOOLS and _is_handoff_tool_write(target, post_tool_input)) or (
-                tool_name == "Bash"
-                and not incomplete
-                and _bash_write_targets_handoffs(target, post_tool_input.get("command"))
-            )
             if not handoff_write:
                 state["last_verification_write_at"] = written_at
-            updated_fp = event_fingerprint(target)
             if updated_fp is not None:
                 state["repo_fingerprint"] = updated_fp
             state.pop("pending_bash_fingerprint", None)
@@ -2435,7 +2416,8 @@ def _handle_event(
             state.pop("pending_bash_fingerprint", None)
             state.pop("pending_bash_started_at", None)
             _write_session_state_preserving_latch(target, session_id, state, log_target=target)
-        return None
+        if event == "PostToolUse" or (budget is not None and budget.attribution_incomplete):
+            return None
 
     if event == "PostToolUseFailure":
         return check_events.failure_followup(payload, target, session_id, state)
@@ -2751,9 +2733,8 @@ def _hook_run_body_unchecked(
         log_target = _resolve_log_target(payload, pin=pin)
     except anchored_io.SessionIntegrityError:
         raise
-    except Exception as exc:  # noqa: BLE001 - command-derived target errors must reach the Bash boundary
-        post_path_error = event in {"PostToolUse", "PostToolUseFailure"} and isinstance(exc, UnreadableCommand)
-        if payload.get("tool_name") != "Bash" or not (event == "PreToolUse" or post_path_error):
+    except Exception:  # noqa: BLE001 - command-derived target errors must reach the Bash boundary
+        if payload.get("tool_name") != "Bash" or event not in {"PreToolUse", "PostToolUse", "PostToolUseFailure"}:
             raise
         log_probe_failed = True
         log_target = _bash_fallback_target(payload, pin)
@@ -2796,6 +2777,10 @@ def _hook_run_body_unchecked(
         except Exception:  # noqa: BLE001 - fall back to unreadable-command refusal
             verdict = Recognition.UNDECIDED
         result = _bash_analysis_refusal(log_target, verdict, command, unreadable=True)
+    elif log_probe_failed:
+        with command_event() as budget:
+            budget.attribution_incomplete = budget.unreadable = True
+            result = _isolated_handle_payload(event, payload, pin=pin)
     else:
         result = _isolated_handle_payload(event, payload, pin=pin)
     result, claim_path = _strip_claim(result)
