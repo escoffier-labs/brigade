@@ -2143,7 +2143,7 @@ def test_index_rejects_zero_exit_incomplete_summary_and_retains_export(tmp_path,
     assert len(_jsonl(exports[0].read_text())) == 1
 
 
-@pytest.mark.parametrize("route", ["stable", "npm", "beta", "prerelease", "source"])
+@pytest.mark.parametrize("route", ["stable", "npm", "beta", "npm-beta", "prerelease", "source"])
 def test_verify_receipt_import_names_repair_for_missing_acknowledgement(tmp_path, monkeypatch, capsys, route):
     from importlib import metadata
     from types import SimpleNamespace
@@ -2151,7 +2151,7 @@ def test_verify_receipt_import_names_repair_for_missing_acknowledgement(tmp_path
     import brigade
     from brigade import component_install, component_paths, distribution, update_cmd
 
-    monkeypatch.setattr(distribution, "_name", "npm" if route == "npm" else None)
+    monkeypatch.setattr(distribution, "_name", "npm" if route in ("npm", "npm-beta") else None)
     monkeypatch.setattr(brigade, "__version__", "0.33.0.dev1" if route == "prerelease" else "0.33.0")
     monkeypatch.setattr(
         metadata,
@@ -2160,7 +2160,7 @@ def test_verify_receipt_import_names_repair_for_missing_acknowledgement(tmp_path
             read_text=lambda _file: '{"url":"file:///checkout","dir_info":{}}' if route in ("source", "npm") else None
         ),
     )
-    if route == "beta":
+    if route in ("beta", "npm-beta"):
         roots = component_install.resolve_roots()
         update_cmd.write_update_state(
             Path(component_paths.update_state_path(roots.data_root)),
@@ -2178,7 +2178,9 @@ def test_verify_receipt_import_names_repair_for_missing_acknowledgement(tmp_path
             ),
         )
     _write_verify_export_receipt(tmp_path, "missing-ack", started_at="2026-07-08T12:00:00Z")
-    monkeypatch.setattr(receipts_cmd.component_bins, "resolve", lambda _: "fake-ledger")
+    engine = tmp_path / "test-engine"
+    engine.touch()
+    monkeypatch.setattr(receipts_cmd.component_bins, "resolve", lambda _: str(engine))
     monkeypatch.setattr(
         receipts_cmd.subprocess,
         "run",
@@ -2196,15 +2198,20 @@ def test_verify_receipt_import_names_repair_for_missing_acknowledgement(tmp_path
 
     _attach_indexing(receipt, target=tmp_path, json_output=True)
     indexing = receipt["miseledger_indexing"]
-    assert indexing["status"] == "failed"
+    assert indexing["status"] == "paused"
     assert indexing["reason"] == "outdated_evidence_engine"
     assert indexing["repair"] in output.err
-    assert "brigade update" not in indexing["repair"]
+    assert ("brigade update --channel beta" in indexing["repair"]) == (route == "beta")
     assert ("run `brigade setup`" in indexing["repair"].lower()) == (route in ("stable", "npm"))
-    assert "--allow-compatible-stable-manifest" in indexing["repair"]
+    assert ("--allow-compatible-stable-manifest" in indexing["repair"]) == (
+        route in ("source", "prerelease", "npm-beta")
+    )
     assert capsys.readouterr() == ("", "")
+    _attach_indexing(receipt, target=tmp_path, json_output=False)
+    paused = capsys.readouterr()
+    assert paused.out.count(indexing["repair"]) == 1 and not paused.err
     assert not (tmp_path / receipts_cmd.MISELEDGER_CURSOR_REL).exists()
-    assert len(list((tmp_path / ".brigade/work").glob("miseledger-export-*.jsonl"))) == 2
+    assert len(list((tmp_path / ".brigade/work").glob("miseledger-export-*.jsonl"))) == 1
 
 
 @pytest.mark.parametrize("status", [None, "complete"])
@@ -2547,26 +2554,29 @@ def test_automatic_replay_backs_off_after_consecutive_timeouts(tmp_path, monkeyp
     monkeypatch.setattr(time, "time", lambda: now)
     state["failure"] = "timeout"
     for attempt, delay in enumerate((15, 30, 60, 120, 120)):
-        assert _capture_for_replay(tmp_path, 2 * attempt)["status"] == "failed"
+        assert _capture_for_replay(tmp_path, 3 * attempt)["status"] == "failed"
         marker = localio.read_json_dict(_replay_state_path(tmp_path))
         assert marker["kind"] == "timeout"
+        assert marker["batch_size"] == 1
         assert marker["retry_after"] - now == delay
+        assert _capture_for_replay(tmp_path, 3 * attempt + 1)["status"] == "backoff"
         now += delay - 1
-        assert _capture_for_replay(tmp_path, 2 * attempt + 1)["status"] == "backoff"
+        assert _capture_for_replay(tmp_path, 3 * attempt + 2)["status"] == "backoff"
+        assert state["calls"] == [1] * (attempt + 1)
+        assert state["timeouts"] == [5] * (attempt + 1)
         now += 1
-    assert state["calls"] == [1, 1, 1, 1, 1]
     assert not _read_cursor_hashes(tmp_path)
 
     state["failure"] = None
     state["ack"] = True
     if retry == "automatic":
-        result = _capture_for_replay(tmp_path, 10)
-        assert result["status"] == "draining" and result["remaining_count"] == 10
+        result = _capture_for_replay(tmp_path, 15)
+        assert result["status"] == "draining" and result["remaining_count"] == 15
         assert state["calls"][-1] == 1
     else:
         now -= 1
         assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path), "--import", "--new-only"]) == 0
-        assert state["calls"][-1] == 10
+        assert state["calls"][-1] == 15
     marker = localio.read_json_dict(_replay_state_path(tmp_path))
     assert marker is None or marker["kind"] == "drain"
 
@@ -2651,7 +2661,11 @@ def test_timeout_recovers_from_clock_rollback_and_ages_after_idle(tmp_path, monk
     assert _capture_for_replay(tmp_path, 1)["status"] == "failed"
     capsys.readouterr()
     assert _capture_for_replay(tmp_path, 2)["status"] == "backoff"
-    assert capsys.readouterr().out.count("brigade receipts export evidence --new-only --import") == 1
+    from brigade.component_install import engine_repair_hint
+
+    cooldown = capsys.readouterr().out
+    assert cooldown.count(engine_repair_hint()) == 1
+    assert cooldown.count("brigade receipts export evidence --new-only --import") == 1
     now -= 60
     assert _capture_for_replay(tmp_path, 3)["status"] == "failed"
     marker = _replay_state_path(tmp_path)

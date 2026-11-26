@@ -75,7 +75,7 @@ def current_manifest(acceptance):
         body = source.read_bytes()
         for platform, asset in record["assets"].items():
             asset["asset_name"] = asset["asset_name"].replace(key, canonical, 1)
-            asset["download_url"] = "https://example.invalid/" + asset["asset_name"]
+            asset["download_url"] = "https://github.com/example/components/" + asset["asset_name"]
             if platform == "linux-amd64":
                 asset.update(byte_size=len(body), sha256=hashlib.sha256(body).hexdigest())
                 bodies[asset["download_url"]] = body

@@ -1,0 +1,90 @@
+Coordinate the single governed native T3 batch described in expected.json.
+Run the shell commands from this private arm directory:
+
+    cd $folder
+    cat $read_expected
+
+Use the designated T3 parent on Codex gpt-6.2-sol, medium reasoning and
+serviceTier=default. The parent must be attached to the workload checkout at
+the expected base. Call T3 tools yourself. Keep the raw replies in this
+directory. Edit only the evidence files named here. Wait for completion wakes
+and let the operator handle worker approvals.
+
+## Launch in one turn
+
+1. Use the exact orchestrator_capabilities reply for this parent thread.
+   Call it if this thread has not already captured it. Otherwise copy its
+   original reply from the previous arm after confirming the same parent and
+   provider settings still apply. Save the exact reply as capabilities.json.
+   Match parentThreadId to expected.json and confirm the expected environment,
+   project and provider instance. Create capabilities-report.json with schema
+   brigade.t3_capabilities_report.v1, origin_environment and origin_project
+   from expected.json, reported_at set to the current UTC ISO 8601 timestamp
+   with Z, and capabilities set to the unmodified tool result. Immediately run:
+
+       $ready > readiness.json
+
+2. Mark immediately before the open command, and check open.json against
+   expected.json for the run ID and all three task IDs.
+
+       $mark opened
+       $open > open.json
+
+3. Mark native delegation start once before claiming any tasks.
+
+       $mark delegate-start
+
+4. For each task ID in sorted order, substitute
+   TASK in the commands below. Check the run, task, seat and request identities
+   in the claim receipt. Call delegate_task with exactly the JSON object at
+   delegate_task in claim-TASK.json. Save the exact tool result to
+   delegate-TASK.json, then record acceptance.
+
+       $claim TASK > claim-TASK.json
+       $accepted TASK --native-json delegate-TASK.json > accepted-TASK.json
+
+5. Mark the last accepted delegate reply and end the turn.
+
+       $mark delegate-replies
+
+## Each completion wake
+
+1. Check the waking task ID against its saved delegate reply. If it was already
+   acknowledged, check the task and run IDs, then end the turn. For a new wake,
+   record its clock mark immediately. Run only the command for that task:
+
+       $wake_marks
+
+2. Call task_status once for the delegate reply's taskId. Save the exact
+   reply to status-TASK.json. Call t3_thread_read for its childThreadId with
+   view=activity and limit=100. Save the exact reply to activity-TASK.json.
+   Require hasMore=false. The child run in recentRuns matching the terminal
+   run in task_status supplies startedAt and completedAt. A missing or
+   ambiguous match blocks the measurement.
+3. Observe the exact status reply and check that the observation is completed.
+   Verify the JSON answer against answers.TASK in expected.json, and check
+   that the child activity identifies a distinct worktree with clean Git status
+   at the pinned base. Ack the exact result_id from the observation.
+
+       $observe TASK --native-json status-TASK.json > observe-TASK.json
+       $ack TASK --result-id RESULT_ID > ack-TASK.json
+
+4. End the turn when work remains. When all three tasks are acknowledged,
+   finalize, check the completed status, then run the independent evidence
+   check. The finish command writes measurements.json atomically.
+
+       $finalize > finalize.json
+       $finish
+
+## Exceptions
+
+Stop on a failed command, ambiguous reply, or unverified result. Preserve the
+raw files. Record the failed step and exact error with the following command
+and stop. A failed batch stops the campaign, and an operator handles closeout.
+
+    $abort 'FAILED_STEP_AND_ERROR'
+
+For an intervention outside Brigade's cancel and hold facts, append one JSON
+string describing the action to interventions.jsonl. Log independently
+observed errors as one JSON string each in errors.jsonl. Record no prompts or
+secrets in either log. Keep any operator approval wait inside the measurement.

@@ -1,1 +1,1 @@
-- Record the governed Orca qualification run after profile recovery, including verified worker outputs, the runtime outage, and transcript clipping that prevented closeout after recovery.
+- Record the completed governed Orca qualification for #2884: five matched pairs passed, with a matched repeat of pair 1.

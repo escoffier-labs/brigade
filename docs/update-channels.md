@@ -74,8 +74,8 @@ preview lines, unrelated prereleases, Git refs, and native release assets, and
 force-reinstalls that pin into the existing user-global pipx Brigade environment
 (one active CLI environment; no second installer). A machine already owned by the
 other channel fails until the operator supplies `--switch-channel`; a command never
-transfers ownership implicitly. Right after a version bump, beta fails closed until the first dev wheel of the new base publishes at 12:00 UTC. `--dry-run` resolves and prints the exact planned
-global pipx and setup commands without changing pipx, managed components, or state.
+transfers ownership implicitly. Right after a version bump, beta fails closed until the first dev wheel of the new base publishes at 12:00 UTC. `--dry-run` prints the planned pipx commands
+and names the manifest release setup would use. It leaves pipx, managed components, and state intact.
 
 Rollback from beta to stable is explicit:
 
@@ -102,40 +102,81 @@ wheel's Python distribution and runtime version; bundled template and component 
 committed stable values. Operators who use `brigade update --channel beta` receive the
 selected `0.33.0.devYYYYMMDD` wheel plus native bytes from the latest verified stable manifest.
 
-The updater runs `pipx install --force` with an exact requirement, then calls the newly installed absolute `brigade` executable with `setup --manifest <verified-cache-path>`. It does not use the prior executable for setup. This sequence is not an atomic installation transaction: pipx replacement happens before component setup. State publication is transactional, so a failed pipx install or setup leaves the prior update state untouched; rerun the same update to repair components.
+When update coordinates change, the updater runs `pipx install --force` with
+an exact requirement, then calls the newly installed `brigade` executable with
+`setup --manifest <verified-cache-path>`. A failed pipx install or setup leaves
+the prior update state intact. Rerun the same update to repair components.
 
 ## Repair managed engines
 
-After `pipx upgrade brigadestack` or `npm update --global brigadestack` on a
-released stable CLI, run `brigade setup` to match the managed engines to the CLI.
-The package manager upgrades the CLI. If v0.30.0 engines are still installed with
-CLI 0.31.0 or 0.32.0, a captured verification can exit 0 and print
+With a released stable CLI and a stable or absent update pin, run `brigade setup`
+after `pipx upgrade brigadestack` or follow the npm commands below. Package
+managers update the CLI separately from the managed engines. With v0.30.0
+engines and CLI 0.31.0 or 0.32.0, a captured verification can exit 0 and print
 `miseledger indexing: import failed (receipts pending)`.
 
-For an unreleased source build or a beta install pinned to v0.30.0, obtain and
-verify a compatible stable release's `component-manifest-v1.json`. The v0.32.0
-bundle supports receipt acknowledgements. Check the manifest's SHA-256 against
-the digest published for the release asset, then pass the verified manifest and
-its Brigade version explicitly:
+### Repair through the updater
+
+`brigade update` checks managed engine records and executable bytes even when
+the saved update coordinates match. A healthy install reuses the verified
+manifest cache and downloads no engine or CLI assets. Missing or mismatched
+engines trigger setup without reinstalling the CLI. The updater keeps a healthy
+newer release in place and uses its own verified manifest for repair if it
+detects damage. A failed setup exits non-zero and rolls back the prior state and
+files where possible. It lists any paths it could not restore. HTTP and redirect
+errors identify the URL and status.
+
+### Saved beta pins and unreleased builds
+
+Plain setup refuses a saved beta pin in `update-state.json` when it would install
+engines older than the receipt importer supports or downgrade verified engines.
+The receipt importer requires engines from v0.31.0 or later. To refresh the pin
+on a pipx install, run `brigade update --channel beta` with network access. When
+setup finds a compatible cached manifest whose digest ships in the CLI, its
+refusal prints the actual path and release version. That command can run offline
+if the component assets are cached. Other release manifests need network access
+for authentication against the exact release's published size and digest.
+
+On an unreleased source build or an npm install with a refused beta pin, you can
+also supply a compatible stable manifest explicitly. Verify its SHA-256 against
+the release asset's published digest first. For the v0.32.0 release, use:
 
 ```bash
 brigade setup --manifest /path/to/component-manifest-v1.json --allow-compatible-stable-manifest 0.32.0
 ```
 
-The explicit manifest bypasses the saved beta pin for this setup run. A later
-plain `brigade setup` on that beta install can still reuse the pinned release.
+An explicit manifest applies to one setup run. Its use leaves the saved beta pin
+in place.
+
 When the evidence engine omits an acknowledgement, automatic receipt indexing
-pauses in that worktree. Captured verifications keep saving receipts, and the
-next capture after the engine is repaired imports the pending receipts. To retry
+pauses in that worktree. Captured verifications keep saving receipts. After an
+engine replacement, the next capture resumes indexing the backlog. To retry
 immediately from the worktree, run `brigade receipts export evidence --new-only --import`.
-An `indexed` result confirms receipt import even if doctor still warns that the
-installed release differs from the CLI's bundled manifest.
+An `indexed` result confirms receipt import even if doctor warns that the installed
+release differs from the CLI's bundled manifest.
+
+Setup authenticates a release manifest again when it is used with
+`--allow-compatible-stable-manifest` or read from the updater's manifest cache.
+A plain `--manifest` outside that cache is an explicitly chosen file. Setup
+checks its schema and version and uses its asset sizes and digests. Component
+download URLs start on GitHub, with redirects restricted to GitHub asset hosts.
 
 ## Timer migration after release
 
 When the external development timer is migrated, replace its direct pipx script with the thin invocation `brigade update --channel beta`. Disable the old direct-pipx script at the same time. This repository does not modify live timer files.
 
 ## Switching npm packages
+
+`brigade update` is for pipx installations. With npm, use the package you
+installed (`brigadestack` or `@escoffier-labs/brigade`) in the commands below.
+With a refused beta pin, follow the [explicit manifest instructions](#saved-beta-pins-and-unreleased-builds)
+for the setup step.
+
+| Install type | Update and engine repair |
+| --- | --- |
+| Global | `npm install --global <package>@latest`, then `brigade setup` |
+| Project | From the project directory run `npm install <package>@latest`, then `npm exec -- brigade setup` |
+| npx | `npx --package <package>@latest brigade setup` |
 
 `brigadestack` and `@escoffier-labs/brigade` both link a global `brigade` command, so install only one of them. npm stops with `EEXIST` on the second install, which is what `npm install --global brigadestack` does while `@escoffier-labs/brigade` owns the command. `npm update --global @escoffier-labs/brigade` keeps working: the package is a compatibility package that depends on exactly `brigadestack` at the same version. To move to the new name, uninstall the old package first:
 
@@ -149,6 +190,8 @@ To go back, run `npm uninstall --global brigadestack`, then `npm install --globa
 ## Compatibility window
 
 `brigade setup` normally resolves the running CLI's exact `vX.Y.Z` release manifest, never `latest`. Before the first unified release is available, only an absent exact release or manifest can select the bundled standalone manifest. Digest failures, malformed release metadata, manifest parse failures, and component download failures never fall back. `brigade setup --manifest-source standalone` is the explicit one-unified-release compatibility path. Offline setup uses a verified exact-manifest cache when present or that explicit standalone compatibility path.
+
+For version drift and refused beta pins, see [Repair managed engines](#repair-managed-engines).
 
 ## Update notifications
 

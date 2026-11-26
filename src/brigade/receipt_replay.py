@@ -135,13 +135,19 @@ def _refresh_engine_digest(state: dict[str, Any], now: int) -> None:
 
 def skipped_index(target: Path, state: dict[str, Any]) -> dict[str, Any]:
     kind = state.get("kind")
-    if kind == OUTDATED:
-        from .component_install import engine_repair_hint
+    cooling = (
+        kind == "timeout" and 0 < state["retry_after"] - int(time.time()) <= _BACKOFF_SECONDS[state["timeout_step"]]
+    )
+    if kind != OUTDATED and not cooling:
+        return {}
 
+    from .component_install import engine_repair_hint
+
+    repair = engine_repair_hint()
+    if kind == OUTDATED:
         # The original snapshot excludes known and malformed receipts.
         count = sum(1 for _, root, pattern in RECEIPT_SOURCES for _ in (target / root).glob(pattern))
         pending = max(0, state["pending_count"] + count - state["candidate_count"])
-        repair = engine_repair_hint()
         return {
             "status": "paused",
             "reason": kind,
@@ -149,15 +155,14 @@ def skipped_index(target: Path, state: dict[str, Any]) -> dict[str, Any]:
             "repair": repair,
             "message": f"Evidence indexing paused ({pending} receipt(s) pending). {repair} {_MANUAL_RETRY}",
         }
-    if kind == "timeout" and 0 < state["retry_after"] - int(time.time()) <= _BACKOFF_SECONDS[state["timeout_step"]]:
-        return {
-            "status": "backoff",
-            "reason": kind,
-            "pending_count": state["pending_count"],
-            "retry_after": state["retry_after"],
-            "message": f"Evidence indexing cooling down after an import timeout. {_MANUAL_RETRY}",
-        }
-    return {}
+    return {
+        "status": "backoff",
+        "reason": kind,
+        "pending_count": state["pending_count"],
+        "retry_after": state["retry_after"],
+        "repair": repair,
+        "message": f"Evidence indexing cooling down after an import timeout. {repair} {_MANUAL_RETRY}",
+    }
 
 
 def oldest_pending(

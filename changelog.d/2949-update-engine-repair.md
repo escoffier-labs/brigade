@@ -1,0 +1,1 @@
+- Repair missing or mismatched managed engines when update coordinates already match, refuse stale beta engine pins that would break receipt indexing or downgrade verified engines, and report blocked downloads with the URL and HTTP status.

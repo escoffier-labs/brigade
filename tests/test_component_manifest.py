@@ -838,6 +838,17 @@ def test_manifest_rejects_bad_download_urls(tmp_path, download_url):
         component_manifest.load(path)
 
 
+def test_manifest_rejects_https_asset_origin_outside_allowlist(tmp_path):
+    path = _write_manifest(tmp_path)
+    manifest = json.loads(path.read_bytes())
+    first = next(iter(manifest["components"].values()))
+    asset = first["assets"]["linux-amd64"]
+    asset["download_url"] = f"https://example.invalid/{asset['asset_name']}"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="asset host"):
+        component_manifest.load(path)
+
+
 def test_manifest_rejects_wrong_windows_asset_suffix(tmp_path):
     base = json.loads(_write_manifest(tmp_path).read_text())
     base["components"]["miseledger"]["assets"]["windows-amd64"]["asset_name"] = "miseledger-windows-amd64"
