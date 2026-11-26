@@ -871,10 +871,10 @@
         "sha256": "b4d397555e84ac43a44639264d3b1942f06042491fb7dd49fc687abce47ed9fd"
       },
       {
-        "byte_size": 5347,
+        "byte_size": 5288,
         "dst": "skills/note/SKILL.md",
         "rendered": true,
-        "sha256": "457078ef56f4143910ba68729198285e204645d66ababc557e17b80496fe4cb1"
+        "sha256": "d8f0f3df4a53adc10006c4da3fcfe735e4b08e582bf1d6a7a4a3038ada2556da"
       },
       {
         "byte_size": 2364,

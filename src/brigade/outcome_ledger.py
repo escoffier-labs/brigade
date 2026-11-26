@@ -95,19 +95,19 @@ def _reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     return result
 
 
-def parse_ledger(raw: bytes) -> dict[str, Any]:
+def parse_ledger(raw: bytes, *, allow_empty: bool = False) -> dict[str, Any]:
     """Parse ledger bytes and check the shape. Raise ``LedgerError`` naming the first problem."""
     try:
         payload = json.loads(raw.decode("utf-8"), object_pairs_hook=_reject_duplicates)
     except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise LedgerError(f"ledger is not valid JSON: {exc}") from exc
-    errors = shape_errors(payload)
+    errors = shape_errors(payload, allow_empty=allow_empty)
     if errors:
         raise LedgerError("; ".join(errors[:5]))
     return payload  # type: ignore[no-any-return]
 
 
-def shape_errors(payload: object) -> list[str]:
+def shape_errors(payload: object, *, allow_empty: bool = False) -> list[str]:
     if not isinstance(payload, dict):
         return ["ledger must be an object"]
     errors: list[str] = []
@@ -122,7 +122,7 @@ def shape_errors(payload: object) -> list[str]:
     if not isinstance(payload.get("policy"), dict):
         errors.append("policy must be an object")
     subjects = payload.get("subjects")
-    if not isinstance(subjects, dict) or not subjects:
+    if not isinstance(subjects, dict) or (not subjects and not allow_empty):
         errors.append("subjects must be a non-empty object")
         return errors
     for key, subject in subjects.items():
