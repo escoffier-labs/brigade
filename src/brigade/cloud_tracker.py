@@ -984,7 +984,7 @@ def status_payload(
     cursor_wired: bool = False,
     provider_observations: dict[str, ProviderObservation] | None = None,
 ) -> dict[str, Any]:
-    from . import grokbot_jobs
+    from . import codex_cloud_land, grokbot_jobs
 
     observed = now or datetime.now(timezone.utc)
     if observed.tzinfo is None:
@@ -1008,6 +1008,7 @@ def status_payload(
         for entry in registry["entries"]
         if entry.get("provider") in _REGISTRY_PROVIDERS
     ]
+    codex_cloud_land.add_landing_commands(target, entries)
     grokbot_rows = _grokbot_rows(target, github=github, now=observed, stale_ready_hours=stale_ready_hours)
     entries.extend(grokbot_rows)
     known_queue_branches = {
@@ -1255,6 +1256,7 @@ def sync_payload(
             for row in status.get("entries", [])
             if row.get("landing_state") in {"prepared", "branch-pushed"}
         ],
+        "ready_landings": [row for row in status["entries"] if "next_command" in row],
         "active": active[:100],
         "renewed": renewed[:100],
         "released": released[:100],

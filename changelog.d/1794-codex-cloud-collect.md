@@ -1,0 +1,1 @@
+- Collect a finished Codex Cloud task from its registry entry with `brigade run cloud land`, even when the polling worker has exited and no issue number is available. Cloud status and sync print the command for tasks awaiting collection.

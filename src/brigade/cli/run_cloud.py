@@ -82,7 +82,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     p_land.add_argument("--target", type=Path, default=Path("."))
     p_land.add_argument("--provider", required=True, choices=("codex-cloud",))
     p_land.add_argument("--task-id", required=True)
-    p_land.add_argument("--issue", required=True, type=int)
+    p_land.add_argument("--issue", type=int, help="Reference this issue in the pull request.")
     p_land.add_argument("--closes", action="store_true", help="Use Closes #N instead of Refs #N in the PR body.")
     p_land.add_argument("--json", action="store_true")
 
@@ -652,6 +652,8 @@ def dispatch(args) -> int:
             print(
                 f"  landing: task={row.get('task_id')} state={row.get('landing_state')} commit={row.get('landing_commit')}"
             )
+        for row in payload["ready_landings"]:
+            print(f"  ready to collect: {row['next_command']}")
         for row in payload.get("needs_investigation", []):
             print(f"  needs-investigation: task={row.get('task_id')} label={row.get('label')}")
         for row in payload.get("needs_you", []):
@@ -698,6 +700,8 @@ def dispatch(args) -> int:
                 f"  - [{row.get('classification')}] {row.get('label')} "
                 f"provider={row.get('provider')} task={row.get('task_id')} branch={row.get('branch')}{extra}"
             )
+            if row.get("next_command"):
+                print(f"    ready to collect: {row['next_command']}")
         return 0
 
     if command == "sweep":

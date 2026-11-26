@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, cloud_tracker, codex_cloud, codex_cloud_land, proc
+from brigade import cli, cloud_tracker, codex_cloud, codex_cloud_land, fleet_client, proc
 from tests._home import set_home
 
 
@@ -91,6 +91,7 @@ def landing(tmp_path, monkeypatch):
         "pushes": [],
         "pr_creates": [],
         "prs": [],
+        "expected_issue": 2473,
     }
 
     def probe_transport(argv, kwargs):
@@ -203,7 +204,11 @@ def landing(tmp_path, monkeypatch):
         if argv[:3] == ["gh", "pr", "create"]:
             state["pr_creates"].append(list(argv))
             body = Path(argv[argv.index("--body-file") + 1]).read_text()
-            assert "task_example" in body and "#2473" in body
+            assert "task_example" in body
+            if state["expected_issue"] is not None:
+                assert f"#{state['expected_issue']}" in body
+            else:
+                assert not re.search(r"(?m)^(Refs|Closes) #", body)
             state["body"] = body
             state["title"] = argv[argv.index("--title") + 1]
             if state["failure"] == "pr":
@@ -246,6 +251,35 @@ def test_land_isolated_and_registered(landing):
     assert codex_cloud_land.land(caller, "task_example", 2473) == result
     assert len(calls) == count
     assert not any("merge" in argv for argv, _ in calls)
+
+
+@pytest.mark.parametrize(("surface", "provider_state"), [("status", "ready"), ("sync", "finished")])
+def test_collect_ready_task_from_registry(landing, monkeypatch, capsys, surface, provider_state):
+    caller, state, calls = landing
+    state["expected_issue"] = None
+    observations = {
+        "codex-cloud": cloud_tracker.ProviderObservation(
+            True, True, None, {"task_example": {"state": provider_state}}, complete=True
+        ),
+        "cursor-cloud": cloud_tracker.ProviderObservation(False, False, None, {}),
+    }
+    monkeypatch.setattr(cloud_tracker, "observe_provider_details", lambda _: (observations, {}))
+    monkeypatch.setattr(codex_cloud, "reconcile_launches", lambda _: [])
+    monkeypatch.setattr(fleet_client, "fetch_cloud", lambda: {"leases": []})
+    argv = ["run", "cloud", surface, "--target", str(caller)]
+    assert cli.main([*argv, "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    row = payload["entries" if surface == "status" else "ready_landings"][0]
+    command = row["next_command"]
+    assert cli.main(argv) == 0
+    assert command in capsys.readouterr().out
+    assert cli.main(shlex.split(command)[1:]) == 0
+    assert "pull/123" in capsys.readouterr().out
+    assert state["body"].startswith("Codex Cloud task task_example.")
+    assert re.fullmatch(r"codex/task-[a-f0-9]{12}", cloud_tracker.load_registry(caller)["entries"][0]["branch"])
+    assert any(argv[:5] == ["codex", "cloud", "diff", "--attempt", "1"] for argv, _ in calls)
+    assert cli.main([*argv, "--json"]) == 0
+    assert "next_command" not in capsys.readouterr().out
 
 
 @pytest.mark.parametrize(
@@ -595,6 +629,13 @@ def test_r1_closes_issue(landing):
     caller, state, _ = landing
     codex_cloud_land.land(caller, "task_example", 2473, closes=True)
     assert "Closes #2473" in state["body"]
+
+
+def test_closes_without_issue_is_refused(landing):
+    caller, _, calls = landing
+    with pytest.raises(codex_cloud_land.LandError, match="closes-requires-issue"):
+        codex_cloud_land.land(caller, "task_example", closes=True)
+    assert not calls
 
 
 def test_r1_git_environment_and_absolute_tools(landing, monkeypatch):
@@ -2028,7 +2069,7 @@ def test_r4_expired_workspace_resumes_pr_creation(landing):
     caller, state, calls = landing
     entry = _expire_private_workspace(caller, state)
     calls.clear()
-    result = codex_cloud_land.land(caller, "task_example", 2473)
+    result = codex_cloud_land.land(caller, "task_example")
     assert result == {
         "task_id": "task_example",
         "branch": entry["landing_branch"],
@@ -2039,6 +2080,7 @@ def test_r4_expired_workspace_resumes_pr_creation(landing):
     assert final["landing_commit"] == entry["landing_commit"]
     assert final["landing_tree"] == entry["landing_tree"]
     assert final["landing_workspace"] is None
+    assert state["body"].startswith("Refs #2473.")
     assert not any(argv[:3] == ["codex", "cloud", "diff"] for argv, _ in calls)
     assert not any(argv[:2] == ["git", "push"] for argv, _ in calls)
     assert sum(argv[:3] == ["gh", "pr", "create"] for argv, _ in calls) == 1
