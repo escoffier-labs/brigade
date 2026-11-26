@@ -585,12 +585,12 @@ def dispatch(args) -> int:
         if args.codex_leases_only:
             from .. import codex_cloud
 
-            counts = codex_cloud.sync_leases(target)
+            sync_result = codex_cloud.sync_leases(target)
             if args.json:
-                print(json.dumps(counts, sort_keys=True))
+                print(json.dumps(sync_result, sort_keys=True))
             else:
-                print("Codex Cloud leases " + " ".join(f"{name}={value}" for name, value in counts.items()))
-            return int(bool(counts["errors"]))
+                print("Codex Cloud leases " + " ".join(f"{name}={value}" for name, value in sync_result.items()))
+            return int(bool(sync_result["errors"]))
 
         from .. import fleet_client
 

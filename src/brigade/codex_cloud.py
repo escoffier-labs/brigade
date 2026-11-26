@@ -21,11 +21,12 @@ from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, NotRequired, TypedDict
 from urllib.parse import quote
 from uuid import uuid4
 
 from . import bug_io, cloud_tracker, dirfd, fleet_client, localio, proc
+from .inbox_lock import InboxLockTimeout, held_file_lock
 from .isolated_exec import trusted_cwd
 
 SUBMIT_TIMEOUT = 120.0
@@ -35,6 +36,7 @@ POLL_INTERVAL = 15.0
 DIFF_CAP = 20_000
 DEFAULT_MAX_ITEMS = 250
 DEFAULT_LIST_TIMEOUT = 10.0
+LEASE_SYNC_BUDGET_SECONDS = 105.0
 MAX_LIST_PAGES = 20
 MAX_LIST_LIMIT = 20
 CONFIGURED_SELECTOR = "configured"
@@ -591,9 +593,17 @@ def _verified_status(text: str) -> str | None:
     return token if token in TERMINAL_FAIL + TERMINAL_OK + NONTERMINAL else None
 
 
-def sync_leases(target: Path) -> dict[str, int]:
+class LeaseSyncResult(TypedDict):
+    renewed: int
+    released: int
+    errors: int
+    skipped: int
+    reason: NotRequired[str]
+
+
+def sync_leases(target: Path) -> LeaseSyncResult:
     """Renew or release live Codex leases held by this workspace."""
-    counts = {"renewed": 0, "released": 0, "errors": 0}
+    counts: LeaseSyncResult = {"renewed": 0, "released": 0, "errors": 0, "skipped": 0}
     holders = {
         entry["task_id"]: entry["lease_holder"]
         for entry in cloud_tracker.load_registry(target)["entries"]
@@ -604,20 +614,45 @@ def sync_leases(target: Path) -> dict[str, int]:
     }
     if not holders:
         return counts
+    lock_path = cloud_tracker.registry_path(target).with_name("codex-sync.lock")
     try:
-        leases = fleet_client.fetch_cloud()["leases"]
+        with held_file_lock(lock_path, deadline_seconds=0):
+            return _sync_locked_leases(holders, counts)
+    except InboxLockTimeout:
+        counts["skipped"] = 1
+        counts["reason"] = "already-running"
+    except OSError:
+        counts["errors"] += 1
+        counts["reason"] = "lock-unavailable"
+    return counts
+
+
+def _sync_budget_exceeded(counts: LeaseSyncResult) -> LeaseSyncResult:
+    counts["errors"] += 1
+    counts["reason"] = "budget-exceeded"
+    return counts
+
+
+def _sync_locked_leases(holders: dict[str, str], counts: LeaseSyncResult) -> LeaseSyncResult:
+    node_id = fleet_client.resolve_node_id()
+    if not fleet_client._node_id_is_claimable(node_id):  # noqa: SLF001 - use the same identity rule as cloud mutations
+        counts["errors"] += 1
+        counts["reason"] = "no-identity"
+        return counts
+    deadline = time.monotonic() + LEASE_SYNC_BUDGET_SECONDS
+    try:
+        codex_leases = [lease for lease in fleet_client.fetch_cloud()["leases"] if lease.get("provider") == "codex"]
     except fleet_client.FleetClientError:
         counts["errors"] += 1
         return counts
-    node_id = fleet_client.resolve_node_id()
+    leases = [lease for lease in codex_leases if lease.get("owner_node") == node_id]
+    if codex_leases and not leases:
+        counts["skipped"] = len(codex_leases)
+        counts["reason"] = "no-matching-node"
+        return counts
+    terminal: list[tuple[str, str, str]] = []
     for lease in leases:
-        if (
-            lease.get("provider") != "codex"
-            or lease.get("owner_node") != node_id
-            or lease.get("state") != "bound"
-            or lease.get("released_at") is not None
-            or lease.get("expired")
-        ):
+        if lease.get("state") != "bound" or lease.get("released_at") is not None or lease.get("expired"):
             continue
         task_id = lease.get("provider_task_id")
         lease_id = lease.get("lease_id")
@@ -632,25 +667,50 @@ def sync_leases(target: Path) -> dict[str, int]:
             or expires_at.timestamp() <= time.time()
         ):
             continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _sync_budget_exceeded(counts)
         try:
-            result = proc.run(["codex", "cloud", "status", task_id], timeout=DEFAULT_LIST_TIMEOUT, cwd=trusted_cwd())
+            result = proc.run(
+                ["codex", "cloud", "status", task_id], timeout=min(DEFAULT_LIST_TIMEOUT, remaining), cwd=trusted_cwd()
+            )
         except OSError:
+            result = None
+        if time.monotonic() >= deadline:
+            return _sync_budget_exceeded(counts)
+        if (
+            result is None
+            or result.code != 0
+            or result.timed_out
+            or _AUTH_FAILURE_RE.search(result.stdout + "\n" + result.stderr)
+        ):
             counts["errors"] += 1
             continue
-        state = _verified_status(result.stdout + "\n" + result.stderr)
-        if result.timed_out or result.code == 124:
+        state = _verified_status(result.stdout)
+        if state is None:
             counts["errors"] += 1
-        elif state is not None and state in TERMINAL_OK + TERMINAL_FAIL:
-            decision = fleet_client.release_cloud(lease_id, state=state, holder=holders[task_id], node_id=node_id)
-            counts["released" if decision.granted else "errors"] += 1
-        elif state in NONTERMINAL and result.code == 0:
+        elif state in TERMINAL_OK + TERMINAL_FAIL:
+            terminal.append((lease_id, state, holders[task_id]))
+        else:
             # The probe may outlast the lease. The hub also checks expiry
             # atomically with renewal to close the remaining race.
             if expires_at.timestamp() > time.time():
                 decision = fleet_client.renew_cloud(
                     lease_id, ttl_seconds=fleet_client.CLOUD_BOUND_TTL_SECONDS, holder=holders[task_id], node_id=node_id
                 )
-                counts["renewed" if decision.granted else "errors"] += 1
+                if decision.granted:
+                    counts["renewed"] += 1
+                else:
+                    counts["errors"] += 1
+
+    # A scan that runs out of time leaves capacity fenced. Apply the
+    # terminal observations only after the probe loop finishes in budget.
+    for lease_id, state, holder in terminal:
+        if time.monotonic() >= deadline:
+            return _sync_budget_exceeded(counts)
+        decision = fleet_client.release_cloud(lease_id, state=state, holder=holder, node_id=node_id)
+        if decision.granted:
+            counts["released"] += 1
         else:
             counts["errors"] += 1
     return counts
