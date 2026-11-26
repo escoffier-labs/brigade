@@ -1,5 +1,6 @@
 """Codex observation budgets keep registered tasks visible in work briefs."""
 
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -14,7 +15,7 @@ NOW = datetime(2026, 8, 12, 20, tzinfo=timezone.utc)
 @pytest.fixture
 def isolated_providers(monkeypatch):
     empty = cloud_tracker.ProviderObservation(False, False, "unconfigured", {})
-    monkeypatch.setattr(cloud_tracker, "_cursor_cloud_observation", lambda target: empty)
+    monkeypatch.setattr(cloud_tracker, "_cursor_cloud_observation", lambda target, **kwargs: empty)
     monkeypatch.setattr(cloud_tracker, "observe_github", lambda target, **_kwargs: {"branches": [], "prs": []})
 
 
@@ -36,11 +37,10 @@ def test_brief_limits_inventory_and_checks_only_missing_registered_tasks(monkeyp
     limits = []
     status_ids = []
 
-    def list_tasks(
-        *, cwd, max_items=codex_cloud.DEFAULT_MAX_ITEMS, max_pages=codex_cloud.MAX_LIST_PAGES, command_timeout=None
-    ):
+    def list_tasks(*, cwd, max_items, max_pages, deadline, **kwargs):
         assert cwd == tmp_path
-        limits.append((max_items, max_pages, command_timeout))
+        limits.append((max_items, max_pages))
+        assert 0 < deadline - time.monotonic() <= cloud_codex_probes.BRIEF_CODEX_BUDGET_SECONDS
         return codex_cloud.ListTasksResult([{"id": "task_present", "state": "running"}])
 
     def run_text(command, *, cwd, timeout=30.0):
@@ -55,7 +55,7 @@ def test_brief_limits_inventory_and_checks_only_missing_registered_tasks(monkeyp
     result = cloud_tracker.stale_entries_for_brief(tmp_path, now=NOW)
 
     assert "error" not in result
-    assert limits == [(codex_cloud.MAX_LIST_LIMIT, 1, cloud_codex_probes.BRIEF_CODEX_BUDGET_SECONDS)]
+    assert limits == [(codex_cloud.MAX_LIST_LIMIT, 1)]
     assert status_ids == ["task_missing"]
 
 
@@ -170,7 +170,7 @@ def test_brief_inventory_and_probes_share_one_deadline(monkeypatch, tmp_path):
     list_timeouts: list[float] = []
 
     def slow_list(**kwargs):
-        list_timeouts.append(kwargs["command_timeout"])
+        list_timeouts.append(kwargs["deadline"] - clock[0])
         clock[0] += budget / 3
         return codex_cloud.ListTasksResult([])
 
@@ -208,10 +208,9 @@ def test_default_observation_keeps_full_inventory(monkeypatch, tmp_path, isolate
     _register(tmp_path, "task_outside_inventory")
     limits = []
 
-    def list_tasks(
-        *, cwd, max_items=codex_cloud.DEFAULT_MAX_ITEMS, max_pages=codex_cloud.MAX_LIST_PAGES, command_timeout=None
-    ):
-        limits.append((max_items, max_pages, command_timeout))
+    def list_tasks(*, cwd, max_items, max_pages, deadline, **kwargs):
+        assert deadline > time.monotonic()
+        limits.append((max_items, max_pages))
         return codex_cloud.ListTasksResult([{"id": "task_inventory", "state": "running"}])
 
     def unexpected_status(*a, **k):
@@ -227,5 +226,19 @@ def test_default_observation_keeps_full_inventory(monkeypatch, tmp_path, isolate
     else:
         tasks, _, _ = cloud_tracker.observe_providers(tmp_path, ignored_legacy_option=True)
 
-    assert limits == [(codex_cloud.DEFAULT_MAX_ITEMS, codex_cloud.MAX_LIST_PAGES, codex_cloud.DEFAULT_LIST_TIMEOUT)]
+    assert limits == [(None, None)]
     assert tasks == {"task_inventory": {"state": "running", "ready_at": None}}
+
+
+def test_brief_passes_a_cursor_budget_within_the_section_deadline(tmp_path, monkeypatch):
+    budgets = []
+
+    def observe(target, **kwargs):
+        budgets.append(kwargs.get("cursor_budget_seconds"))
+        return {}, {}, False
+
+    monkeypatch.setattr(cloud_tracker, "observe_providers", observe)
+    result = cloud_tracker.stale_entries_for_brief(tmp_path, now=NOW)
+    assert "error" not in result
+    (budget,) = budgets
+    assert budget is not None and 0 < budget < 5

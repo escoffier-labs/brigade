@@ -3296,3 +3296,38 @@ def test_late_match_reuses_lease_when_clean_failure_release_was_unconfirmed(laun
     assert len(calls["admit"]) == len(calls["release"]) == len(calls["bind"]) == 1
     assert calls["bind"][0]["args"] == ("lease-1",)
     assert calls["bind"][0]["kwargs"]["holder"] == "h1"
+
+
+def test_unlimited_inventory_preserves_completed_pages_on_timeout(monkeypatch):
+    import time
+
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        calls.append(argv)
+        page = len(calls)
+        if page == 15:
+            return _result(code=124, stderr="timeout")
+        tasks = [{"id": f"task_page{page}item{i}", "status": "RUNNING"} for i in range(20)]
+        return _result(stdout=json.dumps({"tasks": tasks, "cursor": str(page)}))
+
+    monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
+    result = codex_cloud.list_tasks(max_items=None, max_pages=None, deadline=time.monotonic() + 10)
+    assert len(result.tasks) == 280
+    assert not result.ok
+    assert not result.complete
+    assert "14" in calls[-1]
+
+
+@pytest.mark.parametrize("ok", [False, True])
+def test_canary_leaves_environment_unknown_for_incomplete_inventory(tmp_path, monkeypatch, ok):
+    partial = codex_cloud.ListTasksResult(
+        [{"id": "task_example", "environment_id": "env-other"}],
+        ok=ok,
+        reason=None if ok else "provider-timeout",
+        complete=False,
+    )
+    monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: partial)
+    report = codex_cloud.canary(tmp_path, selector="env-fixture")
+    assert report["ok"] is ok
+    assert report["environment_seen"] == "unknown"

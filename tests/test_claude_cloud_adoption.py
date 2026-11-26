@@ -109,7 +109,7 @@ def test_observer_never_marks_malformed_or_truncated_branch_read_complete(tmp_pa
         if argv[:3] == ["gh", "repo", "view"]:
             return (0, json.dumps({"nameWithOwner": REPO}), "")
         if argv[:2] == ["gh", "api"]:
-            return (0, body, "")
+            return (1, "", "") if "&page=" in argv[-1] else (0, body, "")
         return (0, "[]" if argv[0] == "gh" else "", "")
 
     monkeypatch.setattr(cloud_tracker, "_run_text", read)
@@ -148,18 +148,21 @@ def test_observer_retains_explicit_refs_and_scopes_branch_evidence(tmp_path, mon
     def read(argv, **kwargs):
         if argv[:3] == ["gh", "repo", "view"]:
             return (0, json.dumps({"nameWithOwner": observed_repo}), "")
-        if argv[:2] == ["gh", "api"]:
+        if argv[:2] == ["gh", "api"] and "/branches?" in argv[-1]:
             return (0, json.dumps([{"name": branch}]), "")
-        if argv[:3] == ["gh", "pr", "list"]:
+        if argv[:2] == ["gh", "api"] and "pulls?state=open" in argv[-1]:
+            return (0, "[]", "")
+        if argv[:2] == ["gh", "api"] and "pulls?state=closed" in argv[-1]:
             return (
                 0,
                 json.dumps(
                     [
                         {
-                            "headRefName": branch,
-                            "state": "MERGED",
+                            "head": {"ref": branch},
+                            "state": "closed",
+                            "merged_at": "2026-08-12T20:00:00Z",
                             "number": 12,
-                            "url": f"https://github.com/{observed_repo or 'fixture-owner/other'}/pull/12",
+                            "html_url": f"https://github.com/{observed_repo or 'fixture-owner/other'}/pull/12",
                         }
                     ]
                 ),
