@@ -535,6 +535,31 @@ def test_coordinator_renders_single_marks_outside_task_loop(coordinator_brief):
     assert "Substitute the waking task ID for TASK" in brief
 
 
+def test_coordinator_resumes_from_saved_outputs_and_marks_before_finalize(coordinator_brief):
+    launch, wake = coordinator_brief.split("## Each completion wake", 1)
+    launch_rule = " ".join(launch.split())
+    wake_rule = " ".join(wake.split())
+
+    assert "continue at the first unfinished sub-step for each task" in launch_rule
+    assert "Never re-run a sub-step whose output file exists" in launch_rule
+    for filename in (
+        "claim-TASK.json",
+        "delegate-TASK.json",
+        "delegate-reply-TASK.json",
+        "accepted-TASK.json",
+        "opened.json",
+        "delegate-start.json",
+        "delegate-replies.json",
+        "wake-TASK.json",
+    ):
+        assert filename in launch_rule
+    assert "continue at the first unfinished sub-step for each task" in wake_rule
+    assert "skip the wake mark if wake-TASK.json already exists" in wake_rule
+    assert "Never finalize before delegate-replies.json exists" in wake_rule
+    assert "Mark launch complete before finalizing" in launch_rule
+    assert coordinator_brief.index(" delegate-replies\n") < coordinator_brief.index(" > finalize.json")
+
+
 def test_collect_row_binds_directory_and_explicit_route(tmp_path, monkeypatch):
     from brigade import localio, run_batch
 

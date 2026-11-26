@@ -55,21 +55,38 @@ and let the operator handle worker approvals.
 
           $accepted TASK --native-json delegate-TASK.json > accepted-TASK.json
 
-5. After recording all acceptances, mark launch complete once. If all tasks
-   are already acknowledged, finalize using step 4 below. Otherwise end the
-   turn and wait for the remaining wakes.
+5. After recording all acceptances, mark launch complete if
+   delegate-replies.json is missing.
 
        $mark delegate-replies
+
+   Mark launch complete before finalizing, even if all tasks are already
+   acknowledged. Once delegate-replies.json exists, finalize using the
+   commands in the wake section if all tasks are acknowledged. Otherwise
+   end the turn and wait for the remaining wakes.
+
+### Resume launch
+
+On resuming, continue at the first unfinished sub-step for each task. A
+sub-step is finished when its output file exists. Check claim-TASK.json,
+delegate-TASK.json, delegate-reply-TASK.json, and accepted-TASK.json in
+that order. Never re-run a sub-step whose output file exists. Apply the
+same rule to single marks. Skip a mark only when its own file already
+exists. Check opened.json for opened, delegate-start.json for delegate-start,
+delegate-replies.json for delegate-replies, and wake-TASK.json for wake-TASK.
 
 ## Each completion wake
 
 Wakes can arrive while the launch turn is still running. Handle each wake
 after saving that task's delegate reply and its per-task reply mark, even
-when other tasks have yet to launch.
+when other tasks have yet to launch. When returning to launch, continue
+at the first unfinished sub-step for each task. Use the saved output files
+to skip completed sub-steps and marks as described in the launch section.
 
 1. Check the waking task ID against its saved delegate reply. If it was already
    acknowledged, check the task and run IDs. Resume launch if needed or end
-   the turn. For a new wake, record its clock mark immediately.
+   the turn. For a new wake, skip the wake mark if wake-TASK.json already
+   exists. Otherwise record the mark immediately.
    Substitute the waking task ID for TASK and run:
 
        $mark wake-TASK
@@ -89,10 +106,12 @@ when other tasks have yet to launch.
        $observe TASK --native-json status-TASK.json > observe-TASK.json
        $ack TASK --result-id RESULT_ID > ack-TASK.json
 
-4. If the launch-complete mark is still due, resume at the next unfinished
-   launch step. Once launch is complete, end the turn if any acknowledgements
-   are outstanding. When all three tasks are acknowledged, finalize, check
-   the completed status, then run the independent evidence check. The finish command writes measurements.json atomically.
+4. Never finalize before delegate-replies.json exists. If it is missing,
+   resume launch and complete the launch mark in step 5. Once that file
+   exists, end the turn if any acknowledgements are outstanding. When all
+   three tasks are acknowledged, finalize, check the completed status, then
+   run the independent evidence check. The finish command writes
+   measurements.json atomically.
 
        $finalize > finalize.json
        $finish
