@@ -309,9 +309,13 @@ tracked script helpers must match the base. The runner uses the coordinator's
 Python and tools through Linux bubblewrap. It requires working user, mount,
 PID, and network namespaces. The sandbox mounts the toolchain read-only and
 allows writes to the candidate checkout and private temp directory. It has a
-fresh home. The coordinator's run directories, store, and credentials stay
-outside the sandbox. The PID namespace contains subprocesses through timeout
-and cleanup, including children that start a new session.
+fresh home. The Python and base-interpreter mounts are limited to `bin/` or
+`Scripts/`, `lib/`, `lib32/`, `lib64/`, `libx32/`, and `pyvenv.cfg`, along
+with standard system binaries and libraries. The sandbox masks
+`pipx_metadata.json` and `direct_url.json` anywhere in the mounted paths.
+The coordinator's run directories, store, and credentials stay outside the
+sandbox. The PID namespace contains subprocesses through timeout and cleanup,
+including children that start a new session.
 
 Install the runner and its dependencies in the coordinator environment.
 Python gets the candidate's `src/` directory, when present, and checkout root

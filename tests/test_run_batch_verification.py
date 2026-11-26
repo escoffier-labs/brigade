@@ -5,6 +5,7 @@ import secrets
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -372,6 +373,62 @@ def linux_sandbox():
 
     if run_batch_verify_sandbox.bwrap() is None:
         pytest.skip("Linux bubblewrap namespaces are unavailable")
+
+
+def test_sandbox_hides_installer_metadata_and_runs_fake_venv(linux_sandbox, tmp_path, monkeypatch):
+    from brigade import run_batch_verify_sandbox
+
+    binary = run_batch_verify_sandbox.bwrap()
+    assert binary is not None
+    scratch = tmp_path / "runs" / "task" / "scratch"
+    checkout = scratch / "candidate"
+    (checkout / ".git").mkdir(parents=True)
+    env = run_batch_verify_tree.command_environment(scratch, run_batch_verify_tree.git_environment())
+    # Bubblewrap gives /tmp its own mount. Put the fake tool prefix outside it.
+    base = Path(__file__).resolve().parents[1] / ".brigade"
+    with tempfile.TemporaryDirectory(prefix="toolchain-fixture-", dir=base) as directory:
+        prefix = Path(directory)
+        subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(prefix)], check=True)
+        python = prefix / "bin" / "python"
+        packages = prefix / "lib" / f"python{sys.version_info.major}.{sys.version_info.minor}" / "site-packages"
+        info = packages / "sandbox_fixture-1.0.dist-info"
+        info.mkdir()
+        (packages / "sandbox_fixture.py").write_text("value = 42\n", encoding="utf-8")
+        metadata = [
+            prefix / "pipx_metadata.json",
+            packages / "pipx_metadata.json",
+            info / "direct_url.json",
+            prefix / "prefix-only.txt",
+        ]
+        for path in metadata:
+            path.write_text("private fixture value\n", encoding="utf-8")
+        unrelated = tmp_path / "unrelated"
+        unrelated.mkdir()
+        (unrelated / "private.txt").write_text("private fixture value\n", encoding="utf-8")
+        (prefix / "Scripts").symlink_to(unrelated, target_is_directory=True)
+        metadata.append(prefix / "Scripts" / "private.txt")
+        monkeypatch.setattr(sys, "prefix", str(prefix))
+        monkeypatch.setattr(sys, "exec_prefix", str(prefix))
+
+        sandbox = run_batch_verify_sandbox.prepare(binary, checkout, env)
+        assert sandbox is not None
+        # lib64 can be a second mount of the same site-packages on Linux.
+        if (prefix / "lib64").is_dir():
+            metadata.append(prefix / "lib64" / metadata[2].relative_to(prefix / "lib"))
+        probe = (
+            "import json, sys, sandbox_fixture\n"
+            "from pathlib import Path\n"
+            "assert sandbox_fixture.value == 42\n"
+            "for name in json.loads(sys.argv[1]):\n"
+            "    try:\n"
+            "        Path(name).read_bytes()\n"
+            "    except (FileNotFoundError, PermissionError):\n"
+            "        continue\n"
+            "    raise AssertionError('installer metadata is readable')\n"
+        )
+        command = sandbox.command([str(python), "-P", "-s", "-c", probe, json.dumps([str(p) for p in metadata])])
+        result = subprocess.run(command, capture_output=True, text=True, timeout=20, check=False)
+        assert result.returncode == 0, result.stderr
 
 
 def test_sandbox_hides_coordinator_files_and_network(setup, configured_repo, linux_sandbox, capsys, monkeypatch):

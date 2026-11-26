@@ -37,6 +37,9 @@ _SYSTEM_MOUNTS = (
     "/usr/share/git-core",
     "/etc/ld.so.cache",
 )
+_PYTHON_RUNTIME_DIRS = ("bin", "Scripts", "lib", "lib32", "lib64", "libx32")
+_PYTHON_RUNTIME_FILES = ("pyvenv.cfg",)
+_PRIVATE_TOOL_METADATA = frozenset({"pipx_metadata.json", "direct_url.json"})
 
 # The trusted startup hook loads the verification entry points before exposing
 # candidate imports. A candidate package named pytest cannot replace the tool.
@@ -90,9 +93,10 @@ def bwrap() -> str | None:
     binary = shutil.which("bwrap", path=os.defpath) if sys.platform == "linux" else None
     if binary is None:
         return None
-    argv = [binary, *_FLAGS, "--ro-bind", "/usr", "/usr", "--ro-bind", "/lib", "/lib"]
-    if Path("/lib64").exists():
-        argv += ["--ro-bind", "/lib64", "/lib64"]
+    argv = [binary, *_FLAGS]
+    for path in _SYSTEM_MOUNTS:
+        if Path(path).exists():
+            argv += ["--ro-bind", path, path]
     return binary if _probe([*argv, "--", "/usr/bin/true"]) == 0 else None
 
 
@@ -150,6 +154,47 @@ class Sandbox:
         return _probe(self.command([sys.executable, "-P", "-s", "-c", _IMPORT_PROBE, json.dumps(packages)]))
 
 
+def _toolchain_mounts() -> list[tuple[Path, Path]]:
+    """Mount runtime paths at their original locations for absolute shebangs."""
+    prefixes = {Path(path) for path in (sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix)}
+    prefix_roots = {prefix.resolve() for prefix in prefixes}
+    system_paths = {Path(path) for path in _SYSTEM_MOUNTS if Path(path).exists()}
+    allowed = {path.resolve() for path in system_paths}
+    allowed.update(root / name for root in prefix_roots for name in (*_PYTHON_RUNTIME_DIRS, *_PYTHON_RUNTIME_FILES))
+    paths = set(system_paths)
+    for prefix in prefixes:
+        paths.update(prefix / name for name in _PYTHON_RUNTIME_DIRS if (prefix / name).is_dir())
+        paths.update(prefix / name for name in _PYTHON_RUNTIME_FILES if (prefix / name).is_file())
+    mounts = [(path.resolve(), path) for path in sorted(paths)]
+    # An overlapping system or base mount must not re-expose an entire prefix.
+    return [
+        (source, target)
+        for source, target in mounts
+        if source in allowed and not any(p.is_relative_to(source) for p in prefix_roots)
+    ]
+
+
+def _raise_walk_error(error: OSError) -> None:
+    raise error
+
+
+def _metadata_masks(mounts: list[tuple[Path, Path]]) -> list[Path]:
+    """Find private installer metadata, including aliases such as venv lib64."""
+    metadata = {source for source, _ in mounts if source.name in _PRIVATE_TOOL_METADATA}
+    for source in {source for source, _ in mounts if source.is_dir()}:
+        for root, _, files in os.walk(source, onerror=_raise_walk_error):
+            for name in _PRIVATE_TOOL_METADATA.intersection(files):
+                metadata.add((Path(root) / name).resolve(strict=True))
+    return sorted(
+        {
+            target / path.relative_to(source)
+            for source, target in mounts
+            for path in metadata
+            if path.is_relative_to(source)
+        }
+    )
+
+
 def prepare(binary: str, checkout: Path, env: dict[str, str]) -> Sandbox | None:
     """Expose just the verifier's toolchain alongside a writable checkout and scratch."""
     checkout = checkout.resolve()
@@ -165,16 +210,18 @@ def prepare(binary: str, checkout: Path, env: dict[str, str]) -> Sandbox | None:
     for key in ("BRIGADE_HOME", "BRIGADE_STORE", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"):
         if os.environ.get(key):
             protected.append(Path(os.environ[key]).expanduser().resolve())
-    # Keep absolute venv shebangs working without exposing any enclosing directory.
-    prefixes = {sys.prefix, sys.base_prefix, sys.exec_prefix, sys.base_exec_prefix} - {"/usr", "/usr/local"}
+    mounts = _toolchain_mounts()
     args = [binary, *_FLAGS, "--clearenv"]
-    for path in sorted(prefixes | set(_SYSTEM_MOUNTS)):
-        prefix = Path(path).resolve()
-        if path not in prefixes and not prefix.exists():
-            continue
-        if home.is_relative_to(prefix) or any(prefix.is_relative_to(p) or p.is_relative_to(prefix) for p in protected):
+    for source, target in mounts:
+        if home.is_relative_to(source) or any(source.is_relative_to(p) or p.is_relative_to(source) for p in protected):
             return None
-        args += ["--ro-bind", str(prefix), path]
+        args += ["--ro-bind", str(source), str(target)]
+    metadata = _metadata_masks(mounts)
+    if metadata:
+        mask = bootstrap / "private-metadata"
+        mask.touch(mode=0)
+        for path in metadata:
+            args += ["--ro-bind", str(mask), str(path)]
     args += [
         "--proc",
         "/proc",
