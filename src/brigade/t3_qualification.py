@@ -56,13 +56,15 @@ def schedule() -> list[tuple[int, str]]:
     return [(pair, arm) for pair in range(1, 6) for arm in (ARMS if pair % 2 else ARMS[::-1])]
 
 
-def envelope(base_sha: str, brigade_commit: str, workload_digest: str) -> dict[str, Any]:
+def envelope(
+    base_sha: str, brigade_commit: str, workload_digest: str, worker_effort: str = evidence.DEFAULT_WORKER_EFFORT
+) -> dict[str, Any]:
     return {
         "base_sha": base_sha,
         "brigade_commit": brigade_commit,
         "workload_digest": workload_digest,
         "model": evidence.MODEL,
-        "effort": evidence.EFFORT,
+        "effort": worker_effort,
         "service_tier": evidence.TIER,
         "isolation": "worktree",
         "max_workers": evidence.SLOTS,
@@ -80,7 +82,9 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
     for key, size in (("base_sha", 40), ("brigade_commit", 40), ("workload_digest", 64)):
         require(re.fullmatch(rf"[0-9a-f]{{{size}}}", expected[key]), "invalid qualification envelope identity")
     require(
-        expected == envelope(expected["base_sha"], expected["brigade_commit"], expected["workload_digest"]),
+        expected["effort"] in evidence.WORKER_EFFORTS
+        and expected
+        == envelope(expected["base_sha"], expected["brigade_commit"], expected["workload_digest"], expected["effort"]),
         "invalid qualification envelope",
     )
     previous_close = -1
@@ -188,7 +192,7 @@ def prepare_batch(workspace: Path, base: str, seat: str, request_id: str) -> tup
     return {"schema": run_batch.SCHEMA, "request_id": request_id, "tasks": tasks}, answers
 
 
-def _preflight(workspace: Path, roster_path: Path, seat: str, base: str) -> NativeTarget:
+def _preflight(workspace: Path, roster_path: Path, seat: str, base: str, worker_effort: str) -> NativeTarget:
     require = evidence.require
     require(evidence.clean_revision(workspace) == base, "workload checkout changed since the campaign began")
     evidence.check_native_idle(workspace)
@@ -202,6 +206,10 @@ def _preflight(workspace: Path, roster_path: Path, seat: str, base: str) -> Nati
     options = dict(target.options)
     max_live = loaded.t3_targets[seat].get("max_live", evidence.SLOTS)
     require(
+        agent.reasoning == options.get("reasoningEffort") == worker_effort,
+        f"worker roster seat and T3 target must both use {worker_effort} effort",
+    )
+    require(
         loaded.max_workers == evidence.SLOTS
         and seat != loaded.orchestrator
         and agent.cli == "codex"
@@ -210,7 +218,6 @@ def _preflight(workspace: Path, roster_path: Path, seat: str, base: str) -> Nati
         and agent.env is None
         and not agent.fallback
         and agent.model == target.launch_model == evidence.MODEL
-        and agent.reasoning == options.get("reasoningEffort") == evidence.EFFORT
         and options.get("serviceTier") == evidence.TIER
         and target.driver == "codex"
         and target.target_environment == target.origin_environment
@@ -335,7 +342,7 @@ def run(args: argparse.Namespace) -> None:
     evidence.require(
         re.fullmatch(r"[0-9a-f]{40}", args.brigade_commit), "expected the executable's 40-character commit"
     )
-    target = _preflight(workspace, roster_path, args.seat, base)
+    target = _preflight(workspace, roster_path, args.seat, base, args.worker_effort)
     runs = native_t3_capacity.runs_root(workspace)
     lock_dir = runs.parent
     lock_dir.mkdir(parents=True, exist_ok=True)
@@ -361,11 +368,13 @@ def _run_campaign(
         "base_sha": base,
         "brigade_commit": args.brigade_commit,
         "seat": args.seat,
+        "worker_effort": args.worker_effort,
     }
     localio.write_json_exclusive(output / "campaign.json", campaign)
     for pair, arm in schedule():
         evidence.require(
-            _preflight(workspace, roster_path, args.seat, base) == target, "retained roster target changed"
+            _preflight(workspace, roster_path, args.seat, base, args.worker_effort) == target,
+            "retained roster target changed",
         )
         pair_dir = output / f"pair-{pair:02d}"
         request, run_ids = _pair_identities(campaign, pair)
@@ -383,6 +392,7 @@ def _run_campaign(
             "answers": answers,
             "run_ids": run_ids,
             "seat": args.seat,
+            "worker_effort": campaign["worker_effort"],
             "parent_thread": target.origin_thread,
             "environment": target.origin_environment,
             "project": target.target_project,
@@ -431,6 +441,11 @@ def _collect_row(output: Path, pair: int, arm: str, *, closing: bool = False) ->
     folder = pair_dir / arm
     evidence.require(not (folder / "failure.json").exists(), "qualification arm failed")
     context = evidence.read(folder / "expected.json")
+    worker_effort = evidence.recorded_worker_effort(campaign)
+    evidence.require(
+        evidence.recorded_worker_effort(context) == worker_effort,
+        "campaign worker effort differs from the arm's recorded effort",
+    )
     request, run_ids = _pair_identities(campaign, pair)
     evidence.require(
         type(context["pair"]) is int
@@ -480,7 +495,7 @@ def _collect_row(output: Path, pair: int, arm: str, *, closing: bool = False) ->
         "request_id": request,
         "batch_fingerprint": fingerprint,
         "parent": parent,
-        "envelope": envelope(base, campaign["brigade_commit"], digest),
+        "envelope": envelope(base, campaign["brigade_commit"], digest, worker_effort),
         "record": record,
     }
 
@@ -530,6 +545,7 @@ def main() -> None:
     for name in ("workspace", "output", "roster", "codex-sessions"):
         campaign.add_argument(f"--{name}", type=Path, required=True)
     campaign.add_argument("--seat", required=True)
+    campaign.add_argument("--worker-effort", choices=evidence.WORKER_EFFORTS, default=evidence.DEFAULT_WORKER_EFFORT)
     campaign.add_argument("--brigade-commit", required=True)
     campaign.add_argument("--parent-timeout", type=float, default=3600)
     report = commands.add_parser("report", help="Rebuild a complete report from retained batch evidence.")

@@ -1,0 +1,1 @@
+- Let matched T3 qualification campaigns select low or medium worker effort and verify that both arms used the recorded setting.
