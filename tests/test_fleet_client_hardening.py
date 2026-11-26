@@ -145,6 +145,41 @@ class TestProxyDisabledTransport:
 
 
 class TestSpoolPrivacy:
+    @pytest.mark.parametrize("lookup", ["before_flush", "after_flush", "missing"])
+    def test_report_event_distinguishes_unreadable_and_missing_spool(self, home, monkeypatch, caplog, lookup):
+        spool = _spool()
+        fail_lookup = lookup == "before_flush"
+        if lookup != "missing":
+            spool.parent.mkdir(parents=True)
+            spool.touch()
+        is_file, open_file = Path.is_file, os.open
+        posted = []
+
+        def fail_spool_open(path, *args, **kwargs):
+            if path == str(spool) and fail_lookup:
+                raise PermissionError("event spool parent unavailable")
+            return open_file(path, *args, **kwargs)
+
+        def fail_lookup_after_flush(*args, **kwargs):
+            nonlocal fail_lookup
+            fail_lookup = True
+            return 0
+
+        monkeypatch.setattr(Path, "is_file", lambda path: False if path == spool and fail_lookup else is_file(path))
+        monkeypatch.setattr(os, "open", fail_spool_open)
+        monkeypatch.setattr(fleet_client, "_post_events", lambda *args, **kwargs: posted.append(args))
+        monkeypatch.setattr(fleet_client, "_flush_locked", fail_lookup_after_flush)
+
+        delivered = fleet_client.report_event({"run_id": "fixture-run", "state": "run.started"})
+
+        assert delivered is (lookup == "missing")
+        if lookup == "missing":
+            assert len(posted) == 1
+            assert not spool.parent.exists()
+        else:
+            assert not posted
+            assert "event spool parent unavailable" in caplog.text
+
     @pytest.mark.parametrize("error_number", [errno.EACCES, errno.EIO])
     def test_flush_surfaces_spool_parent_errors(self, home, monkeypatch, error_number):
         spool = _spool()

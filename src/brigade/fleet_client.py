@@ -116,6 +116,7 @@ from .fleet_client_spool import ensure_directory as _ensure_spool_directory
 from .fleet_client_spool import fsync_parent as _fsync_spool_parent
 from .fleet_client_spool import parse_records as _parse_spool_records
 from .fleet_client_spool_entry import FLUSH_TIMEOUT_SECONDS as FLUSH_TIMEOUT_SECONDS
+from .fleet_client_spool_entry import _has_regular_spool as _has_regular_spool
 from .fleet_client_spool_entry import flush_spool as flush_spool
 from .fleet_client_spool_entry import spool_path as spool_path
 from .fleet_client_spool_lock import _spool_lock as _spool_lock
@@ -298,10 +299,12 @@ def find_workspace_for_path(start: Path) -> Path | None:
 
     for candidate in workspace_identity_ancestors(start):
         try:
-            if node_mod.node_path(candidate).is_file():
+            if stat.S_ISREG(node_mod.node_path(candidate).stat().st_mode):
                 return candidate
-        except OSError:
+        except (FileNotFoundError, NotADirectoryError):
             continue
+        except OSError:
+            return None
     return None
 
 

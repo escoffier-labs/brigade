@@ -10,6 +10,23 @@ from brigade import aboyeur, cli, doctor as doctor_mod, fleet_client, node, run_
 from brigade.station import DoctorContext
 
 
+def test_load_identity_distinguishes_unreadable_and_missing_parent(tmp_path, monkeypatch):
+    assert node.load_identity(tmp_path) is None
+    identity = node.node_path(tmp_path)
+    is_file, original_stat = Path.is_file, Path.stat
+
+    def fail_stat(path, *args, **kwargs):
+        if path == identity:
+            raise PermissionError("node identity parent unavailable")
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "is_file", lambda path: False if path == identity else is_file(path))
+    monkeypatch.setattr(Path, "stat", fail_stat)
+
+    with pytest.raises(node.NodeIdentityError, match="node identity parent unavailable"):
+        node.load_identity(tmp_path)
+
+
 def test_node_identity_persists_across_two_inits(tmp_path, monkeypatch):
     monkeypatch.setattr(node.socket, "gethostname", lambda: "testhost.example")
     first = node.ensure_identity(tmp_path)
