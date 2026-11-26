@@ -1056,21 +1056,32 @@ def test_verify_no_reuse_flag_forces_run(tmp_target, monkeypatch):
 
 
 @pytest.mark.parametrize("cleanup_fails", [False, True])
-def test_verify_runs_again_if_tree_changes_while_writing_reuse(tmp_target, monkeypatch, cleanup_fails):
+def test_verify_runs_again_if_tree_changes_while_writing_reuse(tmp_target, monkeypatch, capsys, cleanup_fails):
     from brigade.work_cmd import verification
 
     _init_verify_target_with_head(tmp_target)
     monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(tmp_target / "missing-code-graph"))
     commands = [[sys.executable, "-c", "print('ran')"]]
     assert verification.verify_run(target=tmp_target, commands=commands) == 0
+    capsys.readouterr()
     old_tree = localio.tree_fingerprint(tmp_target)
     capture_identity = verification._capture_verify_identity
+    captured = []
+    child_runs = []
+    run_child = verification.verify_runtime._run_verify_child_process
 
     def change_tree_before_capture(target, run_dir, **kwargs):
         (target / "newfile.txt").write_text("new tree\n")
-        return capture_identity(target, run_dir, **kwargs)
+        identity = capture_identity(target, run_dir, **kwargs)
+        captured.append((run_dir, identity["tree_fingerprint"]))
+        return identity
+
+    def count_child(*args, **kwargs):
+        child_runs.append(1)
+        return run_child(*args, **kwargs)
 
     monkeypatch.setattr(verification, "_capture_verify_identity", change_tree_before_capture)
+    monkeypatch.setattr(verification.verify_runtime, "_run_verify_child_process", count_child)
     if cleanup_fails:
         rmdir = Path.rmdir
 
@@ -1083,10 +1094,19 @@ def test_verify_runs_again_if_tree_changes_while_writing_reuse(tmp_target, monke
     assert verification.verify_run(target=tmp_target, commands=commands) == 0
     newest, original = verification._verify_receipts(tmp_target)
     assert "reused_from" not in newest
+    assert newest["reuse_skipped"] == "tree_changed_during_reuse_capture"
+    assert "verification reuse skipped: tree_changed_during_reuse_capture" in capsys.readouterr().err
+    assert len(child_runs) == 1
     assert newest["commands"][0]["stdout_summary"] == "ran"
     assert newest["tree_fingerprint"] == localio.tree_fingerprint(tmp_target) != old_tree
     assert original["tree_fingerprint"] == old_tree
-    if not cleanup_fails:
+    (rejected_dir, rejected_tree), (_, _) = captured
+    assert rejected_tree == newest["tree_fingerprint"] != old_tree
+    if cleanup_fails:
+        assert list(rejected_dir.iterdir()) == []
+        assert verification._resolve_verify_receipt(tmp_target, rejected_dir.name)[0] is None
+        assert verification._latest_verify_receipt(tmp_target) == newest
+    else:
         assert {path.name for path in Path(newest["path"]).parent.iterdir()} == {newest["run_id"], original["run_id"]}
 
 

@@ -165,8 +165,8 @@ def test_verify_base_scope_is_repo_keyed_and_discarded(tmp_path):
     assert verify_manifest_git.VerifyGitFacts(original).base.source == "no_remote"
 
 
-@pytest.mark.parametrize("state", ["dirty", "rename", "merge", "sparse", "crlf"])
-def test_fresh_and_reused_receipt_bytes_match_unbatched_git(tmp_path, isolated_verify, monkeypatch, capsys, state):
+@pytest.mark.parametrize("state", ["clean", "dirty", "rename", "merge", "sparse", "crlf"])
+def test_fresh_and_reused_receipt_bytes_match_unbatched_shim(tmp_path, isolated_verify, monkeypatch, capsys, state):
     target = _initialize(tmp_path / "repo")
     manifests = target / "verify" / "manifests"
     manifests.mkdir(parents=True)
@@ -199,9 +199,10 @@ def test_fresh_and_reused_receipt_bytes_match_unbatched_git(tmp_path, isolated_v
     elif state == "crlf":
         _git(target, "config", "core.autocrlf", "true")
         (target / "source.py").write_bytes(b"value = 2\r\n")
-    else:
+    elif state == "dirty":
         (target / "source.py").write_text("value = 2\n", encoding="utf-8")
-    (target / "café with spaces.txt").write_text("untracked", encoding="utf-8")
+    if state != "clean":
+        (target / "café with spaces.txt").write_text("untracked", encoding="utf-8")
     start = datetime(2020, 1, 1, tzinfo=timezone.utc)
     ids = (UUID("aaaaaa00-0000-0000-0000-000000000000"), UUID("bbbbbb00-0000-0000-0000-000000000000"))
     monkeypatch.setattr(helpers, "_now", lambda: start)
@@ -292,6 +293,7 @@ def test_reuse_rejects_patch_if_edit_after_admission_reverts_after_patch_read(
     second = _verify(target, capsys, reuse=True)
     assert edits == ["edited", "reverted"]
     assert "reused_from" not in second
+    assert second["reuse_skipped"] == "tree_changed_during_reuse_capture"
     assert second["tree_fingerprint"] == fresh["tree_fingerprint"]
     assert second["changes_patch_sha256"] == fresh["changes_patch_sha256"]
 

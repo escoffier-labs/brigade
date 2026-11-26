@@ -2108,6 +2108,8 @@ def verify_run(
                         capture_kind=capture_kind,
                         capture_meta=capture_meta,
                     )
+                    if receipt is None:
+                        reuse_skipped = "tree_changed_during_reuse_capture"
             if receipt is None:
                 if reuse_skipped is not None:
                     verify_runtime._print_verify_console(
