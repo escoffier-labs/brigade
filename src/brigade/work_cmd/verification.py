@@ -501,7 +501,7 @@ def _finalize_verify_receipt(
     else:
         receipt["status"], rc = verify_receipt_details.terminal_status(receipt, rc)
         verify_receipt_details.stamp_tree_after(target, receipt)
-    if run_dir.parent == helpers._verify_runs_root(target):
+    if "producer_attempt_id" not in receipt:
         verify_gate.stamp_gating(target, receipt)
     commands = receipt.get("commands")
     if isinstance(commands, list):
@@ -566,7 +566,7 @@ def _finalize_verify_receipt(
         _write_verify_markdown(run_dir, receipt)
     except Exception:
         pass
-    if run_dir.parent == helpers._verify_runs_root(target):
+    if "producer_attempt_id" not in receipt:
         with suppress(Exception):
             _prune_verify_runs(target)
     return receipt, rc
@@ -606,7 +606,7 @@ def _safe_finalize_verify_receipt(
             # The status changed after these were stamped, so stamp them again.
             verify_trial.stamp_verify_receipt_failure_taxonomy(receipt)
             _stamp_verification_contract_outcomes(receipt)
-        if run_dir.parent == helpers._verify_runs_root(target):
+        if "producer_attempt_id" not in receipt:
             verify_gate.stamp_gating(target, receipt)
         receipt.setdefault("completed_at", helpers._now().isoformat())
         # Keep a valid digest/signature if fallback did not change the payload.
@@ -683,7 +683,7 @@ def _commit_verify_receipt(
         state = verify_runtime._ACTIVE_VERIFY_CANCEL.get()
         if state is not None:
             state.owned_receipt = None
-        if run_dir.parent == helpers._verify_runs_root(target):
+        if "producer_attempt_id" not in receipt:
             _report_fleet_completion(target, receipt, rc)
         if state is not None:
             # Terminal evidence owns the first signal even when it was deferred.

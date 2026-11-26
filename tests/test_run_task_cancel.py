@@ -619,7 +619,7 @@ def test_cancel_after_worker_result_handoff_is_too_late(site, capsys, monkeypatc
     publish = BatchExecution._publish_result
     drain = BatchExecution._drain_inbox
 
-    def pause_publication(self, result, task_id, containment, *, worktree_locked=False):
+    def pause_publication(self, result, task_id, containment):
         nonlocal request, journaled_before_publication
         # observe() has marked the handoff. Start cancellation here so batch
         # startup is outside the wait, and submit only once if finish observes again.
@@ -627,7 +627,7 @@ def test_cancel_after_worker_result_handoff_is_too_late(site, capsys, monkeypatc
             request = pool.submit(inbox.cancel, self.run_dir, [task_id], workspace=self.workspace)
             request.result(timeout=10)
             journaled_before_publication = journaled.wait(10)
-        publish(self, result, task_id, containment, worktree_locked=worktree_locked)
+        publish(self, result, task_id, containment)
 
     def signal_drain(self):
         drained = drain(self)
@@ -829,7 +829,7 @@ def test_unconfirmed_stop_commits_nothing_from_the_worktree(tmp_path, monkeypatc
     execution.workspaces["a"] = object()
     result = WorkerResult(worker="coder", task="t", text="", ok=False, task_id="a")
 
-    execution._publish_result(result, "a", containment, worktree_locked=True)
+    execution._publish_result(result, "a", containment)
 
     (result_path,) = tmp_path.glob("batch-result-*.json")
     assert json.loads(result_path.read_text()) == {"verification_skipped": "uncontained-cancel"}

@@ -46,6 +46,7 @@ JOURNAL_SENTINEL = "batch-journal-enrolled.json"
 _CANCEL_POLL_SECONDS = 0.5
 # Cancel outcomes that do not prove the worker stopped writing its checkout.
 _UNCONTAINED = frozenset({"still_active", "error"})
+_OBSERVING_LOCKED_WORKTREE = contextvars.ContextVar("batch_observing_locked_worktree", default=False)
 
 
 @dataclass
@@ -471,7 +472,7 @@ class BatchExecution:
             for t in self.plan["tasks"]
         ]
 
-    def observe(self, result: WorkerResult, *, worktree_locked: bool = False) -> WorkerResult | None:
+    def observe(self, result: WorkerResult) -> WorkerResult | None:
         if result.task_id is None:
             return None
         task_id = str(result.task_id)
@@ -486,12 +487,15 @@ class BatchExecution:
                 runtime.containment = self._cancel_containment(task_id, attempt_id, result)
             containment = runtime.containment
             result = replace(result, ok=False, status=TASK_CANCELLED_STATUS)
-        self._publish_result(result, task_id, containment, worktree_locked=worktree_locked)
+        self._publish_result(result, task_id, containment)
         return result
 
     def _observe_for_dispatch(self, result: WorkerResult) -> WorkerResult | None:
+        # Dispatch invokes this callback inside the checkout locks. Finish may
+        # retry publication later, but can only reuse verification already run.
+        locked = _OBSERVING_LOCKED_WORKTREE.set(True)
         try:
-            return self.observe(result, worktree_locked=True)
+            return self.observe(result)
         except Exception:
             task_id = result.task_id
             if task_id is None or self.runtime[task_id].containment is None:
@@ -500,10 +504,10 @@ class BatchExecution:
             # observation and reports any error that persists.
             print(f"warning: task {task_id} cancellation observation failed", file=sys.stderr)
             return replace(result, ok=False, status=TASK_CANCELLED_STATUS)
+        finally:
+            _OBSERVING_LOCKED_WORKTREE.reset(locked)
 
-    def _publish_result(
-        self, result: WorkerResult, task_id: str, cancel_containment: str | None, *, worktree_locked: bool = False
-    ) -> None:
+    def _publish_result(self, result: WorkerResult, task_id: str, cancel_containment: str | None) -> None:
         if task_id in self.prerequisite_cancelled:
             # Never launched and never journaled: the task stays queued.
             return
@@ -532,7 +536,6 @@ class BatchExecution:
                     handle.attempt_id,
                     cancel_containment,
                     launched=current.launch_claim is not None,
-                    worktree_locked=worktree_locked,
                 )
             )
         localio.write_json(path, payload)
@@ -591,7 +594,6 @@ class BatchExecution:
         cancel_containment: str | None,
         *,
         launched: bool,
-        worktree_locked: bool,
     ) -> dict[str, object]:
         runtime = self.runtime[str(result.task_id)]
         if runtime.verification is not None:
@@ -610,7 +612,7 @@ class BatchExecution:
             reason = skip.SHARED_CHECKOUT
         elif not launched:
             reason = skip.NOT_LAUNCHED
-        elif not worktree_locked:
+        elif not _OBSERVING_LOCKED_WORKTREE.get():
             reason = skip.WORKTREE_UNLOCKED
         else:
             runtime.verification = run_batch_verification.verify(binding, self.workspace, self.run_dir, attempt_id)
