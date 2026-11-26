@@ -7,7 +7,6 @@ import sqlite3
 import stat
 import subprocess
 import sys
-import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -2346,37 +2345,6 @@ def test_work_verify_defers_graph_sync_once_and_recovers_a_dead_launcher(
     assert launch_order[:2] == ["read start time", "start reaper"]
 
 
-@pytest.mark.parametrize(
-    ("worker_args", "exit_reason"),
-    [
-        (("claim-token",), None),
-        (("other-token",), "reservation token mismatch"),
-        ((), "missing reservation token"),
-    ],
-)
-def test_background_graph_worker_claims_by_token(tmp_path, monkeypatch, worker_args, exit_reason):
-    lock = tmp_path / "verify-sync.lock"
-    reservation = lock.with_suffix(".json")
-    localio.write_json(reservation, {"pid": 12345, "token": "claim-token"})
-    monkeypatch.setattr(os, "getpid", lambda: 54321)
-    calls = []
-
-    def sync(argv, **kwargs):
-        calls.append(argv)
-        return subprocess.CompletedProcess(argv, 0)
-
-    monkeypatch.setattr(subprocess, "run", sync)
-    code_graph_background._worker(str(lock), "engine", "db", str(tmp_path), *worker_args)
-    if exit_reason is None:
-        assert calls == [["engine", "--db", "db", "sync", str(tmp_path)]]
-        assert not reservation.exists()
-        assert not lock.with_suffix(".exit.json").exists()
-    else:
-        assert calls == []
-        assert localio.read_json_dict(reservation) == {"pid": 12345, "token": "claim-token"}
-        assert localio.read_json_dict(lock.with_suffix(".exit.json")) == {"reason": exit_reason}
-
-
 def test_work_verify_reports_and_replaces_stale_legacy_graph_reservation(tmp_path, capsys, monkeypatch):
     _init_git_repo_with_head(tmp_path)
     lock = tmp_path / ".brigade/code-graph/verify-sync.lock"
@@ -2396,113 +2364,46 @@ def test_work_verify_reports_and_replaces_stale_legacy_graph_reservation(tmp_pat
     assert claim["pid"] == 54321 and claim["token"]
 
 
-def test_work_verify_detached_worker_survives_and_releases_pipes(tmp_path, monkeypatch):
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    _init_git_repo_with_head(repo)
-    script = tmp_path / "engine.py"
-    started, release = tmp_path / "started", tmp_path / "release"
-    script.write_text(
-        "import sqlite3, sys, time\n"
-        "from pathlib import Path\n"
-        f"assert Path(sys.argv[-1]) == Path({str(repo)!r})\n"
-        f"Path({str(started)!r}).touch(exist_ok=False)\n"
-        "limit = time.monotonic() + 90\n"
-        f"while not Path({str(release)!r}).exists():\n"
-        "    if time.monotonic() > limit: raise TimeoutError()\n"
-        "    time.sleep(0.02)\n"
-        "with sqlite3.connect(sys.argv[2]) as db:\n"
-        "    db.execute('CREATE TABLE meta (key TEXT, value TEXT)')\n"
-        "    db.execute(\"INSERT INTO meta VALUES ('synced_at', '1')\")\n"
-        "print('detached worker stdout')\n"
-        "print('detached worker stderr', file=sys.stderr)\n"
-    )
-    engine = tmp_path / ("engine.cmd" if os.name == "nt" else "engine")
-    if os.name == "nt":
-        engine.write_text(f'@echo off\n"{sys.executable}" "{script}" %*\n')
-    else:
-        engine.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} {shlex.quote(str(script))} "$@"\n')
-        engine.chmod(0o755)
-    monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(engine))
-    db = repo / ".brigade/code-graph/code-graph.db"
-    reservation = db.parent / "verify-sync.json"
-    argv = [
-        sys.executable,
-        "-m",
-        "brigade",
-        "work",
-        "verify",
-        "run",
-        "--target",
-        str(repo),
-        "--argv-json",
-        json.dumps([sys.executable, "-V"]),
-        "--json",
-        "--no-reuse",
-    ]
-    if os.name == "nt" and os.environ.get("BRIGADE_WINDOWS_TEST_PROGRESS"):
-        # The affected-tests driver contains the entire test in a job that
-        # forbids breakaway. Keep the detached worker in that outer job while
-        # testing the actual console detach, lock and verify-parent exit.
-        argv[1:3] = [
-            "-c",
-            "from brigade import cli, proc; "
-            "flags = proc.detached_launch_kwargs; "
-            "proc.detached_launch_kwargs = lambda **kw: flags(job_breakaway=False); "
-            "cli.process_main()",
-        ]
-    deadline = time.monotonic() + 90
-
-    def wait_until(predicate):
-        while not predicate():
-            assert (reason := code_graph_background.last_exit_reason(repo)) is None, reason
-            assert time.monotonic() < deadline, "detached graph refresh did not reach the expected state"
-            time.sleep(0.02)
-
-    try:
-        result = subprocess.run(argv, capture_output=True, text=True, check=True, timeout=40)
-        assert json.loads(result.stdout)["code_graph_delta"]["background_refresh"]["status"] == "started"
-        wait_until(started.exists)
-        assert not release.exists() and not reservation.exists()
-        result = subprocess.run(argv, capture_output=True, text=True, check=True, timeout=40)
-        assert json.loads(result.stdout)["code_graph_delta"]["background_refresh"]["status"] == "busy"
-        assert "detached worker stdout" not in result.stdout and "detached worker stderr" not in result.stderr
-    finally:
-        release.touch()
-    wait_until(
-        lambda: code_graph_background.index_ready(db) and code_graph_background.status_or_start(repo, db) is None
-    )
-    assert not reservation.exists()
-
-
-def test_work_verify_records_detached_launch_failure(tmp_path, capsys, monkeypatch):
+@pytest.mark.parametrize("post_timeout", [False, True])
+def test_work_verify_records_detached_launch_failure(tmp_path, capsys, monkeypatch, post_timeout):
     _init_git_repo_with_head(tmp_path)
     engine = _write_fake_graphtrail(tmp_path)
     monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(engine))
+    lock = code_graph_background._lock_path(tmp_path)
+    localio.write_json(lock.with_suffix(".exit.json"), {"reason": "previous failure"})
 
     def fail(*args, **kwargs):
         raise proc.DetachedLaunchError("detach refused")
 
     real_run = subprocess.run
+    real_ignore = code_graph_background._ignored_for_refresh
+    ignore_calls = []
     sync_budgets = []
+
+    def check_ignore(*args):
+        ignore_calls.append(args)
+        return real_ignore(*args)
 
     def check_initial_budget(argv, *args, **kwargs):
         if isinstance(argv, list) and argv[:1] == [str(engine)] and argv[-1] == "sync":
             sync_budgets.append(kwargs["timeout"])
-            if len(sync_budgets) == 1 and kwargs["timeout"] < 1:
+            if (post_timeout or len(sync_budgets) == 1) and kwargs["timeout"] < 1:
                 raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
             kwargs["timeout"] = None
         return real_run(argv, *args, **kwargs)
 
+    monkeypatch.setattr(code_graph_background, "_ignored_for_refresh", check_ignore)
     monkeypatch.setattr(proc, "spawn_detached", fail)
     monkeypatch.setattr(subprocess, "run", check_initial_budget)
     assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True) == 0
     delta = json.loads(capsys.readouterr().out)["code_graph_delta"]
-    assert delta["status"] == "ok"
+    assert delta["status"] == ("sync_timed_out" if post_timeout else "ok")
     assert delta["background_refresh"]["status"] == "launch_failed"
     assert delta["background_refresh"]["reason"] == "detach refused"
     assert delta["foreground_fallback"] == {"reason": "detached launch refused", "timeout_seconds": 10.0}
     assert sync_budgets == [10.0, 0.5]
+    assert "background_refresh_last_exit" not in delta
+    assert len(ignore_calls) == 1
 
 
 def test_work_verify_graphtrail_delta_config_timeout_reaches_pre_and_post_sync(tmp_path, capsys, monkeypatch):

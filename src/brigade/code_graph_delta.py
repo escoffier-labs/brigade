@@ -32,6 +32,14 @@ LINE_KEYS = {
 }
 
 
+def _request_background_refresh(target: Path, db: Path, binary: str, details: dict[str, Any]) -> dict[str, str] | None:
+    # A verify run can ask at several points, but only the first request can launch.
+    if details.get("_background_launch_requested"):
+        return code_graph_background.status_or_start(target, db)
+    details["_background_launch_requested"] = True
+    return code_graph_background.status_or_start(target, db, binary)
+
+
 def capture_before(
     target: Path,
     run_dir: Path,
@@ -56,13 +64,11 @@ def capture_before(
             "snapshots": {},
         }
         refresh = code_graph_background.status_or_start(target, db_path) if defer_sync else None
-        if defer_sync and (last_exit := code_graph_background.last_exit_reason(target)):
-            details["background_refresh_last_exit"] = f"last background refresh exited: {last_exit}"
         ready = code_graph_background.index_ready(db_path) if defer_sync else db_path.is_file()
         sync_budget = timeout
         if defer_sync and not ready:
             if refresh is None:
-                refresh = code_graph_background.status_or_start(target, db_path, binary)
+                refresh = _request_background_refresh(target, db_path, binary, details)
             if refresh:
                 details["background_refresh"] = refresh
                 if refresh["status"] != "launch_failed":
@@ -103,12 +109,13 @@ def capture_before(
             digest = _timed_snapshot(db_path, snapshot_path, backup_budget, details["snapshots"], "before")
         except TimeoutError:
             if sync and sync.get("timed_out"):
-                if defer_sync:
-                    details["background_refresh"] = code_graph_background.status_or_start(target, db_path, binary)
+                if defer_sync and (refresh := _request_background_refresh(target, db_path, binary, details)):
+                    details["background_refresh"] = refresh
                 return _status("sync_timed_out", f"code graph sync timed out after {sync_budget:g}s", **details)
             return _status("capture_failed", "code graph baseline snapshot timed out", **details)
         if defer_sync and sync and sync.get("timed_out"):
-            details["background_refresh"] = code_graph_background.status_or_start(target, db_path, binary)
+            if refresh := _request_background_refresh(target, db_path, binary, details):
+                details["background_refresh"] = refresh
         return {
             **details,
             "ok": True,
@@ -152,6 +159,16 @@ def capture_after_and_diff(
         if before.get("status") == "unavailable":
             return _compact(_status("unavailable", str(before.get("summary") or "code graph delta unavailable")))
         if before.get("ok") is not True:
+            before_sync = before.get("sync")
+            db_path_value = before.get("db_path")
+            if (
+                sync_timeout is not None
+                and db_path_value
+                and (not before_sync or before_sync.get("returncode") != 0)
+                and not code_graph_background.index_ready(Path(db_path_value))
+                and (last_exit := code_graph_background.last_exit_reason(target))
+            ):
+                before["background_refresh_last_exit"] = f"last background refresh exited: {last_exit}"
             payload = _failure_payload(
                 target,
                 before,
@@ -172,7 +189,7 @@ def capture_after_and_diff(
             sync = _run_graphtrail(binary, db_path, "sync", timeout=sync_budget, stage="incremental-sync", cwd=target)
             if sync.get("timed_out") and sync_timeout is not None:
                 stale_after = True
-                refresh = code_graph_background.status_or_start(target, db_path, binary)
+                refresh = _request_background_refresh(target, db_path, binary, before)
             elif sync["returncode"] != 0 and sync_timeout is not None:
                 refresh = code_graph_background.status_or_start(target, db_path)
                 stale_after = bool(refresh and refresh["status"] == "busy")
