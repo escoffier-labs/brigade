@@ -1,0 +1,1 @@
+- Allow coordinators to close out multiple Orca tasks concurrently within one governed run.
