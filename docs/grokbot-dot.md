@@ -96,6 +96,7 @@ optional. Replace placeholders with the deployment's configured values.
 | `hub.poll_seconds` | integer | Hub poll interval, 10 through 300 seconds. |
 | `hub.recipients` | object | Up to 16 aliases mapped to agent principals or node UUIDs. Keep a `conductor` alias for the conductor's principal. |
 | `dispatch_enabled` | boolean | Gate for the six dispatch/message tools marked below. |
+| `dispatch_limits` | object | Optional repository, open request, daily attempt and prompt limits. |
 | `events_enabled` | boolean | Enable event capabilities, RPCs, workers, fleet polling, and webhooks. When false, pass requests straight to MCP. |
 | `digest_pr_repo` | string | Repository for digest PR queries, formatted `owner/repo`. |
 | `callback_hosts` | string array | Nonempty allowlist of callback hostnames. |
@@ -110,6 +111,34 @@ optional. Replace placeholders with the deployment's configured values.
 Dot is one profile of this connector code. The duet pack runs the same code with
 its own runtime schema, identity and a smaller tool set. See
 [duet-connector.md](duet-connector.md).
+
+### Dispatch limits
+
+Add `dispatch_limits` to the runtime JSON to limit new work from
+`fleet_submit` and `fleet_followup`. When absent, Dot dispatch is unlimited
+by this policy and the existing tool limits still apply.
+
+```json
+{
+  "dispatch_limits": {
+    "repositories": ["example-repo"],
+    "max_open": 3,
+    "daily_limit": 20,
+    "prompt_max_bytes": 32768
+  }
+}
+```
+
+Omit `repositories` to allow all configured aliases. The numeric values in
+the example are the defaults. The daily budget counts launch attempts per
+UTC day. The prompt limit counts UTF-8 bytes, including any appended owner
+authorization. A terminal status or wait result releases an open slot.
+An uncertain launch retains its reservation for reconciliation.
+
+With an allowlist configured, a followup requires a known repository.
+Answer, approve and interrupt check the allowlist when Dot knows the request's
+repository. They use no launch quota. `dot_t3_capabilities` reports the
+configured values under `fleet.limits`.
 
 ### Tool grants
 

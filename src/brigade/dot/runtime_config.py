@@ -292,7 +292,14 @@ def parse_runtime(payload: object, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
             "callback_hosts",
             "owner_authorization",
         },
-        optional={"notify_command", "messaging_enabled", "memory_push", "assignments", "tool_grants"},
+        optional={
+            "notify_command",
+            "messaging_enabled",
+            "memory_push",
+            "assignments",
+            "tool_grants",
+            "dispatch_limits",
+        },
     )
     if root["schema"] != RUNTIME_SCHEMA:
         raise _invalid()
@@ -328,6 +335,7 @@ def parse_runtime(payload: object, *, schema: str = RUNTIME_SCHEMA) -> Runtime:
         owner_authorization=owner_authorization,
         messaging_enabled=messaging_enabled,
         memory_push=_boolean(root["memory_push"]) if "memory_push" in root else True,
+        dispatch_limits=_parse_dispatch_limits(root["dispatch_limits"]) if "dispatch_limits" in root else None,
         tool_grants=_parse_tool_grants(root),
     )
 

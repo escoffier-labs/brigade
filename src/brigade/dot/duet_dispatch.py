@@ -1,7 +1,9 @@
-"""Duet-only dispatch admission. Reservations survive restarts and uncertain replies."""
+"""Shared Dot and Duet dispatch admission. Reservations survive restarts and uncertain replies."""
 
 from __future__ import annotations
 
+import json
+import sqlite3
 from datetime import timezone
 from typing import Any
 
@@ -12,46 +14,60 @@ from .fleet_tools import FleetTools
 TERMINAL = frozenset({"succeeded", "failed", "interrupted", "cancelled", "completed"})
 
 
-class DuetFleetTools(FleetTools):
+class LimitedFleetTools(FleetTools):
+    _owned_requests_only = False
+
     def __init__(self, *args: Any, **kwargs: Any):
         super().__init__(*args, **kwargs)
         require(self.runtime.dispatch_limits is not None, "invalid_config")
         with self.state.transaction() as connection:
+            # Keep the existing table names for persisted Duet state. The listeners use separate state directories.
             connection.execute("""CREATE TABLE IF NOT EXISTS duet_dispatch (
                 id INTEGER PRIMARY KEY, request_id TEXT UNIQUE, repository TEXT NOT NULL,
                 open INTEGER NOT NULL, busy INTEGER NOT NULL DEFAULT 0, generation INTEGER NOT NULL DEFAULT 0)""")
             connection.execute("""CREATE TABLE IF NOT EXISTS duet_dispatch_attempts (
                 ts REAL NOT NULL)""")
-            # Completion notices are sent with the node credential, which a Duet listener never
-            # holds. Tracked rows would retry forever and starve the poller, so Duet tracks none
-            # (including rows BridgeState recovers from the journal) and polls with fleet_status.
-            connection.execute("DELETE FROM tracked_requests")
 
-    def fleet_submit(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
-        result = super().fleet_submit(*args, **kwargs)
-        request_id = result.get("request_id")
-        if isinstance(request_id, str):
-            # finish_operation tracks every successful submit; Duet cannot deliver those notices.
-            with self.state.transaction() as connection:
-                connection.execute("DELETE FROM tracked_requests WHERE request_id=?", (request_id,))
-        return result
+    @staticmethod
+    def _journal_repository(connection: sqlite3.Connection, request_id: str) -> str | None:
+        # Dot can enable limits after it has already submitted work.
+        old = connection.execute(
+            "SELECT summary FROM operations WHERE request_id=? AND tool='fleet_submit' ORDER BY id DESC LIMIT 1",
+            (request_id,),
+        ).fetchone()
+        if old is None:
+            return None
+        value = json.loads(old["summary"]).get("repository")
+        return value if isinstance(value, str) else None
 
     def _fleet(self, action: str, payload: dict[str, Any], *, timeout: float, mutating: bool = False) -> dict[str, Any]:
         limits = self.runtime.dispatch_limits
         assert limits is not None
-        reservation = None
         launching = action in {"submit", "followup"}
+        observing = action in {"status", "wait"}
+        control = action == "interrupt" or (not self._owned_requests_only and action in {"answer", "approve"})
+        if not (launching or observing or control):
+            return super()._fleet(action, payload, timeout=timeout, mutating=mutating)
+
+        reservation = None
+        request_id = payload.get("request_id")
         with self.state.transaction() as connection:
             row = None
-            if action in {"status", "wait", "followup", "interrupt"}:
-                row = connection.execute(
-                    "SELECT * FROM duet_dispatch WHERE request_id=?", (payload["request_id"],)
-                ).fetchone()
-                if row is None:
+            if request_id is not None:
+                row = connection.execute("SELECT * FROM duet_dispatch WHERE request_id=?", (request_id,)).fetchone()
+            if self._owned_requests_only and (observing or action in {"followup", "interrupt"}) and row is None:
+                return {"error": "unknown_request"}
+            repository = payload["repository"] if action == "submit" else (row["repository"] or None) if row else None
+            check_repository = launching or control or self._owned_requests_only
+            if limits.repositories is not None and check_repository:
+                if repository is None and request_id is not None and not self._owned_requests_only:
+                    repository = self._journal_repository(connection, request_id)
+                if repository is not None and repository not in limits.repositories:
+                    return {"error": "repository_not_allowed"}
+                if launching and repository is None:
                     return {"error": "unknown_request"}
-            repository = payload["repository"] if action == "submit" else row["repository"] if row else None
-            if limits.repositories is not None and repository is not None and repository not in limits.repositories:
-                return {"error": "repository_not_allowed"}
+            elif action == "followup" and row is None and request_id is not None:
+                repository = self._journal_repository(connection, request_id)
             if launching:
                 if len(payload["prompt"].encode("utf-8")) > limits.prompt_max_bytes:
                     return {"error": "prompt_too_large"}
@@ -72,7 +88,8 @@ class DuetFleetTools(FleetTools):
                 connection.execute("DELETE FROM duet_dispatch_attempts WHERE ts<?", (midnight.timestamp(),))
                 if row is None:
                     reservation = connection.execute(
-                        "INSERT INTO duet_dispatch(repository,open,busy) VALUES (?,1,1)", (repository,)
+                        "INSERT INTO duet_dispatch(request_id,repository,open,busy) VALUES (?,?,1,1)",
+                        (request_id, repository or ""),
                     ).lastrowid
                 else:
                     reservation = row["id"]
@@ -96,8 +113,7 @@ class DuetFleetTools(FleetTools):
                         (int(bool(row and row["open"])), reservation),
                     )
                 # Unknown outcomes keep both the open slot and busy flag until operator reconciliation.
-            elif action in {"status", "wait"} and result.get("ok") and nested.get("state") in TERMINAL:
-                assert row is not None
+            elif observing and row is not None and result.get("ok") and nested.get("state") in TERMINAL:
                 if row["busy"]:
                     # Started while a followup was launching: this terminal state may describe the
                     # previous turn, so it must not release the new turn's reservation.
@@ -107,4 +123,25 @@ class DuetFleetTools(FleetTools):
                     "UPDATE duet_dispatch SET open=0 WHERE request_id=? AND busy=0 AND generation=?",
                     (request_id, row["generation"]),
                 )
+        return result
+
+
+class DuetFleetTools(LimitedFleetTools):
+    _owned_requests_only = True
+
+    def __init__(self, *args: Any, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        with self.state.transaction() as connection:
+            # Completion notices are sent with the node credential, which a Duet listener never
+            # holds. Tracked rows would retry forever and starve the poller, so Duet tracks none
+            # (including rows BridgeState recovers from the journal) and polls with fleet_status.
+            connection.execute("DELETE FROM tracked_requests")
+
+    def fleet_submit(self, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        result = super().fleet_submit(*args, **kwargs)
+        request_id = result.get("request_id")
+        if isinstance(request_id, str):
+            # finish_operation tracks every successful submit; Duet cannot deliver those notices.
+            with self.state.transaction() as connection:
+                connection.execute("DELETE FROM tracked_requests WHERE request_id=?", (request_id,))
         return result

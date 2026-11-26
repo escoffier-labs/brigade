@@ -1,0 +1,1 @@
+- Add optional dispatch limits to the Dot connector.
