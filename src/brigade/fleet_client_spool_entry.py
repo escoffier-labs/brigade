@@ -5,6 +5,9 @@ Resolve client bindings at call time to preserve fleet_client overrides.
 
 from __future__ import annotations
 
+import errno
+import os
+import stat
 from pathlib import Path
 
 FLUSH_TIMEOUT_SECONDS = 5.0
@@ -41,7 +44,32 @@ def flush_spool(
     hub = hub_url or config["hub_url"]
     tok = token or config["token"]
     path = client.spool_path(node_id)
-    if not hub or not path.is_file():
+    if not hub or not _has_regular_spool(path):
         return 0
     with client._spool_lock(path) as dir_fd:
         return client._flush_locked(path, hub, tok, max_batches=max_batches, timeout=timeout, dir_fd=dir_fd)
+
+
+def _has_regular_spool(path: Path) -> bool:
+    from . import fleet_client as client
+
+    # Path.is_file() suppresses lookup errors on Python 3.14. Open safely
+    # before taking the lock so absent spools leave no directory or lock file.
+    try:
+        fd = os.open(str(path), os.O_RDONLY | client._O_NOFOLLOW | client._O_CLOEXEC | client._O_NONBLOCK)
+    except (FileNotFoundError, NotADirectoryError, IsADirectoryError):
+        return False
+    except OSError as exc:
+        # A link, socket, or Windows directory can fail before fstat.
+        # Skip only when the lookup establishes that there is no regular file.
+        if exc.errno in (errno.ELOOP, errno.ENXIO) or (os.name == "nt" and isinstance(exc, PermissionError)):
+            try:
+                if not stat.S_ISREG(path.stat().st_mode):
+                    return False
+            except (FileNotFoundError, NotADirectoryError):
+                return False
+        raise
+    try:
+        return stat.S_ISREG(os.fstat(fd).st_mode)
+    finally:
+        os.close(fd)

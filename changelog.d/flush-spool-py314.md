@@ -1,0 +1,1 @@
+- Report unreadable event spools when running `brigade fleet flush` on Python 3.14.

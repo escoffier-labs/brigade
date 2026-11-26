@@ -4,6 +4,7 @@ no-follow spool files."""
 from __future__ import annotations
 
 import email
+import errno
 import json
 import logging
 import os
@@ -144,6 +145,60 @@ class TestProxyDisabledTransport:
 
 
 class TestSpoolPrivacy:
+    @pytest.mark.parametrize("error_number", [errno.EACCES, errno.EIO])
+    def test_flush_surfaces_spool_parent_errors(self, home, monkeypatch, error_number):
+        spool = _spool()
+        spool.parent.mkdir(parents=True)
+        spool.touch()
+        is_file = Path.is_file
+        open_file = os.open
+
+        def suppress_spool_error(path):
+            # Emulate Python 3.14 swallowing the failed spool lookup.
+            return False if path == spool else is_file(path)
+
+        def fail_spool_open(path, *args, **kwargs):
+            if path == str(spool):
+                raise OSError(error_number, "spool parent unavailable")
+            return open_file(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "is_file", suppress_spool_error)
+        monkeypatch.setattr(os, "open", fail_spool_open)
+
+        with pytest.raises(OSError, match="spool parent unavailable") as error:
+            fleet_client.flush_spool(fleet_client.resolve_node_id())
+
+        assert error.value.errno == error_number
+
+    @pytest.mark.parametrize("parent_kind", ["missing", "directory", "file"])
+    def test_flush_missing_spool_returns_zero(self, home, parent_kind):
+        spool = _spool()
+        if parent_kind == "directory":
+            spool.parent.mkdir(parents=True)
+        elif parent_kind == "file":
+            spool.parent.parent.mkdir(parents=True)
+            spool.parent.touch()
+
+        assert fleet_client.flush_spool(fleet_client.resolve_node_id()) == 0
+        if parent_kind == "directory":
+            assert list(spool.parent.iterdir()) == []
+        elif parent_kind == "missing":
+            assert not spool.parent.exists()
+
+    @pytest.mark.parametrize("kind", ["directory", "fifo"])
+    def test_flush_skips_non_regular_spool(self, home, kind):
+        spool = _spool()
+        if kind == "directory":
+            spool.mkdir(parents=True)
+        else:
+            if not hasattr(os, "mkfifo"):
+                pytest.skip("os.mkfifo is POSIX-only")
+            spool.parent.mkdir(parents=True)
+            os.mkfifo(spool)
+
+        assert fleet_client.flush_spool(fleet_client.resolve_node_id()) == 0
+        assert list(spool.parent.iterdir()) == [spool]
+
     def test_flush_preserves_spool_when_read_fails(self, home, monkeypatch):
         spool = _spool()
         spool.parent.mkdir(parents=True, exist_ok=True)
