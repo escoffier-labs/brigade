@@ -40,7 +40,7 @@ func TestImportAdapterReaderFinalRecord(t *testing.T) {
 		{"complete record without newline", last, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			db, err := archive.Open(t.TempDir() + "/miseledger.db")
+			db, err := archive.Open(t.TempDir() + "/brigade-evidence.db")
 			if err != nil {
 				t.Fatal(err)
 			}
