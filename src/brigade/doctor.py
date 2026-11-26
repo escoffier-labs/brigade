@@ -1092,8 +1092,7 @@ def _gather_checks(ctx: DoctorContext) -> List[ScopedCheckResult]:
     from .registry import all_stations
     from . import managed
 
-    checks: List[ScopedCheckResult] = []
-    checks.extend(_scoped_check(*finding) for finding in engine_paths.legacy_findings(ctx.target))
+    checks = [_scoped_check(*finding) for finding in engine_paths.legacy_findings(ctx.target)]
     checks.extend(
         _scoped_check(
             INFO,
