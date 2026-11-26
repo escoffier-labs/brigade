@@ -9,7 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [0.32.1] - 2026-11-25
 
-- Captured verification and doctor now explain how to repair an outdated managed evidence engine. If v0.30.0 engines with CLI 0.31.0 or 0.32.0 produce `miseledger indexing: import failed (receipts pending)`, run `brigade setup` after `pipx upgrade brigadestack` or `npm update --global brigadestack` on stable.
+- Captured verification and doctor now explain how to repair an outdated managed evidence engine. If v0.30.0 engines with CLI 0.31.0 or 0.32.0 produce `miseledger indexing: import failed (receipts pending)`, run `brigade setup` after a package-manager upgrade on the stable channel with a stable or absent update pin. For beta and unreleased builds, use the repair route in `docs/update-channels.md#repair-managed-engines`.
+- Repair missing or mismatched managed engines when update coordinates already match, refuse stale beta engine pins that would break receipt indexing or downgrade verified engines, and report blocked downloads with the URL and HTTP status.
 
 ## [0.32.0] - 2026-11-22
 

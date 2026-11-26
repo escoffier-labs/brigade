@@ -31,6 +31,8 @@ from tests.component_install_helpers import (
     fixture_component_revision,
     fixture_payload,
     linux_env,
+    pin_test_release_manifest,
+    write_release_manifest,
     write_test_manifest,
 )
 
@@ -585,7 +587,8 @@ def test_old_evidence_engine_rejects_forged_installed_record(tmp_path, monkeypat
     assert ("sha256 mismatch" if has_pin else "byte_size mismatch") in detail
 
 
-def test_v030_beta_pin_warns_even_when_it_matches_selected_manifest(tmp_path, monkeypatch):
+@pytest.mark.parametrize("compatible_cache", [False, True])
+def test_v030_beta_pin_warns_even_when_it_matches_selected_manifest(tmp_path, monkeypatch, capsys, compatible_cache):
     monkeypatch.setattr(brigade, "__version__", "0.30.0")
     env, _ = _prepare_unified_release_setup(tmp_path, monkeypatch)
     roots = resolve_roots(env=env, system="linux")
@@ -594,6 +597,10 @@ def test_v030_beta_pin_warns_even_when_it_matches_selected_manifest(tmp_path, mo
     state_path = Path(component_paths.update_state_path(roots.data_root))
     state = update_cmd.load_update_state(state_path)
     assert state is not None
+    cached_pin = Path(component_paths.verified_manifest_path(roots.cache_root, state.component_manifest_sha256))
+    pin_test_release_manifest(
+        monkeypatch, cached_pin.read_bytes(), tag=state.component_tag, commit=state.component_target_commit
+    )
     beta_version = "0.33.0.dev1"
     update_cmd.write_update_state(state_path, replace(state, channel="beta", cli_coordinate=beta_version))
     monkeypatch.setattr(brigade, "__version__", beta_version)
@@ -607,12 +614,27 @@ def test_v030_beta_pin_warns_even_when_it_matches_selected_manifest(tmp_path, mo
             else None
         ),
     )
+    if compatible_cache:
+        content = write_release_manifest(tmp_path / "newer.json", brigade_version="0.32.0", target_commit="b" * 40)
+        manifest_digest = pin_test_release_manifest(monkeypatch, content, tag="v0.32.0", commit="b" * 40)
+        cached = Path(component_paths.verified_manifest_path(roots.cache_root, manifest_digest))
+        cached.write_bytes(content)
+    assert setup_native_components(env=env, dry_run=True) == 1
+    refusal = capsys.readouterr().err
+    assert "brigade update --channel beta" in refusal
+    if compatible_cache:
+        assert str(cached) in refusal
     shallow_checks = component_report.outdated_doctor_checks(env=env, system="linux")
     for checks in (shallow_checks, component_report.doctor_checks(env=env, system="linux")):
         severity, _, detail = next(row for row in checks if row[1] == "components: brigade-evidence")
         assert severity == doctor_mod.WARN
-        assert "Beta setup can reuse its v0.30.0 pin" in detail
-        assert "--allow-compatible-stable-manifest" in detail
+        assert "Plain setup refuses" in detail
+        assert "brigade update --channel beta" in detail
+        if compatible_cache:
+            assert str(cached) in detail
+            assert "--allow-compatible-stable-manifest 0.32.0" in detail
+        else:
+            assert "A compatible manifest is not cached" in detail
     monkeypatch.setattr(component_report, "release_asset_pin", lambda *_args: None)
     severity, _, detail = next(
         row

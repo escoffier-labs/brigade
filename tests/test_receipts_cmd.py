@@ -2145,7 +2145,7 @@ def test_index_rejects_zero_exit_incomplete_summary_and_retains_export(tmp_path,
     assert len(_jsonl(exports[0].read_text())) == 1
 
 
-@pytest.mark.parametrize("route", ["stable", "npm", "beta", "prerelease", "source"])
+@pytest.mark.parametrize("route", ["stable", "npm", "beta", "npm-beta", "prerelease", "source"])
 def test_verify_receipt_import_names_repair_for_missing_acknowledgement(tmp_path, monkeypatch, capsys, route):
     from importlib import metadata
     from types import SimpleNamespace
@@ -2154,7 +2154,7 @@ def test_verify_receipt_import_names_repair_for_missing_acknowledgement(tmp_path
     from brigade import component_install, component_paths, distribution, update_cmd
     from brigade.work_cmd import verification
 
-    monkeypatch.setattr(distribution, "_name", "npm" if route == "npm" else None)
+    monkeypatch.setattr(distribution, "_name", "npm" if route in ("npm", "npm-beta") else None)
     monkeypatch.setattr(brigade, "__version__", "0.33.0.dev1" if route == "prerelease" else "0.33.0")
     monkeypatch.setattr(
         metadata,
@@ -2163,7 +2163,7 @@ def test_verify_receipt_import_names_repair_for_missing_acknowledgement(tmp_path
             read_text=lambda _file: '{"url":"file:///checkout","dir_info":{}}' if route in ("source", "npm") else None
         ),
     )
-    if route == "beta":
+    if route in ("beta", "npm-beta"):
         roots = component_install.resolve_roots()
         update_cmd.write_update_state(
             Path(component_paths.update_state_path(roots.data_root)),
@@ -2202,9 +2202,11 @@ def test_verify_receipt_import_names_repair_for_missing_acknowledgement(tmp_path
     assert indexing["status"] == "failed"
     assert indexing["reason"] == "outdated_evidence_engine"
     assert indexing["repair"] in output.err
-    assert "brigade update" not in indexing["repair"]
+    assert ("brigade update --channel beta" in indexing["repair"]) == (route == "beta")
     assert ("run `brigade setup`" in indexing["repair"].lower()) == (route in ("stable", "npm"))
-    assert "--allow-compatible-stable-manifest" in indexing["repair"]
+    assert ("--allow-compatible-stable-manifest" in indexing["repair"]) == (
+        route in ("source", "prerelease", "npm-beta")
+    )
     assert capsys.readouterr() == ("", "")
     assert not (tmp_path / receipts_cmd.MISELEDGER_CURSOR_REL).exists()
     assert len(list((tmp_path / ".brigade/work").glob("miseledger-export-*.jsonl"))) == 2

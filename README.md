@@ -36,7 +36,7 @@ npm install -g brigadestack
 
 Install only one npm package globally. `brigadestack` and `@escoffier-labs/brigade` both link `brigade`, so npm stops with `EEXIST` on the second one. If `@escoffier-labs/brigade` is installed and you want the new name, run `npm uninstall --global @escoffier-labs/brigade` first, then `npm install --global brigadestack`. Keeping `@escoffier-labs/brigade` and running `npm update --global @escoffier-labs/brigade` also works.
 
-After `pipx upgrade brigadestack` or `npm update --global brigadestack` on stable, run `brigade setup` to match the managed engines to the CLI. With v0.30.0 engines and CLI 0.31.0 or 0.32.0, captured verification can report `miseledger indexing: import failed (receipts pending)`. See [Repair managed engines](docs/update-channels.md#repair-managed-engines) for beta and unreleased source builds.
+With a released stable CLI and a stable or absent update pin, run `brigade setup` after a package-manager upgrade to match the managed engines to the CLI. With v0.30.0 engines and CLI 0.31.0 or 0.32.0, captured verification can report `miseledger indexing: import failed (receipts pending)`. See [Repair managed engines](docs/update-channels.md#repair-managed-engines) for beta and unreleased source builds.
 
 Sections marked <sup>*</sup> describe the 0.32.0 beta. It is published as daily pre-release builds of `brigadestack`, which install the `brigade` command: `pipx install --pip-args='--pre' brigadestack`. Stable is 0.31.0.
 
