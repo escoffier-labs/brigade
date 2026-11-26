@@ -34,8 +34,9 @@ The file is append-only. The release cut leaves the new texts marked unreleased,
 ## 2. Pre-release verification
 
 A successful hosted `ci-gate` on the exact release commit supplies suite
-verification. Confirm that result before tagging in step 5. A local full run
-of `./scripts/verify` is optional for [reproducing CI locally](CONTRIBUTING.md#reproducing-ci-locally).
+verification. Confirm that result before tagging in step 5. If you need to
+[reproduce CI locally](CONTRIBUTING.md#reproducing-ci-locally), run
+`./scripts/verify` through Brigade.
 
 Run the security template audit and cold-start gate before merging.
 
@@ -71,7 +72,8 @@ Commit on a feature branch, push it, open a PR, wait for required checks, and me
 
 Start in a clean checkout of the merged release commit. Fetch `origin/main`,
 confirm the checkout matches it, and confirm that the hosted `ci-gate` passed
-for that exact commit. Run the shim expiry guard before tagging.
+for that exact commit. Use the merge queue result if it is recorded on that
+commit. Run the shim expiry guard before tagging.
 The stable publish workflow repeats the guard after validating tag identity.
 
 ```bash
