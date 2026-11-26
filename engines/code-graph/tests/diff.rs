@@ -478,3 +478,144 @@ if __name__ == \"__main__\":
         .collect();
     assert_eq!(changed, ["<module>"], "{diff:?}");
 }
+
+fn duplicate_graph(order: &[usize], changed: bool) -> rusqlite::Connection {
+    generated_graph(order, 0, changed)
+}
+
+fn generated_graph(order: &[usize], variant: usize, changed: bool) -> rusqlite::Connection {
+    let conn = rusqlite::Connection::open_in_memory().unwrap();
+    init_schema(&conn).unwrap();
+    meta::upsert(&conn, "schema_version", &SCHEMA_VERSION.to_string()).unwrap();
+    conn.execute(
+        "INSERT INTO files(path,content_hash,size,modified_at,indexed_at,language)
+         VALUES('mod.py','f',0,0,0,'python')",
+        [],
+    )
+    .unwrap();
+    for &idx in order {
+        let hashes = [Some("a"), None, Some("b"), Some("a"), None, Some("c")];
+        let hash = hashes[(idx + variant) % hashes.len()];
+        let signature = if changed && idx == 2 {
+            "fn(x)"
+        } else if variant > 0 && (idx + variant) % 2 == 0 {
+            "fn(y)"
+        } else {
+            "fn()"
+        };
+        let span = if variant == 0 {
+            1
+        } else {
+            1 + (idx + variant) % 3
+        };
+        conn.execute(
+            "INSERT INTO symbols(id,kind,name,qualified_name,file_path,start_line,end_line,
+                                 signature,content_hash,body_hash)
+             VALUES(?1,'function','fn','fn','mod.py',?2,?3,?4,'f',?5)",
+            rusqlite::params![
+                format!("symbol-{idx}"),
+                (idx + 1) as i64,
+                (idx + 1 + span) as i64,
+                signature,
+                hash
+            ],
+        )
+        .unwrap();
+    }
+    for pair in order.windows(2) {
+        // Edges are keyed by the pair, independent of insertion order.
+        let id = format!("symbol-{}", pair[0]);
+        conn.execute(
+            "INSERT INTO edges(source,target,kind,line) VALUES(?1,?1,'calls',1)",
+            [&id],
+        )
+        .unwrap();
+    }
+    let id = format!("symbol-{}", order[order.len() - 1]);
+    conn.execute(
+        "INSERT INTO edges(source,target,kind,line) VALUES(?1,?1,'calls',1)",
+        [&id],
+    )
+    .unwrap();
+    conn
+}
+
+#[test]
+fn duplicate_symbol_matching_ignores_insertion_order() {
+    let before = duplicate_graph(&[0, 1, 2], false);
+    let after = duplicate_graph(&[2, 1, 0], false);
+    for (left, right) in [(&before, &after), (&after, &before), (&before, &before)] {
+        let diff = diff_graphs(left, right).unwrap();
+        assert!(diff.changed_nodes.is_empty(), "{diff:?}");
+        assert!(diff.added_nodes.is_empty() && diff.removed_nodes.is_empty());
+        assert!(diff.added_edges.is_empty() && diff.removed_edges.is_empty());
+    }
+}
+
+#[test]
+fn shuffled_symbol_and_edge_rows_preserve_diff_output() {
+    let mut order = [0, 1, 2, 3, 4, 5];
+    let original = duplicate_graph(&order, false);
+    let changed = duplicate_graph(&order, true);
+    let expected = serde_json::to_value(diff_graphs(&original, &changed).unwrap()).unwrap();
+    let mut seed = 711u32;
+    for _ in 0..40 {
+        for i in (1..order.len()).rev() {
+            seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            order.swap(i, seed as usize % (i + 1));
+        }
+        let before = duplicate_graph(&order, false);
+        order.reverse();
+        let after = duplicate_graph(&order, true);
+        assert_eq!(
+            serde_json::to_value(diff_graphs(&before, &after).unwrap()).unwrap(),
+            expected
+        );
+        assert!(
+            diff_graphs(&before, &original)
+                .unwrap()
+                .changed_nodes
+                .is_empty()
+        );
+    }
+}
+
+#[test]
+fn equal_digest_implies_empty_diff_for_varied_insertion_orders() {
+    use brigade_code_graph::query::digest::graph_digest;
+
+    let mut seed = 883u32;
+    for count in 1..=6 {
+        let mut order: Vec<_> = (0..count).collect();
+        for variant in 0..4 {
+            let before = generated_graph(&order, variant, false);
+            let expected = graph_digest(&before).unwrap();
+            for _ in 0..8 {
+                for i in (1..order.len()).rev() {
+                    seed = seed.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+                    order.swap(i, seed as usize % (i + 1));
+                }
+                let after = generated_graph(&order, variant, false);
+                assert_eq!(expected, graph_digest(&after).unwrap());
+                let result = diff_graphs(&before, &after).unwrap();
+                assert!(result.added_nodes.is_empty() && result.removed_nodes.is_empty());
+                assert!(result.changed_nodes.is_empty(), "{result:?}");
+                assert!(result.added_edges.is_empty() && result.removed_edges.is_empty());
+
+                after
+                    .execute(
+                        "UPDATE symbols SET signature='fn(changed)' WHERE id='symbol-0'",
+                        [],
+                    )
+                    .unwrap();
+                assert_ne!(expected, graph_digest(&after).unwrap());
+                assert!(
+                    !diff_graphs(&before, &after)
+                        .unwrap()
+                        .changed_nodes
+                        .is_empty()
+                );
+            }
+        }
+    }
+}

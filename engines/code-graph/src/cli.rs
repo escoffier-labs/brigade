@@ -49,6 +49,11 @@ enum Command {
         #[arg(long)]
         force: bool,
     },
+    /// Hash the committed graph content without syncing.
+    Digest {
+        #[arg(long)]
+        json: bool,
+    },
     Search {
         query: String,
         #[arg(long, value_name = "PATH")]
@@ -237,8 +242,8 @@ pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Command::Init { root } => {
             let db_path = db_path(cli.db, &root)?;
-            let conn = open_db(&db_path)?;
-            init_schema(&conn)?;
+            let conn = open_db(&db_path).map_err(init_writer_error)?;
+            init_schema(&conn).map_err(init_writer_error)?;
             println!("initialized {}", db_path.display());
         }
         Command::Sync { root, force } => {
@@ -279,6 +284,17 @@ pub fn run(cli: Cli) -> Result<()> {
                     summary.skipped,
                     reasons.join(" ")
                 );
+            }
+        }
+        Command::Digest { json } => {
+            let conn = open_default_read_only(cli.db)?;
+            let digest = crate::query::digest::graph_digest(&conn)?;
+            if json {
+                println!("{}", serde_json::to_string(&digest)?);
+            } else {
+                println!("format_version: {}", digest.format_version);
+                println!("schema_version: {}", digest.schema_version);
+                println!("sha256: {}", digest.sha256);
             }
         }
         Command::Search {
@@ -693,6 +709,16 @@ pub fn run(cli: Cli) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn init_writer_error(error: anyhow::Error) -> anyhow::Error {
+    let message = error.to_string();
+    if let Some(detail) = message.strip_prefix("another sync is already running for this database")
+    {
+        anyhow::anyhow!("another writer holds this database{detail}")
+    } else {
+        error
+    }
 }
 
 fn default_query_db_path(explicit: Option<PathBuf>) -> Result<PathBuf> {

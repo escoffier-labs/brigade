@@ -263,3 +263,41 @@ fn doctor_reports_per_language_coverage() {
     assert_eq!(rust["call_sites"], 0);
     assert_eq!(rust["cross_file_edges"], 0);
 }
+
+#[test]
+fn graph_digest_json_and_text_shapes() {
+    use std::process::Command;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("graph.db");
+    let conn = open_db(&db).unwrap();
+    init_schema(&conn).unwrap();
+    sync_repo(&conn, dir.path()).unwrap();
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_brigade-code-graph"))
+            .arg("--db")
+            .arg(&db)
+            .arg("digest")
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        output.stdout
+    };
+    let json: serde_json::Value = serde_json::from_slice(&run(&["--json"])).unwrap();
+    let sha256 = json["sha256"].as_str().unwrap();
+    assert_eq!(sha256.len(), 64);
+    assert!(
+        sha256
+            .bytes()
+            .all(|ch| ch.is_ascii_digit() || (b'a'..=b'f').contains(&ch))
+    );
+    assert_eq!(
+        json,
+        serde_json::json!({"format_version": 2, "schema_version": SCHEMA_VERSION, "sha256": sha256})
+    );
+    assert_eq!(
+        String::from_utf8(run(&[])).unwrap(),
+        format!("format_version: 2\nschema_version: {SCHEMA_VERSION}\nsha256: {sha256}\n")
+    );
+}

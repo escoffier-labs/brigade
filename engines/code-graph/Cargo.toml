@@ -55,4 +55,5 @@ miseledger = []
 watch = ["dep:notify"]
 
 [dev-dependencies]
+rusqlite = { version = "0.40", features = ["blob"] }
 tempfile = "3"

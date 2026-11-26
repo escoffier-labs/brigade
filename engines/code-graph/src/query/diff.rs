@@ -11,11 +11,11 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 use crate::model::{DiffEdge, DiffNode, DiffNodePrevious, GraphDiff, GraphDiffCounts};
-use crate::store::schema::table_has_column;
 
 const GRAPH_DIFF_SCHEMA_VERSION: u32 = 3;
 
 /// A symbol as loaded for diffing (a subset of the `symbols` row).
+#[derive(PartialEq, Eq, PartialOrd, Ord)]
 struct SymRow {
     kind: String,
     qualified_name: String,
@@ -36,13 +36,14 @@ type CanonEdge = (String, String, usize, String, String);
 type LinelessEdge = (String, String, String, String);
 
 fn load_symbols(conn: &Connection) -> Result<BTreeMap<NodeKey, Vec<SymRow>>> {
-    let body_hash_expr = if table_has_column(conn, "symbols", "body_hash")? {
-        "body_hash"
-    } else {
-        "NULL"
-    };
+    let has_body_hash: bool = conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM pragma_table_info('symbols', 'main') WHERE name = 'body_hash')",
+        [],
+        |row| row.get(0),
+    )?;
+    let body_hash_expr = if has_body_hash { "body_hash" } else { "NULL" };
     let mut stmt = conn.prepare(&format!(
-        "SELECT file_path, qualified_name, kind, start_line, end_line, signature, {body_hash_expr} FROM symbols"
+        "SELECT file_path, qualified_name, kind, start_line, end_line, signature, {body_hash_expr} FROM main.symbols"
     ))?;
     let rows = stmt.query_map([], |r| {
         Ok(SymRow {
@@ -66,16 +67,21 @@ fn load_symbols(conn: &Connection) -> Result<BTreeMap<NodeKey, Vec<SymRow>>> {
         );
         map.entry(key).or_default().push(row);
     }
+    // Keep the table scan sequential. Canonicalize only duplicate groups,
+    // before any matching or previous-node tie breaking.
+    for group in map.values_mut().filter(|group| group.len() > 1) {
+        group.sort_unstable();
+    }
     Ok(map)
 }
 
 fn load_call_edges(conn: &Connection) -> Result<BTreeSet<CanonEdge>> {
     let mut stmt = conn.prepare(
         "SELECT src.file_path, src.qualified_name, e.line, dst.file_path, dst.qualified_name \
-         FROM edges e \
-         JOIN symbols src ON e.source = src.id \
-         JOIN symbols dst ON e.target = dst.id \
-         WHERE e.kind = 'calls'",
+         FROM main.edges e \
+         JOIN main.symbols src ON e.source COLLATE BINARY = src.id \
+         JOIN main.symbols dst ON e.target COLLATE BINARY = dst.id \
+         WHERE e.kind COLLATE BINARY = 'calls'",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((
@@ -112,18 +118,42 @@ fn rows_unchanged(before_rows: &[SymRow], after_rows: &[SymRow]) -> bool {
         return false;
     }
 
-    let mut used = vec![false; before_rows.len()];
-    for after in after_rows {
-        let Some((idx, _)) = before_rows
-            .iter()
-            .enumerate()
-            .find(|(idx, before)| !used[*idx] && rows_equivalent(before, after))
-        else {
-            return false;
-        };
-        used[idx] = true;
+    if before_rows.len() == 1 {
+        return rows_equivalent(&before_rows[0], &after_rows[0]);
     }
-    true
+
+    #[derive(Default)]
+    struct Shape<'a> {
+        totals: [usize; 2],
+        missing: [usize; 2],
+        known: BTreeMap<&'a str, [usize; 2]>,
+    }
+
+    let mut shapes: BTreeMap<(&str, usize), Shape<'_>> = BTreeMap::new();
+    for (side, rows) in [before_rows, after_rows].into_iter().enumerate() {
+        for row in rows {
+            let shape = shapes.entry((&row.signature, span_len(row))).or_default();
+            shape.totals[side] += 1;
+            if let Some(hash) = row.body_hash.as_deref() {
+                shape.known.entry(hash).or_default()[side] += 1;
+            } else {
+                shape.missing[side] += 1;
+            }
+        }
+    }
+    shapes.values().all(|shape| {
+        if shape.totals[0] != shape.totals[1] {
+            return false;
+        }
+        // Cancel exact known hashes first. Any surplus must fit in the
+        // other side's missing hashes. Equal totals then pair the rest.
+        let mut surplus = [0, 0];
+        for &[before, after] in shape.known.values() {
+            surplus[0] += before.saturating_sub(after);
+            surplus[1] += after.saturating_sub(before);
+        }
+        surplus[0] <= shape.missing[1] && surplus[1] <= shape.missing[0]
+    })
 }
 
 fn previous_for_rows(

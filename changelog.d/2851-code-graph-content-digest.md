@@ -1,0 +1,1 @@
+- Add a read-only SHA-256 digest of committed code graph content and make graph diffs independent of insertion order. Refuse malformed or newer graph schema markers and send the index ignore notice to stderr.

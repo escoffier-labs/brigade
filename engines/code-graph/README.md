@@ -103,6 +103,44 @@ When the sync root is inside a git repository, `sync` follows `.gitignore` and `
 
 A file that cannot be indexed does not fail the sync. Sync skips it, drops any rows it had, indexes everything else, and prints `skipped files=N <reason>=N` when anything is skipped. Files that are not valid UTF-8 are skipped rather than decoded lossily, so stored line numbers always match the file. Reasons are `unreadable_utf8`, `io_error`, and `parse_error`. A skipped file is retried when its size or mtime changes (or on `sync --force`). An `io_error` skip is also retried once the file becomes readable again, because a permission fix changes neither. Its entry clears once it indexes or is deleted. Doctor JSON includes `skipped: {count, sample: [{path, reason}]}`, `parse_errors: {count, sample: [path]}` for indexed files where tree-sitter had to recover from syntax errors, and a `warnings` array of strings describing both. Samples list at most five paths. Skipped and parse-error files never change the verdict, so a permanently bad vendored file does not pin `doctor` to `STALE`. `evaluate` reports the same skips in a `skipped` list and `totals.skipped`.
 
+### Compare committed graph content
+
+```sh
+brigade-code-graph --db PATH digest --json
+```
+
+The digest command returns `format_version`, `schema_version`, and `sha256`.
+Plain text prints the same fields. Compare all three fields. Equal digests
+from two committed snapshots imply an empty graph diff, assuming SHA-256
+collision resistance. The digest is more specific than the diff, so different
+digests can still produce an empty diff.
+
+The digest reads all declared columns in `files`, `symbols`, `edges`,
+`imports`, `pending_calls`, `module_exports`, `module_assignments`,
+`conditional_symbols`, and `skipped_files` in one read transaction. It hashes
+table and column names and typed, length-prefixed values in primary-key order,
+with full-value tie breaking for nullable keys. Integer and text values have
+different tags, and NULL differs from empty strings and BLOBs. Format 2 binds
+the format and database schema versions into the hash. The `meta` table, the
+full-text index and its shadow tables, physical rowids, schema objects, and
+SQLite ID-allocation bookkeeping are excluded. The hash includes per-row
+timestamps such as `files.indexed_at`, `files.modified_at`, and
+`skipped_files.skipped_at`.
+
+An unchanged sync leaves the digest unchanged. A forced sync or file reindex
+that refreshes row timestamps changes the digest even when the diff is empty.
+
+The command uses an existing database and does not synchronize or take the
+engine's sync lock. It reports an error for unsupported schemas or unreadable
+snapshots. SQLite may need access to WAL and shared-memory sidecars. The digest
+describes the committed snapshot the read transaction observes.
+
+Diff orders duplicate symbol groups by their values. Within each signature
+and span, it matches exact known body hashes first, then uses missing hashes
+to pair remaining rows with a compatible signature and span. This preserves
+the legacy fallback for missing body hashes and removes insertion-order
+dependence. Edges use a sorted set of their canonical values.
+
 ## MCP server
 
 `brigade-code-graph-mcp` speaks newline-delimited JSON-RPC 2.0 over stdio. It has no async runtime and no extra dependencies, so the sidecar stays small. `refresh: true` starts an incremental graph-index write and waits up to 10 seconds before opening the query read-only. If the refresh fails or times out, the query proceeds and appends a `refresh_error` note to its text result. A timed-out worker may finish concurrently with that read-only query. Without `refresh`, query tools do not write the graph.

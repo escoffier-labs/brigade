@@ -1,6 +1,6 @@
 //! SQLite schema definition.
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use rusqlite::Connection;
 
 /// Bumped when the on-disk schema changes; surfaced in JSON packs from Phase 2 on.
@@ -55,7 +55,11 @@ pub(crate) fn clear_parse_census_pending(tx: &Connection) -> Result<()> {
 }
 
 pub fn init_schema(conn: &Connection) -> Result<()> {
-    conn.execute_batch(
+    super::db::checkpoint_on_close(conn, false)?;
+    let _lock = super::db::lock_connection(conn)?;
+    let tx = conn.unchecked_transaction()?;
+    checked_schema_version(&tx)?;
+    tx.execute_batch(
         r#"
         CREATE TABLE IF NOT EXISTS files (
             path TEXT PRIMARY KEY,
@@ -151,15 +155,17 @@ pub fn init_schema(conn: &Connection) -> Result<()> {
         CREATE INDEX IF NOT EXISTS idx_pending_calls_file ON pending_calls(file_path);
         "#,
     )?;
-    conn.execute_batch(SKIPPED_FILES_TABLE)?;
-    conn.execute_batch(MODULE_ASSIGNMENTS_TABLE)?;
-    ensure_import_columns(conn)?;
-    Ok(())
+    tx.execute_batch(SKIPPED_FILES_TABLE)?;
+    tx.execute_batch(MODULE_ASSIGNMENTS_TABLE)?;
+    ensure_import_columns(&tx)?;
+    tx.commit()?;
+    super::db::checkpoint_on_close(conn, true)
 }
 
 /// Apply write-path schema upgrades needed before sync can insert current rows,
 /// returning how much derived state the caller must rebuild.
 pub fn upgrade_for_sync(conn: &Connection) -> Result<SchemaUpgrade> {
+    let version = checked_schema_version(conn)?;
     let mut upgrade = SchemaUpgrade::None;
     conn.execute_batch(MODULE_ASSIGNMENTS_TABLE)?;
     if !table_has_column(conn, "symbols", "body_hash")? {
@@ -176,7 +182,7 @@ pub fn upgrade_for_sync(conn: &Connection) -> Result<SchemaUpgrade> {
     // no longer be derived for its files; reindex once to populate them. The
     // stored version (not table existence) is the signal, because init_schema
     // creates the empty table before this runs.
-    if stored_schema_version(conn)?.is_some_and(|version| version < 5) {
+    if version.is_some_and(|version| version < 5) {
         conn.execute(
             "CREATE TABLE IF NOT EXISTS pending_calls (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -206,7 +212,7 @@ pub fn upgrade_for_sync(conn: &Connection) -> Result<SchemaUpgrade> {
     // columns the symbols table already stores, so the migration rewrites ids
     // in place (symbols, pending_calls, FTS) and re-resolves edges, re-parsing
     // nothing. Pre-v5 databases skip this: their FullReindex regenerates ids.
-    if stored_schema_version(conn)?.is_some_and(|version| (5..7).contains(&version)) {
+    if version.is_some_and(|version| (5..7).contains(&version)) {
         rewrite_symbol_ids_v7(conn)?;
         upgrade = upgrade.max(SchemaUpgrade::RebuildEdges);
     }
@@ -296,7 +302,7 @@ fn rewrite_symbol_ids_v7(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-fn stored_schema_version(conn: &Connection) -> Result<Option<u32>> {
+pub(crate) fn checked_schema_version(conn: &Connection) -> Result<Option<u32>> {
     let meta_exists: bool = conn.query_row(
         "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'meta')",
         [],
@@ -305,7 +311,24 @@ fn stored_schema_version(conn: &Connection) -> Result<Option<u32>> {
     if !meta_exists {
         return Ok(None);
     }
-    Ok(crate::store::meta::read(conn, "schema_version")?.and_then(|value| value.parse().ok()))
+    let Some(marker) = crate::store::meta::read(conn, "schema_version")? else {
+        return Ok(None);
+    };
+    ensure!(
+        !marker.is_empty() && marker.bytes().all(|byte| byte.is_ascii_digit()),
+        "invalid database schema marker: expected a non-negative decimal integer"
+    );
+    let newer = || {
+        anyhow::anyhow!(
+            "database schema is newer than this engine (supports schema {SCHEMA_VERSION})"
+        )
+    };
+    // An all-digit value that cannot fit in u32 is necessarily newer.
+    let version = marker.parse::<u32>().map_err(|_| newer())?;
+    if version > SCHEMA_VERSION {
+        return Err(newer());
+    }
+    Ok(Some(version))
 }
 
 fn ensure_import_columns(conn: &Connection) -> Result<()> {

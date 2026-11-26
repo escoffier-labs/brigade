@@ -31,6 +31,7 @@ fn command_args<'a>(db: &'a Path, command: &'a str) -> Vec<String> {
         "context" => vec!["--db".into(), db, "context".into(), "helper".into()],
         "neighbors" => vec!["--db".into(), db, "neighbors".into(), "app.py".into()],
         "outline" => vec!["--db".into(), db, "outline".into(), "app.py".into()],
+        "digest" => vec!["--db".into(), db, "digest".into(), "--json".into()],
         "stats" => vec!["--db".into(), db, "stats".into()],
         "doctor" => vec!["--db".into(), db, "doctor".into()],
         other => panic!("unknown query command: {other}"),
@@ -239,6 +240,7 @@ fn query_commands_do_not_create_default_db_state_when_missing() {
         "neighbors",
         "outline",
         "stats",
+        "digest",
         "doctor",
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -253,6 +255,7 @@ fn query_commands_do_not_create_default_db_state_when_missing() {
             "neighbors" => cmd.args(["neighbors", "app.py"]),
             "outline" => cmd.args(["outline", "app.py"]),
             "stats" => cmd.arg("stats"),
+            "digest" => cmd.args(["digest", "--json"]),
             "doctor" => cmd.arg("doctor"),
             other => panic!("unknown query command: {other}"),
         };
@@ -281,6 +284,7 @@ fn query_commands_do_not_mutate_existing_db_state() {
         "neighbors",
         "outline",
         "stats",
+        "digest",
         "doctor",
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -861,7 +865,13 @@ fn fresh_repository_gets_canonical_index_and_ignore_entry() {
     let sync = engine_in(root, &["sync", "."]);
     assert_eq!(sync.status.code(), Some(0), "{sync:?}");
     // Windows prints the relative path with backslashes.
+    let stderr = String::from_utf8_lossy(&sync.stderr);
+    assert!(
+        stderr.contains("updated ") && stderr.contains(".gitignore"),
+        "{stderr}"
+    );
     let stdout = String::from_utf8_lossy(&sync.stdout).replace('\\', "/");
+    assert!(!stdout.contains("updated "), "{stdout}");
     assert!(
         stdout.contains("db=./.brigade/code-graph/code-graph.db"),
         "{stdout}"
