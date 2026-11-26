@@ -1,1 +1,1 @@
-- Record all five completed Orca qualification pairs, including recovery of the initial batch through paged worker transcripts.
+- Record the matched repeat of Orca qualification pair 1.

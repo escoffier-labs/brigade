@@ -242,53 +242,103 @@ three, and the final assistant lines matched the expected outputs. Each
 acknowledgement and post-release observation succeeded. The final status
 reported `completed`, zero live capacity, and no held tasks.
 
-The 1A verified completion clock runs from the original submission through
-the final zero-capacity check and includes the outage and time awaiting the
-transcript fix. The record counts two parent interventions, the Orca
-outage and the Brigade re-pin. It retains the launch commit
-`9190c006061bc185879e527e521417f67929668a` and the checkout revision used
-at launch. The newer Brigade commit handled 1A closeout and all remaining
-batches. That executable change and the recovery interval limit comparisons
-within pair 1. The 1B elapsed time includes coordinator time before its
-first baseline output and worktree verification.
+### Original pair 1 history
 
-All five pairs completed. Every batch returned the three exact outputs
-from clean worktrees at the pinned revision and ended with zero held
-capacity. All 30 Codex worker sessions recorded `service_tier = "default"`
-in their applied thread settings. Arm A used a read-only prompt. Arm B
-enforced read-only access through Brigade's batch policy.
+Original 1A launched on Brigade `9190c00`. Brigade `225cc9c` handled its
+paged closeout and the original 1B. Original 1A remains recovery evidence.
+Both original records preserve their passed verdict and zero held capacity.
+
+| Batch | Verdict | Verified elapsed (s) | Command time (s) | Held capacity |
+| --- | --- | ---: | ---: | ---: |
+| [Original 1A](research/evidence/orca-qualification/attempt-6-pair-01-a/record.json) | Passed | 8,080.964 | At least 57.476 | 0 |
+| [Original 1B](research/evidence/orca-qualification/attempt-6-pair-01-b/record.json) | Passed | 54.926 | 14.555 | 0 |
+
+Original 1A spent 22.266 seconds of instrumented command time reaching worker
+acceptance, 5.588 seconds on the failed recovery, and 29.622 seconds on paged
+closeout. The failure probe was at 21:17:24 UTC. Orca reported ready at
+21:23:55 UTC, 391 seconds later. The outage onset was unobserved. The first
+timed retry began at 21:25:05 UTC and returned a refusal at 21:25:11 UTC.
+Closeout resumed at 23:30:41 UTC after a 7,530.6-second wait. The collector
+counts the outage and the Brigade re-pin as two parent interventions.
+
+Original 1B's last batch command ended at 23:31:51.969 UTC. The collector
+completed its output check at 23:32:32.339 UTC, 40.371 seconds later.
+
+### Matched results
+
+Matched pair 1 is the A-then-B repeat on Brigade `225cc9c`, the same build
+used for pairs 2 through 5. All five matched pairs passed. Each batch
+returned three exact outputs from clean worktrees at workload revision
+`0c29e690312b88ec99adb266281e476cc3fa5516` and closed with zero held capacity.
+All 30 worker sessions in the matched pairs recorded the default Codex tier.
+Arm A used a read-only prompt. Arm B enforced read-only access through
+Brigade's batch policy.
+
 The projected `brigade.orca_qualification.v1` schema omits service tier
 and transcript clipping, which this report verifies from the retained
 local worker `thread_settings_applied` events and Brigade `observe`
 receipts, respectively.
 
-Peak observed swap was 6.17 GiB. The first repository verification capture
-after the ledger engine switch to v0.32.0 could drain up to about 45 seconds
-of queued evidence. Verification capture ran after the series and sits
-outside the worker and batch completion measurements.
+Verified elapsed has a different endpoint for each arm. Arm A runs from
+`open.start` to `status.end`, after inline output checks. Arm B runs from
+`batch-result.start` to the end of the collector's output and worktree
+checks, including any coordinator delay before the collector starts.
+Command time uses the same
+method for both arms. It sums `end - start` for every retained timing receipt
+inside that batch's verified clock span, excluding launcher preflight
+outside the span.
 
-| Batch | Verdict | Verified completion (seconds) | Zero held capacity | Clipped transcripts |
-| --- | --- | ---: | --- | ---: |
-| [1A](research/evidence/orca-qualification/attempt-6-pair-01-a/record.json) | Passed | 8,080.964 including outage | Yes | 3 |
-| [1B](research/evidence/orca-qualification/attempt-6-pair-01-b/record.json) | Passed | 54.926 | Yes | N/A |
-| [2B](research/evidence/orca-qualification/attempt-6-pair-02-b/record.json) | Passed | 12.545 | Yes | N/A |
-| [2A](research/evidence/orca-qualification/attempt-6-pair-02-a/record.json) | Passed | 53.821 | Yes | 3 |
-| [3A](research/evidence/orca-qualification/attempt-6-pair-03-a/record.json) | Passed | 54.827 | Yes | 3 |
-| [3B](research/evidence/orca-qualification/attempt-6-pair-03-b/record.json) | Passed | 19.081 | Yes | N/A |
-| [4B](research/evidence/orca-qualification/attempt-6-pair-04-b/record.json) | Passed | 12.370 | Yes | N/A |
-| [4A](research/evidence/orca-qualification/attempt-6-pair-04-a/record.json) | Passed | 57.801 | Yes | 3 |
-| [5A](research/evidence/orca-qualification/attempt-6-pair-05-a/record.json) | Passed | 53.972 | Yes | 3 |
-| [5B](research/evidence/orca-qualification/attempt-6-pair-05-b/record.json) | Passed | 20.664 | Yes | N/A |
+| Batch | Verdict | Verified elapsed (s) | Command time (s) | Held capacity | Clipped transcripts |
+| --- | --- | ---: | ---: | ---: | ---: |
+| [Repeat 1A](research/evidence/orca-qualification/attempt-6-pair-01-repeat-a/record.json) | Passed | 60.818 | 60.203 | 0 | 3 |
+| [Repeat 1B](research/evidence/orca-qualification/attempt-6-pair-01-repeat-b/record.json) | Passed | 14.457 | 13.808 | 0 | N/A |
+| [2B](research/evidence/orca-qualification/attempt-6-pair-02-b/record.json) | Passed | 12.545 | 12.172 | 0 | N/A |
+| [2A](research/evidence/orca-qualification/attempt-6-pair-02-a/record.json) | Passed | 53.821 | 53.358 | 0 | 3 |
+| [3A](research/evidence/orca-qualification/attempt-6-pair-03-a/record.json) | Passed | 54.827 | 54.385 | 0 | 3 |
+| [3B](research/evidence/orca-qualification/attempt-6-pair-03-b/record.json) | Passed | 19.081 | 18.685 | 0 | N/A |
+| [4B](research/evidence/orca-qualification/attempt-6-pair-04-b/record.json) | Passed | 12.370 | 12.027 | 0 | N/A |
+| [4A](research/evidence/orca-qualification/attempt-6-pair-04-a/record.json) | Passed | 57.801 | 57.354 | 0 | 3 |
+| [5A](research/evidence/orca-qualification/attempt-6-pair-05-a/record.json) | Passed | 53.972 | 53.508 | 0 | 3 |
+| [5B](research/evidence/orca-qualification/attempt-6-pair-05-b/record.json) | Passed | 20.664 | 20.193 | 0 | N/A |
 
-Queue and startup windows were available for Arm A. Execution was
-available for both arms. The phase windows can overlap. No planning,
-synthesis, or delivery interval was measured. Usage covers observed
-input, output, and cached input tokens from the worker session counters.
+Matched pair 1 is the repeat on `225cc9c`. The original 1A took 8,080.964
+seconds through an Orca outage and a build change, with at least 57.5
+seconds of instrumented work. The original 1B's 54.926 seconds include
+40.371 seconds between its last batch command and the collector's output
+check. Captured verification, graph sync, ledger indexing, and polling
+were outside the batch command paths in both arms. Arm B recorded
+`code_graph_delta.status = skipped_read_only`. Peak observed swap for
+attempt 6 was 6.17 GiB.
 
-| Batch | Queue (seconds) | Startup (seconds) | Execution (seconds) | Input tokens | Output tokens | Cached input tokens |
+### Protocol overhead and measurement limits
+
+Governed batches in pairs 2 through 5 each made 45 timed calls, 24 Orca
+and 21 Brigade, for 53.4 to 57.4 seconds of command time. The longest
+gap between commands in those batches was 0.156 seconds. Launch took
+22.0 to 26.1 seconds, including 18.4 to 20.0 seconds for the three
+blocking worker starts at about six seconds each. Closeout took 31.1 to
+32.0 seconds. About 80% of governed command time was in serial Orca CLI
+calls, with an observed range of 80% to 84%. Orca closeout calls took
+about 1.2 seconds per call. Brigade's closeout proof, including observe,
+ack, finalize, and status, took 4.4 to 5.7 seconds per batch.
+
+This protocol overhead can be reduced. Estimated from those timings,
+concurrent per-task closeout chains would bring governed batches to
+about 41 to 45 seconds. Collapsing closeout calls could save up to about
+24 seconds per batch. These are separate estimates. The #2046
+qualification sets no speed target, so the measured gap breaks no
+threshold.
+
+The phase-separation wording in #2046 is only partly met. Arm A's queue
+and startup windows overlap, Arm B's queue and startup fields are unset,
+and delivery is unmeasured. Execution windows were available for both
+arms. Planning and synthesis were also unmeasured. The token counts below
+come from observed worker session counters.
+
+| Batch | Queue (s) | Startup (s) | Execution (s) | Input tokens | Output tokens | Cached input tokens |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| 1A | 15.720 | 20.631 | 22.124 | 320,740 | 555 | 226,816 |
-| 1B | Unobserved | Unobserved | 5.613 | 210,529 | 210 | 119,424 |
+| Repeat 1A | 16.545 | 21.360 | 23.346 | 320,855 | 598 | 226,816 |
+| Repeat 1B | Unobserved | Unobserved | 5.587 | 210,545 | 246 | 165,632 |
 | 2B | Unobserved | Unobserved | 4.980 | 210,517 | 223 | 126,720 |
 | 2A | 15.720 | 20.356 | 22.288 | 320,887 | 603 | 233,856 |
 | 3A | 15.807 | 20.697 | 23.613 | 320,657 | 543 | 233,856 |
@@ -297,23 +347,3 @@ input, output, and cached input tokens from the worker session counters.
 | 4A | 18.341 | 22.720 | 24.800 | 320,636 | 520 | 272,768 |
 | 5A | 15.776 | 20.470 | 22.433 | 320,628 | 525 | 233,856 |
 | 5B | Unobserved | Unobserved | 5.586 | 210,540 | 236 | 131,584 |
-
-### Matched repeat of pair 1
-
-The original pair 1 used different Brigade builds because 1A needed recovery.
-Use the repeat below as matched pair 1 for comparison with pairs 2 through 5.
-The original 1A remains recovery evidence, and the original 1B remains the
-baseline record from that sequence.
-
-The repeat ran A then B using Brigade commit
-`225cc9ca4538f40ad36089916e46268eee814618` and workload revision
-`0c29e690312b88ec99adb266281e476cc3fa5516` in both arms. Each arm returned
-three exact outputs from clean worktrees, with zero parent interventions.
-All six sessions recorded the default tier. Each governed transcript used
-two pages and reported clipping. Swap usage was 6.15 GiB at both batch
-boundaries, below the 8 GiB stop threshold.
-
-| Batch | Verdict | Verified completion (seconds) | Held capacity at close |
-| --- | --- | ---: | ---: |
-| [Repeat 1A](research/evidence/orca-qualification/attempt-6-pair-01-repeat-a/record.json) | Passed | 60.818 | 0 |
-| [Repeat 1B](research/evidence/orca-qualification/attempt-6-pair-01-repeat-b/record.json) | Passed | 14.457 | 0 |
