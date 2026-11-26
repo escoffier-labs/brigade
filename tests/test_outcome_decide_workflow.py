@@ -57,11 +57,10 @@ def test_outcome_decide_app_token_is_scoped_to_the_writer():
     assert dict(re.findall(r"^          permission-([a-z-]+): (\w+)$", mint, re.MULTILINE)) == {
         "contents": "write",
         "pull-requests": "write",
-        "actions": "write",
     }
 
 
-def test_outcome_decide_publish_uses_the_same_identity_for_git_and_gh():
+def test_outcome_decide_publish_binds_git_pull_request_and_actions_tokens():
     app_output = "steps.ledger-app-token.outputs.token"
     app_checkout = _workflow_step_section(WORKFLOW, "publish", "Check out with the ledger writer token")
     assert "if: vars.LEDGER_APP_ID != ''" in app_checkout
@@ -75,6 +74,7 @@ def test_outcome_decide_publish_uses_the_same_identity_for_git_and_gh():
 
     publish = _workflow_step_section(WORKFLOW, "publish", "Verify and publish ledger pull requests")
     assert f"GH_TOKEN: ${{{{ vars.LEDGER_APP_ID == '' && github.token || {app_output} }}}}" in publish
+    assert "GH_ACTIONS_TOKEN: ${{ github.token }}" in publish
     assert "if:" not in publish
 
 

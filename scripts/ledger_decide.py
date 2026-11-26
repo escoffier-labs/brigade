@@ -105,6 +105,21 @@ def command(
     return result.stdout
 
 
+def actions_token() -> str:
+    token = os.environ.get("GH_ACTIONS_TOKEN", "")
+    if not token.strip():
+        raise PublicationError("GH_ACTIONS_TOKEN is required for publication")
+    return token
+
+
+def actions_command(repo: Repo, *args: str) -> bytes:
+    return command("gh", *args, cwd=repo.path, env=dict(os.environ, GH_TOKEN=actions_token()))
+
+
+def actions_api(repo: Repo, endpoint: str) -> Any:
+    return json.loads(actions_command(repo, "api", "--method", "GET", endpoint))
+
+
 def candidate_commit(repo: Repo, main: str, raw: bytes, restore_map: dict[str, str], *, title: str) -> str:
     """Build a disposable candidate with a private index and exact Git tree modes."""
     with tempfile.TemporaryDirectory(prefix="ledger-index-") as directory:
@@ -306,13 +321,13 @@ class Publisher:
         return result
 
     def _dispatch(self, branch: str) -> None:
-        self._gh("workflow", "run", "ci.yml", "--repo", self.ev.slug, "--ref", branch)
+        actions_command(self.ev.repo, "workflow", "run", "ci.yml", "--repo", self.ev.slug, "--ref", branch)
         say(f"dispatched ci.yml on {branch}")
 
     def _dispatch_if_missing(self, branch: str, head: str) -> None:
         query = urlencode({"event": "workflow_dispatch", "branch": branch, "head_sha": head, "per_page": 1})
         endpoint = f"repos/{self.ev.slug}/actions/workflows/ci.yml/runs?{query}"
-        runs = ci_attestation.default_gh_api(endpoint)
+        runs = actions_api(self.ev.repo, endpoint)
         if not isinstance(runs, dict) or type(runs.get("total_count")) is not int:
             raise PublicationError("the CI run listing is unreadable")
         if runs["total_count"] == 0:
@@ -529,7 +544,15 @@ def main() -> int:
     try:
         repo = Repo(Path.cwd())
         sha = repo.resolve("HEAD")
-        ev = planner.evidence(repo, ci_attestation.default_gh_api, os.environ["GITHUB_REPOSITORY"])
+        if args.stage == "publish":
+            actions_token()
+
+        def gh_api(endpoint: str) -> Any:
+            if args.stage == "publish" and "/actions/" in endpoint:
+                return actions_api(repo, endpoint)
+            return ci_attestation.default_gh_api(endpoint)
+
+        ev = planner.evidence(repo, gh_api, os.environ["GITHUB_REPOSITORY"])
         now = dt.datetime.now(dt.timezone.utc)
         operation = compute if args.stage == "compute" else publish
         operation(ev, sha, args.artifact, now)

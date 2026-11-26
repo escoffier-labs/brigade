@@ -1,0 +1,1 @@
+- The workflow token handles CI run lookup and dispatch, so the ledger App needs only Contents and Pull requests write access.

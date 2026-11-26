@@ -189,6 +189,72 @@ def test_artifact_from_older_main_is_stale(seeded, writer_script, tmp_path):
         writer_script.verify_artifact(seeded.ev, newer, artifact, WRITER_NOW)
 
 
+def test_publish_routes_actions_separately_from_pr_and_git(seeded, writer_script, monkeypatch, tmp_path):
+    monkeypatch.chdir(seeded.root)
+    monkeypatch.setenv("GITHUB_REPOSITORY", seeded.ev.slug)
+    monkeypatch.setenv("GH_TOKEN", "test-app-token")
+    monkeypatch.setenv("GH_ACTIONS_TOKEN", "test-workflow-token")
+    monkeypatch.setattr(writer_script.sys, "argv", ["ledger_decide.py", "publish", "--artifact", str(tmp_path)])
+    calls = []
+
+    def command(*args, cwd, env=None, data=None):
+        calls.append((args, (os.environ if env is None else env)["GH_TOKEN"]))
+        return b'{"total_count":0,"number":6}'
+
+    def default_api(endpoint):
+        calls.append((("gh", "api", endpoint), os.environ["GH_TOKEN"]))
+        return {"id": seeded.ev.repo_id}
+
+    def publish(ev, main, *_):
+        ev.gh(f"repos/{ev.slug}/actions/workflows/attest.yml/runs")
+        ev.gh(f"repos/{ev.slug}/actions/runs/7/attempts/1/jobs")
+        ev.gh(f"repos/{ev.slug}/pulls/6/reviews")
+        publisher = writer_script.Publisher(ev, main)
+        publisher._dispatch_if_missing(writer.AUTO_BRANCH, main)
+        publisher.auto(main)
+
+    monkeypatch.setattr(writer_script, "command", command)
+    monkeypatch.setattr(writer_script.ci_attestation, "default_gh_api", default_api)
+    monkeypatch.setattr(writer_script, "publish", publish)
+    monkeypatch.setattr(
+        writer_script.Publisher, "_ref", lambda _, branch: seeded.repo.resolve("HEAD") if branch == "main" else None
+    )
+    monkeypatch.setattr(writer_script.Publisher, "_decision", lambda *_: ("create", None))
+
+    assert writer_script.main() == 0
+    assert [args[:2] for args, _ in calls] == [
+        ("gh", "api"),  # Repository metadata
+        ("gh", "api"),  # Attest runs
+        ("gh", "api"),  # Attest jobs
+        ("gh", "api"),  # PR reviews
+        ("gh", "api"),  # CI runs
+        ("gh", "workflow"),
+        ("git", "push"),
+        ("gh", "api"),  # PR creation
+        ("gh", "workflow"),
+        ("gh", "pr"),  # Auto-merge
+    ]
+    for args, token in calls:
+        uses_actions = args[:2] == ("gh", "workflow") or any("/actions/" in arg for arg in args)
+        assert token == ("test-workflow-token" if uses_actions else "test-app-token")
+
+
+@pytest.mark.parametrize("token", [None, ""])
+def test_publish_requires_actions_token(seeded, writer_script, monkeypatch, tmp_path, capsys, token):
+    monkeypatch.chdir(seeded.root)
+    monkeypatch.setenv("GITHUB_REPOSITORY", seeded.ev.slug)
+    monkeypatch.setenv("GH_TOKEN", "test-app-token")
+    if token is None:
+        monkeypatch.delenv("GH_ACTIONS_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("GH_ACTIONS_TOKEN", token)
+    monkeypatch.setattr(writer_script.sys, "argv", ["ledger_decide.py", "publish", "--artifact", str(tmp_path)])
+    monkeypatch.setattr(writer_script.ci_attestation, "default_gh_api", lambda *_: pytest.fail("called GitHub"))
+
+    assert writer_script.main() == 1
+    assert "GH_ACTIONS_TOKEN" in capsys.readouterr().out
+
+
 def test_queued_automatic_pull_has_no_side_effects(seeded, writer_script, monkeypatch, capsys):
     publisher = writer_script.Publisher(seeded.ev, seeded.c0)
     monkeypatch.setattr(publisher, "_decision", lambda _: ("queued", {"number": 5}))
@@ -207,6 +273,7 @@ def test_automatic_pull_pushes_dispatches_and_enables_auto_merge(seeded, writer_
     monkeypatch.setattr(publisher, "_push", lambda *args: calls.append(("push", *args)))
     monkeypatch.setattr(publisher, "_open", lambda *args: calls.append(("open", args[0])) or {"number": 6})
     monkeypatch.setattr(publisher, "_gh", lambda *args: calls.append(args))
+    monkeypatch.setattr(writer_script, "actions_command", lambda _, *args: calls.append(args))
     publisher.auto(seeded.c0)
     assert calls == [
         ("push", writer.AUTO_BRANCH, seeded.c0, pull),
@@ -461,11 +528,12 @@ def test_existing_current_approval_recovers_a_missing_ci_dispatch(seeded, writer
     monkeypatch.setattr(publisher, "_dispatch", dispatched.append)
     api_calls = []
 
-    def gh(endpoint):
+    def gh(repo, endpoint):
+        assert repo == seeded.repo
         api_calls.append(endpoint)
         return {"total_count": 0}
 
-    monkeypatch.setattr(writer_script.ci_attestation, "default_gh_api", gh)
+    monkeypatch.setattr(writer_script, "actions_api", gh)
     publisher.approval(raw, proposed, approval, WRITER_NOW + dt.timedelta(minutes=3))
     assert len(api_calls) == 1 and f"head_sha={head}" in api_calls[0]
     assert dispatched == [approval.branch]
@@ -483,6 +551,7 @@ def test_existing_approval_rebuilds_unreadable_head(seeded, writer_script, monke
     calls = []
     monkeypatch.setattr(publisher, "_push", lambda *args: pushes.append(args))
     monkeypatch.setattr(publisher, "_gh", lambda *args, **kwargs: calls.append(args))
+    monkeypatch.setattr(writer_script, "actions_command", lambda _, *args: calls.append(args))
     assert not publisher.approval(raw, proposed, approval, WRITER_NOW + dt.timedelta(minutes=2))
     [(branch, new_head, old_pull)] = pushes
     assert branch == approval.branch and old_pull == pull
@@ -529,6 +598,7 @@ def test_publish_equal_closes_auto_and_opens_approval(seeded, writer_script, tmp
     calls = []
     pushes = []
     monkeypatch.setattr(publisher, "_gh", lambda _, *args: calls.append(args))
+    monkeypatch.setattr(writer_script, "actions_command", lambda _, *args: calls.append(args))
     monkeypatch.setattr(publisher, "_push", lambda _, *args: pushes.append(args))
     writer_script.publish(seeded.ev, main, artifact, now)
     assert calls == [
