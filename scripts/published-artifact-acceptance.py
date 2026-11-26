@@ -45,7 +45,8 @@ GITHUB_API_HOST = "api.github.com"
 PYPI_PROJECT_URL = "https://pypi.org/pypi/brigadestack/json"
 PYPI_AVAILABILITY_TIMEOUT_SECONDS = 6 * 60
 PYPI_POLL_INTERVAL_SECONDS = 5
-PIPX_INSTALL_TIMEOUT_SECONDS = 6 * 60
+# The Simple index can lag the release JSON by a 600-second cache lifetime.
+PIPX_INSTALL_TIMEOUT_SECONDS = 15 * 60
 PIPX_INSTALL_POLL_INTERVAL_SECONDS = 10
 VERIFY_RECEIPT_KIND = "brigade_work_verify_receipt"
 USER_AGENT = "brigade-published-artifact-acceptance/1.0"
@@ -505,17 +506,9 @@ def run_checked(
     return completed
 
 
-def _is_transient_pipx_install_error(detail: str) -> bool:
-    lowered = detail.lower()
-    return any(
-        token in lowered
-        for token in (
-            "no matching distribution found",
-            "could not find a version that satisfies",
-            "404 client error",
-            "not found for the requested version",
-        )
-    )
+def _is_transient_pipx_install_error(detail: str, requirement: str) -> bool:
+    missing_version = f"error: no matching distribution found for {requirement.lower()}"
+    return any(line.rstrip().lower().endswith(missing_version) for line in detail.splitlines())
 
 
 def install_brigade_cli(
@@ -528,22 +521,22 @@ def install_brigade_cli(
     timeout_seconds: float = PIPX_INSTALL_TIMEOUT_SECONDS,
     poll_interval_seconds: float = PIPX_INSTALL_POLL_INTERVAL_SECONDS,
 ) -> None:
-    """Install an exact wheel, retrying while the simple index lags the JSON API."""
+    """Install the exact release, retrying while the Simple index lags the JSON API."""
     deadline = monotonic() + timeout_seconds
-    detail = "pipx install has not succeeded"
-    argv = [sys.executable, "-m", "pipx", "install", f"brigadestack=={version}"]
+    requirement = f"brigadestack=={version}"
+    argv = [sys.executable, "-m", "pipx", "install", "--pip-args=--no-cache-dir", requirement]
     while True:
         try:
             run_checked(argv, runner=runner, env=env)
             return
         except AcceptanceError as exc:
             detail = str(exc)
-            if not _is_transient_pipx_install_error(detail):
+            if not _is_transient_pipx_install_error(detail, requirement):
                 raise
         remaining = deadline - monotonic()
         if remaining <= 0:
             raise AcceptanceError(
-                f"pipx install of brigadestack=={version} was not available within {timeout_seconds:g} seconds: {detail}"
+                f"pipx install of {requirement} was not available within {timeout_seconds:g} seconds: {detail}"
             )
         sleep(min(poll_interval_seconds, remaining))
 
