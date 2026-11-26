@@ -7,6 +7,7 @@ import subprocess
 import sys
 import time
 from contextlib import closing
+from io import BytesIO
 from types import SimpleNamespace
 
 import pytest
@@ -99,7 +100,9 @@ def test_work_verify_detached_worker_survives_and_releases_pipes(tmp_path, monke
 
     try:
         result = subprocess.run(argv, capture_output=True, text=True, check=True, timeout=40)
-        assert json.loads(result.stdout)["code_graph_delta"]["background_refresh"]["status"] == "started"
+        first = json.loads(result.stdout)["code_graph_delta"]
+        assert first["status"] == "sync_deferred"
+        assert first["background_refresh"]["status"] in ({"started", "busy"} if os.name == "nt" else {"started"})
         wait_until(started.exists)
         assert not release.exists() and not reservation.exists()
         result = subprocess.run(argv, capture_output=True, text=True, check=True, timeout=40)
@@ -172,26 +175,35 @@ def test_worker_lock_timeout_preserves_latest_exit(tmp_path, monkeypatch):
     assert localio.read_json_dict(lock.with_suffix(".exit.json")) == previous_exit
 
 
-def test_owned_windows_worker_keeps_lock_when_sync_exceeds_budget(tmp_path, monkeypatch, graph_sync_platform):
+def test_owned_windows_worker_keeps_lock_when_sync_exceeds_budget(tmp_path, monkeypatch, capsys, graph_sync_platform):
     graph_sync_platform("win32")
     lock = code_graph_background._lock_path(tmp_path)
     db = lock.parent / "code-graph.db"
     localio.write_json(lock.with_suffix(".json"), {"token": "claim-token"})
+    localio.write_json(lock.with_suffix(".exit.json"), {"lock_refused_db": str(db), "reason": "old refusal"})
     waits = []
 
     def wait(*, timeout=None):
         waits.append(timeout)
         if timeout is not None:
+            assert code_graph_background.last_engine_lock_refusal(tmp_path, db) is None
             raise subprocess.TimeoutExpired("engine", timeout)
         status = code_graph_background.status_or_start(tmp_path, db, "engine")
         assert status["status"] == "busy" and "still running" in status["reason"]
+        assert status["engine_pid"] == 12345 and status["started_at"] <= time.time()
+        assert status["elapsed_seconds"] >= 0
         assert code_graph_background.last_exit_reason(tmp_path) is None
+        assert code_cmd.run("doctor", ["--target", str(tmp_path)]) == 0
+        assert "engine PID 12345" in capsys.readouterr().err
         return 0
 
     def start_engine(argv, **kwargs):
         assert kwargs["creationflags"] == subprocess.CREATE_NO_WINDOW
-        return SimpleNamespace(wait=wait)
+        assert kwargs["stderr"] == subprocess.PIPE
+        return SimpleNamespace(wait=wait, pid=12345, stderr=BytesIO())
 
+    monkeypatch.setattr(proc, "run", lambda *args, **kwargs: proc.Result(0, "", ""))
+    monkeypatch.setattr(component_bins, "resolve", lambda name: "engine")
     monkeypatch.setattr(subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
     monkeypatch.setattr(subprocess, "Popen", start_engine)
     monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("killable worker sync"))
@@ -221,7 +233,7 @@ def test_owned_windows_worker_keeps_lock_when_sync_exceeds_budget(tmp_path, monk
 def test_windows_observes_startup_reservation_without_relaunch(
     tmp_path, monkeypatch, created, mtime, actual_start, alive, busy
 ):
-    monkeypatch.setattr(code_graph_background, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(code_graph_background, "sys", SimpleNamespace(platform="win32", executable=sys.executable))
     monkeypatch.setattr(code_graph_background, "time", SimpleNamespace(time=lambda: 1000))
     monkeypatch.setattr(proc_group, "process_start_time", lambda pid: None)
     monkeypatch.setattr(nt_process, "process_creation_time", lambda pid: actual_start, raising=False)
@@ -346,8 +358,8 @@ def graph_sync_platform(monkeypatch):
     def select(platform):
         monkeypatch.setattr(
             code_graph_background,
-            "sys",
-            SimpleNamespace(platform=platform, executable=sys.executable),
+            "may_run_killable_foreground_sync",
+            lambda: platform != "win32",
         )
 
     return select
@@ -384,9 +396,22 @@ def test_verify_existing_graph_sync_policy(
     calls = []
     real_run = subprocess.run
 
+    (tmp_path / "source.py").write_text("new source")
+    with closing(sqlite3.connect(db)) as connection, connection:
+        connection.execute("INSERT INTO meta VALUES ('indexed_source', 'old source')")
+    if platform == "win32" and not detach_refused:
+        previous = code_graph_background._lock_path(tmp_path).with_suffix(".exit.json")
+        localio.write_json(previous, {"lock_refused_db": str(db.resolve()), "reason": "old refusal"})
+
     def run_engine(argv, *args, **kwargs):
         if isinstance(argv, list) and argv[:1] == ["engine"]:
             calls.append(argv[3])
+            if argv[3] == "diff" and platform == "win32":
+                for flag in ("--before", "--after"):
+                    with closing(sqlite3.connect(argv[argv.index(flag) + 1])) as snapshot:
+                        assert snapshot.execute("SELECT value FROM meta WHERE key = 'indexed_source'").fetchone() == (
+                            "old source",
+                        )
             return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
         return real_run(argv, *args, **kwargs)
 
@@ -405,13 +430,20 @@ def test_verify_existing_graph_sync_policy(
         assert receipt["stale_graph_used"] and receipt["stale_after"]
         assert receipt["commands"]["before_sync"] is None
         assert receipt["commands"]["after_sync"] is None
+        assert "graph_sync_reason" not in receipt
         if detach_refused:
             assert receipt["background_refresh"]["failure_kind"] == "detach_refused"
 
 
-def test_windows_first_build_keeps_running_after_detach_refusal(tmp_path, monkeypatch, graph_sync_platform):
+@pytest.mark.parametrize("unready_file", [False, True])
+def test_windows_first_build_keeps_running_after_detach_refusal(
+    tmp_path, monkeypatch, graph_sync_platform, unready_file
+):
     graph_sync_platform("win32")
     db = engine_paths.code_graph_db(tmp_path).path
+    if unready_file:
+        db.parent.mkdir(parents=True)
+        db.touch()
     monkeypatch.setattr(component_bins, "resolve", lambda name: "engine")
     monkeypatch.setattr(code_graph_background, "_ignored_for_refresh", lambda *args: True)
     monkeypatch.setattr(code_graph_background, "_process_start_time", lambda pid: None)
@@ -450,7 +482,8 @@ def test_windows_first_build_keeps_running_after_detach_refusal(tmp_path, monkey
     assert reapers == [wait]
     assert len(launches) == 1 and launches[0][1]["creationflags"] == 4
     assert receipt["status"] == "sync_deferred"
-    assert "still running" in receipt["background_refresh"]["reason"]
+    assert before["background_refresh"]["status"] == "busy"
+    assert receipt["background_refresh"]["in_progress"] is True
     assert receipt["foreground_fallback"]["reason"] == "detached launch refused"
     assert code_graph_background.status_or_start(tmp_path, db, "engine")["status"] == "busy"
 
@@ -465,11 +498,10 @@ def test_windows_engine_lock_refusal_is_reported_in_receipt_and_doctor(
     engine_lock = db.with_name(db.name + ".lock")
     localio.write_json(lock.with_suffix(".json"), {"token": "claim-token"})
     engine_lock.write_text("12345\n")
-    stderr = b"Error: another sync is already running for this database\n"
+    stderr = b"noise\n" * 4000 + b"Error: another sync is already running for this database\n"
 
     def refuse_sync(argv, **kwargs):
-        kwargs["stderr"].write(stderr)
-        return SimpleNamespace(wait=lambda **kw: 1)
+        return SimpleNamespace(wait=lambda **kw: 1, stderr=BytesIO(stderr))
 
     monkeypatch.setattr(subprocess, "Popen", refuse_sync)
     monkeypatch.setattr(subprocess, "run", lambda argv, **kwargs: subprocess.CompletedProcess(argv, 1))
@@ -485,7 +517,7 @@ def test_windows_engine_lock_refusal_is_reported_in_receipt_and_doctor(
         ),
     )
     monkeypatch.setattr(code_graph_background, "_process_start_time", lambda pid: None)
-    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
     run_dir = tmp_path / "run"
     before = code_graph_delta.capture_before(tmp_path, run_dir, defer_sync=True)
     receipt = code_graph_delta.capture_after_and_diff(tmp_path, run_dir, before, sync_timeout=0.5)
@@ -501,3 +533,75 @@ def test_windows_engine_lock_refusal_is_reported_in_receipt_and_doctor(
     assert "Confirm no code-graph engine process is running" in doctor.err
     assert "delete" in doctor.err and "one hour" in doctor.err
     assert engine_lock.is_file()
+
+
+def test_windows_explicit_sync_returns_with_live_engine(tmp_path, monkeypatch, capsys, graph_sync_platform):
+    graph_sync_platform("win32")
+    monkeypatch.setattr(component_bins, "resolve", lambda name: "engine")
+    monkeypatch.setattr(proc, "run", lambda *args, **kwargs: pytest.fail("killable sync"))
+    launched = []
+
+    def start(argv, **kwargs):
+        launched.append(argv)
+
+        def wait(*, timeout=None):
+            if timeout is not None:
+                raise subprocess.TimeoutExpired(argv, timeout)
+            return 0
+
+        return SimpleNamespace(pid=12345, wait=wait)
+
+    monkeypatch.setattr(subprocess, "Popen", start)
+    assert code_cmd.run("sync", ["--target", str(tmp_path), "--force"]) == 124
+    assert launched == [["engine", "sync", "--force"]]
+    stderr = capsys.readouterr().err
+    assert "still running" in stderr and "12345" in stderr and "brigade code doctor" in stderr
+
+
+def test_windows_dependency_hook_sync_does_not_kill_writer(tmp_path, monkeypatch, graph_sync_platform):
+    from brigade.claude_hooks import dependencies
+
+    graph_sync_platform("win32")
+    db = engine_paths.code_graph_db(tmp_path).path
+    db.parent.mkdir(parents=True)
+    db.touch()
+    monkeypatch.setattr(component_bins, "resolve", lambda name: "engine")
+    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("killable hook sync"))
+
+    def wait(*, timeout=None):
+        if timeout is not None:
+            raise subprocess.TimeoutExpired("engine", timeout)
+        return 0
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: SimpleNamespace(pid=12345, wait=wait))
+    assert dependencies._dependents(tmp_path, "source.py") == (None, "sync_timed_out")
+
+
+def test_windows_aboyeur_snapshot_defaults_defer_to_one_refresh(tmp_path, monkeypatch, graph_sync_platform):
+    graph_sync_platform("win32")
+    db = engine_paths.code_graph_db(tmp_path).path
+    db.parent.mkdir(parents=True)
+    with closing(sqlite3.connect(db)) as connection, connection:
+        connection.execute("CREATE TABLE meta (key TEXT, value TEXT)")
+        connection.execute("INSERT INTO meta VALUES ('synced_at', '1')")
+    monkeypatch.setattr(component_bins, "resolve", lambda name: "engine")
+    launches = []
+
+    def refresh(target, database, binary=None, **kwargs):
+        if binary is not None:
+            launches.append(binary)
+            return {"status": "started"}
+        return {"status": "busy", "reason": "background sync lock held"}
+
+    def run_engine(argv, **kwargs):
+        assert argv[3] == "diff"
+        return subprocess.CompletedProcess(argv, 0, stdout="{}", stderr="")
+
+    monkeypatch.setattr(code_graph_background, "status_or_start", refresh)
+    monkeypatch.setattr(subprocess, "run", run_engine)
+    run_dir = tmp_path / "run"
+    before = code_graph_delta.capture_before(tmp_path, run_dir)
+    result = code_graph_delta.capture_after_and_diff(tmp_path, run_dir, before)
+    assert result["status"] == "ok" and result["stale_graph_used"]
+    assert launches == ["engine"]
+    assert result["background_refresh"]["status"] == "busy"

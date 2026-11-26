@@ -103,14 +103,24 @@ def _warn_engine_lock(cwd: Path | None, forwarded: Sequence[str]) -> None:
         return
     base = cwd or Path.cwd()
     explicit = args.db or os.environ.get(engine_paths.CODE_GRAPH_DB_ENV)
-    db = engine_paths.code_graph_db(base if explicit else base / args.root, explicit=explicit).path
     try:
-        lock = code_graph_background.engine_lock_path(db.resolve())
-    except (OSError, RuntimeError):
+        repo = (base / args.root).resolve()
+        db = engine_paths.code_graph_db(base if explicit else repo, explicit=explicit).path.resolve()
+        lock = code_graph_background.engine_lock_path(db)
+        lock_present = lock.is_file()
+    except (OSError, RuntimeError, ValueError):
         return
-    if lock.is_file():
+    refresh = code_graph_background.status_or_start(repo, db)
+    if refresh and (pid := refresh.get("engine_pid")) is not None:
         print(
-            f"warning: a stale engine lock may block updates: {lock}. "
+            f"warning: code graph refresh is still running after {refresh['elapsed_seconds']}s (engine PID {pid}). "
+            "Confirm the PID belongs to the code-graph engine before ending it. Then check for a leftover lock.",
+            file=sys.stderr,
+        )
+    if lock_present:
+        display_path = "".join(char for char in str(lock) if char.isprintable())
+        print(
+            f"warning: a stale engine lock may block updates: {display_path}. "
             "Confirm no code-graph engine process is running, then delete the file. "
             "The engine can reclaim it after one hour.",
             file=sys.stderr,
@@ -154,7 +164,9 @@ def run(verb: str, arguments: Sequence[str]) -> int:
         return 127
 
     argv = [binary, verb, *forwarded]
-    if cwd is None:
+    if verb == "sync" and not code_graph_background.may_run_killable_foreground_sync():
+        result = code_graph_background.run_windows_sync(argv, timeout=timeout, cwd=cwd)
+    elif cwd is None:
         result = proc.run(argv, timeout=timeout)
     else:
         result = proc.run(argv, timeout=timeout, cwd=cwd)

@@ -10,8 +10,9 @@ import sys
 import time
 from contextlib import closing, suppress
 from pathlib import Path
-from tempfile import TemporaryFile
+from tempfile import TemporaryFile, gettempdir
 from threading import Thread
+from typing import IO, Any
 
 from . import engine_paths, inbox_lock, localio, nt_process, proc, proc_group, runguard
 
@@ -31,8 +32,47 @@ _WORKER = (
 
 def may_run_killable_foreground_sync() -> bool:
     # Engines up to v0.32.0 cannot recover a killed writer's lock on Windows.
-    # Drop this workaround once Brigade requires an engine release with the fix.
+    # Drop this workaround once Brigade requires a minimum engine release containing PR #2963.
     return sys.platform != "win32"
+
+
+def run_windows_sync(argv: list[str], *, timeout: float, cwd: Path | None = None) -> proc.Result:
+    """Run a direct sync and let it finish if the caller's wait budget expires."""
+    # A detached child keeps writing to its own temporary handles after the
+    # caller closes its copies. Pipes would lose their readers at CLI exit.
+    try:
+        with TemporaryFile() as stdout, TemporaryFile() as stderr:
+            try:
+                child, _ = proc.spawn_detached(argv, cwd=cwd, stdout=stdout, stderr=stderr)
+            except proc.DetachedLaunchError:
+                child = subprocess.Popen(
+                    argv,
+                    cwd=cwd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout,
+                    stderr=stderr,
+                    **proc.detached_launch_kwargs(job_breakaway=False),
+                )
+            try:
+                code = child.wait(timeout=timeout)
+            except subprocess.TimeoutExpired:
+                Thread(target=child.wait, daemon=True).start()
+                return proc.Result(
+                    124,
+                    "",
+                    f"Code graph sync is still running (PID {child.pid}). "
+                    "Check that PID in Task Manager and use `brigade code doctor` to check the index.\n",
+                    timed_out=True,
+                )
+            stdout.seek(0)
+            stderr.seek(0)
+            out, err, out_error, err_error = proc._decoded_output(
+                stdout.read(proc.MAX_CAPTURE_BYTES), stderr.read(proc.MAX_CAPTURE_BYTES)
+            )
+            return proc.Result(code, out, err, stdout_decode_error=out_error, stderr_decode_error=err_error)
+    except OSError as exc:
+        code, message = proc._launch_failure(argv, exc)
+        return proc.Result(code, "", message + "\n")
 
 
 def engine_lock_path(db: Path) -> Path:
@@ -73,7 +113,7 @@ def last_engine_lock_refusal(target: Path, db: Path) -> str | None:
     return None
 
 
-def _record_refresh_state(lock: Path, reason: str, **metadata: str | bool) -> None:
+def _record_refresh_state(lock: Path, reason: str, **metadata: str | bool | int | float) -> None:
     with suppress(OSError):
         localio.write_json(lock.with_suffix(".exit.json"), {"reason": reason, **metadata})
 
@@ -135,7 +175,7 @@ def status_or_start(
     binary: str | None = None,
     *,
     initial_wait: float | None = None,
-) -> dict[str, str] | None:
+) -> dict[str, Any] | None:
     """Observe or launch a refresh, optionally waiting for an in-session first build."""
     lock = _lock_path(target)
     reservation = lock.with_suffix(".json")
@@ -174,11 +214,14 @@ def status_or_start(
                 token,
             ]
             cwd = Path(sys.executable).resolve().parent
+            if not may_run_killable_foreground_sync() and cwd.is_relative_to(target):
+                # A venv in the target must not make it the worker's working directory.
+                cwd = Path(gettempdir()).resolve()
             in_session = False
             try:
                 child, _ = proc.spawn_detached(argv, cwd=cwd)
             except proc.DetachedLaunchError:
-                if initial_wait is None or may_run_killable_foreground_sync() or db.is_file():
+                if initial_wait is None or may_run_killable_foreground_sync() or index_ready(db):
                     raise
                 # Breakaway was refused. Keep the worker in the ambient job
                 # and give it no console or pipes connected to verification.
@@ -213,10 +256,27 @@ def status_or_start(
             }
         return {"status": "completed", "mode": "in_session"}
     except inbox_lock.InboxLockTimeout:
-        reason = "background sync lock held"
-        if not may_run_killable_foreground_sync() and _refresh_state(lock).get("in_progress"):
-            reason = _SYNC_STILL_RUNNING
-        return {"status": "busy", "reason": reason}
+        if not may_run_killable_foreground_sync():
+            state = _refresh_state(lock)
+            pid, started = state.get("engine_pid"), state.get("started_at")
+            now = time.time()
+            if (
+                state.get("in_progress")
+                and state.get("running_db") == str(db.resolve())
+                and type(pid) is int
+                and pid > 0
+                and isinstance(started, (int, float))
+                and not isinstance(started, bool)
+                and 0 < started <= now
+            ):
+                return {
+                    "status": "busy",
+                    "reason": _SYNC_STILL_RUNNING,
+                    "engine_pid": pid,
+                    "started_at": started,
+                    "elapsed_seconds": int(now - started),
+                }
+        return {"status": "busy", "reason": "background sync lock held"}
     except proc.DetachedLaunchError as exc:
         return {"status": "launch_failed", "reason": str(exc), "failure_kind": "detach_refused"}
     except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
@@ -241,10 +301,9 @@ def _worker(lock_path: str, binary: str, db: str, target: str, token: str = "") 
                 if may_run_killable_foreground_sync():
                     returncode = subprocess.run(argv, timeout=_SYNC_TIMEOUT, check=False, creationflags=0).returncode
                 else:
-                    if _refresh_state(lock).get("in_progress"):
-                        with suppress(OSError):
-                            lock.with_suffix(".exit.json").unlink(missing_ok=True)
-                    returncode, lock_refused = _wait_for_windows_sync(argv, lock)
+                    with suppress(OSError):
+                        lock.with_suffix(".exit.json").unlink(missing_ok=True)
+                    returncode, lock_refused = _wait_for_windows_sync(argv, lock, db)
             except subprocess.TimeoutExpired:
                 _record_refresh_state(lock, "graph sync timed out")
             except OSError as exc:
@@ -262,16 +321,34 @@ def _worker(lock_path: str, binary: str, db: str, target: str, token: str = "") 
         return
 
 
-def _wait_for_windows_sync(argv: list[str], lock: Path) -> tuple[int, bool]:
-    # A file lets the engine write diagnostics without a pipe reader that
-    # needs cleanup when the wait expires.
-    with TemporaryFile() as stderr:
-        child = subprocess.Popen(argv, stderr=stderr, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        try:
-            returncode = child.wait(timeout=_SYNC_TIMEOUT)
-        except subprocess.TimeoutExpired:
-            _record_refresh_state(lock, _SYNC_STILL_RUNNING, in_progress=True)
-            returncode = child.wait()
-        stderr.seek(0)
-        lock_refused = returncode != 0 and _ENGINE_LOCK_REFUSED.encode() in stderr.read(8192)
-        return returncode, lock_refused
+def _drain_stderr_tail(stderr: IO[bytes], tail: bytearray) -> None:
+    with stderr, suppress(OSError):
+        while chunk := stderr.read(4096):
+            tail.extend(chunk)
+            del tail[:-16384]
+
+
+def _wait_for_windows_sync(argv: list[str], lock: Path, db: str) -> tuple[int, bool]:
+    # The worker can keep draining a pipe throughout the sync because it owns
+    # the refresh lock until the writer exits. No temporary file is needed.
+    started = time.time()
+    child = subprocess.Popen(argv, stderr=subprocess.PIPE, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    assert child.stderr is not None
+    tail = bytearray()
+    reader = Thread(target=_drain_stderr_tail, args=(child.stderr, tail), daemon=True)
+    reader.start()
+    try:
+        returncode = child.wait(timeout=_SYNC_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        _record_refresh_state(
+            lock,
+            _SYNC_STILL_RUNNING,
+            in_progress=True,
+            engine_pid=child.pid,
+            started_at=started,
+            running_db=db,
+        )
+        returncode = child.wait()
+    # An inherited pipe in an engine descendant must not hold the worker lock.
+    reader.join(timeout=1)
+    return returncode, returncode != 0 and _ENGINE_LOCK_REFUSED.encode() in tail

@@ -1,1 +1,1 @@
-- On Windows, `brigade work verify run` records committed graph snapshots and lets the background writer finish. `brigade code doctor` shows where a stale lock may be blocking updates and how to recover.
+- On Windows, verification and agent runs use committed code graph snapshots. Syncs can finish after the caller's wait expires, and `brigade code doctor` reports overdue refreshes and possible stale locks.

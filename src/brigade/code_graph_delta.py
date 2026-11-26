@@ -33,7 +33,7 @@ LINE_KEYS = {
 }
 
 
-def _request_background_refresh(target: Path, db: Path, binary: str, details: dict[str, Any]) -> dict[str, str] | None:
+def _request_background_refresh(target: Path, db: Path, binary: str, details: dict[str, Any]) -> dict[str, Any] | None:
     # A verify run can ask at several points, but only the first request can launch.
     if details.get("_background_launch_requested"):
         return code_graph_background.status_or_start(target, db)
@@ -64,7 +64,7 @@ def capture_before(
             "graphtrail_timeout_seconds": backup_budget,
             "snapshots": {},
         }
-        defer_windows = defer_sync and not code_graph_background.may_run_killable_foreground_sync()
+        defer_windows = not code_graph_background.may_run_killable_foreground_sync()
         sync_budget = timeout
         if defer_windows:
             refresh = code_graph_background.status_or_start(target, db_path, binary, initial_wait=backup_budget)
@@ -171,11 +171,10 @@ def _observe_windows_refresh(target: Path, db: Path, before: dict[str, Any]) -> 
     refresh = code_graph_background.status_or_start(target, db)
     previous = before.get("background_refresh") or {}
     if refresh and refresh["status"] == "busy":
-        before["background_refresh"] = {
-            **refresh,
-            **(previous if previous.get("status") in ("started", "launch_failed") else {}),
-            "in_progress": True,
-        }
+        before["background_refresh"] = {**refresh, "in_progress": True}
+        if previous.get("status") == "launch_failed":
+            before["background_refresh"]["launch_failure"] = previous
+        return
     if refusal := code_graph_background.last_engine_lock_refusal(target, db):
         before["graph_sync_reason"] = "engine_lock_refused"
         before["background_refresh_last_exit"] = f"last background refresh exited: {refusal}"
@@ -196,14 +195,15 @@ def capture_after_and_diff(
         before = before if isinstance(before, dict) else {}
         if before.get("status") == "unavailable":
             return _compact(_status("unavailable", str(before.get("summary") or "code graph delta unavailable")))
-        defer_windows = sync_timeout is not None and not code_graph_background.may_run_killable_foreground_sync()
+        defer_windows = not code_graph_background.may_run_killable_foreground_sync()
         if defer_windows and (db_path_value := before.get("db_path")):
             _observe_windows_refresh(target, Path(db_path_value), before)
         if before.get("ok") is not True:
             before_sync = before.get("sync")
             db_path_value = before.get("db_path")
             if (
-                sync_timeout is not None
+                (sync_timeout is not None or defer_windows)
+                and (not defer_windows or (before.get("background_refresh") or {}).get("status") != "busy")
                 and db_path_value
                 and (not before_sync or before_sync.get("returncode") != 0)
                 and not code_graph_background.index_ready(Path(db_path_value))
@@ -431,10 +431,23 @@ def _run_graphtrail(
     if json_output:
         argv.append("--json")
     started = time.monotonic()
+    engine_cwd = cwd or engine_paths.code_graph_repo_root(db_path)
+    if command == "sync" and not code_graph_background.may_run_killable_foreground_sync():
+        result = code_graph_background.run_windows_sync(argv, timeout=timeout, cwd=engine_cwd)
+        return _command_result(
+            argv=argv,
+            returncode=result.code,
+            stdout=result.stdout,
+            stderr=result.stderr,
+            timed_out=result.timed_out,
+            duration_seconds=time.monotonic() - started,
+            timeout=timeout,
+            stage=stage,
+        )
     try:
         completed = subprocess.run(
             argv,
-            cwd=cwd or engine_paths.code_graph_repo_root(db_path),
+            cwd=engine_cwd,
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
