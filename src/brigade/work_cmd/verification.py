@@ -80,7 +80,8 @@ def _git_head_branch(target: Path, *, paths: bool = False) -> verify_manifest_gi
             lines = result.stdout.rstrip("\n").split("\n")
             if result.returncode == 0 and len(lines) == 4 and all(lines):
                 root, git_dir, head, branch = lines
-                return verify_manifest_git.WorktreeIdentity(head.strip(), branch.strip(), git_dir, root.strip())
+                if Path(root).is_absolute() and Path(git_dir).is_absolute():
+                    return verify_manifest_git.WorktreeIdentity(head.strip(), branch.strip(), git_dir, root.strip())
         result = helpers._git(target, "rev-parse", "HEAD", "--abbrev-ref", "HEAD")
     except (OSError, UnicodeError):
         if paths:
@@ -96,7 +97,7 @@ def _receipt_git_snapshot(
     target: Path, *, facts: verify_manifest_git.VerifyGitFacts | None = None
 ) -> dict[str, Any] | None:
     try:
-        identity = facts.identity if facts is not None else _git_head_branch(target)
+        identity = facts.identity if facts is not None and facts.read_identity is not None else _git_head_branch(target)
         status = helpers._git(target, "status", "--porcelain")
     except OSError:
         return None
@@ -1531,9 +1532,7 @@ def _git_with_index(target: Path, index_file: Path, *args: str) -> subprocess.Co
         return subprocess.CompletedProcess(["git"], 127, stdout="", stderr="git unavailable")
 
 
-def _capture_verify_identity(
-    target: Path, run_dir: Path, *, before: verify_manifest_git.VerifyGitFacts | None = None
-) -> dict[str, Any]:
+def _capture_verify_identity(target: Path, run_dir: Path) -> dict[str, Any]:
     unavailable: dict[str, Any] = {
         "schema_version": receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION,
         "baseline_commit": None,
@@ -1543,7 +1542,7 @@ def _capture_verify_identity(
     }
     patch_path = run_dir / "changes.patch"
     try:
-        tree_fingerprint, baseline_commit = (before or verify_manifest_git.VerifyGitFacts(target)).tree
+        tree_fingerprint, baseline_commit = localio.tree_fingerprint_with_head(target)
         if baseline_commit is None or tree_fingerprint is None:
             return unavailable
         # This caller consumes patch bytes only. Counts used by run evidence
@@ -1762,14 +1761,13 @@ def _write_reused_receipt(
     capture: str | None = None,
     capture_kind: str = "skill",
     capture_meta: dict[str, Any] | None = None,
-    before: verify_manifest_git.VerifyGitFacts | None = None,
 ) -> tuple[dict[str, Any] | None, int]:
     """Write a fresh receipt dir that records a reused passing run (no commands executed)."""
     started = helpers._now()
     run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-work-verify-{uuid4().hex[:6]}"
     run_dir = helpers._verify_runs_root(target) / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
-    identity = _capture_verify_identity(target, run_dir, before=before)
+    identity = _capture_verify_identity(target, run_dir)
     if admitted_fingerprint is None or identity.get("tree_fingerprint") != admitted_fingerprint:
         with suppress(OSError):
             (run_dir / "changes.patch").unlink(missing_ok=True)
@@ -2109,7 +2107,6 @@ def verify_run(
                         capture=capture,
                         capture_kind=capture_kind,
                         capture_meta=capture_meta,
-                        before=before,
                     )
             if receipt is None:
                 if reuse_skipped is not None:

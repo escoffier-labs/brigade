@@ -3,6 +3,7 @@
 from __future__ import annotations
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess
@@ -20,6 +21,7 @@ MAX_MANIFEST_BYTES = 1024 * 1024
 REQUIRED_CHECK_PATH = "verify/required-check.json"
 _MANIFEST_DIR = "verify/manifests"
 _OBJECT_ID = re.compile(rb"[0-9a-f]{40}|[0-9a-f]{64}")
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -56,13 +58,18 @@ def trusted_git_env() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if not key.upper().startswith("GIT_")}
 
 
+def _git_timeout(command: list[str], deadline: float | None) -> float:
+    timeout = 30.0 if deadline is None else min(30.0, deadline - monotonic())
+    if timeout <= 0:
+        raise subprocess.TimeoutExpired(command, timeout)
+    return timeout
+
+
 def _git(
     target: Path, *args: str, deadline: float | None = None, git_env: dict[str, str] | None = None
 ) -> subprocess.CompletedProcess[bytes]:
     command = ["git", *args]
-    timeout = 30.0 if deadline is None else min(30.0, deadline - monotonic())
-    if timeout <= 0:
-        raise subprocess.TimeoutExpired(command, timeout)
+    timeout = _git_timeout(command, deadline)
     try:
         return subprocess.run(
             command,
@@ -110,9 +117,7 @@ class VerifyGitFacts:
 
     @cached_property
     def tree(self) -> tuple[str | None, str | None]:
-        return localio.tree_fingerprint_with_head(
-            self.target, observed_head=self.identity.head if self.identity is not None else None
-        )
+        return localio.tree_fingerprint_with_head(self.target)
 
     @cached_property
     def base(self) -> BaseResolution:
@@ -120,7 +125,7 @@ class VerifyGitFacts:
 
     @cached_property
     def base_files(self) -> _BaseFiles | None:
-        if not self.capture_registry or not (self.target / ".git").exists():
+        if not self.capture_registry:
             return None
         return _read_base_files(self.target, self.base, include_policy=True)
 
@@ -236,16 +241,28 @@ class _BaseFiles:
     policy: bytes | None
 
 
-def _read_base_files(target: Path, base: BaseResolution, *, include_policy: bool = False) -> _BaseFiles | None:
+def _base_batch_fallback(reason: str) -> _BaseFiles | None:
+    # Reasons are fixed labels or numeric status. Git's stderr can contain
+    # repository-controlled text, paths and escape sequences.
+    _LOG.debug("Committed verification files: falling back to individual reads (%s)", reason)
+    return None
+
+
+def _read_base_files(
+    target: Path, base: BaseResolution, *, include_policy: bool = False, deadline: float | None = None
+) -> _BaseFiles | None:
     """Read advisory IDs and optionally the committed declaration in two Git launches."""
-    if base.status != "resolved" or base.commit is None:
+    if base.status != "resolved" or base.commit is None or not (target / ".git").exists():
         return None
     paths = [_MANIFEST_DIR]
     if include_policy:
         paths.append(REQUIRED_CHECK_PATH)
-    listing = _git(target, "ls-tree", "-r", "-t", "-l", "-z", base.commit, "--", *paths)
+    try:
+        listing = _git(target, "ls-tree", "-r", "-t", "-l", "-z", base.commit, "--", *paths, deadline=deadline)
+    except subprocess.TimeoutExpired:
+        return _base_batch_fallback("tree listing timed out")
     if listing.returncode:
-        return None
+        return _base_batch_fallback(f"tree listing exit {listing.returncode}")
     requests: dict[bytes, int] = {}
     manifests: set[bytes] = set()
     policy_oid = None
@@ -260,16 +277,16 @@ def _read_base_files(target: Path, base: BaseResolution, *, include_policy: bool
             continue
         fields = metadata.split()
         if len(fields) != 4:
-            return None
+            return _base_batch_fallback("invalid tree entry")
         mode, kind, oid, size = fields
         if mode not in {b"100644", b"100755"} or kind != b"blob" or not _OBJECT_ID.fullmatch(oid) or not size.isdigit():
             if is_policy:
-                return None
+                return _base_batch_fallback("invalid policy entry")
             continue
         length = int(size)
         if length > MAX_MANIFEST_BYTES:
             if is_policy:
-                return None
+                return _base_batch_fallback("policy exceeds blob limit")
             continue
         requests[oid] = length
         if is_policy:
@@ -280,29 +297,30 @@ def _read_base_files(target: Path, base: BaseResolution, *, include_policy: bool
         return _BaseFiles(frozenset(), None)
     # Preserve the bounded per-manifest path for unusually large registries.
     if sum(requests.values()) > 64 * MAX_MANIFEST_BYTES:
-        return None
+        return _base_batch_fallback("registry exceeds batch limit")
     ids: set[str] = set()
     policy = None
     try:
         with tempfile.TemporaryFile() as output:
+            command = ["git", "cat-file", "--batch"]
             result = subprocess.run(
-                ["git", "cat-file", "--batch"],
+                command,
                 cwd=target,
                 input=b"".join(oid + b"\n" for oid in requests),
                 stdout=output,
                 stderr=subprocess.DEVNULL,
-                timeout=30,
+                timeout=_git_timeout(command, deadline),
                 env=trusted_git_env(),
             )
             if result.returncode:
-                return None
+                return _base_batch_fallback(f"blob read exit {result.returncode}")
             output.seek(0)
             for oid, length in requests.items():
                 if output.readline(128).split() != [oid, b"blob", str(length).encode("ascii")]:
-                    return None
+                    return _base_batch_fallback("invalid blob header")
                 raw = output.read(length)
                 if len(raw) != length or output.read(1) != b"\n":
-                    return None
+                    return _base_batch_fallback("incomplete blob")
                 if oid == policy_oid:
                     policy = raw
                 if oid in manifests:
@@ -311,12 +329,14 @@ def _read_base_files(target: Path, base: BaseResolution, *, include_policy: bool
                     except (UnicodeDecodeError, json.JSONDecodeError):
                         continue
                     except RecursionError:
-                        return None
+                        return _base_batch_fallback("manifest nesting limit")
                     manifest_id = payload.get("manifest_id") if isinstance(payload, dict) else None
                     if isinstance(manifest_id, str) and manifest_id:
                         ids.add(manifest_id)
-    except (OSError, subprocess.TimeoutExpired):
-        return None
+    except subprocess.TimeoutExpired:
+        return _base_batch_fallback("blob read timed out")
+    except OSError:
+        return _base_batch_fallback("blob I/O failed")
     return _BaseFiles(frozenset(ids), policy)
 
 

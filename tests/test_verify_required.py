@@ -11,7 +11,7 @@ from time import monotonic, sleep
 
 import pytest
 
-from brigade import cli, proc, verify_manifest_git
+from brigade import cli, localio, proc, verify_manifest_git
 from brigade.work_cmd import verify_gate, verify_required
 
 
@@ -218,6 +218,22 @@ def test_git_read_failures_cannot_look_unconfigured(repo, capsys, monkeypatch, c
     monkeypatch.setattr(subprocess, "run", fail_read)
     reason = error(target, capsys)["reason"]
     assert reason == (f"git {command} timed out" if timeout else f"git {command} failed (exit 128)")
+
+
+def test_snapshot_planner_explains_unavailable_absolute_git_directory(repo, monkeypatch):
+    target, base = repo
+    tree = localio.tree_fingerprint(target)
+    assert tree is not None
+    read = verify_required._git
+
+    def older_git(path, *args, **kwargs):
+        if args == ("rev-parse", "--absolute-git-dir"):
+            return b"--absolute-git-dir\n"
+        return read(path, *args, **kwargs)
+
+    monkeypatch.setattr(verify_required, "_git", older_git)
+    with pytest.raises(ValueError, match=r"Git 2\.13 or newer"):
+        verify_required.plan_snapshot(target, base, tree, deadline=monotonic() + 30)
 
 
 @pytest.mark.parametrize("path", [verify_required.CONFIG_PATH, "planner.py", "tests/a.py"])

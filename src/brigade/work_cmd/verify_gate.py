@@ -194,6 +194,10 @@ def _load_policy(
 ) -> _GatePolicy:
     if facts is not None and facts.target != target:
         raise ValueError("verify Git facts target does not match policy target")
+    # Stop and closeout keep their original budgeted per-item path. Lazy
+    # verify facts are collected without a Stop deadline.
+    if deadline is not None:
+        facts = None
     base_deadline = None if deadline is None else deadline - _HEAD_FALLBACK_BUDGET_SECONDS
     try:
         base = facts.base if facts is not None else verify_manifest_git.resolve_base(target, deadline=base_deadline)

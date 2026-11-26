@@ -309,6 +309,8 @@ def _run_planner(
                     _copy_head(target, entries, head_dir, deadline, snapshot=True)
             if git_dir is None:
                 git_dir = os.fsdecode(_git(target, "rev-parse", "--absolute-git-dir", deadline=deadline).rstrip(b"\n"))
+                if not Path(git_dir).is_absolute():
+                    raise ValueError("required-test snapshot planning needs Git 2.13 or newer (--absolute-git-dir)")
             env.update(GIT_DIR=git_dir, GIT_WORK_TREE=str(head_dir), GIT_NO_REPLACE_OBJECTS="1")
             replacements["{head_dir}"] = str(head_dir)
             if snapshot:

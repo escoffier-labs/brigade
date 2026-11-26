@@ -122,6 +122,8 @@ Reviewed planning docs are public and tracked: the phase plans (`docs/phase-*.md
 
 ## Local dev
 
+Use Git 2.13 or newer for batched work-verification discovery (`rev-parse --absolute-git-dir` and `for-each-ref %(symref)`). When an older Git lacks either feature, receipt discovery falls back to the individual probes. Required-test snapshot planning already relies on `--absolute-git-dir` and reports a plan error if Git cannot provide an absolute directory.
+
 From a repo clone with Python 3.11+:
 
 ```bash
