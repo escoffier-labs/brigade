@@ -11,6 +11,7 @@ import stat
 import sys
 
 from . import fleet_client, fleet_home_guard
+from .fleet_home_guard import open_token_fd as _open_token_fd
 from .mcp_events import EVENT_ERROR_CODES
 
 ENV_TOKEN_FILE = "BRIGADE_FLEET_MESSAGE_TOKEN_FILE"
@@ -64,23 +65,6 @@ class FleetMessageHubError(fleet_client.FleetClientError):
         super().__init__(message)
         self.status = status
         self.code = code if isinstance(code, str) and code in MESSAGE_CODES else None
-
-
-def _open_token_fd(path: str) -> int:
-    """Open the final path component itself, never the target of a link swapped in after a check."""
-    nofollow = getattr(os, "O_NOFOLLOW", 0)
-    if nofollow:
-        # NONBLOCK prevents a hostile FIFO from blocking before fstat rejects it.
-        return os.open(path, os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0))
-    if sys.platform == "win32":
-        # O_NOFOLLOW is 0 on Windows, so open with FILE_FLAG_OPEN_REPARSE_POINT and refuse a
-        # handle that is a reparse point or a directory, then read from that same handle (#2422).
-        try:
-            from .work_cmd import nt_dirfd
-        except ImportError:  # no ctypes on this build: fail closed as a credential error
-            raise ValueError from None
-        return nt_dirfd.open_path_file(os.path.abspath(path), os.O_RDONLY)
-    raise ValueError  # No way to open without following a link: fail closed.
 
 
 def read_message_token_file(path: str, *, label: str = "message") -> str:

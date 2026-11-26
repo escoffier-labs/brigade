@@ -79,6 +79,8 @@ def _bound_connection(hub_url: str, token: str, *, shared: bool | None = None) -
     A per-binding lock orders each complete read, cache update, and return;
     callers perform network requests after the lock is released.
     """
+    from .fleet_home_guard import FleetTokenPermissionError
+
     latest = token
     lock = Lock()
 
@@ -87,6 +89,9 @@ def _bound_connection(hub_url: str, token: str, *, shared: bool | None = None) -
         with lock:
             try:
                 configured_hub, node_token, admin_token = _token_snapshot()
+            except FleetTokenPermissionError:
+                latest = ""
+                raise
             except Exception:
                 configured_hub, node_token, admin_token = "", "", ""
             if configured_hub == hub_url:

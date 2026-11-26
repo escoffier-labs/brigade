@@ -874,7 +874,9 @@ def skills_station_checks(ctx: DoctorContext) -> List[CheckResult]:
 
 
 def tokens_station_checks(ctx: DoctorContext) -> List[CheckResult]:
-    return []
+    from .fleet_home_guard import token_file_doctor_checks
+
+    return token_file_doctor_checks()
 
 
 def search_station_checks(ctx: DoctorContext) -> List[CheckResult]:
