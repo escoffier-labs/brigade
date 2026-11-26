@@ -1,0 +1,1 @@
+- Report unreadable message spools, refuse unreadable principal retry state and node identities, and preserve event delivery and session discovery results on Python 3.14.

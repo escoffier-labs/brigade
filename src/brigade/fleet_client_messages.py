@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import stat
+from fnmatch import fnmatch
 from time import monotonic
 import urllib.error
 import urllib.request
@@ -1057,8 +1058,19 @@ def _principal_revocation_path(name: str, admin_token: str, *, hub_url: str) -> 
 def _require_no_legacy_principal_requests(name: str, admin_token: str, active: Path) -> None:
     name_scope = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
     token_scope = hashlib.sha256(admin_token.encode("utf-8")).hexdigest()
-    for candidate in active.parent.glob(f"*principal-{name_scope}-{token_scope}.*"):
-        if candidate.is_symlink() or (candidate.is_file() and candidate.stat().st_size):
+    pattern = f"*principal-{name_scope}-{token_scope}.*"
+    try:
+        candidates = list(active.parent.iterdir())
+    except (FileNotFoundError, NotADirectoryError):
+        return
+    for candidate in candidates:
+        if not fnmatch(candidate.name, pattern):
+            continue
+        try:
+            info = candidate.lstat()
+        except (FileNotFoundError, NotADirectoryError):
+            continue
+        if stat.S_ISLNK(info.st_mode) or (stat.S_ISREG(info.st_mode) and info.st_size):
             raise fleet_client.FleetClientError("legacy principal retry has unproven endpoint scope; left untouched")
 
 
@@ -1194,7 +1206,7 @@ def flush(
     path = _spool_path(node_id, authority.token, hub_url=authority.hub)
     if warn_inactive:
         _warn_inactive_spools(node_id, path)
-    if not path.is_file():
+    if not fleet_client._has_regular_spool(path):
         return 0
     with fleet_client._spool_lock(path, timeout=lock_timeout) as dir_fd:
         authority.validate()
