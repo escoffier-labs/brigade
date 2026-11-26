@@ -1,0 +1,1 @@
+- Normalize executable names consistently in scanner, review, verification, and repository health command policies.
