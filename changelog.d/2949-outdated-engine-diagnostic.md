@@ -1,1 +1,0 @@
-- Captured verification and doctor now explain how to repair an outdated managed evidence engine. If v0.30.0 engines with CLI 0.31.0 or 0.32.0 produce `miseledger indexing: import failed (receipts pending)`, run `brigade setup` after `pipx upgrade brigadestack` or `npm update --global brigadestack` on stable.
