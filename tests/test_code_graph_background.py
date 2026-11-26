@@ -10,7 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from brigade import code_graph_background, code_graph_delta, inbox_lock, localio, proc, proc_group, runguard
+from brigade import code_graph_background, code_graph_delta, component_bins, inbox_lock, localio, proc, proc_group
+from brigade import runguard
 
 
 def test_work_verify_detached_worker_survives_and_releases_pipes(tmp_path, monkeypatch):
@@ -216,8 +217,7 @@ def test_ready_graph_ignores_old_exit_and_observes_without_git(tmp_path, monkeyp
         connection.execute("CREATE TABLE meta (key TEXT, value TEXT)")
         connection.execute("INSERT INTO meta VALUES ('synced_at', '1')")
 
-    monkeypatch.setattr(code_graph_delta, "_graphtrail_bin", lambda: "engine")
-    monkeypatch.setattr(code_graph_delta, "_run_graphtrail", lambda *args, **kwargs: {"returncode": 7})
+    monkeypatch.setattr(component_bins, "resolve", lambda name: str(tmp_path / "nonexistent-engine"))
     monkeypatch.setattr(code_graph_background, "_ignored_for_refresh", lambda *args: pytest.fail("observed via git"))
     run_dir = tmp_path / "run"
     run_dir.mkdir()
