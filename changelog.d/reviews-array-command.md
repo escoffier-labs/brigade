@@ -1,0 +1,1 @@
+- Accept argument arrays in `.brigade/reviews.toml` so Windows paths and arguments keep their spaces, apostrophes, and backslashes.

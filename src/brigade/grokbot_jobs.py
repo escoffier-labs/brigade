@@ -58,9 +58,6 @@ from .grokbot_job_validation import (
 from .grokbot_jobs_claim_target import valid_claim_target as _valid_claim_target
 
 
-from .grokbot_jobs_hub import _hub_jobs, _hub_tracker_artifact, _hub_unavailable_row
-
-
 JOB_STATES = frozenset({"queued", "claimed", "running", "completed", "failed", "expired", "canceled"})
 
 
@@ -163,39 +160,14 @@ def authority_marker_present(target: Path) -> bool:
 
 
 def tracker_rows(target: Path) -> list[dict[str, Any]]:
-    """Return the bounded queue fields that the cloud tracker may project.
+    """Return bounded fields from the retained local queue.
 
     This deliberately differs from the queue CLI projection. The tracker needs
     completion artifact references to reconcile draft PRs, but it never needs
     the private envelope, lease holder, or verification commands.
     """
     if hub_authority(target):
-        try:
-            hub_jobs = _hub_jobs(include_all=True)
-        except GrokbotJobError as exc:
-            if exc.reason == "hub-unavailable":
-                return [_hub_unavailable_row()]
-            raise
-        rows: list[dict[str, Any]] = []
-        for job in hub_jobs:
-            kind = job.get("artifact_kind", "report")
-            row: dict[str, Any] = {
-                "job_id": job["job_id"],
-                "label": job.get("label"),
-                "task_hash": job["task_hash"],
-                "state": job["state"],
-                "created_at": job["created_at"],
-                "updated_at": job["updated_at"],
-                "queued_at": job["queued_at"],
-                "artifact": {"kind": kind},
-            }
-            if "claimed_at" in job:
-                row["claimed_at"] = job["claimed_at"]
-            completed = _hub_tracker_artifact(job, kind)
-            if completed:
-                row["result_artifact"] = completed
-            rows.append(row)
-        return rows
+        return []
     root = Path(target).expanduser() / ".brigade" / "cloud" / "grokbot"
     if not root.exists():
         return []

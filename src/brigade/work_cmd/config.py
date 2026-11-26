@@ -8,6 +8,7 @@ import json
 import re
 import shlex
 import shutil
+import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -575,7 +576,11 @@ def _format_review_toml(reviewers: tuple[dict[str, Any], ...] = constants.REVIEW
             "findings_path",
             "privacy_mode",
         ):
-            lines.append(f"{key} = {toml_format.format_toml_value(reviewer[key])}")
+            value = reviewer[key]
+            if key == "command" and isinstance(value, list):
+                lines.append(f"{key} = {_format_toml_array(value)}")
+            else:
+                lines.append(f"{key} = {toml_format.format_toml_value(value)}")
         lines.append(f"target_paths = {_format_toml_array(reviewer.get('target_paths'))}")
         lines.append(f"supported_modes = {_format_toml_array(reviewer.get('supported_modes'))}")
         lines.append("")
@@ -682,6 +687,25 @@ def _safe_relative_path(value: str, *, field: str, label: str, errors: list[str]
     return raw
 
 
+def _review_command_value(value: object, *, label: str, errors: list[str]) -> str | list[str] | None:
+    if isinstance(value, str) or value is None:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        errors.append(f"{label}: command must be a non-empty string")
+        return None
+    if not isinstance(value, list):
+        errors.append(f"{label}: command must be a non-empty string or an array of non-empty strings")
+        return None
+    if not value:
+        errors.append(f"{label}: command must be a non-empty array")
+        return None
+    for index, part in enumerate(value, start=1):
+        if not isinstance(part, str) or not part:
+            errors.append(f"{label}: command[{index}] must be a non-empty string")
+            return None
+    return value
+
+
 def _load_review_config(target: Path) -> tuple[list[dict[str, Any]], list[str]]:
     path = helpers._review_config_path(target)
     if not path.is_file():
@@ -704,6 +728,11 @@ def _load_review_config(target: Path) -> tuple[list[dict[str, Any]], list[str]]:
         reviewer: dict[str, Any] = {}
         for field in constants.REVIEW_REQUIRED_FIELDS:
             value = item.get(field)
+            if field == "command":
+                command = _review_command_value(value, label=label, errors=errors)
+                if command is not None:
+                    reviewer[field] = command
+                continue
             if not isinstance(value, str) or not value.strip():
                 errors.append(f"{label}: {field} must be a non-empty string")
             else:
@@ -818,6 +847,15 @@ def _scanner_command_ok(command: str) -> bool:
     return shutil.which(executable) is not None
 
 
+def _scanner_argv_blocker(parts: list[str]) -> str | None:
+    executable = Path(parts[0]).name
+    if executable in constants.SCANNER_HIGH_RISK_COMMANDS:
+        return f"high-risk scanner command: {executable}"
+    if any(constants.SCANNER_SHELL_META_RE.search(part) for part in parts):
+        return "high-risk scanner command contains shell metacharacters"
+    return None
+
+
 def _scanner_argv(command: str) -> tuple[list[str] | None, str | None]:
     try:
         parts = shlex.split(command)
@@ -825,11 +863,9 @@ def _scanner_argv(command: str) -> tuple[list[str] | None, str | None]:
         return None, f"invalid command: {exc}"
     if not parts:
         return None, "empty command"
-    executable = Path(parts[0]).name
-    if executable in constants.SCANNER_HIGH_RISK_COMMANDS:
-        return None, f"high-risk scanner command: {executable}"
-    if any(constants.SCANNER_SHELL_META_RE.search(part) for part in parts):
-        return None, "high-risk scanner command contains shell metacharacters"
+    blocker = _scanner_argv_blocker(parts)
+    if blocker is not None:
+        return None, blocker
     if not _scanner_command_ok(command):
         return None, f"scanner command is not resolvable: {parts[0]}"
     return parts, None
@@ -881,5 +917,21 @@ def _review_cwd(target: Path, reviewer: dict[str, Any]) -> Path:
     return target
 
 
-def _review_argv(command: str) -> tuple[list[str] | None, str | None]:
-    return _scanner_argv(command)
+def _review_argv(command: str | list[str]) -> tuple[list[str] | None, str | None]:
+    if isinstance(command, str):
+        return _scanner_argv(command)
+    if not command:
+        return None, "empty command"
+    blocker = _scanner_argv_blocker(command)
+    if blocker is not None:
+        return None, blocker
+    executable = command[0]
+    resolved = shutil.which(executable)
+    # Windows can invoke a shell for batch files even with shell=False.
+    if sys.platform == "win32" and any(
+        Path(path).suffix.lower() in {".bat", ".cmd"} for path in (executable, resolved) if path is not None
+    ):
+        return None, "review array command cannot launch a Windows batch file"
+    if resolved is None and executable != "brigade":
+        return None, f"scanner command is not resolvable: {executable}"
+    return command, None

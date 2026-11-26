@@ -71,11 +71,12 @@ def _receipt(
     errors=0,
     started_at=None,
     extra_commands=(),
+    tree_stable=True,
 ):
     receipt = {
         "status": status,
         "started_at": started_at if started_at is not None else f"2026-01-01T12:00:{second:02d}+00:00",
-        "tree_stable": True,
+        "tree_stable": tree_stable,
         "tree_fingerprint": tree,
         "commands": [
             {
@@ -100,7 +101,9 @@ def _receipt(
         receipt["gating"]["plan"] = plan
     path = target / ".brigade" / "work" / "verify-runs" / f"20260101-1200{second:02d}-work-verify-fixture"
     path.mkdir(parents=True)
-    (path / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+    receipt_path = path / "receipt.json"
+    receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+    return receipt_path
 
 
 def _check(target, capsys, *options):
@@ -179,8 +182,47 @@ def test_latest_required_failure_or_pass_governs(push_repo, capsys, failure_seco
     code, result = _single(push_repo, capsys)
     assert (code, result["status"]) == expected
     if code:
-        assert "A newer run of the required check failed on this tree" in result["reason"]
+        assert result["reason"] == "The most recent run of the required check failed. An earlier run had passed."
+
+
+@pytest.mark.parametrize("command_status", ["failed", "timed_out"])
+@pytest.mark.parametrize(("failure_second", "expected"), [(1, (0, "ok")), (2, (1, "rejected"))])
+def test_unstable_required_failure_governs_when_newer(push_repo, capsys, command_status, failure_second, expected):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree, second=3 - failure_second)
+    _receipt(push_repo, tree, second=failure_second, status="failed", command_status=command_status, tree_stable=False)
+    code, result = _single(push_repo, capsys)
+    assert (code, result["status"]) == expected
+    if code:
         assert "An earlier run had passed" in result["reason"]
+
+
+@pytest.mark.parametrize("status", ["failed", "timed_out"])
+def test_legacy_multi_command_failure_masks_an_older_pass(push_repo, capsys, status):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree)
+    _receipt(push_repo, tree, second=2, status=status, extra_commands=[{"argv": ["git", "status"]}])
+    code, result = _single(push_repo, capsys)
+    assert (code, result["status"]) == (1, "rejected")
+    assert "An earlier run had passed" in result["reason"]
+
+
+@pytest.mark.parametrize("different_policy", [False, True], ids=["lint-fail-pass", "policy-changed"])
+def test_newest_lint_does_not_hide_failure_before_pass(push_repo, capsys, different_policy):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree)
+    failure_path = _receipt(push_repo, tree, second=2, status="failed", command_status="failed")
+    if different_policy:
+        receipt = json.loads(failure_path.read_text(encoding="utf-8"))
+        receipt["gating"]["declaration_sha256"] = "f" * 64
+        failure_path.write_text(json.dumps(receipt), encoding="utf-8")
+    _receipt(push_repo, tree, second=3, argv=["git", "status"])
+    code, result = _single(push_repo, capsys)
+    assert (code, result["status"]) == (1, "rejected")
+    assert "An earlier run had passed" in result["reason"]
 
 
 @pytest.mark.parametrize(
@@ -225,6 +267,13 @@ def test_eligible_receipt_for_another_tree_is_missing(push_repo, capsys):
     assert result["reason"] == "No local verification receipt matches this tree."
 
 
+def test_empty_receipt_directory_is_missing(push_repo, capsys):
+    _policy(push_repo)
+    (push_repo / ".brigade" / "work" / "verify-runs").mkdir(parents=True)
+    code, result = _single(push_repo, capsys)
+    assert (code, result["status"]) == (1, "missing_receipt")
+
+
 @pytest.mark.parametrize("outcome", [{"failed": 1}, {"errors": 1}, {"command_status": "timed_out"}])
 def test_required_failure_uses_recorded_outcomes_and_timeout(push_repo, capsys, outcome):
     _policy(push_repo)
@@ -257,6 +306,24 @@ def test_same_second_pass_and_failure_follow_start_time(push_repo, capsys, failu
     failed_run.rename(root / "20260101-120001-work-verify-aaa")
     code, result = _single(push_repo, capsys)
     assert (code, result["status"]) == ((1, "rejected") if failure_is_newer else (0, "ok"))
+
+
+@pytest.mark.parametrize("timestamp", [None, "invalid", "2026-01-01T12:00:01.000000+00:00"])
+def test_unordered_same_second_pass_and_failure_are_indeterminate(push_repo, capsys, timestamp):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree, started_at="2026-01-01T12:00:01Z")
+    failed = _receipt(push_repo, tree, second=2, status="failed", command_status="failed")
+    receipt = json.loads(failed.read_text(encoding="utf-8"))
+    if timestamp is None:
+        del receipt["started_at"]
+    else:
+        receipt["started_at"] = timestamp
+    failed.write_text(json.dumps(receipt), encoding="utf-8")
+    failed.parent.rename(failed.parent.with_name("20260101-120001-work-verify-aaa"))
+    code, result = _single(push_repo, capsys)
+    assert (code, result["status"]) == (3, "indeterminate")
+    assert "order" in result["reason"]
 
 
 def test_audit_policy_keeps_any_eligible_receipt(push_repo, monkeypatch, capsys):

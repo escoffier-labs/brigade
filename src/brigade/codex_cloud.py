@@ -20,12 +20,15 @@ import time
 from collections.abc import Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, NotRequired, TypedDict
 from urllib.parse import quote
 from uuid import uuid4
 
 from . import bug_io, cloud_tracker, dirfd, fleet_client, localio, proc
+from .inbox_lock import InboxLockTimeout, held_file_lock
+from .isolated_exec import trusted_cwd
 
 SUBMIT_TIMEOUT = 120.0
 POLL_TIMEOUT = 60.0
@@ -34,8 +37,12 @@ POLL_INTERVAL = 15.0
 DIFF_CAP = 20_000
 DEFAULT_MAX_ITEMS = 250
 DEFAULT_LIST_TIMEOUT = 10.0
+LEASE_SYNC_BUDGET_SECONDS = 105.0
 MAX_LIST_PAGES = 20
 MAX_LIST_LIMIT = 20
+LAUNCH_RECONCILE_WINDOW = timedelta(minutes=5)
+LAUNCH_REDISCOVERY_WINDOW = timedelta(hours=24)
+_LAUNCH_TAG_RE = re.compile(r"\[(brigade-launch-[0-9a-f]{32})\]")
 CONFIGURED_SELECTOR = "configured"
 DEFAULT_ENV_VAR = "CODEX_CLOUD_ENV"
 CONFIG_SCHEMA = "brigade.codex-cloud-config/1"
@@ -58,6 +65,7 @@ class ListTasksResult:
     tasks: list[dict[str, Any]]
     ok: bool = True
     reason: str | None = None
+    complete: bool = True
 
 
 class CodexCloudConfigError(ValueError):
@@ -405,6 +413,244 @@ def _resolve_launch_branch(target: Path, repo: str, branch: str | None) -> tuple
     return None, "branch-unavailable"
 
 
+def _tagged_prompt(prompt: str, tag: str) -> str:
+    return f"[{tag}]\nKeep the bracketed launch tag verbatim in the task title.\n\n{prompt}"
+
+
+def _submitted_task_id(result: proc.Result) -> str | None:
+    if result.code == 0:
+        return parse_task_id(result.stdout) or parse_task_id(result.stderr)
+    # A failed command can mention unrelated task IDs in its diagnostics.
+    # Accept only the standalone submission response when it exits nonzero.
+    responses = {
+        match[1]
+        for stream in (result.stdout, result.stderr)
+        for line in stream.splitlines()
+        if (
+            match := re.fullmatch(
+                r"(?:Submitted )?(?:https?://\S+/tasks?/)?(task_[A-Za-z0-9][A-Za-z0-9_-]{2,})", line.strip()
+            )
+        )
+    }
+    return next(iter(responses)) if len(responses) == 1 else None
+
+
+def _launch_entry(registry: dict[str, Any], tag: str) -> dict[str, Any]:
+    return next(
+        row for row in registry["entries"] if row.get("provider") == "codex-cloud" and row.get("launch_tag") == tag
+    )
+
+
+def _bind_launch_lease(
+    target: Path, entry: dict[str, Any], task_id: str, *, admit_if_unleased: bool, repo: str | None
+) -> bool:
+    """Bind the current lease or recover one whose absence the hub confirms."""
+    lease_id = entry.get("launch_lease_id")
+    holder = entry.get("lease_holder")
+    admission_pending = entry.get("launch_admission_pending", False)
+    if lease_id and not admission_pending:
+        if not holder:
+            return False
+        bound = fleet_client.bind_cloud(
+            lease_id, provider_task_id=task_id, holder=holder, ttl_seconds=fleet_client.CLOUD_BOUND_TTL_SECONDS
+        )
+        if bound.granted:
+            return True
+        if bound.reason != "refused":
+            return False
+        leases = fleet_client.fetch_cloud().get("leases")
+        if not isinstance(leases, list) or any(
+            row.get("lease_id") == lease_id or row.get("provider_task_id") == task_id
+            for row in leases
+            if isinstance(row, dict)
+        ):
+            return False
+    elif not admission_pending and not (
+        entry.get("launch_requires_lease") or (admit_if_unleased and require_hub_lease_storage())
+    ):
+        return True
+
+    if not admission_pending:
+        lease_id, holder = uuid4().hex, uuid4().hex
+        # An interrupted admission can be retried with the same lease and holder.
+        with cloud_tracker.registry_lock(target):
+            registry = cloud_tracker.load_registry(target)
+            row = _launch_entry(registry, entry["launch_tag"])
+            row.update(launch_lease_id=lease_id, lease_holder=holder, launch_admission_pending=True)
+            cloud_tracker.save_registry(target, registry)
+    if not isinstance(lease_id, str) or not isinstance(holder, str):
+        return False
+
+    digest = entry.get("prompt_hash")
+    repo = entry.get("launch_repo") or repo or _repo_from_cwd(target)
+    admission = fleet_client.admit_cloud(
+        "codex",
+        repo=repo,
+        label=cloud_tracker.lease_label("codex", repo, digest),
+        prompt_hash=digest,
+        ttl_seconds=300,
+        lease_id=lease_id,
+        holder=holder,
+    )
+    if not admission.granted:
+        return False
+    with cloud_tracker.registry_lock(target):
+        registry = cloud_tracker.load_registry(target)
+        row = _launch_entry(registry, entry["launch_tag"])
+        row.pop("launch_admission_pending", None)
+        cloud_tracker.save_registry(target, registry)
+    return fleet_client.bind_cloud(
+        lease_id, provider_task_id=task_id, holder=holder, ttl_seconds=fleet_client.CLOUD_BOUND_TTL_SECONDS
+    ).granted
+
+
+def _finish_launch_intent(
+    target: Path,
+    tag: str,
+    *,
+    task_id: str | None,
+    submit_failed: bool = False,
+    admit_if_unleased: bool = False,
+    repo: str | None = None,
+) -> tuple[str, dict[str, Any]]:
+    """Resolve one intent while leaving the registry writable during hub calls."""
+    if _LAUNCH_TAG_RE.fullmatch(f"[{tag}]") is None:
+        raise ValueError("invalid Codex Cloud launch tag")
+    # Serialize retries for this intent only. Other launches can write the registry
+    # while a bind, release, or admission for this tag is in flight.
+    lock = cloud_tracker.registry_path(target).with_name(f"{tag}.lock")
+    with held_file_lock(lock, deadline_seconds=15):
+        with cloud_tracker.registry_lock(target):
+            registry = cloud_tracker.load_registry(target)
+            entry = _launch_entry(registry, tag)
+            state = entry["launch_state"]
+            candidate = entry.get("launch_candidate_id")
+            if state == "tracked" and entry["task_id"] == task_id:
+                return "ok", entry
+            if state not in ("needs-reconcile", "not-launched") or candidate not in (None, task_id):
+                return "tracking-failed", entry
+            if task_id is None:
+                entry["launch_state"] = "not-launched"
+                lease_id, holder = entry.get("launch_lease_id"), entry.get("lease_holder")
+            else:
+                if any(
+                    row is not entry
+                    and row.get("provider") == "codex-cloud"
+                    and (
+                        row.get("launch_candidate_id") == task_id
+                        or (
+                            row.get("task_id") == task_id
+                            and (
+                                row.get("launch_tag")
+                                or row.get("lease_holder") not in (entry.get("lease_holder"), None)
+                            )
+                        )
+                    )
+                    for row in registry["entries"]
+                ):
+                    return "tracking-failed", entry
+                entry.update(launch_state="needs-reconcile", launch_candidate_id=task_id)
+                lease_id, holder = None, None
+            cloud_tracker.save_registry(target, registry)
+
+        if task_id is None:
+            if submit_failed and lease_id is not None:
+                released = fleet_client.release_cloud(lease_id, state="submit-failed", holder=holder)
+                if released.granted:
+                    with cloud_tracker.registry_lock(target):
+                        registry = cloud_tracker.load_registry(target)
+                        entry = _launch_entry(registry, tag)
+                        entry.pop("launch_lease_id", None)
+                        entry.pop("lease_holder", None)
+                        cloud_tracker.save_registry(target, registry)
+            return "ok", entry
+        if not _bind_launch_lease(
+            target,
+            entry,
+            task_id,
+            admit_if_unleased=admit_if_unleased or (state == "not-launched" and "launch_requires_lease" not in entry),
+            repo=repo,
+        ):
+            return "bind-failed", entry
+        with cloud_tracker.registry_lock(target):
+            registry = cloud_tracker.load_registry(target)
+            entry = _launch_entry(registry, tag)
+            if entry["launch_state"] != "needs-reconcile" or entry.get("launch_candidate_id") != task_id:
+                return "tracking-failed", entry
+            existing = [
+                row
+                for row in registry["entries"]
+                if row.get("provider") == "codex-cloud" and row.get("task_id") == task_id
+            ]
+            holder = entry.get("lease_holder")
+            if len(existing) > 1 or (
+                existing and (existing[0].get("launch_tag") or existing[0].get("lease_holder") not in (holder, None))
+            ):
+                return "tracking-failed", entry
+            if existing:
+                lease_id = entry.get("launch_lease_id")
+                registry["entries"].remove(entry)
+                entry = existing[0]
+                entry["launch_tag"] = tag
+                if holder:
+                    entry["lease_holder"] = holder
+                    entry["launch_lease_id"] = lease_id
+            entry.update(task_id=task_id, launch_state="tracked")
+            for key in ("launch_candidate_id", "launch_requires_lease", "launch_repo"):
+                entry.pop(key, None)
+            cloud_tracker.save_registry(target, registry)
+            return "ok", entry
+
+
+def reconcile_launches(target: Path, *, now: datetime | None = None) -> list[dict[str, Any]]:
+    """Recover exact matches and retire absent intents after the visibility window."""
+    observed = now or datetime.now(timezone.utc)
+    pending = []
+    for row in cloud_tracker.load_registry(target)["entries"]:
+        if row.get("provider") != "codex-cloud":
+            continue
+        started = cloud_tracker._parse_time(row.get("dispatched_at"))  # noqa: SLF001 - shared timestamp parser
+        age = observed - started if started is not None else timedelta()
+        state = row.get("launch_state")
+        if state == "needs-reconcile" or (state == "not-launched" and age <= LAUNCH_REDISCOVERY_WINDOW):
+            pending.append((row, age))
+
+    inventory = ListTasksResult([], ok=False)
+    if any(not row.get("launch_candidate_id") for row, _ in pending):
+        try:
+            inventory = list_tasks(cwd=target, include_launch_tags=True, command_timeout=3)
+        except (OSError, RuntimeError):
+            pass
+    matches: dict[str, set[str]] = {}
+    if inventory.ok:
+        for task in inventory.tasks:
+            if tag := task.get("launch_tag"):
+                matches.setdefault(tag, set()).add(task["id"])
+
+    outcomes = []
+    for row, age in pending:
+        tag = row["launch_tag"]
+        task_ids = matches.get(tag, set())
+        task_id = row.get("launch_candidate_id") or (next(iter(task_ids)) if len(task_ids) == 1 else None)
+        reason = "awaiting-match"
+        if len(task_ids) > 1:
+            reason = "ambiguous-match"
+        elif not inventory.ok or not inventory.complete:
+            reason = "inventory-incomplete"
+        if task_id is None and row["launch_state"] == "not-launched":
+            continue
+        confirmed_absent = inventory.ok and inventory.complete and not task_ids and age >= LAUNCH_RECONCILE_WINDOW
+        if task_id or confirmed_absent:
+            try:
+                reason, row = _finish_launch_intent(target, tag, task_id=task_id)
+            except (OSError, RuntimeError, ValueError, StopIteration):
+                reason = "tracking-failed"
+        outcomes.append(
+            {"id": row["id"], "tag": tag, "state": row["launch_state"], "task_id": task_id, "reason": reason}
+        )
+    return outcomes
+
+
 def launch_task(prompt: str, *, target: Path, repo: str, label: str, branch: str | None = None) -> dict[str, Any]:
     """Submit one task from stdin and bind its Codex provider lease."""
     from . import cloud_tracker
@@ -444,44 +690,49 @@ def launch_task(prompt: str, *, target: Path, repo: str, label: str, branch: str
             fleet_client.release_cloud(lease_id, state="submit-failed", holder=holder)
             return {"ok": False, "reason": "lease-recovery-unwritable"}
 
+    tag = f"brigade-launch-{uuid4().hex}"
+    try:
+        cloud_tracker.register(
+            target,
+            provider="codex-cloud",
+            label=label,
+            prompt_hash=prompt_hash,
+            lease_holder=holder,
+            environment_audit=environment_audit_ref(CONFIGURED_SELECTOR, env_id),
+            launch_tag=tag,
+            launch_lease_id=lease_id,
+            launch_repo=canonical_repo,
+        )
+    except Exception:  # noqa: BLE001 - no provider work exists yet
+        if lease_id is not None:
+            fleet_client.release_cloud(lease_id, state="submit-failed", holder=holder)
+        return {"ok": False, "reason": "registry-unwritable"}
     try:
         result = proc.run(
             ["codex", "cloud", "exec", "--env", env_id, "--branch", base_branch, "-"],
             timeout=SUBMIT_TIMEOUT,
             cwd=target,
-            stdin=prompt.encode("utf-8"),
+            stdin=_tagged_prompt(prompt, tag).encode("utf-8"),
         )
-    except Exception:  # noqa: BLE001 - submission errors release the unbound lease
-        if lease_id is not None:
-            fleet_client.release_cloud(lease_id, state="submit-failed", holder=holder)
-        return {"ok": False, "reason": "submit-failed"}
-    task_id = parse_task_id(result.stdout) or parse_task_id(result.stderr)
-    if result.code == 124 and task_id is None:
+    except Exception:  # noqa: BLE001 - provider acceptance could be unknown
         return {"ok": False, "reason": "uncertain"}
-    if task_id is None and result.code not in (0, 124):
-        if lease_id is not None:
-            fleet_client.release_cloud(lease_id, state="submit-failed", holder=holder)
-        return {"ok": False, "reason": "submit-failed"}
+    task_id = _submitted_task_id(result)
     if task_id is None:
+        if result.launch_failed:
+            try:
+                reason, _ = _finish_launch_intent(target, tag, task_id=None, submit_failed=True)
+            except (OSError, RuntimeError, ValueError, StopIteration):
+                return {"ok": False, "reason": "tracking-failed"}
+            if reason != "ok":
+                return {"ok": False, "reason": reason}
+            return {"ok": False, "reason": "submit-failed"}
         return {"ok": False, "reason": "uncertain"}
-    if lease_id is not None:
-        bound = fleet_client.bind_cloud(
-            lease_id, provider_task_id=task_id, holder=holder, ttl_seconds=fleet_client.CLOUD_BOUND_TTL_SECONDS
-        )
-        if not bound.granted:
-            return {"ok": False, "reason": "bind-failed", "task_id": task_id}
     try:
-        entry = cloud_tracker.register(
-            target,
-            provider="codex-cloud",
-            task_id=task_id,
-            label=label,
-            prompt_hash=prompt_hash,
-            lease_holder=holder,
-            environment_audit=environment_audit_ref(CONFIGURED_SELECTOR, env_id),
-        )
+        reason, entry = _finish_launch_intent(target, tag, task_id=task_id)
     except Exception:  # noqa: BLE001 - keep known provider work recoverable after persistence failure
         return {"ok": False, "reason": "tracking-failed", "task_id": task_id}
+    if reason != "ok":
+        return {"ok": False, "reason": reason, "task_id": task_id}
     # A recognized ID proves work exists even when the CLI exits nonzero.
     # Track and bind it, but do not claim the submission completed successfully.
     return {
@@ -492,20 +743,61 @@ def launch_task(prompt: str, *, target: Path, repo: str, label: str, branch: str
     }
 
 
+def recover_registered_launch(
+    target: Path, *, task_id: str, repo: str | None, check_title: bool = True
+) -> dict[str, Any] | None:
+    """Find a launch intent for an explicitly registered task and reuse its lease."""
+    pending = [
+        row
+        for row in cloud_tracker.load_registry(target)["entries"]
+        if row.get("provider") == "codex-cloud" and row.get("launch_state") in ("needs-reconcile", "not-launched")
+    ]
+    tagged = [row for row in pending if row.get("launch_candidate_id") == task_id]
+    if not tagged and check_title and any(not row.get("launch_candidate_id") for row in pending):
+        if parse_task_id(task_id) != task_id:
+            raise ValueError("invalid Codex Cloud task ID")
+        result = proc.run(["codex", "cloud", "status", task_id], cwd=target, timeout=DEFAULT_LIST_TIMEOUT)
+        first_line = result.stdout.partition("\n")[0]
+        if result.code not in (0, 1) or _verified_status(first_line) is None:
+            raise RuntimeError("could not verify Codex Cloud task title with pending launch intents")
+        title_tags = set(_LAUNCH_TAG_RE.findall(first_line))
+        tagged = [row for row in pending if row.get("launch_tag") in title_tags]
+    if len(tagged) > 1:
+        raise RuntimeError("Codex Cloud task matches multiple launch intents")
+    if not tagged:
+        return None
+    reason, entry = _finish_launch_intent(
+        target, tagged[0]["launch_tag"], task_id=task_id, admit_if_unleased=True, repo=repo
+    )
+    if reason != "ok":
+        raise RuntimeError(f"Codex Cloud launch recovery failed ({reason})")
+    return entry
+
+
 def acquire_registered_task_lease(
-    target: Path, *, task_id: str, label: str, prompt_hash: str | None, repo: str | None
-) -> None:
+    target: Path,
+    *,
+    task_id: str,
+    label: str,
+    prompt_hash: str | None,
+    repo: str | None,
+    check_launch_title: bool = True,
+) -> dict[str, Any] | None:
     """Acquire and bind one lease for a Codex task registered after submission."""
     from . import cloud_tracker
 
-    if not require_hub_lease_storage():
-        return
+    hub_configured = require_hub_lease_storage()
+    recovered_entry = recover_registered_launch(target, task_id=task_id, repo=repo, check_title=check_launch_title)
+    if recovered_entry is not None:
+        return recovered_entry
+    if not hub_configured:
+        return None
     entries = cloud_tracker.load_registry(target)["entries"]
     current = next(
         (row for row in entries if row.get("provider") == "codex-cloud" and row.get("task_id") == task_id), None
     )
     if isinstance(current, dict) and isinstance(current.get("lease_holder"), str):
-        return
+        return None
     snapshot = fleet_client.fetch_cloud()
     leases = snapshot.get("leases")
     existing = (
@@ -523,7 +815,7 @@ def acquire_registered_task_lease(
             # Snapshots deliberately omit holders. Never invent ownership or a duplicate lease.
             raise RuntimeError("cloud lease holder unavailable")
         _attach_registered_lease_holder(target, task_id, recovered)
-        return
+        return None
     digest = prompt_hash or cloud_tracker.prompt_hash(label)
     admission = fleet_client.admit_cloud(
         "codex",
@@ -546,6 +838,7 @@ def acquire_registered_task_lease(
         raise RuntimeError("cloud lease bind failed")
     if admission.holder:
         _attach_registered_lease_holder(target, task_id, admission.holder)
+    return None
 
 
 def parse_task_id(text: str) -> str | None:
@@ -588,6 +881,129 @@ def _verified_status(text: str) -> str | None:
         return None
     token = match.group(1).strip().lower().replace(" ", "_")
     return token if token in TERMINAL_FAIL + TERMINAL_OK + NONTERMINAL else None
+
+
+class LeaseSyncResult(TypedDict):
+    renewed: int
+    released: int
+    errors: int
+    skipped: int
+    reason: NotRequired[str]
+
+
+def sync_leases(target: Path) -> LeaseSyncResult:
+    """Renew or release live Codex leases held by this workspace."""
+    counts: LeaseSyncResult = {"renewed": 0, "released": 0, "errors": 0, "skipped": 0}
+    holders = {
+        entry["task_id"]: entry["lease_holder"]
+        for entry in cloud_tracker.load_registry(target)["entries"]
+        if entry.get("provider") == "codex-cloud"
+        and isinstance(entry.get("task_id"), str)
+        and isinstance(entry.get("lease_holder"), str)
+        and entry["lease_holder"]
+    }
+    if not holders:
+        return counts
+    lock_path = cloud_tracker.registry_path(target).with_name("codex-sync.lock")
+    try:
+        with held_file_lock(lock_path, deadline_seconds=0):
+            return _sync_locked_leases(holders, counts)
+    except InboxLockTimeout:
+        counts["skipped"] = 1
+        counts["reason"] = "already-running"
+    except OSError:
+        counts["errors"] += 1
+        counts["reason"] = "lock-unavailable"
+    return counts
+
+
+def _sync_budget_exceeded(counts: LeaseSyncResult) -> LeaseSyncResult:
+    counts["errors"] += 1
+    counts["reason"] = "budget-exceeded"
+    return counts
+
+
+def _sync_locked_leases(holders: dict[str, str], counts: LeaseSyncResult) -> LeaseSyncResult:
+    node_id = fleet_client.resolve_node_id()
+    if not fleet_client._node_id_is_claimable(node_id):  # noqa: SLF001 - use the same identity rule as cloud mutations
+        counts["errors"] += 1
+        counts["reason"] = "no-identity"
+        return counts
+    deadline = time.monotonic() + LEASE_SYNC_BUDGET_SECONDS
+    try:
+        codex_leases = [lease for lease in fleet_client.fetch_cloud()["leases"] if lease.get("provider") == "codex"]
+    except fleet_client.FleetClientError:
+        counts["errors"] += 1
+        return counts
+    leases = [lease for lease in codex_leases if lease.get("owner_node") == node_id]
+    if codex_leases and not leases:
+        counts["skipped"] = len(codex_leases)
+        counts["reason"] = "no-matching-node"
+        return counts
+    terminal: list[tuple[str, str, str]] = []
+    for lease in leases:
+        if lease.get("state") != "bound" or lease.get("released_at") is not None or lease.get("expired"):
+            continue
+        task_id = lease.get("provider_task_id")
+        lease_id = lease.get("lease_id")
+        expires_at = cloud_tracker._parse_time(lease.get("expires_at"))  # noqa: SLF001 - shared timestamp parser
+        if (
+            not isinstance(task_id, str)
+            or re.fullmatch(r"task_[A-Za-z0-9][A-Za-z0-9_-]{2,}", task_id) is None
+            or task_id not in holders
+            or not isinstance(lease_id, str)
+            or not lease_id
+            or expires_at is None
+            or expires_at.timestamp() <= time.time()
+        ):
+            continue
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return _sync_budget_exceeded(counts)
+        try:
+            result = proc.run(
+                ["codex", "cloud", "status", task_id], timeout=min(DEFAULT_LIST_TIMEOUT, remaining), cwd=trusted_cwd()
+            )
+        except OSError:
+            result = None
+        if time.monotonic() >= deadline:
+            return _sync_budget_exceeded(counts)
+        if (
+            result is None
+            or result.code != 0
+            or result.timed_out
+            or _AUTH_FAILURE_RE.search(result.stdout + "\n" + result.stderr)
+        ):
+            counts["errors"] += 1
+            continue
+        state = _verified_status(result.stdout)
+        if state is None:
+            counts["errors"] += 1
+        elif state in TERMINAL_OK + TERMINAL_FAIL:
+            terminal.append((lease_id, state, holders[task_id]))
+        else:
+            # The probe may outlast the lease. The hub also checks expiry
+            # atomically with renewal to close the remaining race.
+            if expires_at.timestamp() > time.time():
+                decision = fleet_client.renew_cloud(
+                    lease_id, ttl_seconds=fleet_client.CLOUD_BOUND_TTL_SECONDS, holder=holders[task_id], node_id=node_id
+                )
+                if decision.granted:
+                    counts["renewed"] += 1
+                else:
+                    counts["errors"] += 1
+
+    # A scan that runs out of time leaves capacity fenced. Apply the
+    # terminal observations only after the probe loop finishes in budget.
+    for lease_id, state, holder in terminal:
+        if time.monotonic() >= deadline:
+            return _sync_budget_exceeded(counts)
+        decision = fleet_client.release_cloud(lease_id, state=state, holder=holder, node_id=node_id)
+        if decision.granted:
+            counts["released"] += 1
+        else:
+            counts["errors"] += 1
+    return counts
 
 
 def config_path(target: Path) -> Path:
@@ -877,19 +1293,23 @@ def list_tasks(
     cwd: Path | None = None,
     process_registry: proc.ProcessRegistry | None = None,
     command_timeout: float = DEFAULT_LIST_TIMEOUT,
+    include_launch_tags: bool = False,
 ) -> ListTasksResult:
     """Run ``codex cloud list --json`` and return a bounded, sanitized task list.
 
     Only the documented ``{tasks: [...], cursor}`` schema is accepted. Reads use
     the documented 1-20 item limit and cursor pagination, with fixed page and
     item caps; ``max_pages`` lowers the page cap (at least one page is read).
-    Task rows retain only id, normalized state, and environment id.
+    Task rows retain id, normalized state, environment id, and, when
+    requested by reconciliation, a validated launch tag extracted from the title.
     """
     item_cap = max(0, min(max_items, DEFAULT_MAX_ITEMS))
     sanitized: list[dict[str, Any]] = []
     cursor: str | None = None
     seen_cursors: set[str] = set()
     seen_task_ids: set[str] = set()
+    complete = False
+    valid_rows = True
     for _page in range(max(1, min(max_pages, MAX_LIST_PAGES))):
         if len(sanitized) >= item_cap:
             break
@@ -913,9 +1333,11 @@ def list_tasks(
             return ListTasksResult([], ok=False, reason="list-json-unsupported")
         for raw in data["tasks"]:
             if not isinstance(raw, dict):
+                valid_rows = False
                 continue
             task_id = raw.get("id")
             if not isinstance(task_id, str) or not parse_task_id(task_id) == task_id:
+                valid_rows = False
                 continue
             if task_id in seen_task_ids:
                 continue
@@ -926,16 +1348,24 @@ def list_tasks(
             environment_id = _environment_id(raw)
             if environment_id is not None:
                 task["environment_id"] = environment_id
+            if include_launch_tags:
+                title = raw.get("title")
+                if isinstance(title, str):
+                    tags = set(_LAUNCH_TAG_RE.findall(title))
+                    if len(tags) == 1:
+                        task["launch_tag"] = tags.pop()
             sanitized.append(task)
             seen_task_ids.add(task_id)
             if len(sanitized) >= item_cap:
                 break
         next_cursor = data.get("cursor")
+        if next_cursor in (None, ""):
+            complete = valid_rows and len(data["tasks"]) <= limit
         if not isinstance(next_cursor, str) or not next_cursor or next_cursor in seen_cursors:
             break
         seen_cursors.add(next_cursor)
         cursor = next_cursor
-    return ListTasksResult(sanitized)
+    return ListTasksResult(sanitized, complete=complete)
 
 
 def run_cloud_task(
@@ -976,6 +1406,7 @@ def run_cloud_task(
         task_id: str | None = None,
         status: str = "",
         failure_kind: str = "provider-error",
+        timed_out: bool = False,
     ):
         return AgentResult(
             text="",
@@ -985,7 +1416,7 @@ def run_cloud_task(
             failure_kind=failure_kind,
             thread_id=task_id,
             status=status,
-            timed_out=False,
+            timed_out=timed_out,
             cloud_environment=environment_audit,
         )
 
@@ -1029,12 +1460,36 @@ def run_cloud_task(
             )
         # Narrow for mypy: the lease id is a string for the rest of the dispatch.
         lease_id_str = lease_id
+    registry_root = register_target or cwd
+    tag = f"brigade-launch-{uuid4().hex}"
+    if registry_root is not None:
+        try:
+            _ensure_cloud_directory(registry_root)
+            cloud_tracker.register(
+                registry_root,
+                provider="codex-cloud",
+                label=tracker_label,
+                prompt_hash=prompt_hash,
+                session_id=session_id,
+                branch=branch,
+                environment_audit=environment_audit,
+                expected_artifact=({"kind": "branch", "pattern": branch} if branch else {"kind": "diff"}),
+                lease_holder=holder,
+                launch_tag=tag,
+                launch_lease_id=lease_id,
+                launch_repo=repo,
+            )
+        except Exception:  # noqa: BLE001 - no provider work exists yet
+            if lease_id is not None:
+                fleet_client.release_cloud(lease_id, state="submit-failed", holder=holder)
+            return fail_result("cloud registry is unwritable", status="denied", failure_kind="registry-unwritable")
+
     argv = ["codex", "cloud", "exec", "--env", env_id]
     if attempts > 1:
         argv += ["--attempts", str(attempts)]
     if branch:
         argv += ["--branch", branch]
-    argv.append(prompt)
+    argv.append(_tagged_prompt(prompt, tag) if registry_root is not None else prompt)
 
     def run_command(command: list[str], *, command_timeout: float) -> proc.Result:
         if process_registry is None:
@@ -1042,68 +1497,49 @@ def run_cloud_task(
         return proc.run(command, timeout=command_timeout, cwd=cwd, process_registry=process_registry)
 
     deadline = clock() + timeout
-    submit = run_command(argv, command_timeout=min(timeout, SUBMIT_TIMEOUT))
+    try:
+        submit = run_command(argv, command_timeout=min(timeout, SUBMIT_TIMEOUT))
+    except Exception:  # noqa: BLE001 - provider acceptance could be unknown
+        return fail_result("cloud submit result was ambiguous", status="uncertain", failure_kind="uncertain")
 
-    task_id = None
-    if submit.code == 0:
-        task_id = parse_task_id(submit.stdout) or parse_task_id(submit.stderr)
+    task_id = _submitted_task_id(submit)
+    clean_failure = task_id is None and submit.launch_failed
+    if registry_root is not None and (task_id is not None or clean_failure):
+        try:
+            reason, entry = _finish_launch_intent(registry_root, tag, task_id=task_id, submit_failed=clean_failure)
+            if reason == "ok" and hub_configured and task_id is not None:
+                lease_id_str = entry["launch_lease_id"]
+                holder = entry["lease_holder"]
+        except Exception:  # noqa: BLE001 - the intent survives the failed update
+            reason = "tracking-failed"
+    elif hub_configured and task_id is not None:
+        bind = fleet_client.bind_cloud(lease_id_str, provider_task_id=task_id, holder=holder)
+        reason = "ok" if bind.granted else "bind-failed"
+    else:
+        reason = "ok"
+    if reason == "bind-failed":
+        return fail_result("cloud lease bind failed", task_id=task_id, status=reason, failure_kind="fleet-bind-failed")
+    if reason != "ok":
+        return fail_result("cloud registry update failed", task_id=task_id, status=reason, failure_kind=reason)
 
-    if hub_configured:
-        if submit.code != 0 or task_id is None:
-            # Ambiguous provider result: retain the short lease and fail with no retry.
-            return AgentResult(
-                text="",
-                ok=False,
-                detail="cloud submit result was ambiguous",
-                thread_id=task_id,
+    if clean_failure:
+        if registry_root is None and lease_id is not None:
+            fleet_client.release_cloud(lease_id, state="submit-failed", holder=holder)
+        return fail_result("cloud submit failed", status="submit-failed")
+    if submit.code != 0 or task_id is None:
+        if hub_configured:
+            return fail_result(
+                "cloud submit result was ambiguous",
+                task_id=task_id,
                 status="uncertain",
-                failure_phase="dispatch",
                 failure_kind="uncertain",
                 timed_out=submit.code == 124,
-                cloud_environment=environment_audit,
             )
-        bind = fleet_client.bind_cloud(lease_id_str, provider_task_id=task_id, holder=holder)
-        if not bind.granted:
-            # The provider task is live but the hub could not bind it. The lease
-            # is still held; the operator can inspect and release it manually.
-            return AgentResult(
-                text="",
-                ok=False,
-                detail="cloud lease bind failed",
-                thread_id=task_id,
-                status="bind-failed",
-                failure_phase="dispatch",
-                failure_kind="fleet-bind-failed",
-                timed_out=False,
-                cloud_environment=environment_audit,
-            )
-    else:
         if submit.code == 124:
-            return timeout_result("cloud submit timed out")
+            return timeout_result("cloud submit timed out", task_id=task_id)
         if submit.code != 0:
-            return fail_result("cloud submit failed")
-        if task_id is None:
-            return fail_result("cloud submit returned no usable task id")
-
-    # Register-on-dispatch (#890): hash only, never store prompt text.
-    registry_root = register_target or cwd
-    if registry_root is not None:
-        try:
-            cloud_tracker.register(
-                Path(registry_root),
-                provider="codex-cloud",
-                task_id=task_id,
-                label=tracker_label,
-                prompt_hash=prompt_hash,
-                session_id=session_id,
-                branch=branch,
-                environment_audit=environment_audit,
-                expected_artifact=({"kind": "branch", "pattern": branch} if branch else {"kind": "diff"}),
-                lease_holder=holder if hub_configured else None,
-            )
-        except Exception:
-            # Registry must not block cloud dispatch; adopt path covers misses.
-            pass
+            return fail_result("cloud submit failed", task_id=task_id, status="uncertain")
+        return fail_result("cloud submit returned no usable task id", status="uncertain")
 
     def remaining(floor: float = 5.0) -> float:
         return max(floor, deadline - clock())

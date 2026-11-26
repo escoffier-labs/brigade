@@ -549,6 +549,29 @@ def test_cli_run_cloud_status_json_contract(tmp_path: Path, capsys, monkeypatch)
     assert payload["sources"]["cursor-cloud"]["wired"] is False
 
 
+@pytest.mark.parametrize("command", ["status", "sweep"])
+def test_cli_cloud_does_not_probe_grokbot_with_configured_hub(tmp_path, capsys, monkeypatch, command):
+    from brigade import fleet_client_grokbot
+
+    _isolate_hosted_providers(monkeypatch)
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "https://hub.example.com")
+    monkeypatch.setattr(cloud_tracker, "observe_github", lambda *a, **k: {"branches": [], "prs": []})
+    calls = []
+
+    def record_action(action, **fields):
+        calls.append(action)
+        return fleet_client_grokbot.GrokbotHubDecision(False, "auth-failed")
+
+    monkeypatch.setattr(fleet_client_grokbot, "_op", record_action)
+    assert fleet_client_grokbot.hub_configured()
+
+    assert cli.main(["run", "cloud", command, "--target", str(tmp_path), "--json"]) == 0
+    assert calls == []
+    if command == "status":
+        payload = json.loads(capsys.readouterr().out)
+        assert "grokbot-cloud" not in payload["sources"]
+
+
 @pytest.mark.parametrize("ambient_cursor_key", [False, True])
 @pytest.mark.parametrize("cursor_configured", [False, True])
 def test_current_observer_fixture_controls_cli_without_transport(
@@ -659,10 +682,13 @@ def test_cli_run_cloud_register_and_adopt(tmp_path: Path, capsys):
 def test_register_on_dispatch_from_codex_cloud(tmp_path: Path, monkeypatch):
     from brigade import codex_cloud, proc
 
-    calls = []
-
     def fake_run(command, timeout, cwd=None, process_registry=None):
         if command[:3] == ["codex", "cloud", "exec"]:
+            (intent,) = cloud_tracker.load_registry(tmp_path)["entries"]
+            assert intent["provider"] == "codex-cloud"
+            assert intent["task_id"] is None
+            assert intent["launch_state"] == "needs-reconcile"
+            assert "do the thing" not in json.dumps(intent)
             return proc.Result(code=0, stdout="task_id: task_dispatch_99\n", stderr="")
         if command[:3] == ["codex", "cloud", "status"]:
             return proc.Result(code=0, stdout="Status: completed\n", stderr="")
@@ -671,11 +697,6 @@ def test_register_on_dispatch_from_codex_cloud(tmp_path: Path, monkeypatch):
         return proc.Result(code=1, stdout="", stderr="unexpected")
 
     monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
-    monkeypatch.setattr(
-        cloud_tracker,
-        "register",
-        lambda *a, **k: calls.append(k) or {"id": "registered"},
-    )
     result = codex_cloud.run_cloud_task(
         "do the thing",
         env_id="env-1",
@@ -685,10 +706,11 @@ def test_register_on_dispatch_from_codex_cloud(tmp_path: Path, monkeypatch):
         register_target=tmp_path,
     )
     assert result.ok
-    assert calls
-    assert calls[0]["task_id"] == "task_dispatch_99"
-    assert calls[0]["provider"] == "codex-cloud"
-    assert "prompt" not in calls[0]
+    (entry,) = cloud_tracker.load_registry(tmp_path)["entries"]
+    assert entry["task_id"] == "task_dispatch_99"
+    assert entry["provider"] == "codex-cloud"
+    assert entry["launch_state"] == "tracked"
+    assert "prompt" not in entry
 
 
 def test_codex_observer_uses_bounded_structured_inventory(tmp_path: Path, monkeypatch):
@@ -1052,8 +1074,6 @@ def test_observe_providers_does_not_call_claude_local_inventory(monkeypatch, tmp
 
 def test_observe_provider_details_keeps_unconfigured_and_failed_inventory_distinct(monkeypatch, tmp_path: Path):
     """An empty inventory is healthy only when the provider answered it."""
-    from brigade import fleet_client_grokbot
-
     _isolate_hosted_providers(monkeypatch)
     monkeypatch.setenv("CURSOR_API_KEY", "fake-cursor-key")
     monkeypatch.setattr(
@@ -1061,21 +1081,13 @@ def test_observe_provider_details_keeps_unconfigured_and_failed_inventory_distin
         "list_agents",
         lambda *a, **k: (_ for _ in ()).throw(OSError("network unavailable")),
     )
-    monkeypatch.setattr(
-        fleet_client_grokbot,
-        "whoami",
-        lambda **k: fleet_client_grokbot.GrokbotHubDecision(False, "no-identity"),
-    )
-
     observations, _github = cloud_tracker.observe_provider_details(tmp_path)
 
     assert observations["cursor-cloud"].configured is True
     assert observations["cursor-cloud"].reachable is False
     assert observations["cursor-cloud"].reason == "transport-failure"
     assert observations["cursor-cloud"].tasks == {}
-    assert observations["grokbot-cloud"].configured is True
-    assert observations["grokbot-cloud"].reachable is False
-    assert observations["grokbot-cloud"].reason == "actor-not-enrolled"
+    assert "grokbot-cloud" not in observations
     assert observations["claude-cloud"].reason == "conductor-routed"
 
     payload = cloud_tracker.status_payload(
@@ -1087,7 +1099,7 @@ def test_observe_provider_details_keeps_unconfigured_and_failed_inventory_distin
     assert payload["sources"]["claude-cloud"]["reason"] == "conductor-routed"
 
 
-def test_provider_auth_failures_are_configured_but_not_reachable(monkeypatch, tmp_path: Path):
+def test_provider_auth_failures_are_configured_but_not_reachable(monkeypatch, tmp_path: Path, capsys):
     from brigade import fleet_client_grokbot
 
     _isolate_hosted_providers(monkeypatch)
@@ -1104,14 +1116,14 @@ def test_provider_auth_failures_are_configured_but_not_reachable(monkeypatch, tm
     )
 
     cursor = cloud_tracker.observe_provider("cursor-cloud", tmp_path)
-    grokbot = cloud_tracker.observe_provider("grokbot-cloud", tmp_path)
-
     assert (cursor.configured, cursor.reachable, cursor.reason) == (
         True,
         False,
         "auth-failure",
     )
-    assert (grokbot.configured, grokbot.reachable, grokbot.reason) == (
+    assert cli.main(["run", "cloud", "doctor", "--provider", "grokbot-cloud", "--target", str(tmp_path), "--json"]) == 1
+    grokbot = json.loads(capsys.readouterr().out)
+    assert (grokbot["configured"], grokbot["reachable"], grokbot["reason"]) == (
         True,
         False,
         "auth-failure",

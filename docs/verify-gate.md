@@ -136,14 +136,23 @@ It skips running, busy, and canceled receipts. Changes in the working tree
 and session identity have no effect. The declaration comes from the merge
 base of the pushed tip and the fetched default branch.
 
-A newer failure of the same required check takes precedence over an older
-pass because it records a later unsuccessful result on the same committed
-tree. A required command that failed or timed out, or recorded failed or
-errored tests, counts as a failure. Unrelated commands, runs rejected before
-execution, and runs that collected no tests leave an older eligible pass
-valid. The same applies when a run supplied no selector or passed the tests
-it ran but missed required files. A policy with no required command prefix
-accepts any eligible receipt for the tree.
+A newer failure takes precedence over an older pass if the run's command
+starts with the current required command prefix, regardless of the policy
+declaration or base recorded in the receipt. A command that failed or timed
+out, or recorded failed or errored tests, counts as a failure. If an older
+receipt has only a failed or timed-out overall status and includes the
+required command, the gate treats the required command as failed. A failed
+run that started on the pushed tree still counts if the tree changed during
+the run. Rerun the required check on the pushed tree to clear the failure.
+
+Unrelated commands, runs rejected before execution, and runs that collected
+no tests leave an older eligible pass valid. The same applies when a run
+supplied no selector or passed the tests it ran but missed required files.
+A policy with no required command prefix accepts any eligible receipt for
+the tree.
+
+Across seconds the check orders runs by their directory names, and within
+one second it orders them by their parsed `started_at` timestamps.
 
 | Result | Meaning |
 | --- | --- |
@@ -154,10 +163,11 @@ accepts any eligible receipt for the tree.
 | `base_predates_policy` | Update the branch from the default branch to pick up the declaration. |
 | `indeterminate` | The check could not reach a verdict, for example because the base is unresolved, the declaration is malformed, or a limit was reached. |
 
-If the scan limit leaves the verdict indeterminate, rerun the required check
-for the pushed tree to record a fresh receipt. If the base or declaration is
-the problem, fetch the default branch or correct the declaration as indicated
-by the reason, then run the push check again.
+If the scan limit or an unordered pass and failure in the same second leaves
+the verdict indeterminate, rerun the required check for the pushed tree to
+record a fresh receipt. If the base or declaration is the problem, fetch the
+default branch or correct the declaration as indicated by the reason, then
+run the push check again.
 
 The exit code is 1 if any result is `missing_receipt` or `rejected`, or 3
 if the only problems are `base_predates_policy` or `indeterminate`. It
