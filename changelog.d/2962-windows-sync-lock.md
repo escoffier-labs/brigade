@@ -1,0 +1,1 @@
+- Release the Windows code graph sync lock when the writer exits or is terminated, and reclaim older lock files when their recorded process is gone.
