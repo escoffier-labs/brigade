@@ -1,0 +1,1 @@
+- Codex Cloud connector docs explain the shared Hub identity and hourly send limit for cloud workers.

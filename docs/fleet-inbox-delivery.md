@@ -12,7 +12,7 @@ Connector tools depend on runtime settings and grants. For a ChatGPT dot, `hoste
 | `local-codex` | `node` | - | `fleet_send` | `fleet_inbox` | `fleet_ack` | `fleet_reply` | `fleet_sent` | `PostToolUse`, `UserPromptSubmit` | `next-event` | Tool-event polls are at least 20 seconds apart. | [Observed](https://github.com/escoffier-labs/brigadestack/issues/1887#issuecomment-7179839383) |
 | `duet` | `agent:duet` | `duet` | `message_send` | `inbox_list` | `inbox_ack` | `inbox_reply` | `message_status` | - | `next-start` | `messaging_enabled` required for send and reply. Send and reply share 20 messages per hour. | [Observed](https://github.com/escoffier-labs/brigadestack/issues/2592#issuecomment-7180093019) |
 | `dot` | `agent:miller` | `dot` | `message_send` | `inbox_list` | `inbox_ack` | `inbox_reply` | `message_status` | - | `hosted-subscription` | Send follows `messaging_enabled`, or `dispatch_enabled` when unset. Subscription requires `events_enabled`. | - |
-| `cloud-agent` | `agent:cloud-agent` | `cloud-agent` | `message_send` | `inbox_list` | `inbox_ack` | `inbox_reply` | - | - | `next-start` | `messaging_enabled: true` required for all messaging tools. Send and reply share 20 messages per hour. | - |
+| `cloud-agent` | `agent:cloud-agent` | `cloud-agent` | `message_send` | `inbox_list` | `inbox_ack` | `inbox_reply` | - | - | `next-start` | `messaging_enabled: true` required for all messaging tools. All cloud workers share one principal, so the Hub cannot tell one cloud run from another. Send and reply share 20 messages per hour. | - |
 
 ## Wake limits
 
@@ -56,6 +56,7 @@ Connector tools depend on runtime settings and grants. For a ChatGPT dot, `hoste
   to read mail at its next task start ([cloud runtime](../src/brigade/dot/cloud_runtime.py),
   [tool gates](../src/brigade/dot/profile.py),
   [wake capability](../src/brigade/fleet_agent_capabilities.py)).
+  Workers share `agent:cloud-agent` and its hourly send limit, so the Hub cannot distinguish runs. Use an untrusted, sender-chosen `ref` or `thread` as a run reference.
 
 In the 2026-11-26 Dot test, the next hub sync queued the event about 15 seconds
 after the send, and the first webhook attempt succeeded. The first tool calls
