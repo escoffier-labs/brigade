@@ -7,6 +7,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from time import monotonic
 
 import pytest
 
@@ -95,6 +96,8 @@ def _assert_binding(run_dir, payload, verification, *, status):
     assert receipt["status"] == status
     assert receipt["producer_attempt_id"] == state.handle.attempt_id
     assert receipt["producer_run_id"] == run_dir.name
+    assert "gating" not in receipt
+    assert "git" not in receipt
     assert verification == {
         "attempt_id": state.handle.attempt_id,
         "receipt_sha256": digest,
@@ -296,15 +299,28 @@ def test_verification_infrastructure_change_is_skipped(setup, script_runner, cap
     assert not (run_dir / "batch-verification").exists()
 
 
-def test_git_identity_ignores_inherited_git_environment(setup, linux_sandbox, configured_repo, capsys, monkeypatch):
+def test_git_identity_ignores_inherited_git_environment(
+    setup, linux_sandbox, configured_repo, capsys, monkeypatch, tmp_path
+):
     run = verification._run_verify_commands
+    live_worktree = tmp_path / "ambient-worktree"
+    live_worktree.mkdir()
+    (live_worktree / "ambient.txt").write_text("only in the ambient working tree", encoding="utf-8")
 
-    def run_with_ambient_env(*args, **kwargs):
+    def run_with_ambient_env(target, *args, batch_receipt, **kwargs):
+        expected_tree, _ = run_batch_verify_tree.fingerprint(
+            target, batch_receipt.command_env, deadline=monotonic() + 30
+        )
         with monkeypatch.context() as env:
-            env.setenv("GIT_DIR", str(setup[0] / "unrelated-git-dir"))
-            env.setenv("GIT_WORK_TREE", str(setup[0]))
+            env.setenv("GIT_DIR", str(target / ".git"))
+            env.setenv("GIT_WORK_TREE", str(live_worktree))
             env.setenv("PY", "missing-worker-tools")
-            return run(*args, **kwargs)
+            ambient_tree = localio.tree_fingerprint(target)
+            assert ambient_tree is not None
+            assert ambient_tree != expected_tree
+            receipt, rc = run(target, *args, batch_receipt=batch_receipt, **kwargs)
+            assert receipt["tree_fingerprint_after"] == expected_tree
+            return receipt, rc
 
     monkeypatch.setattr(verification, "_run_verify_commands", run_with_ambient_env)
     _, run_dir, payload = _run_batch(setup, capsys, verify=True)

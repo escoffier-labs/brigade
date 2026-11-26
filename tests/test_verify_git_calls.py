@@ -397,6 +397,7 @@ def test_capture_from_subdirectory_uses_individual_committed_reads(tmp_path, iso
     monkeypatch.setattr(subprocess, "run", forbid_batch)
     expected_git = _legacy_snapshot(target)
     result = _verify(target, capsys, reuse=False, capture="brigade-work")
+    assert "producer_attempt_id" not in result
     assert result["gating"]["reason"] == "passed_required_check"
     assert result["tree_stable"] is True
     assert result["outcome_scoreability"]["registered_manifest_ids"] == ["nested"]
