@@ -57,6 +57,7 @@ def _run_snapshot(
     argv: list[str],
     runner: str | None,
     imports: list[str],
+    binary: str,
     env: dict[str, str],
 ) -> dict[str, object]:
     tree, head = identity
@@ -68,8 +69,7 @@ def _run_snapshot(
     if _fingerprint(source, env) != identity:
         return _skip(Skip.TREE_CHANGED)
     command = run_batch_verify_tree.command(source, target, base, argv, runner, env)
-    binary = run_batch_verify_sandbox.bwrap()
-    sandbox = run_batch_verify_sandbox.prepare(binary, target, env) if binary is not None else None
+    sandbox = run_batch_verify_sandbox.prepare(binary, target, env)
     if sandbox is None:
         return _skip(Skip.SANDBOX_UNAVAILABLE)
     probe = sandbox.check_imports(imports)
@@ -129,6 +129,10 @@ def verify(binding: run_batch_workspace.Binding, workspace: Path, run_dir: Path,
         runner = run_batch_verify_tree.repository_runner(config["run_argv"][0])
         if run_batch_verify_tree.infrastructure_changed(source, git_env, base, tree, config["planner_files"], runner):
             return _skip(Skip.VERIFY_INFRA_MODIFIED)
+        # A platform without a usable sandbox does not need a verification checkout.
+        binary = run_batch_verify_sandbox.bwrap()
+        if binary is None:
+            return _skip(Skip.SANDBOX_UNAVAILABLE)
         imports = run_batch_verify_sandbox.expected_imports(source, base, config.get("import_packages"))
         plan, _, _ = verify_required.plan_snapshot(source, base, tree, deadline=deadline)
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
@@ -153,6 +157,7 @@ def verify(binding: run_batch_workspace.Binding, workspace: Path, run_dir: Path,
                 plan["run_argv"],
                 runner,
                 imports,
+                binary,
                 env,
             )
     except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):

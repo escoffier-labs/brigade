@@ -13,20 +13,39 @@ from brigade import agents, cli, localio, run_batch_verify_tree, run_export_proj
 from brigade.run_batch import SCHEMA
 from brigade.work_cmd import verification
 from tests.test_run_batch_execute import _commit, task
-from tests.test_run_batch_execute import setup as setup
+from tests.test_run_batch_worktrees import site as site
+
+
+@pytest.fixture
+def setup(site, monkeypatch):
+    # Use the short checkout name and isolated home exercised by the native
+    # Windows worktree tests. The pytest case name must not become a Git slug.
+    calls = []
+
+    def model(agent, prompt, **kwargs):
+        calls.append(prompt)
+        return agents.AgentResult(text="done", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", model)
+    return site.repo, calls
 
 
 def _run_batch(setup, capsys, *, isolation="worktree", verify=None):
     root, _ = setup
-    path = root / "batch.json"
-    spec = {"schema": SCHEMA, "request_id": "req", "tasks": [{**task("a"), "isolation": isolation}]}
+    path = root.parent / "home" / "batch.json"
+    spec = {
+        "schema": SCHEMA,
+        "request_id": "req",
+        "tasks": [{**task("a", read_only=isolation == "shared"), "isolation": isolation}],
+    }
     if verify is not None:
         spec["verify"] = verify
     path.write_text(json.dumps(spec), encoding="utf-8")
     rc = cli.main(["run", "batch", str(path), "--cwd", str(root), "--json"])
     captured = capsys.readouterr()
-    assert rc == 0, captured.err
+    assert captured.out, captured.err
     result = json.loads(captured.out)
+    assert rc == 0, f"{captured.err}\n{result}"
     run_dir = root / ".brigade" / "runs" / result["run_id"]
     payload = json.loads((run_dir / result["tasks"]["a"]["result_ref"]).read_text())
     return result, run_dir, payload
@@ -35,7 +54,6 @@ def _run_batch(setup, capsys, *, isolation="worktree", verify=None):
 @pytest.fixture
 def configured_repo(setup):
     root, _ = setup
-    subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
     (root / ".gitignore").write_text(".brigade/\n.venv/\nbatch.json\nhome/\n", encoding="utf-8")
     (root / "verify").mkdir()
     (root / "verify" / "required-tests.json").write_text(
@@ -204,7 +222,6 @@ def test_existing_export_projection_omits_local_verification(setup, linux_sandbo
 
 def test_unconfigured_planner_skips_verification(setup, capsys):
     root, _ = setup
-    subprocess.run(["git", "init", "-q", "-b", "main", str(root)], check=True)
     (root / ".git" / "info" / "exclude").write_text(".brigade/\nbatch.json\nhome/\n")
     _commit(root, "base", allow_empty=True)
     _, run_dir, payload = _run_batch(setup, capsys, verify=True)
@@ -244,7 +261,15 @@ def test_ignored_worker_interpreter_does_not_run(setup, linux_sandbox, script_ru
     assert _receipt(run_dir)["commands"][0]["exit_code"] == 7
 
 
-@pytest.mark.parametrize("change", ["script", "symlink", "conftest", "force-added-interpreter"])
+@pytest.mark.parametrize(
+    "change",
+    [
+        "script",
+        pytest.param("symlink", marks=pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlinks")),
+        "conftest",
+        "force-added-interpreter",
+    ],
+)
 def test_verification_infrastructure_change_is_skipped(setup, script_runner, capsys, monkeypatch, change):
     def model(agent, prompt, **kwargs):
         checkout = Path(kwargs["cwd"])
@@ -306,18 +331,31 @@ def test_unavailable_candidate_tree_has_closed_skip_reason(setup, configured_rep
 
 
 def test_sandbox_unavailable_skips_batch_verification(setup, configured_repo, capsys, monkeypatch):
-    # Simulate a platform without unprivileged Linux namespaces.
     from brigade import run_batch_verify_sandbox
 
-    monkeypatch.setattr(run_batch_verify_sandbox, "bwrap", lambda: None)
-    _, run_dir, payload = _run_batch(setup, capsys, verify=True)
+    # Exercise the real platform fallback on Windows.
+    if sys.platform == "linux":
+        monkeypatch.setattr(run_batch_verify_sandbox, "bwrap", lambda: None)
+    materializations = []
+    materialize = run_batch_verify_tree.materialize
+
+    def record_materialization(*args, **kwargs):
+        materializations.append(True)
+        return materialize(*args, **kwargs)
+
+    monkeypatch.setattr(run_batch_verify_tree, "materialize", record_materialization)
+    result, run_dir, payload = _run_batch(setup, capsys, verify=True)
+    assert result["tasks"]["a"]["status"] == "completed"
     assert payload["verification_skipped"] == "sandbox-unavailable"
+    assert materializations == []
     assert not (run_dir / "batch-verification").exists()
 
 
 @pytest.mark.parametrize("destination", ["/somewhere", "../outside"])
 @pytest.mark.skipif(sys.platform == "win32", reason="requires POSIX symlinks")
-def test_candidate_symlink_escape_skips_batch_verification(setup, configured_repo, capsys, monkeypatch, destination):
+def test_candidate_symlink_escape_skips_batch_verification(
+    setup, configured_repo, linux_sandbox, capsys, monkeypatch, destination
+):
     def model(agent, prompt, **kwargs):
         (Path(kwargs["cwd"]) / "outside.py").symlink_to(destination)
         return agents.AgentResult(text="done", ok=True)
@@ -338,8 +376,7 @@ def linux_sandbox():
 
 def test_sandbox_hides_coordinator_files_and_network(setup, configured_repo, linux_sandbox, capsys, monkeypatch):
     root, _ = setup
-    home = root / "home"
-    home.mkdir(exist_ok=True)
+    home = root.parent / "home"
     secret = home / "private-fixture.txt"
     secret.write_text("fixture", encoding="utf-8")
     coordinator_config = Path.home() / ".config"
