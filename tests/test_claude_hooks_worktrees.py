@@ -247,22 +247,6 @@ def test_bash_windows_paths_follow_shell_quoting_on_every_host(monkeypatch, comm
     assert runtime._shell_path_tokens(command.format(**fields)) == [token.format(**fields) for token in expected]
 
 
-def test_denied_verifier_replacement_keeps_the_verifier_worktree(worktrees):
-    first, second = worktrees
-    command = f"pytest tests/test_first_only.py && touch {shlex.quote(str(second / 'source.py'))}"
-    result = event(first, "PreToolUse", tool_name="Bash", tool_input={"command": command})
-    assert result is not None
-    specific = result["hookSpecificOutput"]
-    assert specific["permissionDecision"] == "deny"
-    reason = specific["permissionDecisionReason"]
-    fingerprint = runtime._session_fingerprint(SESSION)
-    # The session state lives in the written tree; the verifier in the first checkout is told where.
-    assert (
-        runtime._verify_replacement(first, "pytest tests/test_first_only.py", fingerprint, hook_target=second) in reason
-    )
-    assert runtime._verify_replacement(second, "pytest tests/test_first_only.py", fingerprint) not in reason
-
-
 @pytest.mark.parametrize(
     "command",
     [

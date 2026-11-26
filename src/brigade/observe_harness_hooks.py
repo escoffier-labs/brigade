@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from . import agent_identity, observed_checks, work_mode
-from .claude_hooks import runtime, verification_mode
+from .claude_hooks import observed_verifiers, runtime
 from .wiring import resolve_wired_target
 
 CODEX_HOOK_CONTEXT = "codex-observe"
@@ -70,10 +70,10 @@ def _capture(harness: str, payload: dict[str, Any], target: Path | None, pin: Pa
             return
         tool_input = payload.get("tool_input")
         command = tool_input.get("command") if isinstance(tool_input, dict) else None
-        if not isinstance(command, str) or len(command) > 65536 or not runtime.is_raw_verification(command):
+        if not isinstance(command, str) or len(command) > 65536 or not observed_verifiers.is_raw_verification(command):
             return
         identity = codex_identity(payload)
-        for governed, mode in verification_mode.governing_modes(command, cwd, target, harness=harness):
+        for governed, mode in observed_verifiers.governing_modes(command, cwd, target, harness=harness):
             observed_checks.check_capture_deadline()
             if mode != "observe" or not _allowed(governed, harness, pin):
                 continue

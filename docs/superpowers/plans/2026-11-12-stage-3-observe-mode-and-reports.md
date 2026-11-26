@@ -1,5 +1,7 @@
 # Stage 3 Observe Mode and Check Reports Implementation Plan
 
+> Historical plan. For current Claude hook behavior, see [work modes](../../agent-assisted-setup.md#strict-observe-and-off-modes-and-safety-rails).
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add a three-way work mode (`strict`, `observe`, `off`) in which `observe` records every check an agent runs as its own record type with harness and model identity, and ship two read-only reports over those records, without changing the default or today's strict behavior.

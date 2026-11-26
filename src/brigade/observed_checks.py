@@ -22,6 +22,7 @@ from typing import Any
 
 from . import dirfd, guard, localio, work_mode
 from .agent_identity import MODEL_SOURCES, AgentIdentity, map_identity
+from .claude_hooks import observed_verifiers
 from .claude_hooks.envelope import redact_paths
 from .guard.types import ScanOptions
 from .inbox_lock import InboxLockTimeout, held_file_lock_descriptor as held_file_lock
@@ -181,7 +182,7 @@ def _tool_label(name: str, target: str | None, separator: str = " ") -> str:
 def _normalize_tokens(tokens: list[str]) -> str:
     rt = _rt()
     tokens = rt._strip_env(tokens)
-    while tokens and tokens[0] in rt._SHELL_CONTROL_PREFIXES:
+    while tokens and tokens[0] in observed_verifiers._SHELL_CONTROL_PREFIXES:
         tokens = rt._strip_env(tokens[1:])
     if not tokens:
         return "other"
@@ -190,26 +191,26 @@ def _normalize_tokens(tokens: list[str]) -> str:
     if module:
         return _normalize_tokens([module[0], *module[1]])
     if name in {"uv", "poetry", "npm", "pnpm", "yarn", "bun"}:
-        tail, ambiguous = rt._strip_runner_global_options(name, tokens[1:])
+        tail, ambiguous = observed_verifiers._strip_runner_global_options(name, tokens[1:])
         if ambiguous:
             return "other"
         if name in {"uv", "poetry"}:
             if tail[:1] != ["run"]:
                 return "other"
-            tail, ambiguous = rt._strip_runner_run_options(name, tail[1:])
+            tail, ambiguous = observed_verifiers._strip_runner_run_options(name, tail[1:])
             return "other" if ambiguous else _normalize_tokens(tail)
-        script = rt._package_runner_script(tail)
+        script = observed_verifiers._package_runner_script(tail)
         if name in {"pnpm", "yarn", "bun"} and tail and tail[0] in _TOOL_TARGETS[name]:
             script = tail[0]
         return _tool_label(name, script, ":")
     if name == "npx":
-        tail, ambiguous = rt._strip_npx_options(tokens[1:])
+        tail, ambiguous = observed_verifiers._strip_npx_options(tokens[1:])
         return "other" if ambiguous else _normalize_tokens(tail)
     for suffix in ("scripts/verify", "scripts/verify-focused"):
         if tokens[0].replace("\\", "/").endswith(suffix):
             return suffix
     if name == "make":
-        tail, ambiguous = rt._strip_make_global_options(tokens[1:])
+        tail, ambiguous = observed_verifiers._strip_make_global_options(tokens[1:])
         return _tool_label("make", tail[0] if tail and not ambiguous else None)
     if name in {"go", "cargo", "ruff"} and len(tokens) > 1:
         return _tool_label(name, tokens[1])
@@ -221,7 +222,7 @@ def normalize_tool(command: str) -> str:
         return "other"
     rt = _rt()
     try:
-        segment = rt._shell_tokens(rt._first_verifier_command(command))
+        segment = rt._shell_tokens(observed_verifiers.first_verifier_command(command))
         label = _normalize_tokens(segment)
         return label if label in _TOOL_LABELS else "other"
     except (ValueError, RecursionError):

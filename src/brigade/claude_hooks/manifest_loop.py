@@ -201,24 +201,6 @@ def _commands(target: Path, covered: list[CoveredManifest], prefix: str) -> list
     return [f"{prefix}{verify_command(target, item.source)}" for item in covered]
 
 
-def deny_hint(target: Path, prefix: str) -> str:
-    """Extra deny text, starting with a newline, naming the manifest verify for a changed subject, or ``""``.
-
-    ``prefix`` is the session-env prefix the runtime puts in front of every verify replacement.
-    """
-    covered = covered_manifests(target)
-    if not covered:
-        return ""
-    lines = [
-        "",
-        "This change touches the subject of a tracked verify manifest. Keep your own check, and also run the "
-        "manifest verify, the scoreable one (the manifest picks what it scores):",
-    ]
-    for item, command in zip(covered, _commands(target, covered, prefix), strict=True):
-        lines.append(f"- {item.subject_path}: {command}")
-    return "\n".join(lines)
-
-
 def session_written_paths(state: dict[str, Any]) -> list[str]:
     """Target-relative files this session wrote with a file tool.
 
