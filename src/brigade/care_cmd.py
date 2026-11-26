@@ -187,6 +187,22 @@ LESSON_REVIEW_ENTRY = CareEntry(
     runbook_id="lesson-review",
 )
 
+CODEX_CLOUD_SYNC_RUNBOOK_PAYLOAD: dict[str, Any] = {
+    "id": "codex-cloud-sync",
+    "description": "Renew or release this workspace's Codex Cloud leases.",
+    "allowed_commands": ["brigade"],
+    "steps": [{"id": "sync", "run": "brigade run cloud sync --codex-leases-only --target . --json"}],
+}
+CODEX_CLOUD_SYNC_ENTRY = CareEntry(
+    entry_id="codex-cloud-sync",
+    schedule="*/2 * * * *",
+    on_calendar="*:0/2",
+    description="Brigade Codex Cloud lease sync",
+    kind="runbook",
+    runbook_rel=".brigade/runbooks/codex-cloud-sync.json",
+    runbook_id="codex-cloud-sync",
+)
+
 MEMORY_JOB_ENTRIES: tuple[CareEntry, ...] = (
     CareEntry(
         entry_id="handoff-ingest",
@@ -253,6 +269,7 @@ def _catalog_by_id() -> dict[str, CareEntry]:
             MEMORY_REFLECT_ENTRY,
             MEMORY_VERIFY_ENTRY,
             LESSON_REVIEW_ENTRY,
+            CODEX_CLOUD_SYNC_ENTRY,
             patrol_entry,
         )
     }
@@ -706,6 +723,10 @@ def _install_runbook_specs(
     extra = care_patrol.selected_specs(entries)
     if shipped and any(entry.entry_id == "memory-closeout" for entry in entries):
         extra.append(_memory_closeout_spec())
+    for entry in entries:
+        if entry.entry_id == CODEX_CLOUD_SYNC_ENTRY.entry_id:
+            assert entry.runbook_rel is not None
+            extra.append(care_runbooks.RunbookSpec(entry.runbook_rel, CODEX_CLOUD_SYNC_RUNBOOK_PAYLOAD))
     known = {spec.rel for spec in specs}
     return [*specs, *(spec for spec in extra if spec.rel not in known)], 0
 
