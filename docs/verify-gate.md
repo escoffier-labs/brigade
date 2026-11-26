@@ -129,12 +129,13 @@ remote object ID. Use `--ref <name>` to check a single local ref without
 reading standard input. Use `--target <path>` to select a worktree and
 `--json` for one object with a `refs` array.
 
-The check skips tags, deletions, and unchanged refs. It searches the newest
-128 runs in the worktree for an eligible receipt whose tree fingerprint or
-saved plan snapshot exactly matches the pushed branch tip's committed tree.
-It skips running, busy, and canceled receipts. Changes in the working tree
-and session identity have no effect. The declaration comes from the merge
-base of the pushed tip and the fetched default branch.
+The check skips tags, deletions, and unchanged refs. It checks up to 128
+local receipt files. The receipt's tree fingerprint and its plan snapshot
+tree, if present, must both match the pushed branch tip's committed tree.
+Directories without a receipt and runs marked running, busy, or canceled
+provide no verification evidence. Changes in the working tree and session
+identity have no effect. The declaration comes from the merge base of the
+pushed tip and the fetched default branch.
 
 A newer failure takes precedence over an older pass if the run's command
 starts with the current required command prefix, regardless of the policy
@@ -146,13 +147,24 @@ run that started on the pushed tree still counts if the tree changed during
 the run. Rerun the required check on the pushed tree to clear the failure.
 
 Unrelated commands, runs rejected before execution, and runs that collected
-no tests leave an older eligible pass valid. The same applies when a run
+no tests leave an older eligible pass valid, including a timeout that recorded
+an empty collection. The same applies when a run
 supplied no selector or passed the tests it ran but missed required files.
 A policy with no required command prefix accepts any eligible receipt for
 the tree.
 
-Across seconds the check orders runs by their directory names, and within
-one second it orders them by their parsed `started_at` timestamps.
+Across seconds the check orders runs by the UTC timestamp in the directory
+name. The name must have the writer's timestamp and suffix format. For a
+matching receipt, the name and `started_at` must identify the same UTC
+second, with up to just under one second of fractional precision in
+`started_at`. A future timestamp makes the verdict indeterminate. Within a
+second the check orders runs by their full recorded start times.
+
+An unreadable or malformed receipt makes the verdict indeterminate if its
+run could affect the decision. Invalid test counts, including negative
+numbers and booleans, make a receipt malformed. A symbolic link in the
+receipt directory also makes the verdict indeterminate. If more than 128
+receipt files exist, the result is indeterminate even if a pass is present.
 
 | Result | Meaning |
 | --- | --- |
@@ -163,21 +175,22 @@ one second it orders them by their parsed `started_at` timestamps.
 | `base_predates_policy` | Update the branch from the default branch to pick up the declaration. |
 | `indeterminate` | The check could not reach a verdict, for example because the base is unresolved, the declaration is malformed, or a limit was reached. |
 
-If the scan limit or an unordered pass and failure in the same second leaves
-the verdict indeterminate, rerun the required check for the pushed tree to
-record a fresh receipt. If the base or declaration is the problem, fetch the
-default branch or correct the declaration as indicated by the reason, then
-run the push check again.
+If the scan limit leaves the verdict indeterminate, restore normal
+verify-run retention and rerun the required check for the pushed tree.
+The default retention is 50 runs. A fresh run also resolves an unordered
+pass and failure in the same second. If the base or declaration is the
+problem, fetch the default branch or correct the declaration as indicated
+by the reason, then run the push check again.
 
 The exit code is 1 if any result is `missing_receipt` or `rejected`, or 3
 if the only problems are `base_predates_policy` or `indeterminate`. It
 returns 0 for `ok`, `not_applicable`, or no branch updates, and 2 for
 invalid input. Missing or rejected receipts print a verification command.
 
-This version only reports results. It installs no hook and does not block
-a push. The command shares a two-second budget across its Git calls and
-reads at most 128 local receipts. It runs offline without a planner or tests.
-Local receipts can be forged. Required CI on the head commit is the proof.
+The advisory command reports results. The installed hook uses the same
+evaluator. The check runs offline with a two-second deadline and a 4 MiB
+limit per receipt. A filesystem operation or JSON parse in progress can
+run past the deadline. The next deadline check makes the result indeterminate.
 
 ## Install the push gate
 
@@ -230,5 +243,15 @@ either is missing, then run `brigade work verify push-gate status`. For an
 evaluation error before Brigade can read the policy, use the printed
 `brigade work verify push-check` command to diagnose the pushed commit.
 
-Brigade provides no bypass for enforce mode. Git's own `--no-verify` prevents
-the pre-push hook from running. Required CI remains the proof.
+### Known limits
+
+- Git's `git push --no-verify` skips every pre-push hook, including this gate.
+  Brigade adds no bypass and cannot detect that Git skipped the hook.
+- A clone opts in through `push-gate install` and needs the current hook.
+  The older v1 block allows the push even when the clone is set to enforce.
+- Verify receipts are local files. The gate checks their consistency.
+  Required CI supplies independent evidence on the pushed commit.
+- An indeterminate verdict blocks in enforce mode. Follow the printed
+  recovery guidance, run the required check on the pushed tree, and retry.
+  For an unresolved policy or a receipt-store problem, restore the policy
+  or repair the store first.

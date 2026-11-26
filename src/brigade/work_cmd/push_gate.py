@@ -150,6 +150,8 @@ def _install(repo: Repository, mode: str) -> None:
     if not info["wired"] or not info["current"]:
         print("The effective hook was left in place. Add or update these lines after capturing pre-push input:")
         print(_snippet().decode("ascii"), end="")
+        if info["hook_version"] == 1:
+            print("The v1 hook allows the push even in enforce mode. Replace its marked block with v2.")
         print("For a Brigade content guard hook, refresh from the shipped templates/hooks/pre-push file.")
 
 

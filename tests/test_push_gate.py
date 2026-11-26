@@ -440,7 +440,9 @@ def test_hook_mode_verdicts(push_repo, monkeypatch, capsys, mode, case, result, 
     if case == "scan-cap":
         root = push_repo / ".brigade" / "work" / "verify-runs"
         for i in range(verify_push._RECEIPT_LIMIT + 1):
-            (root / f"20260101-120000-unrelated-{i}").mkdir(parents=True)
+            run = root / f"20260101-120000-work-verify-{i:06x}"
+            run.mkdir(parents=True)
+            (run / "receipt.json").write_text("{}", encoding="utf-8")
     if case == "deadline":
 
         def timed_out(self, *args, **kwargs):
@@ -526,6 +528,36 @@ def test_enforce_names_bad_ref_and_blocks_whole_push(push_repo, monkeypatch, cap
         ("ok", True),
         ("missing_receipt", True),
     ]
+
+
+@pytest.mark.parametrize(
+    "verdict", ["ok", "not_applicable", "base_predates_policy", "missing_receipt", "rejected", "indeterminate"]
+)
+def test_all_verdicts_agree_between_push_check_and_enforce_hook(push_repo, monkeypatch, capsys, verdict):
+    tip = (
+        _git(push_repo, "rev-parse", "HEAD")
+        if verdict in {"not_applicable", "base_predates_policy"}
+        else _policy(push_repo)
+    )
+    if verdict == "base_predates_policy":
+        _policy(push_repo)
+        _git(push_repo, "switch", "--detach", tip)
+    if verdict in {"ok", "rejected", "indeterminate"}:
+        path = _receipt(push_repo, _tree(push_repo), passed=int(verdict != "rejected"))
+        if verdict == "indeterminate":
+            path.write_text("{", encoding="utf-8")
+
+    _, result = _single(push_repo, capsys)
+    assert result["status"] == verdict
+    _git(push_repo, "config", "brigade.pushGate", "enforce")
+    monkeypatch.chdir(push_repo)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(_line(tip, "refs/heads/topic") + "\n"))
+    blocked = verdict in {"missing_receipt", "rejected", "indeterminate"}
+    assert push_gate_hook.run() == (3 if blocked else 0)
+    (row,) = _log_rows(push_repo)
+    assert (row["result"], row["blocked"]) == (result["status"], blocked)
+    if blocked:
+        assert result["reason"] in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("global_mode", [None, "enforce"])
