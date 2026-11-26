@@ -8,13 +8,12 @@ content wherever it was published.
 from __future__ import annotations
 
 import os
-import sys
 from dataclasses import replace
 from datetime import date
 
 import pytest
 
-from tests._handoff_origin_fixtures import requires_automatic_filing, windows_draft_review
+from tests._handoff_origin_fixtures import requires_automatic_filing
 from brigade import ingest, instruction_overflow, memory_cmd, memory_inbox_drain as drain
 from brigade import memory_care_journal as journal
 from brigade.instruction_overflow import CARDS_REL, RouteContext, route
@@ -70,12 +69,7 @@ def _drafts(ws):
 
 def _held(ws, content=NOTE, number=0):
     """An authenticated ingest draft held for a full instruction file."""
-    if sys.platform == "win32":
-        source = ws / ".claude/memory-handoffs" / f"2026-10-01-{number}.md"
-        source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text(handoff_text("USER.md", content, type_="preference"), encoding="utf-8")
-    else:
-        source = write_handoff(ws, f"2026-10-01-{number}.md", handoff_text("USER.md", content, type_="preference"))
+    source = write_handoff(ws, f"2026-10-01-{number}.md", handoff_text("USER.md", content, type_="preference"))
     ingest._execute(
         ingest.Outcome("inboxed", code="bootstrap-budget-exceeded"),
         source,
@@ -633,10 +627,6 @@ def test_unverified_draft_is_not_a_retryable_card_blocker(tmp_path, monkeypatch)
     draft = _held(ws)
     planted = _plant(ws, PUBLIC + "\nplanted\n")
     before = planted.read_bytes()
-    if windows_draft_review(ws, draft):
-        assert drain.drain(ws, today=TODAY, deadline_days=14)["blocked_cards"] == []
-        assert planted.read_bytes() == before
-        return
     assert drain.drain(ws, today=TODAY, deadline_days=14)["blocked_cards"]
     handoff_origin.stamp_path(ws, draft).unlink()
     result = drain.drain(ws, today=TODAY, deadline_days=14)

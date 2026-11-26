@@ -146,10 +146,9 @@ rules. Worker, cron, subagent, unknown, and tool-touched origins go to
 `memory/handoff-inbox/` with reason `origin-review-required`. The inbox drain
 classifies that reason as human review and cannot retry it automatically.
 
-On Windows, automatic filing is off. Handoffs go to human review with
-`origin-review-required` until [#2588](https://github.com/escoffier-labs/brigadestack/issues/2588)
-adds a Win32 ACL confinement check. Regular-file, reparse-point, and single-link
-checks still apply. Files above the automatic inspection limit go to review as
+Automatic filing works on Windows with an owner-only signing key.
+Regular-file, reparse-point, and single-link checks still apply.
+Files above the automatic inspection limit go to review as
 `handoff-too-large`, with their original bytes preserved. Linked handoffs stay in
 the writer inbox with `linked-handoff` and cannot file automatically.
 
@@ -193,10 +192,20 @@ Origin stamps use only the fixed workspace-owned key at
 `brigade receipts keygen` without that override to provision the fixed key.
 Ingest uses the source workspace's key, even when it writes memory into a
 different owner. The key must be a single-link regular file owned by the
-current OS user, with no group or world permission bits. No-follow opens
-reject links in the key path. On Windows, or any platform that cannot prove
-these ownership and permission checks, automatic filing fails closed and
-handoffs require review.
+current OS user. On POSIX, it must have no group or world permission bits.
+On Windows, key generation gives the file a protected access control list
+that grants access only to the current user. No-follow opens reject links
+in the key path. Windows key generation requires the receipt-key override
+to be unset.
+
+Default Windows profile permissions often include SYSTEM and Administrators.
+An older or copied key may have inherited those entries. Brigade prints a
+repair hint and sends handoffs to review when it cannot verify the key.
+Move `.brigade/receipt-signing-key` aside to a private location. In the
+workspace, unset `BRIGADE_RECEIPT_SIGNING_KEY_FILE` and run
+`brigade receipts keygen` to create a fresh owner-only key. Existing stamps
+still require review after the key changes.
+
 A missing key, missing sidecar, bad MAC, changed content, malformed stamp, or
 unknown tool status requires review. Neither drafting nor ingest creates a key.
 Stamps are local to the source workspace and path. Worktree rescue and archive

@@ -1,6 +1,7 @@
 """Publication isolation, reviewed-event eviction, and prompt recovery."""
 
 import json
+import sys
 
 import pytest
 
@@ -171,11 +172,18 @@ def test_keygen_explains_audit_override(scope, monkeypatch, capsys):
 
     audit = scope / "audit-key"
     monkeypatch.setenv(receipt_signing.KEY_ENV, str(audit))
-    assert cli.main(["receipts", "keygen", "--target", str(scope)]) == 0
-    output = capsys.readouterr().out
-    assert "lesson authority uses only .brigade/receipt-signing-key" in output
+    status = cli.main(["receipts", "keygen", "--target", str(scope)])
+    captured = capsys.readouterr()
+    if sys.platform == "win32":
+        assert status == 1
+        output = captured.err
+        assert not audit.exists()
+    else:
+        assert status == 0
+        output = captured.out
+        assert "lesson authority uses only .brigade/receipt-signing-key" in output
+        assert audit.exists()
     assert "Unset BRIGADE_RECEIPT_SIGNING_KEY_FILE" in output
-    assert audit.exists()
     fixed = scope / ".brigade/receipt-signing-key"
     # Audit generation leaves the existing lesson authority untouched.
     assert fixed.read_text().strip() == "01" * 32

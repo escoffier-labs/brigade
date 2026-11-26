@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import re
-import sys
 import threading
 from datetime import date
 
 import pytest
 
-from tests._handoff_origin_fixtures import requires_automatic_filing, windows_draft_review
+from tests._handoff_origin_fixtures import requires_automatic_filing
 from brigade import handoff_origin, ingest, memory_care_tend, memory_inbox_retry
 from brigade import memory_care_journal as journal
 from brigade import memory_inbox_drain as drain
@@ -23,12 +22,7 @@ CARD = "memory/cards/instructions/user-md--overflow-preference.md"
 
 def _held(ws, content=NOTE, *, flags=False, number=0):
     """An authorized review draft, optionally without legacy retry flags in its header."""
-    if sys.platform == "win32":
-        source = ws / ".claude/memory-handoffs" / f"2026-10-01-{number}.md"
-        source.parent.mkdir(parents=True, exist_ok=True)
-        source.write_text(handoff_text("USER.md", content, type_="preference"), encoding="utf-8")
-    else:
-        source = write_handoff(ws, f"2026-10-01-{number}.md", handoff_text("USER.md", content, type_="preference"))
+    source = write_handoff(ws, f"2026-10-01-{number}.md", handoff_text("USER.md", content, type_="preference"))
     ingest._execute(
         ingest.Outcome("inboxed", code="bootstrap-budget-exceeded"),
         source,
@@ -45,7 +39,7 @@ def _held(ws, content=NOTE, *, flags=False, number=0):
     stamped = handoff_origin.stamp_review_draft(
         ws, draft, draft.read_bytes(), handoff_origin.ReviewDraft("bootstrap-budget-exceeded", flags, True)
     )
-    assert stamped == (sys.platform != "win32")
+    assert stamped
     return draft
 
 
@@ -224,8 +218,6 @@ def test_unsigned_budget_hold_stays_for_a_person(tmp_path, monkeypatch, flags):
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
     draft = _held(ws, flags=flags)
-    if windows_draft_review(ws, draft):
-        return
     handoff_origin.stamp_path(ws, draft).unlink()
     result = drain.drain(ws, today=TODAY, deadline_days=14)
     assert result["kept_for_person"] == 1 and result["retried"] == 0
@@ -237,8 +229,6 @@ def test_manually_removed_review_draft_loses_retry_authority(tmp_path, monkeypat
     ws, home, env = field_workspace(tmp_path)
     set_home(monkeypatch, home)
     draft = _held(ws)
-    if windows_draft_review(ws, draft):
-        return
     data = draft.read_bytes()
     sidecar = handoff_origin.stamp_path(ws, draft)
     if move:

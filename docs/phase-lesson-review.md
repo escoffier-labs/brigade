@@ -32,7 +32,8 @@ Empty results commit the review without creating memory.
 
 Receipt authority uses the same fixed-path, private, operator-owned, single-link
 workspace key confinement as #2577. It never uses the audit-key environment
-override or creates a key. Windows authority stays unavailable pending #2588.
+override or creates a key. Windows requires a protected, owner-only access
+control list. See the [key setup and repair steps](handoff-promotion.md#origin-gate-for-automatic-filing).
 A MAC authenticates tooling against text forgery. An agent with shell access can
 read and use the key.
 Both failed and successful verification observations take priority over routine

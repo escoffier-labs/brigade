@@ -22,6 +22,7 @@ from . import evidence_redaction
 from . import provenance
 from . import receipt_json
 from . import receipt_signing
+from .receipt_signing import keygen as keygen
 from . import receipt_replay
 from . import trust_gate
 from .inbox_lock import InboxLockTimeout, held_file_lock
@@ -61,24 +62,6 @@ def _rel(path: Path, target: Path) -> str:
         return str(path.relative_to(target))
     except ValueError:
         return str(path)
-
-
-def keygen(*, target: Path, force: bool = False) -> int:
-    target = target.expanduser().resolve()
-    if not target.is_dir():
-        print(f"error: --target is not a directory: {target}", file=sys.stderr)
-        return 2
-    try:
-        path, key_id = receipt_signing.generate_key(target, force=force)
-    except FileExistsError:
-        print(f"error: receipt signing key already exists: {receipt_signing.key_path(target)}", file=sys.stderr)
-        print("hint: leaving the existing key unchanged", file=sys.stderr)
-        return 1
-    print(f"receipt signing key: {path}")
-    print(f"key_id: {key_id}")
-    print("lesson authority uses only .brigade/receipt-signing-key. Unset BRIGADE_RECEIPT_SIGNING_KEY_FILE for it.")
-    print("reminder: keep this key gitignored. Brigade's .brigade/ ignore convention covers it.")
-    return 0
 
 
 def _item(

@@ -1,12 +1,11 @@
 """Review drafts produced by ingest are drained with reversible decisions."""
 
 from datetime import date, datetime
-import sys
 from pathlib import Path
 
 import pytest
 
-from tests._handoff_origin_fixtures import requires_automatic_filing, windows_draft_review, windows_origin_review
+from tests._handoff_origin_fixtures import requires_automatic_filing
 from brigade import handoff_origin, ingest, receipt_signing
 from brigade import memory_care_journal as journal
 from brigade import memory_care_tend as tend
@@ -49,7 +48,7 @@ def draft(target, code="document-content-present", body=None, age=20, number=0):
     stamped = handoff_origin.stamp_review_draft(
         target, result, result.read_bytes(), handoff_origin.ReviewDraft(code, *flags)
     )
-    assert stamped == (sys.platform != "win32")
+    assert stamped
     return result
 
 
@@ -1287,8 +1286,6 @@ def test_edited_ingest_retry_draft_requires_review(tmp_path):
     receipt_signing.generate_key(tmp_path)
     body = "## Recommended memory action\nno-card\n## Target document\nUSER.md\n## Suggested document content\nA useful fact.\n"
     path = draft(tmp_path, "document-destination-unwritable", body)
-    if windows_draft_review(tmp_path, path):
-        return
     assert handoff_origin.verify_review_draft(tmp_path, path, path.read_bytes()) is not None
     path.write_bytes(path.read_bytes() + b"Edited after signing.\n")
     result = drain.drain(tmp_path, today=TODAY, deadline_days=14)
@@ -1302,8 +1299,6 @@ def test_retry_requires_intact_review_authorization(tmp_path, attack):
     import json
 
     path = draft(tmp_path, "document-destination-unwritable", DOCUMENT_BODY)
-    if windows_draft_review(tmp_path, path):
-        return
     sidecar = handoff_origin.stamp_path(tmp_path, path)
     if attack == "missing":
         sidecar.unlink()
@@ -1327,8 +1322,6 @@ def test_retry_requires_intact_review_authorization(tmp_path, attack):
 
 def test_signed_flags_are_authoritative_over_display_header(tmp_path):
     path = draft(tmp_path, "document-destination-unwritable", DOCUMENT_BODY)
-    if windows_draft_review(tmp_path, path):
-        return
     # Model a tooling record whose display header disagrees with the signed decision.
     path.write_text(path.read_text().replace("route=true", "route=false"))
     assert handoff_origin.stamp_review_draft(
@@ -1355,9 +1348,6 @@ def test_ingest_written_retry_draft_preserves_source_authority(tmp_path):
         + hashlib.sha256(before).hexdigest()
         + "\n## Suggested card content\n---\ntopic: fact\n---\nRevised fact.\n"
     )
-    if windows_origin_review(source, handoff, owner=owner):
-        assert card.read_bytes() == before
-        return
     trusted_handoff(handoff, source)
     receipt_signing.generate_key(owner)
     # The card changed before admission. Restore it after ingest writes a retry draft.
@@ -1377,8 +1367,6 @@ def test_ingest_written_retry_draft_preserves_source_authority(tmp_path):
 
 def test_review_retry_crash_after_write_cannot_replay_record(tmp_path, monkeypatch):
     path = draft(tmp_path, "document-destination-unwritable")
-    if windows_draft_review(tmp_path, path):
-        return
     data = path.read_bytes()
     sidecar = handoff_origin.stamp_path(tmp_path, path)
     record = sidecar.read_bytes()
