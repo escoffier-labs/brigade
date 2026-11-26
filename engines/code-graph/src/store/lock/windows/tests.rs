@@ -1,9 +1,7 @@
 use std::fs::{self, FileTimes};
 use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
-use std::process::{Child, Command, Stdio};
-use std::sync::Barrier;
-use std::thread;
+use std::process::{Child, ChildStderr, Command, Stdio};
 use std::time::{Duration, SystemTime};
 
 use super::*;
@@ -16,11 +14,16 @@ unsafe extern "system" {
 
 const HANDLE_FLAG_INHERIT: u32 = 1;
 const HELPER_DB: &str = "CODE_GRAPH_TEST_LOCK_DB";
+const HELPER_CONTENDER: &str = "CODE_GRAPH_TEST_LOCK_CONTENDER";
 
-struct Helper(Child);
+struct Helper(Child, BufReader<ChildStderr>);
 
 impl Helper {
     fn start(db: Option<&Path>) -> Self {
+        Self::spawn(db, false)
+    }
+
+    fn spawn(db: Option<&Path>, contender: bool) -> Self {
         let mut command = Command::new(std::env::current_exe().unwrap());
         command
             .args([
@@ -37,12 +40,26 @@ impl Helper {
         } else {
             command.env_remove(HELPER_DB);
         }
-        let mut helper = Self(command.spawn().unwrap());
-        let mut ready = String::new();
-        let stderr = helper.0.stderr.as_mut().unwrap();
-        BufReader::new(stderr).read_line(&mut ready).unwrap();
-        assert_eq!(ready.trim(), "ready");
+        if contender {
+            command.env(HELPER_CONTENDER, "1");
+        } else {
+            command.env_remove(HELPER_CONTENDER);
+        }
+        let mut child = command.spawn().unwrap();
+        let stderr = BufReader::new(child.stderr.take().unwrap());
+        let mut helper = Self(child, stderr);
+        assert_eq!(helper.status(), "ready");
         helper
+    }
+
+    fn status(&mut self) -> String {
+        loop {
+            let mut line = String::new();
+            assert_ne!(self.1.read_line(&mut line).unwrap(), 0, "helper exited");
+            if !line.starts_with("reclaimed stale sync lock ") {
+                return line.trim().to_owned();
+            }
+        }
     }
 
     fn terminate(&mut self) {
@@ -63,9 +80,34 @@ impl Drop for Helper {
 #[test]
 #[ignore = "run in a separate process by the Windows lock tests"]
 fn lock_helper() {
-    let _lock =
-        std::env::var_os(HELPER_DB).map(|db| SyncLock::acquire(&PathBuf::from(db)).unwrap());
-    eprintln!("ready");
+    let contender = std::env::var_os(HELPER_CONTENDER).is_some();
+    if contender {
+        eprintln!("ready");
+        io::stdin().read_exact(&mut [0_u8]).unwrap();
+    }
+    let lock = std::env::var_os(HELPER_DB)
+        .map(|db| SyncLock::acquire(&PathBuf::from(db)))
+        .transpose();
+    let _lock = match lock {
+        Ok(lock) if contender => {
+            eprintln!("acquired");
+            lock
+        }
+        Err(err)
+            if contender
+                && err
+                    .to_string()
+                    .starts_with("another sync is already running") =>
+        {
+            eprintln!("busy");
+            return;
+        }
+        result => {
+            let lock = result.unwrap();
+            eprintln!("ready");
+            lock
+        }
+    };
     // Wait for the parent to kill us or close the pipe.
     let _ = io::stdin().read(&mut [0_u8]).unwrap();
 }
@@ -85,6 +127,56 @@ fn terminated_holder_releases_lock_and_next_sync_succeeds() {
     let summary = crate::store::sync::sync_repo(&conn, dir.path()).unwrap();
     assert_eq!(summary.files, 1);
     assert!(!lock_path(&db).exists());
+}
+
+#[test]
+fn pending_delete_is_busy_until_reader_closes() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("g.db");
+    let path = lock_path(&db);
+    let mut holder = Helper::start(Some(&db));
+    let reader = File::open(&path).unwrap();
+    holder.terminate();
+
+    let error = SyncLock::acquire(&db).unwrap_err().to_string();
+    assert!(
+        error.starts_with("another sync is already running"),
+        "{error}"
+    );
+    drop(reader);
+    drop(SyncLock::acquire(&db).unwrap());
+    assert!(!path.exists());
+}
+
+#[test]
+fn vanished_conflict_is_retried() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.db.lock");
+    let mut attempts = 0;
+    let lock = open_lock(&path, |path| {
+        attempts += 1;
+        if attempts == 1 {
+            // The conflicting file disappeared before the legacy inspection.
+            Err(io::Error::from_raw_os_error(5))
+        } else {
+            create(path)
+        }
+    })
+    .unwrap();
+    assert_eq!(attempts, 2);
+    drop(lock);
+}
+
+#[test]
+fn access_denied_without_lock_preserves_the_permission_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("g.db.lock");
+    let error = open_lock(&path, |_| Err(io::Error::from_raw_os_error(5))).unwrap_err();
+    assert!(error.to_string().starts_with("failed to create lock"));
+    assert_eq!(
+        error.downcast_ref::<io::Error>().unwrap().kind(),
+        ErrorKind::PermissionDenied
+    );
 }
 
 #[test]
@@ -152,6 +244,23 @@ fn legacy_lock_without_pid_uses_age_fallback() {
     assert!(!path.exists());
 }
 
+#[test]
+fn oversized_legacy_lock_uses_age_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = dir.path().join("g.db");
+    let path = lock_path(&db);
+    fs::write(&path, [b'x'; 80]).unwrap();
+    assert!(
+        SyncLock::acquire(&db)
+            .unwrap_err()
+            .to_string()
+            .starts_with("another sync is already running")
+    );
+    age_lock(&path);
+    drop(SyncLock::acquire(&db).unwrap());
+    assert!(!path.exists());
+}
+
 fn age_lock(path: &Path) {
     OpenOptions::new()
         .write(true)
@@ -173,22 +282,19 @@ fn racing_legacy_reclaimers_have_one_winner() {
     let mut old_owner = Helper::start(None);
     fs::write(&path, format!("{}\n", old_owner.0.id())).unwrap();
     old_owner.terminate();
-    let start = Barrier::new(3);
-
-    let (first, second) = thread::scope(|scope| {
-        let contend = || {
-            start.wait();
-            SyncLock::acquire(&db)
-        };
-        let first = scope.spawn(contend);
-        let second = scope.spawn(contend);
-        start.wait();
-        // Keep any successful guard held until both attempts have returned.
-        (first.join().unwrap(), second.join().unwrap())
-    });
-    assert!(first.is_ok() ^ second.is_ok(), "{first:?}, {second:?}");
+    let mut first = Helper::spawn(Some(&db), true);
+    let mut second = Helper::spawn(Some(&db), true);
+    first.0.stdin.as_mut().unwrap().write_all(&[0]).unwrap();
+    second.0.stdin.as_mut().unwrap().write_all(&[0]).unwrap();
+    // The winner keeps its guard until both attempts have reported their result.
+    let mut results = [first.status(), second.status()];
+    results.sort();
+    assert_eq!(results, ["acquired", "busy"]);
     assert!(path.exists());
-    drop((first, second));
+    for mut contender in [first, second] {
+        drop(contender.0.stdin.take());
+        assert!(contender.0.wait().unwrap().success());
+    }
     assert!(!path.exists());
 }
 
