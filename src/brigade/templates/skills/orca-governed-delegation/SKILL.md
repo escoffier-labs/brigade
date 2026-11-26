@@ -35,13 +35,14 @@ reported ambiguous start keeps its slot and follows the recovery rules
 while correlated siblings proceed to closeout. Steps 5 and 6 can also run
 concurrently across tasks, in order within each task.
 
-`claim`, `accepted`, `observe`, `ack`, and `hold-resolve` wait up to five
-seconds for the workspace run lock. On `run-busy`, let other chains continue
-and retry just the Brigade command with the same arguments. Replay
-`accepted` with the saved receipt and exit code. `claim` also waits up to
-ten seconds for the shared capacity lock. On `capacity-lock`, retry the same
-claim after contention clears. On `capacity-denied`, retry only once capacity
-is available. Use `status` and the recovery rules for other claim refusals.
+`claim` has up to five seconds to acquire the capacity and run locks. It
+releases capacity before each wait to retry a busy run lock. `accepted`,
+`observe`, `ack`, `cancel`, and `hold-resolve` wait up to five seconds for the
+workspace run lock. On `run-busy`, let other chains continue and retry just
+the Brigade command with the same arguments. Replay `accepted` with the
+saved receipt and exit code. On `capacity-lock`, retry the same claim after
+contention clears. On `capacity-denied`, retry only once capacity is available.
+Use `status` and the recovery rules for other claim refusals.
 
 1. Enroll the batch: `brigade orca open <batch.json> --target <workspace>`. It prints a
    Brigade run and task identity and launches nothing. If it refuses with

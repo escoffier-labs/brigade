@@ -51,11 +51,12 @@ then report the full receipt and exit code to `accepted`. Keep each task's
 argv and receipt separate. Preserve the printed `--retry-request` so a lost
 reply can be recovered against the same Orca Run and Task.
 
-`claim` and `accepted` wait up to five seconds for the workspace run lock.
+`claim` has up to five seconds to acquire the capacity and run locks.
+It releases capacity before each wait to retry a busy run lock.
+`accepted` waits up to five seconds for the workspace run lock.
 If either returns `run-busy`, let the other chains continue and retry just
 that Brigade command with the same arguments. When retrying `accepted`, use
-the saved receipt and exit code. `claim` also waits up to ten seconds for
-the shared capacity lock. Retry the same claim on `capacity-lock` after
+the saved receipt and exit code. Retry the same claim on `capacity-lock` after
 contention clears. If a claim is refused, stop that chain before worker-start.
 On `capacity-denied`, retry only once capacity is available. Investigate other
 refusals through `status` and the recovery rules.

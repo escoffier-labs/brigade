@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from contextlib import AbstractContextManager, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -16,7 +17,7 @@ from . import native_orca_enrollment as enrollment
 from . import native_orca_observations as observations
 from . import run_journal, run_tasks
 from .native_child_custody import owned_run
-from .native_child_host import NativeChildError
+from .native_child_host import NativeChildCustodyError, NativeChildError
 from .native_child_observations import RESOURCE_EVENT, START_UNCONFIRMED
 from .native_orca_host import HOST
 
@@ -24,6 +25,7 @@ CORRELATION_EVENT = "task.native-correlated"
 CORRELATION_SCHEMA = "brigade.orca_correlation.v1"
 _INTENT_DOMAIN = "brigade.native-orca.intent.v1"
 _TASK_LOCK_WAIT_SECONDS = 5.0
+_CLAIM_LOCK_POLL_SECONDS = 0.1
 
 
 def owned_task_run(workspace: Path, run_dir: Path) -> AbstractContextManager[None]:
@@ -96,11 +98,16 @@ def claim(*, workspace: Path, run_id: str, task_id: str, orca_run: str, orca_tas
             out=out,
         )
 
+    deadline = time.monotonic() + _TASK_LOCK_WAIT_SECONDS
+
+    def lock_capacity(ws: Path) -> AbstractContextManager[Path]:
+        return capacity.capacity_lock(ws, wait_seconds=max(0.0, deadline - time.monotonic()))
+
     ops = claims.ClaimOps(
-        capacity_lock=capacity.capacity_lock,
+        capacity_lock=lock_capacity,
         governed_occupancy=lambda ws: capacity.governed_occupancy(HOST, ws),
         assess=lambda roster, seat, live: capacity.assess(HOST, roster, seat, live),
-        owned_run=owned_task_run,
+        owned_run=owned_run,
         load_roster=admission.load_roster,
         run_meta=lambda ws, directory: journal.run_meta(HOST, ws, directory),
         read_events=journal.read_events,
@@ -110,7 +117,22 @@ def claim(*, workspace: Path, run_id: str, task_id: str, orca_run: str, orca_tas
         coordinator=journal.coordinator,
         record_claim=record,
     )
-    grant = claims.run_claim(HOST, ops, workspace=workspace, run_dir=run_dir, task_id=task_id, hub=hub)
+    while True:
+        try:
+            grant = claims.run_claim(HOST, ops, workspace=workspace, run_dir=run_dir, task_id=task_id, hub=hub)
+        except NativeChildCustodyError as exc:
+            if exc.code != "run-busy":
+                raise
+            # Run-lock entry failed before any claim writes. The capacity
+            # lock has been released, so another run can claim during the wait.
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(_CLAIM_LOCK_POLL_SECONDS, remaining))
+            if time.monotonic() >= deadline:
+                raise
+        else:
+            break
     binding, target = grant.recorded["intent"], grant.recorded["target"]
     return {
         "schema": "brigade.orca_claim.v1",

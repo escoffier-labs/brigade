@@ -1,17 +1,20 @@
 """Caller-mediated CLI scenarios against the Orca 1.4.269 contract."""
 
 import json
+import re
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from pathlib import Path
 from threading import Barrier, Event
+from types import SimpleNamespace
 
 import pytest
 
 from brigade import cli, native_child_custody, native_child_journal, native_orca_verbs, native_t3_enrollment, run_tasks
-from brigade import runguard
+from brigade import native_t3_capacity, runguard
 
 from tests.test_native_orca import DISPATCH, RUN, TASK, _fixture
 from tests.test_native_t3_claim import TASK_TEXT, _batch, _events, _git, _run_dir, _workspace
@@ -636,6 +639,59 @@ def test_task_verb_waits_for_the_workspace_run_lock(coordinator, monkeypatch, ve
         assert pending.result(timeout=10)[field] == expected
 
 
+def test_waiting_orca_claim_leaves_capacity_for_another_run(coordinator, monkeypatch):
+    run_id = coordinator.open()
+    batch = json.loads(coordinator.batch.read_text())
+    batch["request_id"] = "other-request"
+    other_run = coordinator.invoke("open", coordinator.payload("other-batch", batch))["run_id"]
+    assert other_run != run_id
+    waiting, resume = Event(), Event()
+
+    def sleep(_seconds):
+        waiting.set()
+        assert resume.wait(timeout=10)
+
+    clock = SimpleNamespace(monotonic=time.monotonic, monotonic_ns=time.monotonic_ns, sleep=sleep)
+    monkeypatch.setattr(runguard, "time", clock)
+    monkeypatch.setattr(native_orca_verbs, "time", clock, raising=False)
+    workspace = coordinator.workspace
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        try:
+            with runguard.run_lock(workspace, run_dir=_run_dir(workspace, run_id)):
+                pending = pool.submit(coordinator.claim)
+                assert waiting.wait(timeout=10)
+                # The T3 wrapper shares this capacity lock. It can get it
+                # even while the workspace run lock is still held.
+                with native_t3_capacity.capacity_lock(workspace, wait_seconds=0):
+                    assert not pending.done()
+            grant = native_orca_verbs.claim(
+                workspace=workspace, run_id=other_run, task_id="one", orca_run=RUN, orca_task=SECOND_TASK
+            )
+            assert grant["state"] == "claimed"
+            assert not pending.done()
+        finally:
+            resume.set()
+        assert pending.result(timeout=10)["state"] == "claimed"
+
+
+def test_orca_claim_run_lock_wait_expires_after_five_seconds(coordinator, monkeypatch):
+    run_id = coordinator.open()
+    before = _events(coordinator.workspace, run_id)
+    elapsed = 0.0
+
+    def sleep(seconds):
+        nonlocal elapsed
+        elapsed += seconds
+        assert elapsed <= 5.1, "claim exceeded the five-second lock wait"
+
+    clock = SimpleNamespace(monotonic=lambda: elapsed, monotonic_ns=time.monotonic_ns, sleep=sleep)
+    monkeypatch.setattr(native_orca_verbs, "time", clock, raising=False)
+    with runguard.run_lock(coordinator.workspace, run_dir=_run_dir(coordinator.workspace, run_id)):
+        coordinator.claim(error="run-busy")
+    assert elapsed == pytest.approx(5.0)
+    assert _events(coordinator.workspace, run_id) == before
+
+
 @pytest.mark.parametrize("case", ["ready", "capacity", "ambiguous", "circuit"])
 def test_orca_1_4_271_concurrent_launch_and_closeout(coordinator, case):
     roster = coordinator.workspace / ".brigade" / "roster.toml"
@@ -646,33 +702,33 @@ def test_orca_1_4_271_concurrent_launch_and_closeout(coordinator, case):
     run_id = coordinator.open()
     start_launch = Barrier(len(tasks), timeout=10)
 
-    def invoke(task, verb, *args, error=None, allow_capacity_denied=False):
-        result = subprocess.run(
-            [
-                sys.executable,
-                "-m",
-                "brigade",
-                "orca",
-                verb,
-                run_id,
-                task,
-                *map(str, args),
-                "--target",
-                str(coordinator.workspace),
-            ],
-            capture_output=True,
-            text=True,
-            timeout=20,
-            check=False,
-        )
-        if allow_capacity_denied and result.returncode == 2:
-            error = "capacity-denied"
-        if error is not None:
-            assert result.returncode == 2 and not result.stdout, result.stderr
-            assert f"[{error}]" in result.stderr
-            return None
-        assert result.returncode == 0 and not result.stderr, result.stderr
-        return json.loads(result.stdout)
+    def invoke(task, verb, *args, error=None):
+        argv = [
+            sys.executable,
+            "-m",
+            "brigade",
+            "orca",
+            verb,
+            run_id,
+            task,
+            *map(str, args),
+            "--target",
+            str(coordinator.workspace),
+        ]
+        retryable = {"claim": {"run-busy", "capacity-lock"}, "accepted": {"run-busy"}}
+        for _ in range(3):
+            result = subprocess.run(argv, capture_output=True, text=True, timeout=20, check=False)
+            if result.returncode == 0:
+                assert not result.stderr and error in (None, "capacity-denied"), result
+                return json.loads(result.stdout)
+            assert result.returncode == 2 and not result.stdout, result
+            diagnostic = re.match(r"error \[([a-z-]+)\]:", result.stderr)
+            assert diagnostic, result.stderr
+            reason = diagnostic[1]
+            if reason == error:
+                return None
+            assert reason in retryable.get(verb, ()), result.stderr
+        pytest.fail(f"{verb} did not settle after retry: {result.stderr}")
 
     def launch(item):
         index, task = item
@@ -681,7 +737,7 @@ def test_orca_1_4_271_concurrent_launch_and_closeout(coordinator, case):
         start_launch.wait()
         # The capacity race has no predetermined winner.
         claim_args = ("--orca-run", RUN, "--orca-task", orca_task)
-        grant = invoke(task, "claim", *claim_args, allow_capacity_denied=case == "capacity")
+        grant = invoke(task, "claim", *claim_args, error="capacity-denied" if case == "capacity" else None)
         if grant is None:
             return task, "capacity-denied", None
         assert grant["argv"][5:11] == ["--retry-request", grant["retry_request"], "--run", RUN, "--task", orca_task]
