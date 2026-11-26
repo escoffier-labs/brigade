@@ -59,7 +59,12 @@ def matched_records():
     return records
 
 
-def test_complete_matched_pairs(matched_records):
+@pytest.mark.parametrize("effort", ["low", "medium"])
+def test_complete_matched_pairs(matched_records, effort):
+    if effort == "medium":
+        for row in matched_records:
+            row["envelope"]["effort"] = effort
+            row["record"]["effort"] = effort
     report = qualification.summarize(matched_records)
     assert report["completed_pairs"] == 5
     assert report["arms"]["t3"]["median_verified_completion_seconds"] == 6
@@ -79,6 +84,7 @@ def test_complete_matched_pairs(matched_records):
         ("input", "shared batch"),
         ("unverified", "verified"),
         ("read-only", "envelope"),
+        ("effort", "envelope"),
     ],
 )
 def test_rejects_invalid_pairs(matched_records, change, message):
@@ -93,6 +99,8 @@ def test_rejects_invalid_pairs(matched_records, change, message):
         rows[1]["envelope"]["service_tier"] = "fast"
     elif change == "input":
         rows[1]["batch_fingerprint"] = "f" * 64
+    elif change == "effort":
+        rows[1]["record"]["effort"] = "medium"
     elif change == "read-only":
         rows[0]["record"]["read_only_enforcement"] = "brigade-read-only-policy"
     else:
@@ -106,6 +114,12 @@ def test_rejects_invalid_pairs(matched_records, change, message):
     [
         ("t3", "valid", None),
         ("run-batch", "valid", None),
+        ("t3", "medium", None),
+        ("run-batch", "medium", None),
+        ("t3", "medium-low-child", "T3 status does not match"),
+        ("t3", "medium-low-target", "retained T3 target"),
+        ("run-batch", "medium-low-session", "Codex turn does not confirm"),
+        ("run-batch", "medium-low-receipt", "worker receipt does not match"),
         ("t3", "restarted", None),
         ("run-batch", "missing-schema", "expected matched qualification measurements"),
         ("run-batch", "edited-errors", "does not match retained evidence|do not match retained evidence"),
@@ -168,6 +182,9 @@ def test_collects_paired_route_with_bound_results(tmp_path, monkeypatch, arm, ca
         "environment": "env-example",
         "seat": "worker",
     }
+    worker_effort = "medium" if case.startswith("medium") else "low"
+    if worker_effort == "medium":
+        context["worker_effort"] = worker_effort
     save(folder / "expected.json", context)
     turns = {name: {"started_at": "2026-01-01T00:00:02Z", "ended_at": "2026-01-01T00:00:06Z"} for name in ids}
     if arm == "run-batch":
@@ -231,7 +248,9 @@ def test_collects_paired_route_with_bound_results(tmp_path, monkeypatch, arm, ca
     (folder / "interventions.jsonl").write_text('"operator action"\n', encoding="utf-8")
     (folder / "errors.jsonl").touch()
 
-    options = [{"id": "reasoningEffort", "value": "low"}, {"id": "serviceTier", "value": "default"}]
+    def worker_options(effort):
+        return [{"id": "reasoningEffort", "value": effort}, {"id": "serviceTier", "value": "default"}]
+
     members = []
 
     def tree_for(name):
@@ -240,7 +259,8 @@ def test_collects_paired_route_with_bound_results(tmp_path, monkeypatch, arm, ca
     for name in ids:
         answer = json.dumps(context["answers"][name])
         receipt = run_dir / f"batch-result-{hashlib.sha256(name.encode()).hexdigest()}.json"
-        save(receipt, {"ok": True, "requested_model": "gpt-6.2-sol", "reasoning": "low", "text": answer})
+        receipt_effort = "low" if case == "medium-low-receipt" and name == "guide" else worker_effort
+        save(receipt, {"ok": True, "requested_model": "gpt-6.2-sol", "reasoning": receipt_effort, "text": answer})
         task = SimpleNamespace(
             handle=SimpleNamespace(spec=SimpleNamespace(task_id=name), attempt_id=f"{name}-attempt"),
             workspace=SimpleNamespace(base_sha=base),
@@ -263,7 +283,7 @@ def test_collects_paired_route_with_bound_results(tmp_path, monkeypatch, arm, ca
                 "childThreadId": f"{name}-thread",
                 "childRunId": task.original_run_id,
                 "providerInstanceId": context["provider_instance"],
-                "options": options,
+                "options": worker_options("low" if case == "medium-low-child" and name == "guide" else worker_effort),
             }
             save(folder / f"delegate-{name}.json", native)
             save(
@@ -307,7 +327,10 @@ def test_collects_paired_route_with_bound_results(tmp_path, monkeypatch, arm, ca
             save(folder / f"ack-{name}.json", join)
             save(folder / f"observe-{name}.json", {**join, "attempt_id": task.handle.attempt_id, "status": "completed"})
         else:
-            session = _session_rows(base, tree_for(name), turns[name]["started_at"], turns[name]["ended_at"])
+            session_effort = "low" if case == "medium-low-session" and name == "guide" else worker_effort
+            session = _session_rows(
+                base, tree_for(name), turns[name]["started_at"], turns[name]["ended_at"], effort=session_effort
+            )
             (folder / f"session-{name}.jsonl").write_text(
                 "".join(f"{json.dumps(row)}\n" for row in session), encoding="utf-8"
             )
@@ -351,7 +374,12 @@ def test_collects_paired_route_with_bound_results(tmp_path, monkeypatch, arm, ca
                     launch_model="gpt-6.2-sol",
                     driver="codex",
                     provider_instance=context["provider_instance"],
-                    options=[(entry["id"], entry["value"]) for entry in options],
+                    options=[
+                        (entry["id"], entry["value"])
+                        for entry in worker_options(
+                            "low" if case == "medium-low-target" and task_id == "guide" else worker_effort
+                        )
+                    ],
                 ),
             ),
         )
@@ -387,6 +415,7 @@ def test_collects_paired_route_with_bound_results(tmp_path, monkeypatch, arm, ca
             collect()
         return
     record = collect()
+    assert record["effort"] == worker_effort
     assert record["all_tasks_terminal"]
     assert record["verified_completion_seconds"] == 8
     assert record["timings_seconds"]["queue"] == 1
@@ -425,10 +454,10 @@ def test_direct_tier_gate_reads_configuration_without_a_turn(monkeypatch, tmp_pa
     assert calls == ["start", "config/read", "close"]
 
 
-def _session_rows(base, tree, turn_start, turn_end):
+def _session_rows(base, tree, turn_start, turn_end, *, effort="low"):
     return [
         {"type": "session_meta", "payload": {"id": "session", "cwd": str(tree), "git": {"commit_hash": base}}},
-        {"type": "turn_context", "payload": {"model": "gpt-6.2-sol", "effort": "low"}},
+        {"type": "turn_context", "payload": {"model": "gpt-6.2-sol", "effort": effort}},
         {
             "type": "event_msg",
             "payload": {
@@ -437,7 +466,7 @@ def _session_rows(base, tree, turn_start, turn_end):
                 "thread_settings": {
                     "cwd": str(tree),
                     "model": "gpt-6.2-sol",
-                    "reasoning_effort": "low",
+                    "reasoning_effort": effort,
                     "service_tier": "default",
                 },
             },
@@ -455,7 +484,7 @@ def test_reads_direct_turn_and_applied_settings(tmp_path):
     turn_start, turn_end = "2026-01-01T00:00:02Z", "2026-01-01T00:00:06Z"
     records = _session_rows(base, tree, turn_start, turn_end)
     (tmp_path / "session.jsonl").write_text("".join(f"{json.dumps(row)}\n" for row in records), encoding="utf-8")
-    assert evidence._provider_turn(tmp_path, tree, {"wall_ns": 0}, base) == {
+    assert evidence._provider_turn(tmp_path, tree, {"wall_ns": 0}, base, "low") == {
         "started_at": turn_start,
         "ended_at": turn_end,
         "provider_errors": 1,
@@ -606,10 +635,11 @@ def test_collect_row_binds_directory_and_explicit_route(tmp_path, monkeypatch):
         assert (selected, qualification, run_dir.name) == (arm, "t3", ids[arm])
         assert status == folder / "status.json"
         assert measurements == folder / "measurements.json"
-        return {"arm": selected}
+        return {"arm": selected, "effort": "low"}
 
     monkeypatch.setattr(qualification.orca_qualification, "collect", collect)
     row = qualification._collect_row(tmp_path, pair, arm)
+    assert row["envelope"]["effort"] == row["record"]["effort"] == "low"
     assert (row["pair"], row["run_id"], row["request_id"], row["batch_fingerprint"]) == (
         pair,
         ids[arm],
@@ -620,6 +650,10 @@ def test_collect_row_binds_directory_and_explicit_route(tmp_path, monkeypatch):
         localio.write_json(folder / "expected.json", {**context, key: changed})
         with pytest.raises(ValueError, match="pair directory"):
             qualification._collect_row(tmp_path, pair, arm)
+    localio.write_json(folder / "expected.json", context)
+    localio.write_json(tmp_path / "campaign.json", {**campaign, "worker_effort": "medium"})
+    with pytest.raises(ValueError, match="campaign worker effort differs"):
+        qualification._collect_row(tmp_path, pair, arm)
 
 
 @pytest.mark.parametrize("early_wake", [False, True])
@@ -658,3 +692,75 @@ def test_t3_marks_allow_wakes_during_launch_after_own_reply(tmp_path, monkeypatc
             evidence._validate_t3_marks(*args)
     else:
         evidence._validate_t3_marks(*args)
+
+
+@pytest.mark.parametrize(("option", "expected"), [([], "low"), (["--worker-effort", "medium"], "medium")])
+def test_run_cli_selects_worker_effort(monkeypatch, tmp_path, option, expected):
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "qualification",
+            "run",
+            "--workspace",
+            str(tmp_path),
+            "--output",
+            str(tmp_path / "output"),
+            "--roster",
+            "roster.toml",
+            "--codex-sessions",
+            "sessions",
+            "--seat",
+            "worker",
+            "--brigade-commit",
+            "a" * 40,
+            *option,
+        ],
+    )
+    selections = []
+    monkeypatch.setattr(qualification, "run", lambda args: selections.append(args.worker_effort))
+    qualification.main()
+    assert selections == [expected]
+
+
+@pytest.mark.parametrize(("seat_effort", "t3_effort"), [("medium", "medium"), ("low", "medium"), ("medium", "low")])
+def test_preflight_matches_worker_effort(tmp_path, monkeypatch, seat_effort, t3_effort):
+    from types import SimpleNamespace
+
+    base = "a" * 40
+    agent = SimpleNamespace(
+        cli="codex",
+        transport="direct",
+        command=None,
+        env=None,
+        fallback=(),
+        model="gpt-6.2-sol",
+        reasoning=seat_effort,
+    )
+    loaded = SimpleNamespace(
+        agents={"worker": agent},
+        t3_targets={"worker": {}},
+        max_workers=3,
+        orchestrator="parent",
+        sandbox="read-only",
+    )
+    target = SimpleNamespace(
+        options=(("reasoningEffort", t3_effort), ("serviceTier", "default")),
+        launch_model="gpt-6.2-sol",
+        driver="codex",
+        target_environment="env-example",
+        origin_environment="env-example",
+    )
+    roster_path = tmp_path / "roster.toml"
+    monkeypatch.setattr(qualification.roster, "resolve_roster_path", lambda _: roster_path)
+    monkeypatch.setattr(qualification.roster, "load_roster", lambda _: loaded)
+    monkeypatch.setattr(qualification.native_t3_enrollment, "target_for_seat", lambda *_args, **_kwargs: target)
+    monkeypatch.setattr(qualification.evidence, "clean_revision", lambda _: base)
+    monkeypatch.setattr(qualification.evidence, "check_native_idle", lambda _: None)
+
+    args = (tmp_path, roster_path, "worker", base, "medium")
+    if seat_effort == t3_effort == "medium":
+        assert qualification._preflight(*args) == target
+    else:
+        with pytest.raises(ValueError, match="must both use medium effort"):
+            qualification._preflight(*args)

@@ -11,7 +11,7 @@ next batch. There is no speedup target.
 | --- | --- |
 | T3 | The parent calls its own `delegate_task` using Brigade's exact claim arguments. Brigade governs enrollment, claims, observation, acknowledgement, and finalization. |
 | Run batch | The runner invokes `brigade run batch` directly with the same file and seat. |
-| Workers | Codex `gpt-6.2-sol`, low reasoning, standard service (`default`) |
+| Workers | Codex `gpt-6.2-sol`, the same reasoning effort in both arms (`low` by default or `medium`), standard service (`default`) |
 | T3 parent | Codex `gpt-6.2-sol`, medium reasoning, standard service |
 | Workload | Three independent read-only tasks. Each reports its Git HEAD and the SHA-256 of one tracked file. Git objects at the pinned revision provide the expected answers. |
 | Input | One `brigade.run_batch.v1` file per pair, with the same request ID, task text, worktree isolation, and no synthesis. Both routes derive the pinned `base_sha` from the same clean checkout. |
@@ -28,8 +28,10 @@ Use a dedicated clean checkout attached to the designated local T3 parent
 project. Keep other workers and benchmark runners off that checkout. Use an
 admitted, direct Codex worker seat with no fallback, a read-only-compatible
 sandbox, and a [native T3 target](t3-governed-delegation.md#seat-bindings) for
-the same seat. Set the target's `reasoningEffort` to `low` and `serviceTier`
-to `default`. If the target sets `max_live`, it must allow three workers.
+the same seat. Set the seat's reasoning effort and the target's
+`reasoningEffort` to the chosen `--worker-effort`. Set the target's
+`serviceTier` to `default`. If the target sets `max_live`, it must allow
+three workers.
 The collector checks the parent model, effort, and tier in the saved T3
 capabilities reply. Set the direct worker's effective Codex
 configuration to standard service and keep its local session logs available
@@ -45,8 +47,12 @@ directory.
 python -m brigade.t3_qualification run \
   --workspace WORKLOAD_CHECKOUT --roster ROSTER_TOML --seat ADMITTED_SEAT \
   --brigade-commit BRIGADE_COMMIT --codex-sessions CODEX_SESSIONS_DIR \
-  --output NEW_CAMPAIGN_DIRECTORY
+  --worker-effort medium --output NEW_CAMPAIGN_DIRECTORY
 ```
+
+Omit `--worker-effort` to use `low` for both arms. The runner saves the
+selected effort in `campaign.json` and checks it against each arm's worker
+evidence when running and rebuilding the report.
 
 For each T3 arm, give the printed `coordinator.txt` to the designated parent.
 The runner stages the shared batch, expected run and task identities, and

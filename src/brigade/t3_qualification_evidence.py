@@ -27,7 +27,8 @@ from .fleet_t3_transport import clean_source_revision as _clean_revision
 from .source_revision import SourceRevisionError
 
 MODEL = "gpt-6.2-sol"
-EFFORT = "low"
+DEFAULT_WORKER_EFFORT = "low"
+WORKER_EFFORTS = (DEFAULT_WORKER_EFFORT, "medium")
 TIER = "default"
 SLOTS = 3
 MEASUREMENTS_SCHEMA = "brigade.t3_qualification_measurements.v1"
@@ -39,6 +40,14 @@ READ_ONLY_ENFORCEMENT = {"t3": "prompt-only", "run-batch": "brigade-read-only-po
 def require(condition: object, message: str) -> None:
     if not condition:
         raise ValueError(message)
+
+
+def recorded_worker_effort(metadata: dict[str, Any]) -> str:
+    # Campaigns created before the option always used low worker effort.
+    effort = metadata.get("worker_effort", DEFAULT_WORKER_EFFORT)
+    if not isinstance(effort, str) or effort not in WORKER_EFFORTS:
+        raise ValueError("worker effort must be low or medium")
+    return effort
 
 
 def read(path: Path) -> dict[str, Any]:
@@ -115,7 +124,7 @@ def timing(measurements: dict[str, Any], tasks: set[str]) -> tuple[float, dict[s
     }
 
 
-def _worker_receipt(run_dir: Path, task: run_tasks.TaskResult) -> dict[str, Any]:
+def _worker_receipt(run_dir: Path, task: run_tasks.TaskResult, effort: str) -> dict[str, Any]:
     key = hashlib.sha256(task.handle.spec.task_id.encode()).hexdigest()
     raw = (run_dir / f"batch-result-{key}.json").read_bytes()
     require(
@@ -128,14 +137,14 @@ def _worker_receipt(run_dir: Path, task: run_tasks.TaskResult) -> dict[str, Any]
         receipt.get("ok") is True
         and receipt.get("requested_model") == MODEL
         and receipt.get("effective_model", MODEL) == MODEL
-        and receipt.get("reasoning") == EFFORT,
+        and receipt.get("reasoning") == effort,
         "worker receipt does not match the model and effort",
     )
     return receipt
 
 
 def _provider_turn(
-    sessions: Path, tree: Path, opened: dict[str, int], base: str, *, retain: Path | None = None
+    sessions: Path, tree: Path, opened: dict[str, int], base: str, effort: str, *, retain: Path | None = None
 ) -> dict[str, Any]:
     """Find the unique fresh Codex turn for this specific clean worktree."""
     candidates = []
@@ -151,13 +160,13 @@ def _provider_turn(
                 candidates.append(path)
     require(len(candidates) == 1, "expected one fresh Codex session for the isolated worktree")
     raw = candidates[0].read_bytes()
-    result = _session_turn(raw, tree, base)
+    result = _session_turn(raw, tree, base, effort)
     if retain is not None:
         localio.write_bytes_atomic(retain, raw)
     return result
 
 
-def _session_turn(raw: bytes, tree: Path, base: str) -> dict[str, Any]:
+def _session_turn(raw: bytes, tree: Path, base: str, effort: str) -> dict[str, Any]:
     initial, *rows = [json.loads(line) for line in raw.splitlines()]
     meta = initial["payload"]
     require(initial["type"] == "session_meta" and meta.get("cwd") == str(tree), "Codex session worktree mismatch")
@@ -168,8 +177,8 @@ def _session_turn(raw: bytes, tree: Path, base: str) -> dict[str, Any]:
     require(
         settings_event["thread_id"] == meta["id"]
         and settings["cwd"] == str(tree)
-        and (turn.get("model"), turn.get("effort")) == (MODEL, EFFORT)
-        and (settings["model"], settings["reasoning_effort"], settings["service_tier"]) == (MODEL, EFFORT, TIER),
+        and (turn.get("model"), turn.get("effort")) == (MODEL, effort)
+        and (settings["model"], settings["reasoning_effort"], settings["service_tier"]) == (MODEL, effort, TIER),
         "Codex turn does not confirm standard service, model and effort",
     )
     (started,) = [row["timestamp"] for row in rows if row["payload"].get("type") == "task_started"]
@@ -181,7 +190,9 @@ def _session_turn(raw: bytes, tree: Path, base: str) -> dict[str, Any]:
     }
 
 
-def _t3_turn(folder: Path, task: run_tasks.TaskResult, context: dict[str, Any]) -> tuple[Path, str, dict[str, str]]:
+def _t3_turn(
+    folder: Path, task: run_tasks.TaskResult, context: dict[str, Any], effort: str
+) -> tuple[Path, str, dict[str, str]]:
     name = task.handle.spec.task_id
     delegation = read(folder / f"delegate-{name}.json")
     status = read(folder / f"status-{name}.json")
@@ -204,7 +215,7 @@ def _t3_turn(folder: Path, task: run_tasks.TaskResult, context: dict[str, Any]) 
         and status["executedModel"] == MODEL
         and status["providerInstanceId"] == context["provider_instance"]
         and status["options"] == delegation["options"]
-        and (options.get("reasoningEffort"), options.get("serviceTier")) == (EFFORT, TIER),
+        and (options.get("reasoningEffort"), options.get("serviceTier")) == (effort, TIER),
         "T3 status does not match the completed delegation",
     )
     thread = activity["thread"]
@@ -322,6 +333,7 @@ def _verified_turns(
     *,
     sessions: Path | None = None,
 ) -> dict[str, Any]:
+    effort = recorded_worker_effort(context)
     expected = context["answers"]
     require({task.handle.spec.task_id for task in members} == expected.keys(), "journal task set mismatch")
     trees = {workspace}
@@ -330,19 +342,19 @@ def _verified_turns(
         name = task.handle.spec.task_id
         require(task.status == "completed" and task.result_id is not None, f"{name} has no completed terminal result")
         if arm == "t3":
-            tree, output, turn = _t3_turn(folder, task, context)
+            tree, output, turn = _t3_turn(folder, task, context, effort)
         else:
             tree = run_batch_workspace.expected_path(workspace, run_dir.name, name).resolve()
-            output = _worker_receipt(run_dir, task)["text"]
+            output = _worker_receipt(run_dir, task, effort)["text"]
         require(tree not in trees and clean_revision(tree) == context["base_sha"], "worktree or base revision mismatch")
         require(json.loads(output) == expected[name], f"{name} answer did not match Git's pinned file digest")
         if arm == "run-batch":
             retained = folder / f"session-{name}.jsonl"
             if sessions is None:
-                turn = _session_turn(retained.read_bytes(), tree, context["base_sha"])
+                turn = _session_turn(retained.read_bytes(), tree, context["base_sha"], effort)
             else:
                 turn = _provider_turn(
-                    sessions, tree, read(folder / "opened.json"), context["base_sha"], retain=retained
+                    sessions, tree, read(folder / "opened.json"), context["base_sha"], effort, retain=retained
                 )
         trees.add(tree)
         turns[name] = turn
@@ -376,6 +388,7 @@ def collect(
     """Project the paired experiment into the existing closed record shape."""
     require(measurements.get("schema") == MEASUREMENTS_SCHEMA, "expected matched qualification measurements")
     context = read(folder / "expected.json")
+    effort = recorded_worker_effort(context)
     base = context["base_sha"]
     workspace = Path(context["workspace"])
     payload = read(folder.parent / "batch.json")
@@ -437,7 +450,7 @@ def collect(
                 and target.launch_model == MODEL
                 and target.driver == "codex"
                 and target.provider_instance == context["provider_instance"]
-                and options.get("reasoningEffort") == EFFORT
+                and options.get("reasoningEffort") == effort
                 and options.get("serviceTier") == TIER,
                 "retained T3 target differs from the matched envelope",
             )
@@ -477,7 +490,7 @@ def collect(
         "orca_version": None,
         "brigade_commit": context["brigade_commit"],
         "model": MODEL,
-        "effort": EFFORT,
+        "effort": effort,
         "source_revision": base,
         "isolation": "worktree",
         "concurrency": SLOTS,
