@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -169,10 +169,12 @@ def same_verification_tree(target: Path, before: str, after: str) -> bool | None
     return all(path.startswith(b".brigade/") for path in result.stdout.split(b"\0")[:-1])
 
 
-def stamp_tree_after(target: Path, receipt: dict[str, Any]) -> None:
+def stamp_tree_after(
+    target: Path, receipt: dict[str, Any], *, read_tree: Callable[[], str | None] | None = None
+) -> None:
     """Capture post-run tree identity without making stability a gate."""
     try:
-        after = localio.tree_fingerprint(target)
+        after = read_tree() if read_tree is not None else localio.tree_fingerprint(target)
     except (OSError, RuntimeError):
         after = None
     receipt["tree_fingerprint_after"] = after

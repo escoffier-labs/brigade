@@ -12,6 +12,7 @@ import shutil
 import stat
 import subprocess
 import sys
+from collections.abc import Callable
 from contextlib import redirect_stderr, redirect_stdout, suppress
 from pathlib import Path
 from typing import Any
@@ -69,17 +70,39 @@ def _verification_split_command(command: str) -> list[str]:
     return split_verify_command(command, windows=_verification_is_windows())
 
 
-def _receipt_git_snapshot(target: Path) -> dict[str, Any] | None:
+def _git_head_branch(target: Path, *, paths: bool = False) -> verify_manifest_git.WorktreeIdentity | None:
+    # rev-parse applies --abbrev-ref only to the arguments that follow it.
     try:
-        # rev-parse applies --abbrev-ref only to the arguments that follow it.
-        identity = helpers._git(target, "rev-parse", "HEAD", "--abbrev-ref", "HEAD")
-        head, _, branch = (value.strip() for value in identity.stdout.partition("\n"))
+        if paths:
+            result = helpers._git(
+                target, "rev-parse", "--show-toplevel", "--absolute-git-dir", "HEAD", "--abbrev-ref", "HEAD"
+            )
+            lines = result.stdout.rstrip("\n").split("\n")
+            if result.returncode == 0 and len(lines) == 4 and all(lines):
+                root, git_dir, head, branch = lines
+                return verify_manifest_git.WorktreeIdentity(head.strip(), branch.strip(), git_dir, root.strip())
+        result = helpers._git(target, "rev-parse", "HEAD", "--abbrev-ref", "HEAD")
+    except (OSError, UnicodeError):
+        if paths:
+            return _git_head_branch(target)
+        return None
+    head, _, branch = (value.strip() for value in result.stdout.partition("\n"))
+    if result.returncode or not head or not branch:
+        return None
+    return verify_manifest_git.WorktreeIdentity(head, branch)
+
+
+def _receipt_git_snapshot(
+    target: Path, *, facts: verify_manifest_git.VerifyGitFacts | None = None
+) -> dict[str, Any] | None:
+    try:
+        identity = facts.identity if facts is not None else _git_head_branch(target)
         status = helpers._git(target, "status", "--porcelain")
     except OSError:
         return None
-    if identity.returncode != 0 or not head or not branch or status.returncode != 0:
+    if identity is None or status.returncode != 0:
         return None
-    return {"head": head, "branch": branch, "dirty_files": len(status.stdout.splitlines())}
+    return {"head": identity.head, "branch": identity.branch, "dirty_files": len(status.stdout.splitlines())}
 
 
 def _high_risk_command_message(executable: str) -> str:
@@ -490,6 +513,7 @@ def _finalize_verify_receipt(
     started,
     rc: int,
     canceled: bool,
+    facts: verify_manifest_git.VerifyGitFacts | None = None,
 ) -> tuple[dict[str, Any], int]:
     completed_at = helpers._now()
     receipt["completed_at"] = completed_at.isoformat()
@@ -501,8 +525,10 @@ def _finalize_verify_receipt(
         rc = verify_runtime._VERIFY_CANCELED_RC
     else:
         receipt["status"], rc = verify_receipt_details.terminal_status(receipt, rc)
-        verify_receipt_details.stamp_tree_after(target, receipt)
-    verify_gate.stamp_gating(target, receipt)
+        verify_receipt_details.stamp_tree_after(
+            target, receipt, read_tree=(lambda: facts.tree[0]) if facts is not None else None
+        )
+    verify_gate.stamp_gating(target, receipt, facts=facts)
     commands = receipt.get("commands")
     if isinstance(commands, list):
         for command in commands:
@@ -511,7 +537,7 @@ def _finalize_verify_receipt(
     verify_trial.stamp_verify_receipt_failure_taxonomy(receipt)
     _stamp_verification_contract_outcomes(receipt)
     try:
-        git = _receipt_git_snapshot(target)
+        git = _receipt_git_snapshot(target, facts=facts)
         if git is not None:
             receipt["git"] = git
     except Exception:
@@ -581,9 +607,12 @@ def _safe_finalize_verify_receipt(
     started,
     rc: int,
     canceled: bool,
+    facts: verify_manifest_git.VerifyGitFacts | None = None,
 ) -> tuple[dict[str, Any], int]:
     try:
-        return _finalize_verify_receipt(target, run_dir, receipt, started=started, rc=rc, canceled=canceled)
+        return _finalize_verify_receipt(
+            target, run_dir, receipt, started=started, rc=rc, canceled=canceled, facts=facts
+        )
     except BaseException:
         if verify_runtime._verify_signal_received():
             _cancel_verify_graph(receipt, run_dir)
@@ -591,7 +620,13 @@ def _safe_finalize_verify_receipt(
             # exception. Retry through the normal digest/signing lifecycle.
             try:
                 return _finalize_verify_receipt(
-                    target, run_dir, receipt, started=started, rc=verify_runtime._VERIFY_CANCELED_RC, canceled=True
+                    target,
+                    run_dir,
+                    receipt,
+                    started=started,
+                    rc=verify_runtime._VERIFY_CANCELED_RC,
+                    canceled=True,
+                    facts=facts,
                 )
             except BaseException:
                 pass
@@ -607,7 +642,7 @@ def _safe_finalize_verify_receipt(
             # The status changed after these were stamped, so stamp them again.
             verify_trial.stamp_verify_receipt_failure_taxonomy(receipt)
             _stamp_verification_contract_outcomes(receipt)
-        verify_gate.stamp_gating(target, receipt)
+        verify_gate.stamp_gating(target, receipt, facts=facts)
         receipt.setdefault("completed_at", helpers._now().isoformat())
         # Keep a valid digest/signature if fallback did not change the payload.
         # A completed digest must never authenticate a newly canceled receipt.
@@ -662,13 +697,14 @@ def _commit_verify_receipt(
     canceled: bool,
     finalized: bool = False,
     manifest: verify_manifest.VerifyManifest | None = None,
+    facts: verify_manifest_git.VerifyGitFacts | None = None,
 ) -> tuple[dict[str, Any], int]:
     with verify_runtime._defer_verify_signal():
         if manifest is not None:
             _apply_manifest_scoring_fields(target, receipt, manifest, run_dir)
         if not finalized:
             receipt, rc = _safe_finalize_verify_receipt(
-                target, run_dir, receipt, started=started, rc=rc, canceled=canceled
+                target, run_dir, receipt, started=started, rc=rc, canceled=canceled, facts=facts
             )
         if (
             verify_runtime._verify_signal_received()
@@ -676,7 +712,13 @@ def _commit_verify_receipt(
         ):
             _cancel_verify_graph(receipt, run_dir)
             receipt, rc = _safe_finalize_verify_receipt(
-                target, run_dir, receipt, started=started, rc=verify_runtime._VERIFY_CANCELED_RC, canceled=True
+                target,
+                run_dir,
+                receipt,
+                started=started,
+                rc=verify_runtime._VERIFY_CANCELED_RC,
+                canceled=True,
+                facts=facts,
             )
         # Commit before calling the append boundary. Later signals may change
         # the process exit status, but cannot rewrite or report this run again.
@@ -1489,7 +1531,9 @@ def _git_with_index(target: Path, index_file: Path, *args: str) -> subprocess.Co
         return subprocess.CompletedProcess(["git"], 127, stdout="", stderr="git unavailable")
 
 
-def _capture_verify_identity(target: Path, run_dir: Path) -> dict[str, Any]:
+def _capture_verify_identity(
+    target: Path, run_dir: Path, *, before: verify_manifest_git.VerifyGitFacts | None = None
+) -> dict[str, Any]:
     unavailable: dict[str, Any] = {
         "schema_version": receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION,
         "baseline_commit": None,
@@ -1499,16 +1543,16 @@ def _capture_verify_identity(target: Path, run_dir: Path) -> dict[str, Any]:
     }
     patch_path = run_dir / "changes.patch"
     try:
-        baseline_commit = helpers._git_value(target, "rev-parse", "HEAD")
-        tree_fingerprint, tree_fingerprint_head = localio.tree_fingerprint_with_head(target)
-        if baseline_commit is None or tree_fingerprint is None or tree_fingerprint_head is None:
+        tree_fingerprint, baseline_commit = (before or verify_manifest_git.VerifyGitFacts(target)).tree
+        if baseline_commit is None or tree_fingerprint is None:
             return unavailable
-        runguard.collect_changes_patch(target, patch_path)
+        # This caller consumes patch bytes only. Counts used by run evidence
+        # are still collected by the default patch API.
+        runguard.collect_changes_patch(target, patch_path, count_tracked=False)
         patch_bytes = patch_path.read_bytes()
-        if (
-            helpers._git_value(target, "rev-parse", "HEAD") != baseline_commit
-            or localio.tree_fingerprint(target) != tree_fingerprint
-        ):
+        # Patch collection reads live files and the live index. Keep a fresh
+        # observation on each side of it, even before the test command starts.
+        if localio.tree_fingerprint_with_head(target) != (tree_fingerprint, baseline_commit):
             patch_path.unlink(missing_ok=True)
             return unavailable
     except (OSError, runguard.RunGuardError):
@@ -1518,7 +1562,7 @@ def _capture_verify_identity(target: Path, run_dir: Path) -> dict[str, Any]:
         "schema_version": receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION,
         "baseline_commit": baseline_commit,
         "tree_fingerprint": tree_fingerprint,
-        "tree_fingerprint_head": tree_fingerprint_head,
+        "tree_fingerprint_head": baseline_commit,
         "changes_patch_sha256": hashlib.sha256(patch_bytes).hexdigest(),
     }
 
@@ -1535,6 +1579,7 @@ def _run_verify_commands(
     capture_kind: str = "skill",
     capture_meta: dict[str, Any] | None = None,
     reuse_skipped: str | None = None,
+    after_command: Callable[[], verify_manifest_git.VerifyGitFacts] | None = None,
 ) -> tuple[dict[str, Any], int]:
     started = helpers._now()
     graph_capture_timeout = code_graph_timeout if code_graph_capture_timeout is None else code_graph_capture_timeout
@@ -1692,11 +1737,15 @@ def _run_verify_commands(
         rc = rc or 1
     finally:
         if receipt is not None:
-            # The child can change HEAD, refs or config. Resolve the base afresh
-            # when finalizing its receipt, even if reuse admission read it first.
-            verify_manifest_git.clear_verify_base(target)
             receipt, rc = _commit_verify_receipt(
-                target, run_dir, receipt, started=started, rc=rc, canceled=canceled, manifest=manifest
+                target,
+                run_dir,
+                receipt,
+                started=started,
+                rc=rc,
+                canceled=canceled,
+                manifest=manifest,
+                facts=after_command() if after_command is not None else None,
             )
     assert receipt is not None
     return receipt, rc
@@ -1713,13 +1762,14 @@ def _write_reused_receipt(
     capture: str | None = None,
     capture_kind: str = "skill",
     capture_meta: dict[str, Any] | None = None,
+    before: verify_manifest_git.VerifyGitFacts | None = None,
 ) -> tuple[dict[str, Any] | None, int]:
     """Write a fresh receipt dir that records a reused passing run (no commands executed)."""
     started = helpers._now()
     run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-work-verify-{uuid4().hex[:6]}"
     run_dir = helpers._verify_runs_root(target) / run_id
     run_dir.mkdir(parents=True, exist_ok=False)
-    identity = _capture_verify_identity(target, run_dir)
+    identity = _capture_verify_identity(target, run_dir, before=before)
     if admitted_fingerprint is None or identity.get("tree_fingerprint") != admitted_fingerprint:
         with suppress(OSError):
             (run_dir / "changes.patch").unlink(missing_ok=True)
@@ -2021,10 +2071,24 @@ def verify_run(
         return blocked_rc
     receipt = None
     reuse_skipped = None
-    with verify_runtime._verify_cancellation_signals() as cancellation, verify_manifest_git.verify_base_scope(target):
+    before = (
+        verify_manifest_git.VerifyGitFacts(target, capture_registry=bool(capture))
+        if reuse and manifest is None
+        else None
+    )
+    after = None
+
+    def after_command() -> verify_manifest_git.VerifyGitFacts:
+        nonlocal after
+        after = verify_manifest_git.VerifyGitFacts(
+            target, capture_registry=bool(capture), read_identity=lambda path: _git_head_branch(path, paths=True)
+        )
+        return after
+
+    with verify_runtime._verify_cancellation_signals() as cancellation:
         try:
-            if reuse and manifest is None:
-                fingerprint = localio.tree_fingerprint(target)
+            if before is not None:
+                fingerprint = before.tree[0]
                 latest = _latest_verify_receipt(target)
                 reusable, reuse_skipped = verify_argv_files.reusable_receipt(
                     target, planned, planned_display, fingerprint, latest
@@ -2032,7 +2096,8 @@ def verify_run(
                 if (
                     reusable
                     and latest is not None
-                    and (gating := verify_gate.reuse_gating(target, latest, current_tree=fingerprint)) is not None
+                    and (gating := verify_gate.reuse_gating(target, latest, current_tree=fingerprint, facts=before))
+                    is not None
                 ):
                     receipt, rc = _write_reused_receipt(
                         target,
@@ -2044,6 +2109,7 @@ def verify_run(
                         capture=capture,
                         capture_kind=capture_kind,
                         capture_meta=capture_meta,
+                        before=before,
                     )
             if receipt is None:
                 if reuse_skipped is not None:
@@ -2061,6 +2127,7 @@ def verify_run(
                     capture_kind=capture_kind,
                     capture_meta=capture_meta,
                     reuse_skipped=reuse_skipped,
+                    after_command=after_command,
                 )
         except KeyboardInterrupt:
             cancellation.raised = True
@@ -2079,6 +2146,7 @@ def verify_run(
                 rc=verify_runtime._VERIFY_CANCELED_RC,
                 canceled=True,
                 manifest=manifest,
+                facts=after_command(),
             )
         cancellation.raised = True
         if receipt.get("status") == verify_runtime._VERIFY_CANCELED_RECEIPT_STATUS and cancellation.received is None:
@@ -2091,7 +2159,7 @@ def verify_run(
         # receive their one neutral capture, including after repeated signals.
         if json_output:
             if capture:
-                scoreability = _scoreability_notice(target, receipt)
+                scoreability = _scoreability_notice(target, receipt, facts=after or before)
                 if (
                     receipt.get("status") == verify_runtime._VERIFY_CANCELED_RECEIPT_STATUS
                     or cancellation.received is None
@@ -2104,6 +2172,7 @@ def verify_run(
                             artifact_kind=capture_kind,
                             run_id=receipt["run_id"],
                             observed=auto_observed,
+                            git_facts=after,
                         )
                     receipt["outcome_scoreability"] = scoreability
                     _attach_miseledger_indexing(receipt, target=target, json_output=True)
@@ -2124,7 +2193,7 @@ def verify_run(
                     )
             verify_runtime._print_verify_console(f"receipt: {Path(str(receipt['path'])) / 'receipt.json'}")
             if capture:
-                scoreability = _scoreability_notice(target, receipt)
+                scoreability = _scoreability_notice(target, receipt, facts=after or before)
                 if (
                     receipt.get("status") == verify_runtime._VERIFY_CANCELED_RECEIPT_STATUS
                     or cancellation.received is None
@@ -2136,6 +2205,7 @@ def verify_run(
                             artifact_kind=capture_kind,
                             run_id=receipt["run_id"],
                             observed=auto_observed,
+                            git_facts=after,
                         )
                     receipt["outcome_scoreability"] = scoreability
                     with verify_runtime._verify_console_output():

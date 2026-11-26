@@ -20,7 +20,7 @@ from typing import Any, Literal
 from .. import localio, verify_manifest_git
 from . import verify_required
 
-_DECLARATION_PATH = "verify/required-check.json"
+_DECLARATION_PATH = verify_manifest_git.REQUIRED_CHECK_PATH
 _DECLARATION_SCHEMA = "brigade.verify_required_check.v1"
 STOP_POLICY_BUDGET_SECONDS = 2.0
 _CLOSEOUT_POLICY_BUDGET_SECONDS = 60.0
@@ -189,19 +189,25 @@ def _fallback_policy(
         return _GatePolicy("unresolved", "policy_timeout", base_message=base_message)
 
 
-def _load_policy(target: Path, *, deadline: float | None = None) -> _GatePolicy:
+def _load_policy(
+    target: Path, *, deadline: float | None = None, facts: verify_manifest_git.VerifyGitFacts | None = None
+) -> _GatePolicy:
+    if facts is not None and facts.target != target:
+        raise ValueError("verify Git facts target does not match policy target")
     base_deadline = None if deadline is None else deadline - _HEAD_FALLBACK_BUDGET_SECONDS
     try:
-        base = (
-            verify_manifest_git.resolve_verify_base(target)
-            if base_deadline is None
-            else verify_manifest_git.resolve_base(target, deadline=base_deadline)
-        )
+        base = facts.base if facts is not None else verify_manifest_git.resolve_base(target, deadline=base_deadline)
     except subprocess.TimeoutExpired:
         return _fallback_policy(target, deadline, "Git timed out while resolving the base.")
     if base.status != "resolved" or not base.commit:
         return _fallback_policy(target, deadline, base.message, default_branch_tip=base.default_branch_tip)
     try:
+        if facts is not None and (files := facts.base_files) is not None:
+            return (
+                _parse_declaration(files.policy, base.commit)
+                if files.policy is not None
+                else _GatePolicy("audit_only", "audit_only")
+            )
         return _committed_policy(target, base.commit, deadline) or _GatePolicy("audit_only", "audit_only")
     except subprocess.TimeoutExpired:
         return _GatePolicy("unresolved", "policy_timeout")
@@ -301,7 +307,14 @@ def _covered_files(
     return covered
 
 
-def _stamp_plan(target: Path, receipt: Mapping[str, Any], policy: _GatePolicy, stamp: dict[str, Any]) -> None:
+def _stamp_plan(
+    target: Path,
+    receipt: Mapping[str, Any],
+    policy: _GatePolicy,
+    stamp: dict[str, Any],
+    *,
+    facts: verify_manifest_git.VerifyGitFacts | None = None,
+) -> None:
     base = policy.base_commit if policy.fallback_source is None else None
     tree = receipt.get("tree_fingerprint")
     plan: dict[str, Any] = {
@@ -328,7 +341,7 @@ def _stamp_plan(target: Path, receipt: Mapping[str, Any], policy: _GatePolicy, s
 
     try:
         fields, _, entries = verify_required.plan_snapshot(
-            target, base, tree, deadline=monotonic() + verify_required.PLANNER_TIMEOUT_SECONDS
+            target, base, tree, deadline=monotonic() + verify_required.PLANNER_TIMEOUT_SECONDS, facts=facts
         )
         mode = fields["mode"]
         if mode == "unconfigured":
@@ -386,11 +399,17 @@ def receipt_is_gating(receipt: Mapping[str, Any]) -> tuple[bool, str]:
     return stamp["eligible"], stamp["reason"]
 
 
-def reuse_gating(target: Path, receipt: Mapping[str, Any], *, current_tree: str | None = None) -> dict[str, Any] | None:
+def reuse_gating(
+    target: Path,
+    receipt: Mapping[str, Any],
+    *,
+    current_tree: str | None = None,
+    facts: verify_manifest_git.VerifyGitFacts | None = None,
+) -> dict[str, Any] | None:
     """Return the stamp to copy if the source receipt still belongs to the current policy."""
     if _blocked_reason(receipt):
         return None
-    policy = _load_policy(target)
+    policy = _load_policy(target, facts=facts)
     if policy.mode == "unresolved":
         return None
     _, reason = receipt_is_gating(receipt)
@@ -408,7 +427,9 @@ def reuse_gating(target: Path, receipt: Mapping[str, Any], *, current_tree: str 
     return None
 
 
-def stamp_gating(target: Path, receipt: dict[str, Any]) -> None:
+def stamp_gating(
+    target: Path, receipt: dict[str, Any], *, facts: verify_manifest_git.VerifyGitFacts | None = None
+) -> None:
     """Record a verdict before the verify receipt is digested."""
     problem = _blocked_reason(receipt)
     previous = receipt.get("gating")
@@ -418,7 +439,7 @@ def stamp_gating(target: Path, receipt: dict[str, Any]) -> None:
             previous.update(eligible=False, reason=problem)
         return
 
-    policy = _load_policy(target)
+    policy = _load_policy(target, facts=facts)
     inherited = receipt.get("inherited_test_env")
     if not policy.needs_plan_coverage and isinstance(inherited, dict):
         # Preserve the legacy receipt shape when plan coverage is disabled.
@@ -435,7 +456,7 @@ def stamp_gating(target: Path, receipt: dict[str, Any]) -> None:
         eligible, reason = _required_check_verdict(receipt, policy)
     receipt["gating"] = stamp = policy.stamp(eligible, reason)
     if policy.needs_plan_coverage:
-        _stamp_plan(target, receipt, policy, stamp)
+        _stamp_plan(target, receipt, policy, stamp, facts=facts)
 
 
 _INELIGIBLE_NOTICE = {

@@ -439,10 +439,20 @@ def trusted_workspace_manifests(target: Path) -> list[VerifyManifest]:
     return manifests
 
 
-def registered_manifest_ids(target: Path) -> list[str]:
-    base_resolution = verify_manifest_git.resolve_verify_base(target)
-    ids: list[str] = []
-    for path in _discover_builtin_manifest_files() + _discover_workspace_manifest_files(target, base=base_resolution):
+def registered_manifest_ids(target: Path, *, facts: verify_manifest_git.VerifyGitFacts | None = None) -> list[str]:
+    if facts is not None and facts.target != target:
+        raise ValueError("verify Git facts target does not match manifest target")
+    base_resolution = facts.base if facts is not None else verify_manifest_git.resolve_base(target)
+    if facts is not None and base_resolution.status != "resolved":
+        base_resolution = verify_manifest_git.resolve_base(target)
+    base_files = facts.base_files if facts is not None else None
+    if base_files is None:
+        base_files = verify_manifest_git._read_base_files(target, base_resolution)
+    ids = set(base_files.manifest_ids) if base_files is not None else set()
+    paths = _discover_builtin_manifest_files()
+    if base_files is None:
+        paths += _discover_workspace_manifest_files(target, base=base_resolution)
+    for path in paths:
         payload: dict[str, Any] | None
         if _is_builtin_manifest(path):
             payload = _load_manifest_file(path)
@@ -455,8 +465,8 @@ def registered_manifest_ids(target: Path) -> list[str]:
             continue
         manifest_id = payload.get("manifest_id")
         if isinstance(manifest_id, str) and manifest_id:
-            ids.append(manifest_id)
-    return sorted(set(ids))
+            ids.add(manifest_id)
+    return sorted(ids)
 
 
 def _normalize_repo_path(path: str) -> str:

@@ -1066,9 +1066,9 @@ def test_verify_runs_again_if_tree_changes_while_writing_reuse(tmp_target, monke
     old_tree = localio.tree_fingerprint(tmp_target)
     capture_identity = verification._capture_verify_identity
 
-    def change_tree_before_capture(target, run_dir):
+    def change_tree_before_capture(target, run_dir, **kwargs):
         (target / "newfile.txt").write_text("new tree\n")
-        return capture_identity(target, run_dir)
+        return capture_identity(target, run_dir, **kwargs)
 
     monkeypatch.setattr(verification, "_capture_verify_identity", change_tree_before_capture)
     if cleanup_fails:

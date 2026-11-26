@@ -10,7 +10,7 @@ from uuid import UUID
 
 import pytest
 
-from brigade import code_graph_delta, receipts_cmd, verify_manifest_git
+from brigade import code_graph_delta, localio, receipts_cmd, runguard, verify_manifest, verify_manifest_git
 from brigade.work_cmd import helpers, verification, verify_runtime
 
 
@@ -33,6 +33,11 @@ def _set_origin(target):
     _git(target, "remote", "add", "origin", "https://github.com/example/project.git")
     _git(target, "update-ref", "refs/remotes/origin/main", "HEAD")
     _git(target, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
+
+
+def _commit(target):
+    _git(target, "add", ".")
+    _git(target, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "fixture update")
 
 
 @pytest.fixture
@@ -67,6 +72,11 @@ def _verify(target, capsys, *, reuse, capture=None):
 
 def test_captured_verify_git_launch_budget(tmp_path, isolated_verify, monkeypatch, capsys):
     target = _initialize(tmp_path / "repo")
+    manifests = target / "verify" / "manifests"
+    manifests.mkdir(parents=True)
+    for index in range(7):
+        (manifests / f"sample-{index}.json").write_text(json.dumps({"manifest_id": f"sample-{index}"}))
+    _commit(target)
     _set_origin(target)
     calls = Counter()
     popen = subprocess.Popen
@@ -80,18 +90,19 @@ def test_captured_verify_git_launch_budget(tmp_path, isolated_verify, monkeypatc
     monkeypatch.setattr(subprocess, "Popen", CountGit)
     fresh = _verify(target, capsys, reuse=False, capture="brigade-work")
     assert fresh["tree_stable"] is True
+    assert fresh["outcome_scoreability"]["registered_manifest_ids"] == [f"sample-{i}" for i in range(7)]
     fresh_count = calls.total()
     assert sum(count for argv, count in calls.items() if argv[-3:] == ("remote", "get-url", "origin")) == 1
     calls.clear()
     reused = _verify(target, capsys, reuse=True, capture="brigade-work")
     assert reused["reused_from"] == fresh["run_id"]
-    # This minimal repository uses 30 calls on both paths. Allow one extra probe.
-    assert fresh_count <= 31
-    assert calls.total() <= 31
+    # Leave one launch of headroom above the 24/21 calls in this fixture.
+    assert fresh_count <= 25
+    assert calls.total() <= 22
     assert receipts_cmd._repository_export_result(target=target, limit=0, new_only=True)["skipped_count"] == 2
 
 
-def _legacy_snapshot(target):
+def _legacy_snapshot(target, **_kwargs):
     head = helpers._git_value(target, "rev-parse", "HEAD")
     branch = helpers._git_value(target, "rev-parse", "--abbrev-ref", "HEAD")
     status = helpers._git(target, "status", "--porcelain")
@@ -124,18 +135,26 @@ def test_receipt_git_stamp_matches_legacy(tmp_path, topology):
         (target / ".brigade").mkdir()
         (target / ".brigade" / "state.txt").write_text("generated", encoding="utf-8")
     (target / "ñ with spaces.txt").write_text("untracked", encoding="utf-8")
-    assert verification._receipt_git_snapshot(target) == _legacy_snapshot(target)
+    expected = _legacy_snapshot(target)
+    assert verification._receipt_git_snapshot(target) == expected
+    facts = verify_manifest_git.VerifyGitFacts(
+        target, read_identity=lambda path: verification._git_head_branch(path, paths=True)
+    )
+    assert verification._receipt_git_snapshot(target, facts=facts) == expected
+    assert facts.tree == localio.tree_fingerprint_with_head(target)
 
 
 def test_verify_base_scope_is_repo_keyed_and_discarded(tmp_path):
     original = _initialize(tmp_path / "original")
     other = _initialize(tmp_path / "other")
     _set_origin(original)
-    with verify_manifest_git.verify_base_scope(original):
-        assert verify_manifest_git.resolve_verify_base(original).source == "default_branch"
-        assert verify_manifest_git.resolve_verify_base(other).source == "no_remote"
+    original_facts = verify_manifest_git.VerifyGitFacts(original)
+    assert original_facts.base.source == "default_branch"
+    assert verify_manifest_git.VerifyGitFacts(other).base.source == "no_remote"
+    with pytest.raises(ValueError, match="target"):
+        verify_manifest.registered_manifest_ids(other, facts=original_facts)
     _git(original, "remote", "remove", "origin")
-    assert verify_manifest_git.resolve_verify_base(original).source == "no_remote"
+    assert verify_manifest_git.VerifyGitFacts(original).base.source == "no_remote"
 
 
 def test_fresh_and_reused_receipt_bytes_match_unbatched_git(tmp_path, isolated_verify, monkeypatch, capsys):
@@ -156,7 +175,12 @@ def test_fresh_and_reused_receipt_bytes_match_unbatched_git(tmp_path, isolated_v
     actual = pair()
     shutil.rmtree(target / ".brigade")
     monkeypatch.setattr(verification, "_receipt_git_snapshot", _legacy_snapshot)
-    monkeypatch.setattr(verify_manifest_git, "resolve_verify_base", verify_manifest_git.resolve_base)
+    monkeypatch.setattr(
+        verify_manifest_git.VerifyGitFacts,
+        "base",
+        property(lambda facts: verify_manifest_git.resolve_base(facts.target)),
+    )
+    monkeypatch.setattr(verify_manifest_git.VerifyGitFacts, "base_files", None)
     assert pair() == actual
 
 
@@ -170,8 +194,7 @@ def test_verify_rereads_tree_and_base_after_child(tmp_path, isolated_verify, mon
     _git(target, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "new base")
 
     def change_tree(*_args, **_kwargs):
-        # Simulate a preflight Git read followed by a child that changes both metadata and files.
-        assert verify_manifest_git.resolve_verify_base(target).source == "default_branch"
+        assert verify_manifest_git.resolve_base(target).source == "default_branch"
         _git(target, "remote", "remove", "origin")
         (target / "source.py").write_text("value = 2\n", encoding="utf-8")
         return "completed", 0, "", ""
@@ -181,7 +204,63 @@ def test_verify_rereads_tree_and_base_after_child(tmp_path, isolated_verify, mon
     assert receipt["tree_stable"] is False
     assert receipt["tree_fingerprint_after"] != receipt["tree_fingerprint"]
     assert "new-base" in receipt["outcome_scoreability"]["registered_manifest_ids"]
-    assert verify_manifest_git.resolve_verify_base(target).source == "no_remote"
+    assert verify_manifest_git.resolve_base(target).source == "no_remote"
+
+
+def test_reuse_admission_reads_live_tree_in_the_same_process(tmp_path, isolated_verify, capsys):
+    target = _initialize(tmp_path / "repo")
+    fresh = _verify(target, capsys, reuse=False, capture="brigade-work")
+    (target / "source.py").write_text("value = 2\n", encoding="utf-8")
+    second = _verify(target, capsys, reuse=True, capture="brigade-work")
+    assert "reused_from" not in second
+    assert second["tree_stable"] is True
+    assert second["tree_fingerprint"] != fresh["tree_fingerprint"]
+
+
+def test_patch_identity_is_rejected_if_tree_changes_while_collecting_it(tmp_path, monkeypatch):
+    target = _initialize(tmp_path / "repo")
+    run_dir = tmp_path / "receipt"
+    collect = runguard.collect_changes_patch
+
+    def collect_and_edit(*args, **kwargs):
+        result = collect(*args, **kwargs)
+        (target / "source.py").write_text("value = 2\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(runguard, "collect_changes_patch", collect_and_edit)
+    identity = verification._capture_verify_identity(target, run_dir)
+    assert identity["tree_fingerprint"] is None
+    assert identity["changes_patch_sha256"] is None
+    assert not (run_dir / "changes.patch").exists()
+
+
+def test_registry_batch_matches_individual_trusted_reads(tmp_path):
+    target = _initialize(tmp_path / "repo")
+    directory = target / "verify" / "manifests"
+    directory.mkdir(parents=True)
+    for name, contents in {
+        "café with spaces.json": b'{"manifest_id":"first"}',
+        "second.json": b'{"manifest_id":"first"}',
+        "broken.json": b"{",
+        "array.json": b"[]",
+        "bad-encoding.json": b"\xff",
+        "large.json": b" " * (verify_manifest_git.MAX_MANIFEST_BYTES + 1),
+    }.items():
+        (directory / name).write_bytes(contents)
+    (directory / "nested.json").mkdir()
+    (directory / "nested.json" / "unlisted.json").write_text('{"manifest_id":"unlisted"}')
+    _commit(target)
+    _set_origin(target)
+    (directory / "second.json").unlink()
+    (directory / "café with spaces.json").write_text('{"manifest_id":"edited"}')
+    base = verify_manifest_git.resolve_base(target)
+    expected = set()
+    for path in verify_manifest_git.list_base_manifests(target, base):
+        try:
+            expected.add(verify_manifest_git.load_base_manifest(target, path, base).payload["manifest_id"])
+        except verify_manifest_git.ManifestGitError:
+            continue
+    assert verify_manifest.registered_manifest_ids(target) == sorted(expected) == ["first"]
 
 
 def test_export_resolves_rewritten_origin_once_and_refreshes_it_per_export(

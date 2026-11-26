@@ -62,6 +62,7 @@ def tree_fingerprint_with_head(
     extra_evidence_paths: tuple[str, ...] = (),
     git_env: dict[str, str] | None = None,
     deadline: float | None = None,
+    observed_head: str | None = None,
 ) -> tuple[str | None, str | None]:
     """Return the Git tree for the live workspace and the HEAD commit that fed it.
 
@@ -93,14 +94,17 @@ def tree_fingerprint_with_head(
                     env=env,
                 )
 
-            head = git("rev-parse", "HEAD")
-            head_sha = head.stdout.strip() if head.returncode == 0 and head.stdout.strip() else None
+            head_sha = observed_head
+            if head_sha is None:
+                head = git("rev-parse", "HEAD")
+                head_sha = head.stdout.strip() if head.returncode == 0 and head.stdout.strip() else None
             if head_sha is None:
                 return None, None
-            if git("read-tree", "HEAD").returncode != 0 or git("add", "-A").returncode != 0:
+            revision = observed_head if observed_head is not None else "HEAD"
+            if git("read-tree", revision).returncode != 0 or git("add", "-A").returncode != 0:
                 return None, None
             if (
-                git("reset", "-q", "HEAD", "--", *TREE_FINGERPRINT_EVIDENCE_PATHS, *extra_evidence_paths).returncode
+                git("reset", "-q", revision, "--", *TREE_FINGERPRINT_EVIDENCE_PATHS, *extra_evidence_paths).returncode
                 != 0
             ):
                 return None, None

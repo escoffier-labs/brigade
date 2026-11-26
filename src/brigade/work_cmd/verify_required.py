@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -71,9 +72,9 @@ def _commit_id(raw: bytes) -> str:
 
 
 def _tree_entries(
-    target: Path, commit: str, path: str | None = None, *, deadline: float | None = None
+    target: Path, commit: str, path: str | None = None, *, deadline: float | None = None, include_trees: bool = False
 ) -> dict[str, tuple[bytes, bytes]]:
-    args = ("-r",) if path is None else ("--", path)
+    args = (("-r", "-t") if include_trees else ("-r",)) if path is None else ("--", path)
     raw = _git(target, "ls-tree", "-z", "--full-tree", commit, *args, deadline=deadline)
     entries = {}
     for entry in raw.split(b"\0"):
@@ -135,8 +136,16 @@ def _json_object(raw: bytes, label: str) -> dict[str, Any]:
     return data
 
 
-def _config_at(target: Path, base: str, deadline: float | None) -> dict[str, Any] | None:
-    entry = _tree_entries(target, base, CONFIG_PATH, deadline=deadline).get(CONFIG_PATH)
+def _config_at(
+    target: Path,
+    base: str,
+    deadline: float | None,
+    *,
+    entries: dict[str, tuple[bytes, bytes]] | None = None,
+) -> dict[str, Any] | None:
+    if entries is None:
+        entries = _tree_entries(target, base, CONFIG_PATH, deadline=deadline)
+    entry = entries.get(CONFIG_PATH)
     if entry is None:
         return None
     config = _json_object(_read_blob(target, entry, CONFIG_PATH, deadline), "required-tests config")
@@ -181,8 +190,14 @@ def _copy_planner(target: Path, base: str, files: list[str], directory: Path, de
 
 
 def _copy_head(
-    target: Path, entries: dict[str, tuple[bytes, bytes]], directory: Path, deadline: float | None, *, snapshot: bool
-) -> None:
+    target: Path,
+    entries: dict[str, tuple[bytes, bytes]],
+    directory: Path,
+    deadline: float | None,
+    *,
+    snapshot: bool,
+    planner: tuple[Path, dict[str, tuple[bytes, bytes]]] | None = None,
+) -> str | None:
     # Read raw blobs so checkout filters or archive attributes cannot alter or hide planner input.
     by_oid: dict[bytes, list[str]] = {}
     for name, (mode, oid) in entries.items():
@@ -191,12 +206,14 @@ def _copy_head(
                 continue
             raise ValueError(f"HEAD snapshot entry is not a regular file: {name!r}")
         by_oid.setdefault(_commit_id(oid).encode("ascii"), []).append(name)
+    planner_dir, planner_entries = planner if planner is not None else (directory, {})
+    planner_inputs = [(name, mode, _commit_id(oid).encode("ascii")) for name, (mode, oid) in planner_entries.items()]
     with tempfile.TemporaryFile() as blobs:
         try:
             proc = subprocess.run(
                 ["git", "--no-replace-objects", "cat-file", "--batch"],
                 cwd=target,
-                input=b"".join(oid + b"\n" for oid in by_oid),
+                input=b"".join(oid + b"\n" for oid in [*(oid for _, _, oid in planner_inputs), *by_oid]),
                 stdout=blobs,
                 stderr=subprocess.DEVNULL,
                 timeout=_remaining(deadline, 30),
@@ -207,7 +224,8 @@ def _copy_head(
         if proc.returncode:
             raise ValueError(f"git cat-file failed copying HEAD (exit {proc.returncode})")
         blobs.seek(0)
-        for oid, paths in by_oid.items():
+
+        def read_blob(oid: bytes) -> bytes:
             _remaining(deadline, 30)
             header = blobs.readline().split()
             if len(header) != 3 or header[:2] != [oid, b"blob"]:
@@ -216,10 +234,22 @@ def _copy_head(
             data = blobs.read(size)
             if len(data) != size or blobs.read(1) != b"\n":
                 raise ValueError("HEAD snapshot blob is incomplete")
+            return data
+
+        digest = hashlib.sha256()
+        for name, mode, oid in planner_inputs:
+            data = read_blob(oid)
+            path = _materialize_file(planner_dir, name, data)
+            if mode == b"100755" and os.name != "nt":
+                path.chmod(0o700)
+            digest.update(name.encode("utf-8") + b"\0" + str(len(data)).encode("ascii") + b"\0" + data)
+        for oid, paths in by_oid.items():
+            data = read_blob(oid)
             for name in paths:
                 path = _materialize_file(directory, name, data)
                 if snapshot and entries[name][0] == b"100755" and os.name != "nt":
                     path.chmod(0o700)
+    return digest.hexdigest() if planner is not None else None
 
 
 def _run_planner(
@@ -231,12 +261,15 @@ def _run_planner(
     *,
     snapshot: bool,
     deadline: float | None,
+    base_entries: dict[str, tuple[bytes, bytes]] | None = None,
+    git_dir: str | None = None,
 ) -> tuple[dict[str, Any], str]:
     with tempfile.TemporaryDirectory(prefix="brigade-required-") as temp_dir:
         scratch = Path(temp_dir).resolve()
         directory = scratch / "planner"
         output = scratch / "plan.json"
-        digest = _copy_planner(target, base, config["planner_files"], directory, deadline)
+        files = config["planner_files"]
+        digest = _copy_planner(target, base, files, directory, deadline) if base_entries is None else None
         replacements = {
             "{base}": base,
             "{head}": head,
@@ -250,8 +283,32 @@ def _run_planner(
         if snapshot or "{head_dir}" in tokens:
             head_dir = scratch / "head"
             head_dir.mkdir()
-            _copy_head(target, entries, head_dir, deadline, snapshot=snapshot)
-            git_dir = os.fsdecode(_git(target, "rev-parse", "--absolute-git-dir", deadline=deadline).rstrip(b"\n"))
+            if base_entries is None:
+                _copy_head(target, entries, head_dir, deadline, snapshot=snapshot)
+            else:
+                planner_entries = {}
+                for name in sorted(files):
+                    entry = base_entries.get(name)
+                    if entry is None:
+                        raise ValueError(f"planner file is missing at the base: {name}")
+                    if not _regular(entry[0]):
+                        raise ValueError(f"{name} is not a regular file")
+                    planner_entries[name] = entry
+                try:
+                    digest = _copy_head(
+                        target, entries, head_dir, deadline, snapshot=True, planner=(directory, planner_entries)
+                    )
+                except (OSError, ValueError):
+                    # Replay exceptional cases in the original order so the
+                    # receipt keeps the existing planner-versus-HEAD diagnosis.
+                    if directory.exists():
+                        shutil.rmtree(directory)
+                    shutil.rmtree(head_dir)
+                    head_dir.mkdir()
+                    digest = _copy_planner(target, base, files, directory, deadline)
+                    _copy_head(target, entries, head_dir, deadline, snapshot=True)
+            if git_dir is None:
+                git_dir = os.fsdecode(_git(target, "rev-parse", "--absolute-git-dir", deadline=deadline).rstrip(b"\n"))
             env.update(GIT_DIR=git_dir, GIT_WORK_TREE=str(head_dir), GIT_NO_REPLACE_OBJECTS="1")
             replacements["{head_dir}"] = str(head_dir)
             if snapshot:
@@ -277,6 +334,7 @@ def _run_planner(
             raise ValueError("planner timed out")
         if result.code:
             raise ValueError(f"planner exited with status {result.code}")
+        assert digest is not None
         return _json_object(output.read_bytes(), "planner output"), digest
 
 
@@ -333,8 +391,10 @@ def _plan_at(
     *,
     snapshot: bool,
     deadline: float | None,
+    git_dir: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, tuple[bytes, bytes]]]:
-    config = _config_at(target, base, deadline)
+    base_entries = _tree_entries(target, base, deadline=deadline, include_trees=True) if snapshot else None
+    config = _config_at(target, base, deadline, entries=base_entries)
     if config is None:
         return (
             {
@@ -346,7 +406,17 @@ def _plan_at(
             {},
         )
     entries = _tree_entries(target, head, deadline=deadline)
-    plan, digest = _run_planner(target, base, head, config, entries, snapshot=snapshot, deadline=deadline)
+    plan, digest = _run_planner(
+        target,
+        base,
+        head,
+        config,
+        entries,
+        snapshot=snapshot,
+        deadline=deadline,
+        base_entries=base_entries,
+        git_dir=git_dir,
+    )
     if snapshot and "error" in plan:
         detail = plan["error"]
         reason = " ".join(detail.split())[:160] if isinstance(detail, str) else ""
@@ -362,12 +432,20 @@ def _plan_at(
 
 
 def plan_snapshot(
-    target: Path, base: str, tree: str, *, deadline: float
+    target: Path, base: str, tree: str, *, deadline: float, facts: verify_manifest_git.VerifyGitFacts | None = None
 ) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, tuple[bytes, bytes]]]:
     """Plan from a verified tree object and the base-pinned planner."""
     base = _commit_id(base.encode("ascii"))
     tree = _commit_id(tree.encode("ascii"))
-    return _plan_at(target, base, tree, snapshot=True, deadline=deadline)
+    git_dir = None
+    # Snapshot Git commands use a restricted environment. Only reuse the
+    # observed location when inherited Git variables could not select it.
+    repo_overrides = any(key.upper().startswith("GIT_") and key.upper() != "GIT_PAGER" for key in os.environ)
+    if facts is not None and facts.target == target and not repo_overrides:
+        identity = facts.identity
+        if identity is not None and identity.root is not None and Path(identity.root).resolve() == target.resolve():
+            git_dir = identity.git_dir
+    return _plan_at(target, base, tree, snapshot=True, deadline=deadline, git_dir=git_dir)
 
 
 def _record_path(target: Path, head: str | None, base: str | None, *, worktree: bool = False) -> Path:

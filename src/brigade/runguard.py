@@ -1857,15 +1857,16 @@ def changes_relative_to_snapshot(cwd: Path | None, snapshot: PreRunSnapshot | No
 _PATCH_PREFIX_ARGS = ("--src-prefix=a/", "--dst-prefix=b/")
 
 
-def _tracked_diff(cwd: Path) -> tuple[str, int]:
+def _tracked_diff(cwd: Path, *, count_files: bool = True) -> tuple[str, int]:
     result = _git(cwd, "diff", "--binary", *_PATCH_PREFIX_ARGS, "HEAD")
     if result.code != 0:
         detail = result.stderr.strip() or result.stdout.strip()
         raise RunGuardError(f"failed to collect tracked diff: {detail}")
     count = 0
-    names = _git(cwd, "diff", "--name-only", "HEAD")
-    if names.code == 0:
-        count = len([line for line in names.stdout.splitlines() if line.strip()])
+    if count_files:
+        names = _git(cwd, "diff", "--name-only", "HEAD")
+        if names.code == 0:
+            count = len([line for line in names.stdout.splitlines() if line.strip()])
     return result.stdout, count
 
 
@@ -1909,10 +1910,10 @@ def _untracked_diff(cwd: Path, relpath: str) -> str:
     return result.stdout
 
 
-def collect_changes_patch(cwd: Path, patch_path: Path) -> PatchSummary:
+def collect_changes_patch(cwd: Path, patch_path: Path, *, count_tracked: bool = True) -> PatchSummary:
     patch_path = patch_path.expanduser().resolve()
     patch_path.parent.mkdir(parents=True, exist_ok=True)
-    tracked_patch, tracked_count = _tracked_diff(cwd)
+    tracked_patch, tracked_count = _tracked_diff(cwd, count_files=count_tracked)
     untracked = _untracked_files(cwd)
     pieces = [tracked_patch] if tracked_patch else []
     pieces.extend(_untracked_diff(cwd, path) for path in untracked)

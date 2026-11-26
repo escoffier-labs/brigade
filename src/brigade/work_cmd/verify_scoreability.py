@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
-from .. import verify_manifest, verify_trial
+from .. import verify_manifest, verify_manifest_git, verify_trial
 
 
 def _print_graph_impact(ranking: object) -> None:
@@ -46,7 +46,9 @@ _ADHOC_SCOREABILITY_REMEDIATION = (
 )
 
 
-def _scoreability_notice(target: Path, receipt: dict[str, Any]) -> dict[str, Any]:
+def _scoreability_notice(
+    target: Path, receipt: dict[str, Any], *, facts: verify_manifest_git.VerifyGitFacts | None = None
+) -> dict[str, Any]:
     """Project whether this receipt can score its ``--capture`` artifact (#1378).
 
     Eligibility used to be visible only in an aggregate ``work brief`` field, so a
@@ -69,7 +71,7 @@ def _scoreability_notice(target: Path, receipt: dict[str, Any]) -> dict[str, Any
         "remediation": None,
     }
     if not projection.eligible:
-        notice["registered_manifest_ids"] = verify_manifest.registered_manifest_ids(target)
+        notice["registered_manifest_ids"] = verify_manifest.registered_manifest_ids(target, facts=facts)
         notice["remediation"] = _ADHOC_SCOREABILITY_REMEDIATION
     return notice
 

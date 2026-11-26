@@ -1,1 +1,1 @@
-- Work verification launches fewer Git processes when finalizing a receipt, listing registered verifiers, and exporting receipt evidence.
+- Work verification batches Git reads for receipt identity, required-test planning, registered verifiers, and receipt export.
