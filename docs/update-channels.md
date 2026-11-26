@@ -124,9 +124,12 @@ brigade setup --manifest /path/to/component-manifest-v1.json --allow-compatible-
 
 The explicit manifest bypasses the saved beta pin for this setup run. A later
 plain `brigade setup` on that beta install can still reuse the pinned release.
-Repeat the captured verification to import the pending receipts. An `indexed`
-result confirms receipt import even if doctor still warns that the installed
-release differs from the CLI's bundled manifest.
+When the evidence engine omits an acknowledgement, automatic receipt indexing
+pauses in that worktree. Captured verifications keep saving receipts, and the
+next capture after the engine is repaired imports the pending receipts. To retry
+immediately from the worktree, run `brigade receipts export evidence --new-only --import`.
+An `indexed` result confirms receipt import even if doctor still warns that the
+installed release differs from the CLI's bundled manifest.
 
 ## Timer migration after release
 
