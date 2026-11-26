@@ -366,7 +366,6 @@ def _unreceipted_session(repo: Path, session_id: str = "yolo-session") -> None:
             "last_write_at": (now - timedelta(minutes=30)).isoformat(),
             "briefed": True,
             "write_observed": True,
-            "verify_denied_count": 0,
         },
     )
 

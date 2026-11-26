@@ -137,7 +137,7 @@ def bash_scopes(command: object, cwd: Path, *, depth: int = 0) -> dict[Path, boo
     Unresolved write operands conservatively retain their command cwd.
     """
     rt = _rt()
-    if not isinstance(command, str) or not command.strip():
+    if not isinstance(command, str) or "\x00" in command or not command.strip():
         return {}
     try:
         tokens = rt._shell_path_tokens(rt._strip_heredoc_bodies(command))

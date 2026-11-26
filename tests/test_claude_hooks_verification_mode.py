@@ -171,3 +171,24 @@ def test_governing_modes_resolves_observe_repo(repos, capsys):
 def test_recognizes_focused_verify_by_exact_script_name():
     assert observed_verifiers.is_raw_verification("./scripts/verify-focused")
     assert not observed_verifiers.is_raw_verification("./scripts/verify-focused-extra")
+
+
+@pytest.mark.parametrize(
+    ("command", "first"),
+    [
+        ("command -p pytest", "pytest"),
+        ("env -S 'pytest -q'", "env -S 'pytest -q'"),
+        ("bash -lc 'pytest -q'", "bash -lc 'pytest -q'"),
+        ("npx --prefix /tmp jest", "npx --prefix /tmp jest"),
+        ("make -j 4 check", "make -j 4 check"),
+    ],
+)
+def test_observation_recognizes_wrapped_checks(command, first):
+    assert observed_verifiers.is_raw_verification(command)
+    assert observed_verifiers.first_verifier_command(f"echo ready && {command}") == first
+
+
+@pytest.mark.parametrize("wrapper", ["uv run ", "poetry run ", "npx "])
+def test_observation_bounds_recursive_wrappers(wrapper):
+    assert observed_verifiers.is_raw_verification(wrapper + "pytest")
+    assert not observed_verifiers.is_raw_verification(wrapper * 1000 + "pytest")

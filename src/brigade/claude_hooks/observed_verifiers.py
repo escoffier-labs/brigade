@@ -13,8 +13,8 @@ from .. import work_mode
 from ..wiring import resolve_wired_target
 from .write_attribution import _literal_path, _rt
 
-_SHELL_CONTROL_PREFIXES = {"!", "{", "do", "elif", "if", "then", "time", "until", "while"}
-_SHELL_CONTROL_TOKENS = _SHELL_CONTROL_PREFIXES | {"}", "case", "done", "else", "esac", "fi", "for", "select"}
+SHELL_CONTROL_PREFIXES = {"!", "{", "do", "elif", "if", "then", "time", "until", "while"}
+_SHELL_CONTROL_TOKENS = SHELL_CONTROL_PREFIXES | {"}", "case", "done", "else", "esac", "fi", "for", "select"}
 
 _KEYWORDS = {"!", "{", "(", "if", "then", "elif", "else", "do", "while", "until", "time"}
 # Text that makes a command more than a plain list: grouping, subshells, command and
@@ -189,7 +189,7 @@ def governing_modes(
     return list(modes.items())
 
 
-def _strip_npx_options(tokens: list[str]) -> tuple[list[str], bool]:
+def strip_npx_options(tokens: list[str]) -> tuple[list[str], bool]:
     remaining = list(tokens)
     no_value = {
         "-y",
@@ -227,7 +227,7 @@ def _strip_npx_options(tokens: list[str]) -> tuple[list[str], bool]:
     return remaining, False
 
 
-def _package_runner_script(tokens: list[str]) -> str | None:
+def package_runner_script(tokens: list[str]) -> str | None:
     remaining = [Path(token).name for token in tokens]
     if remaining[:1] == ["test"]:
         return "test"
@@ -249,7 +249,7 @@ def _package_runner_script(tokens: list[str]) -> str | None:
     return remaining[0] if remaining else None
 
 
-def _strip_make_global_options(tokens: list[str]) -> tuple[list[str], bool]:
+def strip_make_global_options(tokens: list[str]) -> tuple[list[str], bool]:
     remaining = list(tokens)
     no_value = {
         "-k",
@@ -316,7 +316,7 @@ def _strip_make_global_options(tokens: list[str]) -> tuple[list[str], bool]:
     return remaining, False
 
 
-def _strip_runner_global_options(command: str, tokens: list[str]) -> tuple[list[str], bool]:
+def strip_runner_global_options(command: str, tokens: list[str]) -> tuple[list[str], bool]:
     no_value: dict[str, set[str]] = {
         "uv": {"-q", "--quiet", "-v", "--verbose", "--no-config", "--offline", "--no-cache"},
         "poetry": {"-n", "--no-interaction", "--no-ansi", "-v", "-vv", "-vvv"},
@@ -367,7 +367,7 @@ def _strip_runner_global_options(command: str, tokens: list[str]) -> tuple[list[
     return remaining, False
 
 
-def _strip_runner_run_options(command: str, tokens: list[str]) -> tuple[list[str], bool]:
+def strip_runner_run_options(command: str, tokens: list[str]) -> tuple[list[str], bool]:
     no_value: dict[str, set[str]] = {
         "uv": {
             "--no-sync",
@@ -447,7 +447,7 @@ def _ambiguous_runner_contains_verifier(command: str, tokens: list[str], *, dept
             if _segment_is_verifier(tail, depth=depth + 1):
                 return True
         else:
-            script = _package_runner_script(tokens[index:])
+            script = package_runner_script(tokens[index:])
             if script and (script in {"test", "check"} or script.startswith(("test:", "check:"))):
                 return True
     return False
@@ -458,9 +458,11 @@ def _nested_shell_commands(command: str) -> list[str]:
 
 
 def _segment_is_verifier(segment: list[str], *, depth: int = 0) -> bool:
+    if depth > _MAX_DEPTH:
+        return False
     rt = _rt()
     tokens = rt._strip_env(segment)
-    while tokens and tokens[0] in _SHELL_CONTROL_PREFIXES:
+    while tokens and tokens[0] in SHELL_CONTROL_PREFIXES:
         tokens = tokens[1:]
     if not tokens or rt._is_brigade_verify(tokens):
         return False
@@ -472,33 +474,33 @@ def _segment_is_verifier(segment: list[str], *, depth: int = 0) -> bool:
     if python_invocation and python_invocation[0] in {"pytest", "unittest", "nose", "nose2"}:
         return True
     if command in {"npm", "pnpm", "yarn", "bun"}:
-        tail, ambiguous = _strip_runner_global_options(command, tokens[1:])
-        script = _package_runner_script(tail)
+        tail, ambiguous = strip_runner_global_options(command, tokens[1:])
+        script = package_runner_script(tail)
         if script and (script in {"test", "check"} or script.startswith(("test:", "check:"))):
             return True
         return ambiguous and _ambiguous_runner_contains_verifier(command, tail, depth=depth)
     if command in {"uv", "poetry"}:
-        tail, ambiguous = _strip_runner_global_options(command, tokens[1:])
+        tail, ambiguous = strip_runner_global_options(command, tokens[1:])
         if tail[:1] != ["run"]:
             return ambiguous and _ambiguous_runner_contains_verifier(command, tail, depth=depth)
-        tail, run_ambiguous = _strip_runner_run_options(command, tail[1:])
+        tail, run_ambiguous = strip_runner_run_options(command, tail[1:])
         if _segment_is_verifier(tail, depth=depth + 1):
             return True
         return run_ambiguous and _ambiguous_tail_contains_verifier(tail, depth=depth)
     if command == "npx":
-        tail, ambiguous = _strip_npx_options(tokens[1:])
+        tail, ambiguous = strip_npx_options(tokens[1:])
         if _segment_is_verifier(tail, depth=depth + 1):
             return True
         return ambiguous and any(_segment_is_verifier(tail[index:], depth=depth + 1) for index in range(1, len(tail)))
     shell_payload = rt._shell_wrapper_payload(tokens)
     if shell_payload is not None:
-        return depth < _MAX_DEPTH and _is_raw_verification_text(shell_payload, depth=depth + 1)
+        return _is_raw_verification_text(shell_payload, depth=depth + 1)
     if command == "go" and names[1:2] in (["test"], ["vet"]):
         return True
     if command == "cargo" and names[1:2] in (["test"], ["clippy"]):
         return True
     if command == "make":
-        tail, ambiguous = _strip_make_global_options(tokens[1:])
+        tail, ambiguous = strip_make_global_options(tokens[1:])
         if ambiguous:
             return _ambiguous_tail_contains_verifier(tokens[1:], depth=depth)
         tail_names = [Path(token).name for token in tail]
@@ -517,6 +519,8 @@ def _segment_is_verifier(segment: list[str], *, depth: int = 0) -> bool:
 
 
 def _is_raw_verification_text(command: str, *, depth: int) -> bool:
+    if depth > _MAX_DEPTH:
+        return False
     rt = _rt()
     command = rt._strip_heredoc_bodies(command)
     try:
@@ -531,8 +535,6 @@ def _is_raw_verification_text(command: str, *, depth: int) -> bool:
             segments[-1].append(token)
     if any(_segment_is_verifier(segment, depth=depth) for segment in segments):
         return True
-    if depth >= _MAX_DEPTH:
-        return False
     return any(_is_raw_verification_text(nested, depth=depth + 1) for nested in _nested_shell_commands(command))
 
 

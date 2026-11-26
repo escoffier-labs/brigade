@@ -2664,16 +2664,37 @@ def test_posttooluse_read_external_skill_does_not_set_exercised_artifact(tmp_pat
     assert "exercised_artifact_id" not in state
 
 
-def test_verify_replacement_names_the_hook_target_when_the_verifier_checkout_differs(tmp_path: Path):
-    hook_target = tmp_path / "hook"
-    verify_target = tmp_path / "verify"
-    hook_target.mkdir()
-    verify_target.mkdir()
-    same = runtime._verify_replacement(hook_target, "pytest", "0123456789abcdef", hook_target=None)
-    assert "BRIGADE_CLAUDE_SESSION_TARGET" not in same
-    other = runtime._verify_replacement(verify_target, "pytest", "0123456789abcdef", hook_target=hook_target)
-    assert f"BRIGADE_CLAUDE_SESSION_TARGET={hook_target}" in other
-    assert "--capture auto" in other
+@pytest.mark.parametrize("capture", [None, "taste"], ids=["read-only-skill", "typed-capture"])
+def test_stop_guidance_uses_typed_capture_or_auto(tmp_path: Path, monkeypatch, capture):
+    target = _wired_claude(tmp_path)
+    monkeypatch.setattr(runtime, "_run_brief", lambda _target: "brief")
+    monkeypatch.setattr(runtime, "_run_recall", lambda *_args, **_kwargs: "")
+    stop_payload = _unverified_write_stop(target, session_id="capture-guide")
+    skill = target / ".claude" / "skills" / "taste" / "SKILL.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("# taste\n")
+    runtime.handle_payload(
+        "PostToolUse",
+        _payload(
+            target, "PostToolUse", session_id="capture-guide", tool_name="Read", tool_input={"file_path": str(skill)}
+        ),
+    )
+    if capture is not None:
+        runtime.handle_payload(
+            "PostToolUse",
+            _payload(
+                target,
+                "PostToolUse",
+                session_id="capture-guide",
+                tool_name="Bash",
+                tool_input={"command": f"brigade work verify run --capture {capture}"},
+            ),
+        )
+
+    result = runtime.handle_payload("Stop", stop_payload)
+    assert result["decision"] == "block"
+    assert f"--capture {capture or 'auto'}" in result["reason"]
+    assert "BRIGADE_CLAUDE_SESSION_TARGET" not in result["reason"]
 
 
 def test_posttooluse_routed_verify_records_capture_artifact(tmp_path: Path):

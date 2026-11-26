@@ -1,10 +1,9 @@
 """Ask for the tracked manifest verify when a change touches a manifest subject (#2589).
 
 An ad-hoc ``--command`` verify never produces a scoreable trial, because only a
-tracked manifest builds the subject binding. When the working tree changed the
-exact ``subject_path`` of a tracked manifest, the PreToolUse deny names that
-manifest's verify next to the agent's own check, and the Stop gate holds closeout
-until a completed receipt from that manifest postdates the write. Every probe
+tracked manifest builds the subject binding. When a session writes the exact
+``subject_path`` of a tracked manifest, the Stop gate can hold closeout until a
+completed receipt from that manifest postdates the write. Every probe
 here is advisory: any git, filesystem or manifest error reads as "no match" so
 the hooks fall back to their pre-existing behavior.
 """

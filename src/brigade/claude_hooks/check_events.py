@@ -119,15 +119,21 @@ def _on_event(
 def failure_followup(
     payload: dict[str, Any], target: Path, session_id: str, state: dict[str, Any]
 ) -> dict[str, Any] | None:
-    rt = _rt()
+    if payload.get("tool_name") != "Bash":
+        return None
     raw_tool_input = payload.get("tool_input")
     tool_input = raw_tool_input if isinstance(raw_tool_input, dict) else {}
     command = tool_input.get("command")
-    verifier = observed_verifiers.is_raw_verification(command) or rt._is_routed_verify(command)
-    if payload.get("tool_name") != "Bash" or not verifier:
+    if not isinstance(command, str) or len(command) > 65536:
         return None
-    modes = observed_verifiers.governing_modes(command, payload.get("cwd"), target)
-    strict = any(mode == work_mode.MODE_STRICT for _, mode in modes) if modes else work_mode.is_strict(target)
+    rt = _rt()
+    try:
+        if not (observed_verifiers.is_raw_verification(command) or rt._is_routed_verify(command)):
+            return None
+        modes = observed_verifiers.governing_modes(command, payload.get("cwd"), target)
+        strict = any(mode == work_mode.MODE_STRICT for _, mode in modes) if modes else work_mode.is_strict(target)
+    except Exception:  # Advisory recognition must not interrupt hook handling.
+        return None
     if not strict:
         return None
     from .. import outcome_attribution, outcome_cmd

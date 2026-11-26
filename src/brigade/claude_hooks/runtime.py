@@ -568,6 +568,8 @@ def wired_target_from_payload(payload: dict[str, Any], *, attribute_writes: bool
     tool_input = _as_tool_input(payload.get("tool_input"))
     if tool_name == "Bash":
         command = str(tool_input.get("command") or "")
+        if "\x00" in command:
+            return resolve_wired_target(payload.get("cwd"))
         for written_target, confident in (
             write_attribution.bash_scopes(command, cwd).items() if attribute_writes else ()
         ):
@@ -1446,47 +1448,27 @@ def _record_exercised_artifact(state: dict[str, Any], artifact_id: str | None, *
     return True
 
 
-def exercised_artifact_for_fingerprint(target: Path, session_fingerprint: str) -> str | None:
-    """Look up an exercised artifact id for a Claude session fingerprint."""
-    for state in iter_session_states(target, limit=MAX_RECENT_SESSION_STATES):
-        if state.get("session_fingerprint") != session_fingerprint:
-            continue
-        artifact_id = state.get("exercised_artifact_id")
-        if isinstance(artifact_id, str) and artifact_id.strip():
-            return artifact_id.strip()
-    return None
-
-
 def _verify_replacement(
     target: Path,
     command: str | list[str],
     session_fingerprint: str,
     *,
     capture_artifact_id: str | None = None,
-    hook_target: Path | None = None,
 ) -> str:
     from .. import outcome_attribution
 
     # No explicit or exercised id: let verify resolve skills from this session (veto-only).
-    artifact_id = (
-        capture_artifact_id
-        or exercised_artifact_for_fingerprint(target, session_fingerprint)
-        or outcome_attribution.AUTO_CAPTURE
-    )
+    artifact_id = capture_artifact_id or outcome_attribution.AUTO_CAPTURE
     option, value = ("--command", command) if isinstance(command, str) else ("--argv-json", json.dumps(command))
     return (
-        f"{_verify_env_prefix(session_fingerprint, hook_target)}"
+        f"{_verify_env_prefix(session_fingerprint)}"
         f"brigade work verify run --target {shlex.quote(str(target))} "
         f"{option} {shlex.quote(value)} --capture {shlex.quote(artifact_id)}"
     )
 
 
-def _verify_env_prefix(session_fingerprint: str, hook_target: Path | None) -> str:
-    from .. import outcome_attribution
-
-    # The session state lives where the hook fired; point a verifier in another checkout at it.
-    state_at = f"{outcome_attribution.SESSION_TARGET_ENV}={shlex.quote(str(hook_target))} " if hook_target else ""
-    return f"{CLAUDE_SESSION_ENV}={shlex.quote(session_fingerprint)} {state_at}"
+def _verify_env_prefix(session_fingerprint: str) -> str:
+    return f"{CLAUDE_SESSION_ENV}={shlex.quote(session_fingerprint)} "
 
 
 def _new_state(target: Path, session_id: str, repo_fp: str | None, *, task_epoch: str | None = None) -> dict[str, Any]:
@@ -2054,7 +2036,7 @@ def _handle_event(
             manifest_failures += manifest_loop.stop_failures(
                 stop_target,
                 stop_state,
-                _verify_env_prefix(fingerprint, None),
+                _verify_env_prefix(fingerprint),
                 is_foreign=functools.partial(_shared_tree_block_is_foreign, stop_target, session_id, stop_state, gate),
             )
         if blocking_failures or manifest_failures:

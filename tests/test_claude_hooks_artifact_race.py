@@ -88,7 +88,6 @@ def test_read_during_bash_preserves_receipt_attribution(target, monkeypatch, sta
     state = runtime.read_session_state(target, SESSION)
     assert state is not None
     assert (state.get("exercised_artifact_id"), state.get("exercised_artifact_kind")) == ("taste", "skill")
-    assert runtime.exercised_artifact_for_fingerprint(target, state["session_fingerprint"]) == "taste"
 
     # Exercise the receipt path with the artifact preserved across the interleaved read.
     monkeypatch.setenv(runtime.CLAUDE_SESSION_ENV, state["session_fingerprint"])
