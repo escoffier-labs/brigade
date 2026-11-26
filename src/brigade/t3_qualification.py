@@ -40,6 +40,7 @@ WORKLOAD = {
     "runner": "src/brigade/run_batch.py",
 }
 ARMS = ("t3", "run-batch")
+CAMPAIGN_SCHEMA = "brigade.t3_qualification_campaign.v1"
 METRICS = {
     "queue_and_startup": "queue",
     "planning": "planning",
@@ -63,8 +64,6 @@ def envelope(base_sha: str, brigade_commit: str, workload_digest: str) -> dict[s
         "model": evidence.MODEL,
         "effort": evidence.EFFORT,
         "service_tier": evidence.TIER,
-        "parent_model": evidence.MODEL,
-        "parent_effort": "medium",
         "isolation": "worktree",
         "max_workers": evidence.SLOTS,
         "read_only": True,
@@ -96,8 +95,15 @@ def summarize(rows: list[dict[str, Any]]) -> dict[str, Any]:
             and record["source_revision"] == expected["base_sha"]
             and record["brigade_commit"] == expected["brigade_commit"]
             and record["isolation"] == expected["isolation"]
-            and record["concurrency"] == expected["max_workers"],
+            and record["concurrency"] == expected["max_workers"]
+            and record["read_only_enforcement"] == evidence.READ_ONLY_ENFORCEMENT[arm],
             "batch record differs from the matched envelope",
+        )
+        parent_settings = row["parent"]
+        require(
+            parent_settings
+            == ({"model": evidence.MODEL, "effort": "medium", "service_tier": evidence.TIER} if arm == "t3" else None),
+            "unexpected T3 parent settings",
         )
         if index % 2 == 0:
             require(row["request_id"] not in requests, "shared batch request reused in a different pair")
@@ -251,6 +257,7 @@ def _write_brief(folder: Path, context: dict[str, Any], roster_path: Path) -> No
             "--json",
         ),
         mark=shell(*prefix, "mark", str(folder)),
+        wake_marks="\n       ".join(shell(*prefix, "mark", str(folder), f"wake-{task}") for task in WORKLOAD),
         open=shell(
             *CLI, "t3", "open", str(folder.parent / "batch.json"), "--target", workspace, "--roster", str(roster_path)
         ),
@@ -348,19 +355,27 @@ def _run_campaign(
     target: NativeTarget,
 ) -> None:
     rows: list[dict[str, Any]] = []
-    campaign_id = uuid.uuid4().hex
+    campaign = {
+        "schema": CAMPAIGN_SCHEMA,
+        "campaign_id": uuid.uuid4().hex,
+        "workspace": str(workspace),
+        "base_sha": base,
+        "brigade_commit": args.brigade_commit,
+        "seat": args.seat,
+    }
+    localio.write_json_exclusive(output / "campaign.json", campaign)
     for pair, arm in schedule():
         evidence.require(
             _preflight(workspace, roster_path, args.seat, base) == target, "retained roster target changed"
         )
         pair_dir = output / f"pair-{pair:02d}"
-        request = f"qualification-{campaign_id}-{pair}"
+        request, run_ids = _pair_identities(campaign, pair)
         payload, answers = prepare_batch(workspace, base, args.seat, request)
         fingerprint = run_batch.request_fingerprint(payload, base_sha=base)
-        digest = run_batch.request_fingerprint({**payload, "request_id": "qualification-workload"}, base_sha=base)
-        digest_id = hashlib.sha256(request.encode()).hexdigest()
-        run_ids = {"t3": f"t3-{digest_id}", "run-batch": f"batch-{digest_id}"}
         context = {
+            "qualification": "t3",
+            "pair": pair,
+            "arm": arm,
             "workspace": str(workspace),
             "request_id": request,
             "base_sha": base,
@@ -385,32 +400,14 @@ def _run_campaign(
         for log in ("interventions.jsonl", "errors.jsonl"):
             (folder / log).touch(exist_ok=False)
         try:
-            offered = time.monotonic_ns()
+            localio.write_json_exclusive(folder / "offered.json", evidence.clock())
             if arm == "t3":
                 _write_brief(folder, context, roster_path)
                 _wait_for_parent(folder, args.parent_timeout)
             else:
                 _direct(workspace, roster_path, folder, sessions, context)
-            measurement_path = folder / "measurements.json"
-            run_dir = native_t3_capacity.runs_root(workspace) / run_ids[arm]
-            record = orca_qualification.collect(arm, run_dir, folder / "status.json", measurement_path)
-            measurements = evidence.read(measurement_path)
-            start = measurements["opened"]["monotonic_ns"]
-            closed = time.monotonic_ns()
-            evidence.require(
-                (not rows or rows[-1]["closed_ns"] <= start)
-                and offered <= start <= measurements["verified"]["monotonic_ns"] <= closed,
-                "batch overlap or stale measurement",
-            )
-            row = {
-                "pair": pair,
-                "start_ns": start,
-                "closed_ns": closed,
-                "request_id": request,
-                "batch_fingerprint": fingerprint,
-                "envelope": envelope(base, args.brigade_commit, digest),
-                "record": record,
-            }
+            row = _collect_row(output, pair, arm, closing=True)
+            evidence.require(not rows or rows[-1]["closed_ns"] <= row["start_ns"], "batch overlap")
             localio.write_json_exclusive(folder / "record.json", row)
             rows.append(row)
         except QUALIFICATION_ERRORS as exc:
@@ -421,10 +418,90 @@ def _run_campaign(
     localio.write_json_exclusive(output / "report.json", summarize(rows))
 
 
+def _pair_identities(campaign: dict[str, Any], pair: int) -> tuple[str, dict[str, str]]:
+    evidence.require(campaign["schema"] == CAMPAIGN_SCHEMA, "invalid qualification campaign")
+    evidence.require(re.fullmatch(r"[0-9a-f]{32}", campaign["campaign_id"]), "invalid campaign identity")
+    request = f"qualification-{campaign['campaign_id']}-{pair}"
+    digest = hashlib.sha256(request.encode()).hexdigest()
+    return request, {"t3": f"t3-{digest}", "run-batch": f"batch-{digest}"}
+
+
+def _collect_row(output: Path, pair: int, arm: str, *, closing: bool = False) -> dict[str, Any]:
+    campaign = evidence.read(output / "campaign.json")
+    pair_dir = output / f"pair-{pair:02d}"
+    folder = pair_dir / arm
+    evidence.require(not (folder / "failure.json").exists(), "qualification arm failed")
+    context = evidence.read(folder / "expected.json")
+    request, run_ids = _pair_identities(campaign, pair)
+    evidence.require(
+        type(context["pair"]) is int
+        and context["pair"] == pair
+        and context["arm"] == arm
+        and context["qualification"] == "t3"
+        and context["request_id"] == request
+        and context["run_ids"] == run_ids
+        and all(context[key] == campaign[key] for key in ("workspace", "base_sha", "brigade_commit", "seat")),
+        "pair directory does not match its qualification identities",
+    )
+    workspace = Path(campaign["workspace"]).resolve()
+    base = campaign["base_sha"]
+    payload, answers = prepare_batch(workspace, base, campaign["seat"], request)
+    fingerprint = run_batch.request_fingerprint(payload, base_sha=base)
+    evidence.require(
+        evidence.read(pair_dir / "batch.json") == payload
+        and context["batch_fingerprint"] == fingerprint
+        and context["answers"] == answers,
+        "pair does not bind the shared batch fingerprint and pinned answers",
+    )
+    record = orca_qualification.collect(
+        arm,
+        native_t3_capacity.runs_root(workspace) / run_ids[arm],
+        folder / "status.json",
+        folder / "measurements.json",
+        qualification="t3",
+    )
+    parent = evidence.parent_settings(folder, context) if arm == "t3" else None
+    if closing:
+        evidence.check_native_idle(workspace)
+        localio.write_json_exclusive(folder / "closed.json", {**evidence.clock(), "native_live": 0})
+    close_mark = evidence.read(folder / "closed.json")
+    evidence.require(evidence.count(close_mark["native_live"]) == 0, "batch did not close with zero native capacity")
+    offered, start, verified = (
+        evidence.count(evidence.read(folder / f"{mark}.json")["monotonic_ns"])
+        for mark in ("offered", "opened", "verified")
+    )
+    closed = evidence.count(close_mark["monotonic_ns"])
+    evidence.require(offered <= start < verified <= closed, "batch has invalid or stale measurement marks")
+    digest = run_batch.request_fingerprint({**payload, "request_id": "qualification-workload"}, base_sha=base)
+    return {
+        "pair": pair,
+        "start_ns": start,
+        "closed_ns": closed,
+        "run_id": run_ids[arm],
+        "request_id": request,
+        "batch_fingerprint": fingerprint,
+        "parent": parent,
+        "envelope": envelope(base, campaign["brigade_commit"], digest),
+        "record": record,
+    }
+
+
+def report_campaign(output: Path) -> dict[str, Any]:
+    rows = []
+    for pair, arm in schedule():
+        saved = output / f"pair-{pair:02d}" / arm / "record.json"
+        evidence.require(saved.is_file(), "report requires five complete pairs")
+        row = _collect_row(output, pair, arm)
+        evidence.require(evidence.read(saved) == row, f"pair {pair} {arm} record differs from retained evidence")
+        rows.append(row)
+    return summarize(rows)
+
+
 def finish_t3(folder: Path) -> None:
     context = evidence.read(folder / "expected.json")
     workspace = Path(context["workspace"])
     run_id = context["run_ids"]["t3"]
+    evidence.parent_settings(folder, context)
     status = native_t3_lifecycle.status(workspace=workspace, run_id=run_id)
     localio.write_json_exclusive(folder / "status.json", status)
     measurements = evidence.measure("t3", workspace, native_t3_capacity.runs_root(workspace) / run_id, folder)
@@ -456,7 +533,7 @@ def main() -> None:
     campaign.add_argument("--seat", required=True)
     campaign.add_argument("--brigade-commit", required=True)
     campaign.add_argument("--parent-timeout", type=float, default=3600)
-    report = commands.add_parser("report", help="Rebuild a complete report from the ten saved records.")
+    report = commands.add_parser("report", help="Rebuild a complete report from retained batch evidence.")
     report.add_argument("output", type=Path)
     for name in ("mark", "finish-t3", "abort-t3"):
         action = commands.add_parser(name)
@@ -474,9 +551,7 @@ def main() -> None:
             run(args)
             print(args.output / "report.json")
         elif args.command == "report":
-            paths = [args.output / f"pair-{pair:02d}" / arm / "record.json" for pair, arm in schedule()]
-            evidence.require(all(path.is_file() for path in paths), "report requires five complete pairs")
-            localio.write_json(args.output / "report.json", summarize([evidence.read(path) for path in paths]))
+            localio.write_json(args.output / "report.json", report_campaign(args.output))
             print(args.output / "report.json")
         elif args.command == "mark":
             localio.write_json_exclusive(args.folder / f"{args.name}.json", evidence.clock())

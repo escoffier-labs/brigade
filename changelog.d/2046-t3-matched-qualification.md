@@ -1,1 +1,2 @@
 - Add a five-pair qualification harness for governed native T3 and explicit Brigade batches, with shared inputs, verified timing, and complete-pair reporting.
+- Rebuild matched reports from retained evidence and reject records that disagree with the run, readiness, worktrees, or turn measurements.

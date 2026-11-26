@@ -30,7 +30,8 @@ admitted, direct Codex worker seat with no fallback, a read-only-compatible
 sandbox, and a [native T3 target](t3-governed-delegation.md#seat-bindings) for
 the same seat. Set the target's `reasoningEffort` to `low` and `serviceTier`
 to `default`. If the target sets `max_live`, it must allow three workers.
-Confirm the parent settings in T3. Set the direct worker's effective Codex
+The collector checks the parent model, effort, and tier in the saved T3
+capabilities reply. Set the direct worker's effective Codex
 configuration to standard service and keep its local session logs available
 to the verifier. Use the workload checkout's effective roster for both
 routes because T3 claims resolve that roster. Use distinct workload and
@@ -53,10 +54,11 @@ independent expected answers. The parent checks readiness, opens the run,
 claims and delegates the three tasks, then records observations from native
 completion wakes. It verifies and acknowledges the exact results before
 finalizing. The parent's finish command verifies the retained outputs and
-publishes `measurements.json` atomically. The runner checks those measurements
-against Brigade's durable evidence before advancing. The runner waits up to
-one hour by default for each parent submission. `--parent-timeout` sets that
-limit in seconds.
+publishes `measurements.json` atomically. The runner checks the readiness
+receipt and capabilities report, requires the launch and per-task wake marks
+in monotonic order, and checks the measurements against the durable evidence
+before advancing. It waits up to one hour by default for each parent
+submission. `--parent-timeout` sets that limit in seconds.
 
 A refusal, inconclusive observation, evidence mismatch, or timeout stops the
 campaign. Keep the failure marker, raw evidence, and any completed batch
@@ -86,17 +88,24 @@ tool replies, and native identities.
   journaled facts to avoid counting an action twice.
 
 T3's `task_status` identifies the exact terminal child run. The matching T3
-activity run supplies `startedAt` and `completedAt`. The parent preserves the
-raw replies and the harness records those timestamps alongside wall and
-monotonic clock marks in `measurements.json`. Brigade's governed journal
+activity run supplies `startedAt` and `completedAt`. When the terminal run
+differs from the initial delegation, the measurements retain both identities.
+The parent preserves the raw replies. The harness records those timestamps
+alongside wall and monotonic clock marks in `measurements.json`. Brigade's governed journal
 does not record native turn starts or ends. The direct route reads start and
 end timestamps and model, effort, and tier from the local Codex session for
-each isolated worktree. Before dispatch it reads the effective tier through
-Codex's prompt-free `config/read` request. Missing or ambiguous timing evidence blocks the
-report. The harness checks wall-clock drift against the monotonic interval.
+each isolated worktree and keeps a private copy of that session in the arm
+directory for replay. Before dispatch it reads the effective tier through
+Codex's prompt-free `config/read` request. Missing or ambiguous timing
+evidence blocks the report. The harness allows up to 50 ms of wall-clock drift
+and maps phase boundaries between the opening and verification monotonic marks.
 
 `report.json` contains each batch record and per-arm medians, error totals,
 and intervention totals. Rebuild it with
 `python -m brigade.t3_qualification report CAMPAIGN_DIRECTORY`.
+The report rebuilds each row from the retained evidence, including the
+workspace's native capacity at batch close, and compares it against the saved
+row. Keep the campaign directory and Brigade journals available for replay.
+The worker worktrees must still be clean at the pinned revision.
 The collector requires all five verified pairs with alternating order, a
 matched envelope and no overlapping batch intervals before computing medians.

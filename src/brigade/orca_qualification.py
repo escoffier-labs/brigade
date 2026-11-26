@@ -161,17 +161,24 @@ def _matched_configuration(
     return observed, mismatches
 
 
-def collect(arm: str, run_dir: Path, status_path: Path, measurements_path: Path) -> dict[str, Any]:
-    """Read the durable task ledger and the saved post-batch observations."""
+def collect(
+    arm: str,
+    run_dir: Path,
+    status_path: Path,
+    measurements_path: Path,
+    *,
+    qualification: str = "orca",
+) -> dict[str, Any]:
+    """Read the task ledger according to the caller's qualification context."""
     measurements = _read(measurements_path)
-    if arm == "t3" or (
-        arm == "run-batch" and measurements.get("schema") == t3_qualification_evidence.MEASUREMENTS_SCHEMA
-    ):
+    if qualification == "t3" or arm == "t3":
         if measurements.get("schema") != t3_qualification_evidence.MEASUREMENTS_SCHEMA:
             raise ValueError("expected matched qualification measurements")
         return t3_qualification_evidence.collect(
             arm, run_dir, _read(status_path), measurements, measurements_path.parent
         )
+    if qualification != "orca":
+        raise ValueError("unknown qualification context")
     model, effort = measurements["model"], measurements["effort"]
     concurrency = _count(measurements["concurrency"])
     if arm not in ARMS or model not in MODELS or effort not in EFFORTS or not 1 <= concurrency <= len(TASKS):
@@ -294,9 +301,10 @@ def main() -> None:
     parser.add_argument("run_dir", type=Path)
     parser.add_argument("status", type=Path)
     parser.add_argument("measurements", type=Path)
+    parser.add_argument("--qualification", choices=("orca", "t3"), default="orca")
     args = parser.parse_args()
     try:
-        record = collect(args.arm, args.run_dir, args.status, args.measurements)
+        record = collect(args.arm, args.run_dir, args.status, args.measurements, qualification=args.qualification)
     except (
         OSError,
         ValueError,
