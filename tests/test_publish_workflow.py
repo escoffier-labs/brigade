@@ -642,14 +642,13 @@ def test_read_only_candidate_modes_select_the_expected_preparation_and_acceptanc
         flags = (["--candidate"] if mode == "current-source" else []) + (
             ["--stamp-publishing-repository"] if mode == "stable-payload" and flag == "--out" else []
         )
-        assert args[2:] == [*flags, flag, str(tmp_path / "npm-artifacts")]
+        assert args[2:-1] == [*flags, flag]
+        assert Path(args[-1]) == tmp_path / "npm-artifacts"
     assert ("--compat-archive" in accept) == (mode == "stable-payload")
     if mode == "stable-payload":
         version = json.loads((ROOT / "npm/feasibility/runtime.json").read_text())["version"]
-        assert accept[-2:] == [
-            "--compat-archive",
-            str(tmp_path / "npm-compat" / f"escoffier-labs-brigade-{version}.tgz"),
-        ]
+        assert accept[-2] == "--compat-archive"
+        assert Path(accept[-1]) == tmp_path / "npm-compat" / f"escoffier-labs-brigade-{version}.tgz"
     compat_steps = [
         step
         for job in (jobs["package"], jobs["acceptance"])
@@ -667,17 +666,23 @@ def test_read_only_candidate_modes_select_the_expected_preparation_and_acceptanc
     )
 
 
-@pytest.mark.parametrize("sha_matches", [False, True])
-def test_stable_candidate_dispatch_requires_the_expected_sha(sha_matches):
+@pytest.mark.parametrize(
+    ("expected_sha", "exit_code"),
+    [("a" * 40, 0), ("", 1), ("b" * 40, 1)],
+    ids=["match", "missing", "mismatch"],
+)
+def test_stable_candidate_dispatch_requires_the_expected_sha(expected_sha, exit_code):
     import os
+
+    from tests.test_download_metrics import _workflow_bash
 
     workflow = _load_workflow_yaml(ROOT / ".github/workflows/npm-feasibility.yml")
     guard = next(step for step in workflow["jobs"]["package"]["steps"] if "EXPECTED_SHA" in step.get("env", {}))
     assert guard["if"] == "env.PAYLOAD_MODE == 'stable-payload'"
     assert guard["env"]["EXPECTED_SHA"] == "${{ inputs.expected_sha }}"
-    env = {**os.environ, "GITHUB_SHA": "a" * 40, "EXPECTED_SHA": "a" * 40 if sha_matches else ""}
-    result = subprocess.run(["bash", "-e", "-c", guard["run"]], env=env, check=False)
-    assert (result.returncode == 0) == sha_matches
+    env = {**os.environ, "GITHUB_SHA": "a" * 40, "EXPECTED_SHA": expected_sha}
+    result = subprocess.run([_workflow_bash(), "-e", "-c", guard["run"]], env=env, check=False)
+    assert result.returncode == exit_code
 
 
 def test_npm_release_workflow_has_dispatch_source_oidc_and_native_gates():
