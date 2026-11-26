@@ -4,6 +4,8 @@ A message sent to a node shows up in a running Claude Code or Codex session on t
 
 ## Capability table
 
+### Messaging
+
 Connector tools depend on runtime settings and grants. For a ChatGPT dot, `hosted-subscription` means an enabled [MCP Events](fleet-mcp-events.md) subscription can wake a task that checks its inbox. `next-start` means the agent can check its inbox when a task starts.
 
 | Agent kind | Principal source | Connector profile | Send | Read | Ack | Reply | Status | Live delivery hook events | Wake | Limits | Evidence |
@@ -12,7 +14,19 @@ Connector tools depend on runtime settings and grants. For a ChatGPT dot, `hoste
 | `local-codex` | `node` | - | `fleet_send` | `fleet_inbox` | `fleet_ack` | `fleet_reply` | `fleet_sent` | `PostToolUse`, `UserPromptSubmit` | `next-event` | Tool-event polls are at least 20 seconds apart. | [Observed](https://github.com/escoffier-labs/brigadestack/issues/1887#issuecomment-7179839383) |
 | `duet` | `agent:duet` | `duet` | `message_send` | `inbox_list` | `inbox_ack` | `inbox_reply` | `message_status` | - | `next-start` | `messaging_enabled` required for send and reply. Send and reply share 20 messages per hour. | [Observed](https://github.com/escoffier-labs/brigadestack/issues/2592#issuecomment-7180093019) |
 | `dot` | `agent:miller` | `dot` | `message_send` | `inbox_list` | `inbox_ack` | `inbox_reply` | `message_status` | - | `hosted-subscription` | Send follows `messaging_enabled`, or `dispatch_enabled` when unset. Subscription requires `events_enabled`. | - |
-| `cloud-agent` | `agent:cloud-agent` | `cloud-agent` | `message_send` | `inbox_list` | `inbox_ack` | `inbox_reply` | - | - | `next-start` | `messaging_enabled: true` required for all messaging tools. All cloud workers share one principal, so the Hub cannot tell one cloud run from another. Send and reply share 20 messages per hour. | - |
+| `cloud-agent` | `agent:cloud-agent` | `cloud-agent` | `message_send` | `inbox_list` | `inbox_ack` | `inbox_reply` | - | - | `next-start` | `messaging_enabled: true` required for all messaging tools. All cloud workers share one principal, so the Hub cannot tell one cloud run from another. The deployed `tool_grants` deny `handoff_write`. Send and reply share 20 messages per hour. | - |
+
+### Memory and work visibility
+
+The connector columns list tools the profile can expose. The status and limits cells describe current access. Dot and Duet write handoff files to the host inbox without a Hub principal. Local memory search uses the node credential by default and supports a memory hub override.
+
+| Agent kind | Memory principal | Memory read | Handoff write | Work view | Memory status | Work status |
+| --- | --- | --- | --- | --- | --- | --- |
+| `local-claude-code` | `node` | `brigade memory search` | `brigade handoff draft` | `brigade fleet work list`, `brigade fleet sessions`, `brigade fleet claims` | Hub search requires `[hub]` read or sync mode. Handoff drafts go to a local inbox. | - |
+| `local-codex` | `node` | `brigade memory search` | `brigade handoff draft` | `brigade fleet work list`, `brigade fleet sessions`, `brigade fleet claims` | Hub search requires `[hub]` read or sync mode. Handoff drafts go to a local inbox. | - |
+| `duet` | `host [memory_hub] read credential` | `memory_search`, `memory_card` | `handoff_write` | `fleet_work_list`, `fleet_sessions`, `fleet_overview` | - | - |
+| `dot` | `host [memory_hub] read credential` | `memory_search`, `memory_card` | `handoff_write` | `fleet_work_list`, `fleet_sessions`, `fleet_overview` | - | - |
+| `cloud-agent` | `agent:cloud-agent` | `memory_search`, `memory_card` | `handoff_write` | - | not yet: the connector has no memory scope granted. Read access to the shared fleet scope only (never private scopes) is a pending decision | not yet: the cloud-agent profile has no work view |
 
 ## Wake limits
 
