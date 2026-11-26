@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, completions, context_cmd, proc
+from brigade import cli, code_graph_background, completions, context_cmd, proc
 from brigade.cli.code import ENGINE_VERBS
 
 NEW_VERBS = sorted(set(ENGINE_VERBS) - {"sync", "context", "impact"})
@@ -28,6 +28,7 @@ def _patch_engine(monkeypatch, *, run_calls: list | None = None, stderr: str = "
         return proc.Result(0, stdout, stderr)
 
     monkeypatch.setattr(context_cmd, "_graphtrail_bin", lambda: "/fake/graphtrail")
+    monkeypatch.setattr(code_graph_background, "may_run_killable_foreground_sync", lambda: True)
     monkeypatch.setattr(proc, "run", fake_run)
 
 
