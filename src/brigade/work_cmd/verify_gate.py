@@ -192,7 +192,11 @@ def _fallback_policy(
 def _load_policy(target: Path, *, deadline: float | None = None) -> _GatePolicy:
     base_deadline = None if deadline is None else deadline - _HEAD_FALLBACK_BUDGET_SECONDS
     try:
-        base = verify_manifest_git.resolve_base(target, deadline=base_deadline)
+        base = (
+            verify_manifest_git.resolve_verify_base(target)
+            if base_deadline is None
+            else verify_manifest_git.resolve_base(target, deadline=base_deadline)
+        )
     except subprocess.TimeoutExpired:
         return _fallback_policy(target, deadline, "Git timed out while resolving the base.")
     if base.status != "resolved" or not base.commit:

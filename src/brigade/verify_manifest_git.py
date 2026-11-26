@@ -5,6 +5,9 @@ import hashlib
 import json
 import os
 import subprocess
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from functools import cached_property, partial
 from pathlib import Path
@@ -78,6 +81,44 @@ def resolve_base(
 ) -> BaseResolution:
     """Find the trusted base for HEAD or a supplied commit object ID."""
     return _BaseResolver(target, deadline=deadline, git_env=git_env).resolve(commit)
+
+
+@dataclass
+class _VerifyBase:
+    target: Path
+    resolution: BaseResolution | None = None
+
+
+_VERIFY_BASE: ContextVar[_VerifyBase | None] = ContextVar("_VERIFY_BASE", default=None)
+
+
+@contextmanager
+def verify_base_scope(target: Path) -> Iterator[None]:
+    """Share successful base resolution between the verdict and its advisory manifest list."""
+    token = _VERIFY_BASE.set(_VerifyBase(target))
+    try:
+        yield
+    finally:
+        _VERIFY_BASE.reset(token)
+
+
+def clear_verify_base(target: Path) -> None:
+    snapshot = _VERIFY_BASE.get()
+    if snapshot is not None and snapshot.target == target:
+        snapshot.resolution = None
+
+
+def resolve_verify_base(target: Path) -> BaseResolution:
+    snapshot = _VERIFY_BASE.get()
+    if snapshot is None or snapshot.target != target:
+        return resolve_base(target)
+    if snapshot.resolution is not None:
+        return snapshot.resolution
+    resolution = resolve_base(target)
+    # An unavailable base may be transient. Let the next consumer retry.
+    if resolution.status == "resolved":
+        snapshot.resolution = resolution
+    return resolution
 
 
 class _BaseResolver:

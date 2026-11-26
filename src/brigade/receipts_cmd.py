@@ -8,7 +8,9 @@ import re
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import cached_property
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -822,6 +824,16 @@ def _github_remote_parts(remote: str) -> tuple[str, str, str] | None:
     return None
 
 
+@dataclass(frozen=True)
+class _ExportOrigin:
+    target: Path
+
+    @cached_property
+    def parts(self) -> tuple[str, str, str] | None:
+        remote = _git_value(self.target, "remote", "get-url", "origin")
+        return _github_remote_parts(remote) if remote else None
+
+
 def _receipt_git(payload: dict[str, Any]) -> dict[str, Any] | None:
     git = payload.get("git")
     if not isinstance(git, dict):
@@ -833,14 +845,11 @@ def _receipt_git(payload: dict[str, Any]) -> dict[str, Any] | None:
     return copied if copied else None
 
 
-def _git_commit_links(item_external_id: str, payload: dict[str, Any], target: Path) -> list[dict[str, Any]]:
+def _git_commit_links(item_external_id: str, payload: dict[str, Any], origin: _ExportOrigin) -> list[dict[str, Any]]:
     git = _receipt_git(payload)
     if git is None:
         return []
-    remote = _git_value(target, "remote", "get-url", "origin")
-    if remote is None:
-        return []
-    parts = _github_remote_parts(remote)
+    parts = origin.parts
     if parts is None:
         return []
     host, org, repo = parts
@@ -860,28 +869,27 @@ def _metadata_with_git(metadata: dict[str, Any], payload: dict[str, Any]) -> dic
     return metadata
 
 
-def _code_reference_repository(target: Path) -> str | None:
-    remote = _git_value(target, "remote", "get-url", "origin")
-    if remote is None:
-        return None
-    parts = _github_remote_parts(remote)
+def _code_reference_repository(origin: _ExportOrigin) -> str | None:
+    parts = origin.parts
     if parts is None:
         return None
     _, owner, repository = parts
     return f"{owner}/{repository}"
 
 
-def _miseledger_project(target: Path) -> str:
-    repository = _code_reference_repository(target)
+def _miseledger_project(origin: _ExportOrigin) -> str:
+    repository = _code_reference_repository(origin)
     if repository is None:
-        return target.name
+        return origin.target.name
     return repository.rsplit("/", 1)[-1]
 
 
-def _code_references_from_delta(payload: dict[str, Any], target: Path) -> tuple[list[dict[str, Any]], int, bool]:
+def _code_references_from_delta(
+    payload: dict[str, Any], target: Path, *, origin: _ExportOrigin | None = None
+) -> tuple[list[dict[str, Any]], int, bool]:
     delta = payload.get("code_graph_delta")
     git = _receipt_git(payload)
-    repository = _code_reference_repository(target)
+    repository = _code_reference_repository(origin or _ExportOrigin(target))
     if not isinstance(delta, dict) or git is None or repository is None:
         return [], 0, False
     commit = git.get("head")
@@ -951,8 +959,10 @@ def _code_references_from_delta(payload: dict[str, Any], target: Path) -> tuple[
     return references, total, truncated
 
 
-def _metadata_with_code_references(metadata: dict[str, Any], payload: dict[str, Any], target: Path) -> dict[str, Any]:
-    references, total, truncated = _code_references_from_delta(payload, target)
+def _metadata_with_code_references(
+    metadata: dict[str, Any], payload: dict[str, Any], origin: _ExportOrigin
+) -> dict[str, Any]:
+    references, total, truncated = _code_references_from_delta(payload, origin.target, origin=origin)
     if not references:
         return metadata
     metadata["code_references"] = references[:_CODE_REFERENCE_LIMIT]
@@ -1135,8 +1145,8 @@ def _short_commands(payload: dict[str, Any]) -> list[dict[str, Any]]:
     return out
 
 
-def _receipt_repository_fields(payload: dict[str, Any], target: Path) -> tuple[str, str | None]:
-    repository = _code_reference_repository(target)
+def _receipt_repository_fields(payload: dict[str, Any], origin: _ExportOrigin) -> tuple[str, str | None]:
+    repository = _code_reference_repository(origin)
     repo_id = repository if isinstance(repository, str) and provenance.is_safe_identity_label(repository) else "unknown"
     git = _receipt_git(payload)
     revision = git.get("head") if git is not None else None
@@ -1163,6 +1173,7 @@ def _stamp_receipt_provenance(
     payload: dict[str, Any],
     path: Path,
     target: Path,
+    origin: _ExportOrigin,
     item_external_id: str,
     collection_id: str,
     source_kind: str,
@@ -1182,7 +1193,7 @@ def _stamp_receipt_provenance(
             ingested_at = "1970-01-01T00:00:00+00:00"
     if not captured:
         captured = ingested_at
-    repo_id, revision = _receipt_repository_fields(payload, target)
+    repo_id, revision = _receipt_repository_fields(payload, origin)
     session_raw = str(payload.get("run_id") or path.parent.name)
     session_id = session_raw if provenance.is_safe_identity_label(session_raw) else None
     locator_kind, locator_value = _receipt_locator(path, target, item_external_id)
@@ -1236,7 +1247,10 @@ def _receipt_injection(text: str) -> tuple[str, int, list[str]]:
     return "clean", 0, []
 
 
-def _verify_miseledger_item(payload: dict[str, Any], path: Path, target: Path, ordinal: int) -> dict[str, Any]:
+def _verify_miseledger_item(
+    payload: dict[str, Any], path: Path, target: Path, ordinal: int, *, origin: _ExportOrigin | None = None
+) -> dict[str, Any]:
+    origin = origin or _ExportOrigin(target)
     run_id = str(payload.get("run_id") or path.parent.name)
     item_external_id = f"brigade:work-verify:{run_id}"
     receipt_hash, digest_source = _receipt_hash(payload, path)
@@ -1246,7 +1260,7 @@ def _verify_miseledger_item(payload: dict[str, Any], path: Path, target: Path, o
         "run_id": run_id,
         "status": payload.get("status"),
         "target": payload.get("target"),
-        "project": _miseledger_project(target),
+        "project": _miseledger_project(origin),
         "workspace_dir": str(target),
         "path": _rel(path, target),
         "digest": receipt_hash,
@@ -1255,7 +1269,7 @@ def _verify_miseledger_item(payload: dict[str, Any], path: Path, target: Path, o
         "commands": commands,
     }
     metadata = _metadata_with_delta(metadata, payload)
-    metadata = _metadata_with_code_references(metadata, payload, target)
+    metadata = _metadata_with_code_references(metadata, payload, origin)
     metadata = _metadata_with_git(metadata, payload)
     metadata = _metadata_with_digest_signature(metadata, payload)
     text = f"Brigade work verify run {run_id} status={payload.get('status') or 'unknown'} commands={len(commands)}."
@@ -1272,6 +1286,7 @@ def _verify_miseledger_item(payload: dict[str, Any], path: Path, target: Path, o
         payload=payload,
         path=path,
         target=target,
+        origin=origin,
         item_external_id=item_external_id,
         collection_id="brigade_work_verify_runs",
         source_kind="verify-receipt",
@@ -1300,7 +1315,7 @@ def _verify_miseledger_item(payload: dict[str, Any], path: Path, target: Path, o
         },
         "actor": MISELEDGER_ACTOR,
         "artifacts": artifacts,
-        "links": _git_commit_links(item_external_id, payload, target),
+        "links": _git_commit_links(item_external_id, payload, origin),
         "relations": [],
         "raw": {
             "format": "json",
@@ -1311,7 +1326,10 @@ def _verify_miseledger_item(payload: dict[str, Any], path: Path, target: Path, o
     }
 
 
-def _run_miseledger_item(payload: dict[str, Any], path: Path, target: Path, ordinal: int) -> dict[str, Any]:
+def _run_miseledger_item(
+    payload: dict[str, Any], path: Path, target: Path, ordinal: int, *, origin: _ExportOrigin | None = None
+) -> dict[str, Any]:
+    origin = origin or _ExportOrigin(target)
     run_id = path.parent.name
     item_external_id = f"brigade:run:{run_id}"
     receipt_hash, digest_source = _receipt_hash(payload, path)
@@ -1321,7 +1339,7 @@ def _run_miseledger_item(payload: dict[str, Any], path: Path, target: Path, ordi
         "run_id": run_id,
         "status": payload.get("status"),
         "cwd": payload.get("cwd"),
-        "project": _miseledger_project(target),
+        "project": _miseledger_project(origin),
         "workspace_dir": str(target),
         "path": _rel(path, target),
         "digest": receipt_hash,
@@ -1332,7 +1350,7 @@ def _run_miseledger_item(payload: dict[str, Any], path: Path, target: Path, ordi
         "read_only": payload.get("read_only"),
     }
     metadata = _metadata_with_delta(metadata, payload)
-    metadata = _metadata_with_code_references(metadata, payload, target)
+    metadata = _metadata_with_code_references(metadata, payload, origin)
     metadata = _metadata_with_git(metadata, payload)
     metadata = _metadata_with_digest_signature(metadata, payload)
     text = f"Brigade run {run_id} status={payload.get('status') or 'unknown'}."
@@ -1345,6 +1363,7 @@ def _run_miseledger_item(payload: dict[str, Any], path: Path, target: Path, ordi
         payload=payload,
         path=path,
         target=target,
+        origin=origin,
         item_external_id=item_external_id,
         collection_id="brigade_runs",
         source_kind="run-receipt",
@@ -1382,7 +1401,7 @@ def _run_miseledger_item(payload: dict[str, Any], path: Path, target: Path, ordi
         },
         "actor": MISELEDGER_ACTOR,
         "artifacts": artifacts,
-        "links": _git_commit_links(item_external_id, payload, target),
+        "links": _git_commit_links(item_external_id, payload, origin),
         "relations": [],
         "raw": {
             "format": "json",
@@ -1393,12 +1412,12 @@ def _run_miseledger_item(payload: dict[str, Any], path: Path, target: Path, ordi
     }
 
 
-def _miseledger_item(receipt: dict[str, Any], target: Path, ordinal: int) -> dict[str, Any]:
+def _miseledger_item(receipt: dict[str, Any], origin: _ExportOrigin, ordinal: int) -> dict[str, Any]:
     payload = receipt["payload"]
     path = receipt["path"]
     if receipt["receipt_type"] == "work_verify":
-        return _verify_miseledger_item(payload, path, target, ordinal)
-    return _run_miseledger_item(payload, path, target, ordinal)
+        return _verify_miseledger_item(payload, path, origin.target, ordinal, origin=origin)
+    return _run_miseledger_item(payload, path, origin.target, ordinal, origin=origin)
 
 
 def _render_miseledger_jsonl(records: list[dict[str, Any]]) -> str:
@@ -1595,7 +1614,8 @@ def _repository_export_result(
     if automatic_batch:
         selected, pending_count = receipt_replay.oldest_pending(receipts, cursor_hashes, _receipt_hash, automatic_batch)
         skipped_count = len(receipts) - pending_count
-    records = [_miseledger_item(receipt, target, ordinal) for ordinal, receipt in enumerate(selected, start=1)]
+    origin = _ExportOrigin(target)
+    records = [_miseledger_item(receipt, origin, ordinal) for ordinal, receipt in enumerate(selected, start=1)]
     kept_records: list[dict[str, Any]] = []
     for record in records:
         raw = record.get("raw")

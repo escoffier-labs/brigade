@@ -28,7 +28,7 @@ from .. import (
     receipt_signing,
     runguard,
 )
-from .. import verification_contract, verify_manifest, verify_trial
+from .. import verification_contract, verify_manifest, verify_manifest_git, verify_trial
 from ..agent_identity import stamp_verify_identity as _stamp_harness_session
 from ..claude_hooks import producer_session as hook_producer
 from ..verify_command import split_verify_command
@@ -71,12 +71,13 @@ def _verification_split_command(command: str) -> list[str]:
 
 def _receipt_git_snapshot(target: Path) -> dict[str, Any] | None:
     try:
-        head = helpers._git_value(target, "rev-parse", "HEAD")
-        branch = helpers._git_value(target, "rev-parse", "--abbrev-ref", "HEAD")
+        # rev-parse applies --abbrev-ref only to the arguments that follow it.
+        identity = helpers._git(target, "rev-parse", "HEAD", "--abbrev-ref", "HEAD")
+        head, _, branch = (value.strip() for value in identity.stdout.partition("\n"))
         status = helpers._git(target, "status", "--porcelain")
     except OSError:
         return None
-    if head is None or branch is None or status.returncode != 0:
+    if identity.returncode != 0 or not head or not branch or status.returncode != 0:
         return None
     return {"head": head, "branch": branch, "dirty_files": len(status.stdout.splitlines())}
 
@@ -1691,6 +1692,9 @@ def _run_verify_commands(
         rc = rc or 1
     finally:
         if receipt is not None:
+            # The child can change HEAD, refs or config. Resolve the base afresh
+            # when finalizing its receipt, even if reuse admission read it first.
+            verify_manifest_git.clear_verify_base(target)
             receipt, rc = _commit_verify_receipt(
                 target, run_dir, receipt, started=started, rc=rc, canceled=canceled, manifest=manifest
             )
@@ -2017,7 +2021,7 @@ def verify_run(
         return blocked_rc
     receipt = None
     reuse_skipped = None
-    with verify_runtime._verify_cancellation_signals() as cancellation:
+    with verify_runtime._verify_cancellation_signals() as cancellation, verify_manifest_git.verify_base_scope(target):
         try:
             if reuse and manifest is None:
                 fingerprint = localio.tree_fingerprint(target)

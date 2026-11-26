@@ -1,0 +1,1 @@
+- Work verification launches fewer Git processes when finalizing a receipt, listing registered verifiers, and exporting receipt evidence.

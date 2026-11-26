@@ -440,7 +440,7 @@ def trusted_workspace_manifests(target: Path) -> list[VerifyManifest]:
 
 
 def registered_manifest_ids(target: Path) -> list[str]:
-    base_resolution = verify_manifest_git.resolve_base(target)
+    base_resolution = verify_manifest_git.resolve_verify_base(target)
     ids: list[str] = []
     for path in _discover_builtin_manifest_files() + _discover_workspace_manifest_files(target, base=base_resolution):
         payload: dict[str, Any] | None
