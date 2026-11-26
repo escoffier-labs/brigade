@@ -1,6 +1,7 @@
 """Connector grants narrow discovery and calls on both listener profiles."""
 
 import asyncio
+import importlib.util
 from contextlib import contextmanager
 from dataclasses import replace
 import json
@@ -36,6 +37,8 @@ DISPATCH = {
     "fleet_report_session",
 }
 CLASSES = ["read", "messaging", "dispatch", "memory_write"]
+
+requires_mcp = pytest.mark.skipif(importlib.util.find_spec("mcp") is None, reason="requires the grokbot extra")
 
 
 @pytest.fixture(params=[(DOT, _document, verifier), (DUET, _duet_document, _duet_verifier)], ids=["dot", "duet"])
@@ -134,6 +137,7 @@ def test_registered_tool_classes_match_snapshot():
     assert {name: schema.tool_class.value for name, schema in contracts.ALL_TOOL_SCHEMAS.items()} == expected
 
 
+@requires_mcp
 @requires_local_state
 @pytest.mark.parametrize("name", MESSAGING_CALLS)
 def test_denied_messaging_tool_is_hidden_and_has_no_side_effects(connector, name, dot_private_dir, monkeypatch):
@@ -186,6 +190,7 @@ def test_tool_grants_cannot_enable_dispatch_on_duet():
     assert profile.tools == DUET.tools - MESSAGING_CALLS.keys()
 
 
+@requires_mcp
 @requires_local_state
 @pytest.mark.parametrize("dispatch_granted", [True, False])
 def test_duet_listener_dispatch_bundle_requires_dispatch_grant(dispatch_granted, dot_private_dir, monkeypatch):
@@ -206,6 +211,7 @@ def test_duet_listener_dispatch_bundle_requires_dispatch_grant(dispatch_granted,
                 tools.call(tools.runtime.auth.approved_email, "fleet_capacity", {})
 
 
+@requires_mcp
 @requires_local_state
 @pytest.mark.parametrize("authenticated", [False, True], ids=["auth-first", "grant-before-arguments"])
 def test_listener_checks_identity_then_grants_then_arguments(connector, authenticated, dot_private_dir, monkeypatch):
@@ -227,6 +233,7 @@ def test_listener_checks_identity_then_grants_then_arguments(connector, authenti
                 assert connection.execute("SELECT COUNT(*) FROM call_log").fetchone()[0] == 0
 
 
+@requires_mcp
 @requires_local_state
 @pytest.mark.parametrize("name", ["fleet_submit", "handoff_write"])
 def test_dot_listener_denies_tools_when_their_class_is_omitted(name, dot_private_dir, monkeypatch):
@@ -244,6 +251,7 @@ def test_dot_listener_denies_tools_when_their_class_is_omitted(name, dot_private
         assert state.operations(10) == []
 
 
+@requires_mcp
 @requires_local_state
 def test_no_grants_keeps_default_listener_tools_and_allows_calls(connector, dot_private_dir, monkeypatch):
     profile, _, _ = connector
@@ -260,6 +268,7 @@ def test_no_grants_keeps_default_listener_tools_and_allows_calls(connector, dot_
         asyncio.run(scenario())
 
 
+@requires_mcp
 @requires_local_state
 @pytest.mark.parametrize("enabled", [False, True], ids=["messaging-disabled", "hourly-budget"])
 def test_allowed_messaging_still_uses_duet_switch_and_hourly_budget(enabled, dot_private_dir, monkeypatch):
@@ -287,6 +296,7 @@ def test_allowed_messaging_still_uses_duet_switch_and_hourly_budget(enabled, dot
             assert connection.execute("SELECT COUNT(*) FROM send_budget").fetchone()[0] == (20 if enabled else 0)
 
 
+@requires_mcp
 @requires_local_state
 def test_adapter_error_payload_includes_grant_denial_message(dot_private_dir, monkeypatch):
     document = _document()
