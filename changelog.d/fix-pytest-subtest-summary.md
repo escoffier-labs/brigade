@@ -1,0 +1,1 @@
+- Verification recognizes pytest summaries that include subtests, so passing runs no longer receive a false "no passing tests" verdict from the Push and Stop gates.
