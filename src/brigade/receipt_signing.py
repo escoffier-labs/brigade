@@ -132,7 +132,9 @@ def _windows_workspace_key(target: Path) -> bytes | None:
             named = dirfd.stat_child(parent, KEY_NAME)
             if held.st_size > 256:
                 raise ValueError("oversized workspace signing key")
-            if (held.st_dev, held.st_ino) != (named.st_dev, named.st_ino) or len(raw) != held.st_size:
+            held_identity = (held.st_dev, held.st_ino, held.st_size)
+            named_identity = (named.st_dev, named.st_ino, named.st_size)
+            if held_identity != named_identity or len(raw) != held.st_size:
                 raise BlockingIOError("workspace signing key changed")
             key = bytes.fromhex(raw.decode("ascii").strip())
             if len(key) != 32:

@@ -629,6 +629,25 @@ def test_windows_key_creation_uses_protected_owner_dacl(tmp_path, windows_key_ap
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="portable Windows API simulation uses POSIX directory handles")
+def test_windows_key_refuses_changed_directory_entry_size(tmp_path, windows_key_api, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    receipt_signing.generate_key(tmp_path)
+    stat_child = receipt_signing.dirfd.stat_child
+
+    def changed_size(parent, name, *, allow_reparse=False):
+        info = stat_child(parent, name, allow_reparse=allow_reparse)
+        if name != receipt_signing.KEY_NAME or allow_reparse:
+            return info
+        return SimpleNamespace(st_dev=info.st_dev, st_ino=info.st_ino, st_size=info.st_size + 1)
+
+    monkeypatch.setattr(receipt_signing.dirfd, "stat_child", changed_size)
+    refused = receipt_signing.workspace_key(tmp_path) is None
+    assert refused
+    assert "signing key is in use or changed during access" in capsys.readouterr().err
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="portable Windows API simulation uses POSIX directory handles")
 @pytest.mark.parametrize("defect", ["system", "administrators", "owner", "inherited", "reparse", "api"])
 def test_windows_refused_origin_key_requires_review_and_shows_repair(tmp_path, windows_key_api, capsys, defect):
     from argparse import Namespace
