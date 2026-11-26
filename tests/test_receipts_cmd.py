@@ -2563,7 +2563,7 @@ def test_automatic_replay_backs_off_after_consecutive_timeouts(tmp_path, monkeyp
         now += delay - 1
         assert _capture_for_replay(tmp_path, 3 * attempt + 2)["status"] == "backoff"
         assert state["calls"] == [1] * (attempt + 1)
-        assert state["timeouts"] == [5] * (attempt + 1)
+        assert state["timeouts"] == [20] + [5] * attempt
         now += 1
     assert not _read_cursor_hashes(tmp_path)
 
@@ -2597,7 +2597,7 @@ def test_large_replay_adapts_and_resumes_after_interruption(tmp_path, monkeypatc
     assert _capture_for_replay(tmp_path, 41)["status"] == "draining"
     assert len(_read_cursor_hashes(tmp_path)) == 8
     assert state["calls"] == [32, 16, 8]
-    assert state["timeouts"] == [5, 5, 5]
+    assert state["timeouts"] == [20, 5, 5]
     assert state["batches"][-1] == [f"capture-{n}" for n in range(8)]
 
     # Simulate stopping between captures and re-entering with only durable state.
@@ -2606,6 +2606,7 @@ def test_large_replay_adapts_and_resumes_after_interruption(tmp_path, monkeypatc
     assert next_capture["remaining_count"] == 27
     assert len(_read_cursor_hashes(tmp_path)) == 16
     assert state["batches"][-1] == [f"capture-{n}" for n in range(8, 16)]
+    assert state["timeouts"][-1] == 5
 
 
 def test_pause_files_do_not_change_tree_fingerprint(tmp_path, replay_engine):
@@ -2664,7 +2665,9 @@ def test_timeout_recovers_from_clock_rollback_and_ages_after_idle(tmp_path, monk
     from brigade.component_install import engine_repair_hint
 
     cooldown = capsys.readouterr().out
-    assert cooldown.count(engine_repair_hint()) == 1
+    assert engine_repair_hint() not in cooldown
+    assert "The evidence ledger did not answer in time." in cooldown
+    assert "Indexing will retry automatically." in cooldown
     assert cooldown.count("brigade receipts export evidence --new-only --import") == 1
     now -= 60
     assert _capture_for_replay(tmp_path, 3)["status"] == "failed"
@@ -2782,3 +2785,12 @@ def test_relative_evidence_engine_is_keyed_and_invoked_by_absolute_path(tmp_path
     assert _capture_for_replay(tmp_path, 1)["status"] == "failed"
     assert state["calls"] == [1]
     assert localio.read_json_dict(_replay_state_path(tmp_path))["engine"]["path"] == str(engine.resolve())
+
+
+def test_healthy_import_timeout_exceeds_engine_busy_wait():
+    import re
+
+    engine_db = Path(__file__).resolve().parents[1] / "engines/evidence-ledger/internal/archive/db.go"
+    setting = re.search(r"^const BusyTimeoutSeconds = (\d+)$", engine_db.read_text(encoding="utf-8"), re.MULTILINE)
+    assert setting is not None and int(setting[1]) == 10
+    assert receipts_cmd.receipt_replay.AUTO_HEALTHY_IMPORT_TIMEOUT > int(setting[1])

@@ -1748,7 +1748,7 @@ def _index_pending_receipts(
         return payload
 
     import_failed, repair, timed_out = _import_miseledger_file(
-        output_path, binary=binary, strict=False, quiet=quiet, timeout=receipt_replay.AUTO_IMPORT_TIMEOUT
+        output_path, binary=binary, strict=False, quiet=quiet, timeout=receipt_replay.import_timeout(state)
     )
     if repair is not None or timed_out:
         kind = receipt_replay.OUTDATED if repair is not None else "timeout"

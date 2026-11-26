@@ -14,7 +14,10 @@ from .inbox_lock import held_file_lock
 
 OUTDATED = "outdated_evidence_engine"
 AUTO_BATCH_SIZE = 32
-AUTO_IMPORT_TIMEOUT = 5
+# The engine's SQLite BusyTimeoutSeconds is 10 s (engines/evidence-ledger/internal/archive/db.go).
+# A healthy attempt needs time for both lock acquisition and import work.
+AUTO_HEALTHY_IMPORT_TIMEOUT = 20
+AUTO_PROBE_IMPORT_TIMEOUT = 5
 _MANUAL_RETRY = "To retry now, run `brigade receipts export evidence --new-only --import`."
 _BACKOFF_SECONDS = (15, 30, 60, 120)
 _TIMEOUT_STREAK_SECONDS = 600
@@ -141,10 +144,10 @@ def skipped_index(target: Path, state: dict[str, Any]) -> dict[str, Any]:
     if kind != OUTDATED and not cooling:
         return {}
 
-    from .component_install import engine_repair_hint
-
-    repair = engine_repair_hint()
     if kind == OUTDATED:
+        from .component_install import engine_repair_hint
+
+        repair = engine_repair_hint()
         # The original snapshot excludes known and malformed receipts.
         count = sum(1 for _, root, pattern in RECEIPT_SOURCES for _ in (target / root).glob(pattern))
         pending = max(0, state["pending_count"] + count - state["candidate_count"])
@@ -160,9 +163,14 @@ def skipped_index(target: Path, state: dict[str, Any]) -> dict[str, Any]:
         "reason": kind,
         "pending_count": state["pending_count"],
         "retry_after": state["retry_after"],
-        "repair": repair,
-        "message": f"Evidence indexing cooling down after an import timeout. {repair} {_MANUAL_RETRY}",
+        "message": f"The evidence ledger did not answer in time. Indexing will retry automatically. {_MANUAL_RETRY}",
     }
+
+
+def import_timeout(state: dict[str, Any]) -> int:
+    if state.get("kind") in ("timeout", "drain"):
+        return AUTO_PROBE_IMPORT_TIMEOUT
+    return AUTO_HEALTHY_IMPORT_TIMEOUT
 
 
 def oldest_pending(
