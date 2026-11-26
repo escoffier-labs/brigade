@@ -99,8 +99,9 @@ Nothing to install. The managed work-loop hooks already fire `UserPromptSubmit` 
 Codex 0.172.0 accepts `additionalContext` from `UserPromptSubmit` and
 `PostToolUse` hook output and skips untrusted hooks. Add the entries below to
 `~/.codex/hooks.json`, then open `/hooks` in an interactive Codex session and
-trust the entries once on each host. Headless and app-server sessions skip the
-trust prompt. [Codex hook trust](agent-assisted-setup.md).
+trust the entries once on each host. Headless and app-server sessions show no
+trust prompt, and an untrusted hook does not run in them, so trust the entries
+interactively first. [Codex hook trust](agent-assisted-setup.md).
 
 ```json
 {

@@ -468,7 +468,7 @@ def run_codex_hook() -> None:
     """Handle one Codex hook invocation: read its JSON, print its JSON, never fail.
 
     Codex honors ``additionalContext`` from UserPromptSubmit and PostToolUse
-    hook output (codex-cli 0.163.0 hook output schema); other events print an
+    hook output (codex-cli 0.163.0 and 0.172.0 hook output schema); other events print an
     empty object.
     """
     text: str | None = None
