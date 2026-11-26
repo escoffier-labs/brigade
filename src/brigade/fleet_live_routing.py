@@ -28,6 +28,7 @@ CSS = """
 .routing-approved{border-top:1px solid var(--line)}
 .routing-approved .routing-role div{min-width:0;text-align:right}
 .routing-approved code{display:block;color:var(--muted);font-size:11px;margin-top:3px}
+.routing-approved .routing-role:hover{background:transparent}
 @media(max-width:700px){.routing-roles{grid-template-columns:minmax(0,1fr)}.routing-roles .routing-role:nth-child(odd){border-right:0}.routing-roles .routing-role:nth-child(2){border-top:1px solid var(--line-quiet)}}
 @media(max-width:700px){.routing-approved .routing-role{display:block}.routing-approved .routing-role div,.routing-approved .routing-role strong{text-align:left}}
 """

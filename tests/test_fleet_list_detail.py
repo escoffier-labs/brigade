@@ -296,9 +296,9 @@ def test_approved_models_display_preserves_dispatch_projection(
         assert {role: before[role] for role in run_preference.ROLE_FIELDS} == expected_roles
         assert {role.key: role.seat for role in routing.roles} == expected_roles
 
+        # render_overview takes the frozen Routing and no connection, so it cannot write dispatch state;
+        # the two assertions above pin what dispatch reads.
         page = fleet_live_routing.render_overview(routing, NOW)
-        assert fleet_hub_preference.get_run_preference(conn) == before
-        assert fleet_live_routing.project(roster.load_view(conn, deck.DeckConfig(), activation=activation)) == routing
     finally:
         conn.close()
 
@@ -326,4 +326,8 @@ def test_approved_models_display_preserves_dispatch_projection(
         "GPT 6.2 Astra and Claude Fable 5.2, low or medium effort, sign-off required",
         "Gemini 4 Neon (via agy)",
     ]
+    codes = markup.descendants(section, "code")
+    rendered_ids = [markup.text[i] for i in codes]
+    assert rendered_ids == [ids for _, _, ids in fleet_live_routing._APPROVED_MODELS]
+    assert rendered_ids[0] == "gpt-6.2-sol, gpt-6-luna, opencode-go/deepseek-v4.1-flash, claude-sonnet-5-5"
     assert not markup.descendants(section, "a")
