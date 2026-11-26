@@ -320,7 +320,9 @@ def test_child_names_enumerates_the_held_directory_after_ancestor_swap(tmp_path:
         os.close(descriptor)
 
 
-@pytest.mark.parametrize("malformed", [None, "size", "offset", "length", "utf16", "status", "unavailable"])
+@pytest.mark.parametrize(
+    "malformed", [None, "size", "offset", "length", "utf16", "low-surrogate", "status", "unavailable"]
+)
 def test_nt_directory_enumeration_is_bounded_and_rejects_malformed_replies(monkeypatch, malformed):
     import ctypes
     import struct
@@ -339,7 +341,10 @@ def test_nt_directory_enumeration_is_bounded_and_rejects_malformed_replies(monke
         offset = 1 if malformed == "offset" else 0
         length = 3 if malformed == "length" else len(raw)
         if malformed == "utf16":
-            raw = b"\x00\xd8"  # unpaired surrogate
+            raw = b"\x00\xd8"  # lone high surrogate
+            length = len(raw)
+        if malformed == "low-surrogate":
+            raw = b"\x00\xdc"  # lone low surrogate
             length = len(raw)
         record = struct.pack("<III", offset, 0, length) + raw
         ctypes.memmove(buffer, record, len(record))
@@ -360,6 +365,32 @@ def test_nt_directory_enumeration_is_bounded_and_rejects_malformed_replies(monke
         assert len(calls) == 3
         assert calls[0] == (99, 65548, 12, True, True)
         assert all(call[-1] is False for call in calls[1:])
+
+
+def test_nt_directory_enumeration_accepts_a_well_formed_surrogate_pair(monkeypatch):
+    import ctypes
+    import struct
+    from types import SimpleNamespace
+
+    from brigade.work_cmd import nt_dirfd
+
+    names = iter([".", "..", "original\U0001f600"])
+    calls = []
+
+    def query(handle, event, apc, context, block, buffer, capacity, info_class, single, pattern, restart):
+        calls.append((handle, capacity, info_class, single, restart))
+        raw = next(names).encode("utf-16-le")
+        record = struct.pack("<III", 0, 0, len(raw)) + raw
+        ctypes.memmove(buffer, record, len(record))
+        iosb = ctypes.cast(block, ctypes.POINTER(nt_dirfd._IO_STATUS_BLOCK)).contents
+        iosb.Information = len(record)
+        return 0
+
+    api = SimpleNamespace(IO_STATUS_BLOCK=nt_dirfd._IO_STATUS_BLOCK, NtQueryDirectoryFile=query)
+    monkeypatch.setattr(nt_dirfd, "_require_api", lambda: api)
+    monkeypatch.setattr(nt_dirfd, "_handle_from_fd", lambda fd: 99)
+    assert nt_dirfd.child_names(3, 1) == ["original\U0001f600"]
+    assert len(calls) == 3
 
 
 @pytest.mark.parametrize(
