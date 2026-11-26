@@ -121,7 +121,8 @@ and excludes `inbox_ack` and memory writes.
 "tool_grants": {"classes": ["read", "messaging", "dispatch"], "deny": ["inbox_ack"]}
 ```
 
-Both arrays are required. Use `deny: []` to allow every tool in the listed
+Both arrays are required, with at least one entry in `classes`. The `deny` array
+accepts Dot tool names. Use `deny: []` to allow every tool in the listed
 classes, subject to the connector's existing checks. The `messaging` class has
 `message_send`, `inbox_reply`, and `inbox_ack`. The `dispatch` class includes
 `fleet_report_session` in both dry-run and publish mode. The `memory_write`

@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable
 
-from .contracts import ALL_TOOL_SCHEMAS, ToolClass
+from .contracts import ALL_TOOL_SCHEMAS, DUET_DISPATCH_TOOLS, ToolClass
 
 if TYPE_CHECKING:
     from .profile import ConnectorProfile
@@ -45,6 +45,8 @@ def authorize(profile: ConnectorProfile, grants: ToolGrants | None, tool_name: o
             return Denied("tool is on the deny list")
         if tool_class not in grants.classes:
             return Denied(f"{tool_class.value} class is not granted")
+        if profile.pack_id == "duet" and tool_name in DUET_DISPATCH_TOOLS and ToolClass.DISPATCH not in grants.classes:
+            return Denied("Duet's dispatch bundle requires the dispatch class")
     if tool_name not in profile.tools:
         return Denied("tool is outside the profile", "invalid_request")
     hook = _CLASS_HOOKS.get(tool_class)

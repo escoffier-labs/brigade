@@ -14,6 +14,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Mapping
 
+from .contracts import DUET_DISPATCH_TOOLS as DUET_DISPATCH_TOOLS
 from .contracts import TOOLS, DotError
 from .runtime_config import (
     CLOUD_AGENT_RUNTIME_SCHEMA,
@@ -307,19 +308,6 @@ def profile_for(pack_id: str) -> ConnectorProfile:
         return PROFILES[pack_id]
     except (KeyError, TypeError):
         raise DotError("invalid_config") from None
-
-
-DUET_DISPATCH_TOOLS = frozenset(
-    {
-        "fleet_submit",
-        "fleet_status",
-        "fleet_wait",
-        "fleet_recent",
-        "fleet_capacity",
-        "fleet_followup",
-        "fleet_interrupt",
-    }
-)
 
 
 def runtime_profile(

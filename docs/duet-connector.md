@@ -242,12 +242,15 @@ identity can use. This example keeps reads and messaging available and excludes
 "tool_grants": {"classes": ["read", "messaging"], "deny": ["inbox_ack"]}
 ```
 
-Both arrays are required. The available classes are `read`, `messaging`,
+Both arrays are required, with at least one entry in `classes`. The available classes are `read`, `messaging`,
 `dispatch`, and `memory_write`. Use `deny: []` to allow every tool in the
 listed classes, subject to the connector's existing checks. The `messaging`
 class has `message_send`, `inbox_reply`, and `inbox_ack`. The `memory_write`
 class has `handoff_write`. Dispatch tools still require `dispatch_enabled`
-and use the configured dispatch limits.
+and use the configured dispatch limits. When grants are configured, the whole
+Duet dispatch tool set requires the `dispatch` class. Its read tools
+(`fleet_status`, `fleet_wait`, `fleet_recent`, and `fleet_capacity`) also
+require `read`. The `deny` array accepts Duet tool names.
 
 Denied tools are omitted from MCP discovery and calls return
 `tool_not_permitted`. Omit `tool_grants` to keep the default tool set. Restart

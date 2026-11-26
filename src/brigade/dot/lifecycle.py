@@ -242,6 +242,7 @@ class _DotGate:
                 request_id = request.get("id")
                 decision = authorize(self.profile, self.tool_grants, name)
                 if isinstance(decision, Denied) and decision.code == TOOL_NOT_PERMITTED:
+                    await self.record(name, False, started, TOOL_NOT_PERMITTED)
                     await self.reject_tool_call(send, request_id, TOOL_NOT_PERMITTED)
                     return
                 try:

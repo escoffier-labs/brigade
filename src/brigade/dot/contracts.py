@@ -16,6 +16,7 @@ MAX_HANDOFF_BYTES = 16384
 
 
 ERROR_MESSAGES = {
+    "tool_not_permitted": "This tool is outside the connector's configured grants.",
     "recipient_not_permitted": "The recipient is outside the dot's send grants. Nothing was sent or queued, "
     "and retrying will not help.",
     "recipient_quota": "The dot's send quota for this recipient is exhausted. Nothing was sent or queued; "
@@ -357,6 +358,18 @@ TOOLS = frozenset(TOOL_SCHEMAS)
 # Tools that start or steer work on operator machines, gated by dispatch_enabled.
 DISPATCH_GATED_TOOLS = frozenset(
     {"fleet_submit", "fleet_followup", "fleet_answer", "fleet_approve", "fleet_interrupt", "fleet_report_session"}
+)
+# The Duet dispatch bundle also includes reads for work submitted through Duet.
+DUET_DISPATCH_TOOLS = frozenset(
+    {
+        "fleet_submit",
+        "fleet_status",
+        "fleet_wait",
+        "fleet_recent",
+        "fleet_capacity",
+        "fleet_followup",
+        "fleet_interrupt",
+    }
 )
 # Hub messaging has its own gate, so a profile can send messages without dispatch.
 MESSAGING_GATED_TOOLS = frozenset({"message_send"})
