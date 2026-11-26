@@ -500,8 +500,9 @@ def _finalize_verify_receipt(
         rc = verify_runtime._VERIFY_CANCELED_RC
     else:
         receipt["status"], rc = verify_receipt_details.terminal_status(receipt, rc)
-        verify_receipt_details.stamp_tree_after(target, receipt)
-    verify_gate.stamp_gating(target, receipt)
+        verify_receipt_details.stamp_tree_after(target, receipt, git_env=verify_runtime.receipt_git_environment())
+    if "producer_attempt_id" not in receipt:
+        verify_gate.stamp_gating(target, receipt)
     commands = receipt.get("commands")
     if isinstance(commands, list):
         for command in commands:
@@ -509,12 +510,10 @@ def _finalize_verify_receipt(
                 verify_trial.stamp_verify_command_failure_taxonomy(command)
     verify_trial.stamp_verify_receipt_failure_taxonomy(receipt)
     _stamp_verification_contract_outcomes(receipt)
-    try:
-        git = _receipt_git_snapshot(target)
+    with suppress(Exception):
+        git = _receipt_git_snapshot(target) if "producer_attempt_id" not in receipt else None
         if git is not None:
             receipt["git"] = git
-    except Exception:
-        pass
     log_digests: dict[str, str] = {}
     for command in [] if receipt.get("reused_from") else receipt["commands"]:
         if not isinstance(command, dict):
@@ -561,14 +560,11 @@ def _finalize_verify_receipt(
     except Exception:
         receipt.pop("digests", None)
     helpers._write_json(run_dir / "receipt.json", receipt)
-    try:
+    with suppress(Exception):
         _write_verify_markdown(run_dir, receipt)
-    except Exception:
-        pass
-    try:
-        _prune_verify_runs(target)
-    except Exception:
-        pass
+    if "producer_attempt_id" not in receipt:
+        with suppress(Exception):
+            _prune_verify_runs(target)
     return receipt, rc
 
 
@@ -606,7 +602,8 @@ def _safe_finalize_verify_receipt(
             # The status changed after these were stamped, so stamp them again.
             verify_trial.stamp_verify_receipt_failure_taxonomy(receipt)
             _stamp_verification_contract_outcomes(receipt)
-        verify_gate.stamp_gating(target, receipt)
+        if "producer_attempt_id" not in receipt:
+            verify_gate.stamp_gating(target, receipt)
         receipt.setdefault("completed_at", helpers._now().isoformat())
         # Keep a valid digest/signature if fallback did not change the payload.
         # A completed digest must never authenticate a newly canceled receipt.
@@ -682,7 +679,8 @@ def _commit_verify_receipt(
         state = verify_runtime._ACTIVE_VERIFY_CANCEL.get()
         if state is not None:
             state.owned_receipt = None
-        _report_fleet_completion(target, receipt, rc)
+        if "producer_attempt_id" not in receipt:
+            _report_fleet_completion(target, receipt, rc)
         if state is not None:
             # Terminal evidence owns the first signal even when it was deferred.
             # From here through output/capture, handlers only latch new signals.
@@ -1534,18 +1532,24 @@ def _run_verify_commands(
     capture_kind: str = "skill",
     capture_meta: dict[str, Any] | None = None,
     reuse_skipped: str | None = None,
+    batch_receipt: verify_runtime.BatchReceipt | None = None,
 ) -> tuple[dict[str, Any], int]:
     started = helpers._now()
     graph_capture_timeout = code_graph_timeout if code_graph_capture_timeout is None else code_graph_capture_timeout
     run_id = f"{started.strftime('%Y%m%d-%H%M%S')}-work-verify-{uuid4().hex[:6]}"
-    run_dir = helpers._verify_runs_root(target) / run_id
+    run_dir = (batch_receipt.root if batch_receipt else helpers._verify_runs_root(target)) / run_id
+    command_env = batch_receipt.command_env if batch_receipt else None
     receipt: dict[str, Any] | None = None
     graph_delta_before: dict[str, Any] | None = None
     rc = 0
     canceled = False
     try:
         run_dir.mkdir(parents=True, exist_ok=False)
-        identity = _capture_verify_identity(target, run_dir)
+        identity = (
+            verify_receipt_details.capture_batch_identity(target, run_dir, command_env)
+            if command_env is not None
+            else _capture_verify_identity(target, run_dir)
+        )
         argv_hashes, _ = verify_argv_files.argv_file_hashes(target, commands)
         receipt = {
             "run_id": run_id,
@@ -1554,11 +1558,11 @@ def _run_verify_commands(
             "started_at": started.isoformat(),
             "timeout": timeout,
             "path": str(run_dir),
-            "evidence": _verification_evidence_payload(target),
+            "evidence": _verification_evidence_payload(target) if batch_receipt is None else {},
             "commands": [],
             "planned_commands": _planned_commands_display(commands),
             "argv_file_hashes": argv_hashes,
-            "inherited_test_env": verify_receipt_details.inherited_test_env(include_py=True),
+            "inherited_test_env": verify_receipt_details.inherited_test_env(command_env, include_py=True),
         }
         if reuse_skipped is not None:
             receipt["reuse_skipped"] = reuse_skipped
@@ -1566,15 +1570,20 @@ def _run_verify_commands(
         state = verify_runtime._ACTIVE_VERIFY_CANCEL.get()
         if state is not None:
             state.owned_receipt = (target, run_dir, receipt, started)
-        receipt_schema.stamp_optional_producer_run_id(receipt)
+            state.git_env = command_env
+        if batch_receipt is None:
+            receipt_schema.stamp_optional_producer_run_id(receipt)
+            _stamp_harness_session(receipt, target)
+            receipt["producer_work_session_id"] = _active_work_session_id(target)
+        else:
+            receipt.update(producer_run_id=batch_receipt.root.parent.name, producer_attempt_id=batch_receipt.attempt_id)
         _stamp_verify_causal_receipt(receipt)
-        _stamp_harness_session(receipt, target)
-        receipt["producer_work_session_id"] = _active_work_session_id(target)
         _stamp_outcome_capture(receipt, capture, capture_kind, capture_meta)
         try:
-            graph_delta_before = code_graph_delta.capture_before(
-                target, run_dir, timeout=code_graph_timeout, snapshot_timeout=graph_capture_timeout, defer_sync=True
-            )
+            if batch_receipt is None:
+                graph_delta_before = code_graph_delta.capture_before(
+                    target, run_dir, timeout=code_graph_timeout, snapshot_timeout=graph_capture_timeout, defer_sync=True
+                )
         except KeyboardInterrupt:
             canceled = True
             rc = verify_runtime._VERIFY_CANCELED_RC
@@ -1619,7 +1628,7 @@ def _run_verify_commands(
                         rc = 2
                     receipt["commands"].append(command_result)
                     continue
-                run_env = os.environ.copy()
+                run_env = os.environ.copy() if command_env is None else command_env.copy()
                 run_env.update(env_assignments)
                 execution_argv = _verify_execution_argv(argv, target)
                 command_started = helpers._now()
@@ -1667,7 +1676,7 @@ def _run_verify_commands(
             canceled = True
             rc = verify_runtime._VERIFY_CANCELED_RC
             _cancel_verify_graph(receipt, run_dir)
-        else:
+        elif batch_receipt is None:
             receipt["code_graph_delta"] = code_graph_delta.capture_after_and_diff(
                 target, run_dir, graph_delta_before, timeout=graph_capture_timeout, sync_timeout=code_graph_timeout
             )
@@ -1678,12 +1687,8 @@ def _run_verify_commands(
             raise
         canceled = True
         rc = verify_runtime._VERIFY_CANCELED_RC
-        if receipt is not None:
-            receipt.setdefault(
-                "interruption",
-                verify_runtime._verify_interruption_record(),
-            )
-            _cancel_verify_graph(receipt, run_dir)
+        receipt.setdefault("interruption", verify_runtime._verify_interruption_record())
+        _cancel_verify_graph(receipt, run_dir)
     except Exception:
         if receipt is None:
             raise

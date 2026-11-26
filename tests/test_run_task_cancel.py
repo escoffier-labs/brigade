@@ -823,18 +823,15 @@ def test_unconfirmed_stop_commits_nothing_from_the_worktree(tmp_path, monkeypatc
     monkeypatch.setattr(run_batch_execute.run_tasks, "observe_task", lambda *a, **k: observed.append(k["observation"]))
     monkeypatch.setattr(run_batch_execute.run_tasks, "prepare_attempt", lambda *a, **k: SimpleNamespace(attempt_id="t"))
     monkeypatch.setattr(run_batch_execute.run_receipts, "worker_payload_one", lambda result: {})
-    fake = SimpleNamespace(
-        prerequisite_cancelled=set(),
-        refused=set(),
-        current=lambda task_id: SimpleNamespace(result_id=None),
-        run_dir=tmp_path,
-        workspace=tmp_path,
-        workspaces={"a": object()},
-        _drain_inbox=lambda: True,
-    )
+    execution = BatchExecution({"tasks": [{"task_id": "a"}], "verify": True}, tmp_path, tmp_path)
+    monkeypatch.setattr(execution, "current", lambda task_id: SimpleNamespace(result_id=None, launch_claim=object()))
+    monkeypatch.setattr(execution, "_drain_inbox", lambda: True)
+    execution.workspaces["a"] = object()
     result = WorkerResult(worker="coder", task="t", text="", ok=False, task_id="a")
 
-    BatchExecution._publish_result(fake, result, "a", containment)
+    execution._publish_result(result, "a", containment)
 
+    (result_path,) = tmp_path.glob("batch-result-*.json")
+    assert json.loads(result_path.read_text()) == {"verification_skipped": "uncontained-cancel"}
     assert collected == []
     assert [(o.status, o.containment, o.artifact_kind) for o in observed] == [("cancelled", containment, "receipt")]

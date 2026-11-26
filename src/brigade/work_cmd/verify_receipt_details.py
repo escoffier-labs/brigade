@@ -133,7 +133,9 @@ def stamp_reused_tree(receipt: dict[str, Any], identity: Mapping[str, Any]) -> N
         receipt.pop("inherited_test_env", None)
 
 
-def same_verification_tree(target: Path, before: str, after: str) -> bool | None:
+def same_verification_tree(
+    target: Path, before: str, after: str, *, git_env: dict[str, str] | None = None
+) -> bool | None:
     """Compare Git trees ignoring changes under .brigade/. None means comparison failed."""
     if before == after:
         return True
@@ -161,6 +163,7 @@ def same_verification_tree(target: Path, before: str, after: str) -> bool | None
             stdin=subprocess.DEVNULL,
             capture_output=True,
             timeout=30,
+            env=git_env,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -169,16 +172,60 @@ def same_verification_tree(target: Path, before: str, after: str) -> bool | None
     return all(path.startswith(b".brigade/") for path in result.stdout.split(b"\0")[:-1])
 
 
-def stamp_tree_after(target: Path, receipt: dict[str, Any]) -> None:
+def stamp_tree_after(target: Path, receipt: dict[str, Any], *, git_env: dict[str, str] | None = None) -> None:
     """Capture post-run tree identity without making stability a gate."""
     try:
-        after = localio.tree_fingerprint(target)
-    except (OSError, RuntimeError):
+        after = localio.tree_fingerprint(target) if git_env is None else _batch_fingerprint(target, git_env)[0]
+    except (OSError, RuntimeError, ValueError, subprocess.SubprocessError):
         after = None
     receipt["tree_fingerprint_after"] = after
     before = receipt.get("tree_fingerprint")
     receipt["tree_stable"] = (
-        same_verification_tree(target, before, after) is True
+        same_verification_tree(target, before, after, git_env=git_env) is True
         if isinstance(before, str) and isinstance(after, str)
         else None
     )
+
+
+def _batch_fingerprint(target: Path, git_env: dict[str, str]) -> tuple[str, str]:
+    from time import monotonic
+
+    from .. import run_batch_verify_tree
+
+    return run_batch_verify_tree.fingerprint(target, git_env, deadline=monotonic() + 60)
+
+
+def capture_batch_identity(target: Path, run_dir: Path, git_env: dict[str, str]) -> dict[str, Any]:
+    """Fingerprint the coordinator snapshot and retain its patch with the same Git environment."""
+    from .. import receipt_schema
+
+    tree, head = _batch_fingerprint(target, git_env)
+    patch = run_dir / "changes.patch"
+    with patch.open("wb") as output:
+        subprocess.run(
+            [
+                "git",
+                "--no-replace-objects",
+                "diff",
+                "--cached",
+                "--binary",
+                "--no-ext-diff",
+                "--no-textconv",
+                head,
+                "--",
+            ],
+            cwd=target,
+            env=git_env,
+            stdin=subprocess.DEVNULL,
+            stdout=output,
+            stderr=subprocess.DEVNULL,
+            timeout=30,
+            check=True,
+        )
+    return {
+        "schema_version": receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION,
+        "baseline_commit": head,
+        "tree_fingerprint": tree,
+        "tree_fingerprint_head": head,
+        "changes_patch_sha256": localio.file_sha256(patch),
+    }

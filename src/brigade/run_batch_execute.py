@@ -24,6 +24,7 @@ from . import (
     run_batch_capability,
     run_batch_launch,
     run_batch_synthesis,
+    run_batch_verification,
     run_batch_workspace,
     run_control,
     run_journal,
@@ -45,6 +46,7 @@ JOURNAL_SENTINEL = "batch-journal-enrolled.json"
 _CANCEL_POLL_SECONDS = 0.5
 # Cancel outcomes that do not prove the worker stopped writing its checkout.
 _UNCONTAINED = frozenset({"still_active", "error"})
+_OBSERVING_LOCKED_WORKTREE = contextvars.ContextVar("batch_observing_locked_worktree", default=False)
 
 
 @dataclass
@@ -54,6 +56,8 @@ class _TaskRuntime:
     cancel_done: threading.Event | None = None
     attempt_id: str | None = None
     containment: str | None = None
+    cloud: bool = False
+    verification: dict[str, object] | None = None
     # Where the task runs once a remote router has decided: "local" or
     # "remote". None means no decision yet; without a router every task is local.
     routing: str | None = None
@@ -487,6 +491,9 @@ class BatchExecution:
         return result
 
     def _observe_for_dispatch(self, result: WorkerResult) -> WorkerResult | None:
+        # Dispatch invokes this callback inside the checkout locks. Finish may
+        # retry publication later, but can only reuse verification already run.
+        locked = _OBSERVING_LOCKED_WORKTREE.set(True)
         try:
             return self.observe(result)
         except Exception:
@@ -497,6 +504,8 @@ class BatchExecution:
             # observation and reports any error that persists.
             print(f"warning: task {task_id} cancellation observation failed", file=sys.stderr)
             return replace(result, ok=False, status=TASK_CANCELLED_STATUS)
+        finally:
+            _OBSERVING_LOCKED_WORKTREE.reset(locked)
 
     def _publish_result(self, result: WorkerResult, task_id: str, cancel_containment: str | None) -> None:
         if task_id in self.prerequisite_cancelled:
@@ -507,7 +516,8 @@ class BatchExecution:
             # cancellation once, then leave the result untouched.
             self._record_cancelled(task_id)
             return
-        if self.current(task_id).result_id is not None:
+        current = self.current(task_id)
+        if current.result_id is not None:
             return
         # Skipped tasks retain queued state. They were never launched.
         if result.status == "skipped":
@@ -515,11 +525,23 @@ class BatchExecution:
         handle = run_tasks.prepare_attempt(self.run_dir, workspace=self.workspace, task_id=task_id)
         path = self.run_dir / f"batch-result-{hashlib.sha256(task_id.encode()).hexdigest()}.json"
         # Persist the sanitized receipt projection, without raw captures or diagnostics.
-        localio.write_json(path, run_receipts.worker_payload_one(result))
+        payload = run_receipts.worker_payload_one(result)
+        binding = self.workspaces.get(task_id)
+        if self.plan.get("verify"):
+            assert handle.attempt_id is not None
+            payload.update(
+                self._verify_result(
+                    result,
+                    binding,
+                    handle.attempt_id,
+                    cancel_containment,
+                    launched=current.launch_claim is not None,
+                )
+            )
+        localio.write_json(path, payload)
         run_journal._fsync_directory(self.run_dir)
         digest = hashlib.sha256(path.read_bytes()).hexdigest()
         artifact_kind, artifact_digest = "receipt", digest
-        binding = self.workspaces.get(task_id)
         if cancel_containment in _UNCONTAINED:
             # The stop was not confirmed, so the worker may still be writing
             # the checkout. Commit nothing and retain the receipt alone.
@@ -564,6 +586,40 @@ class BatchExecution:
             ),
         )
 
+    def _verify_result(
+        self,
+        result: WorkerResult,
+        binding: run_batch_workspace.Binding | None,
+        attempt_id: str,
+        cancel_containment: str | None,
+        *,
+        launched: bool,
+    ) -> dict[str, object]:
+        runtime = self.runtime[str(result.task_id)]
+        if runtime.verification is not None:
+            return runtime.verification
+        skip = run_batch_verification.Skip
+        if cancel_containment in {*_UNCONTAINED, "unknown"}:
+            reason = skip.UNCONTAINED_CANCEL
+        elif (
+            runtime.routing == "remote"
+            or runtime.cloud
+            or result.remote is not None
+            or result.cloud_environment is not None
+        ):
+            reason = skip.REMOTE_OR_CLOUD
+        elif binding is None:
+            reason = skip.SHARED_CHECKOUT
+        elif not launched:
+            reason = skip.NOT_LAUNCHED
+        elif not _OBSERVING_LOCKED_WORKTREE.get():
+            reason = skip.WORKTREE_UNLOCKED
+        else:
+            runtime.verification = run_batch_verification.verify(binding, self.workspace, self.run_dir, attempt_id)
+            return runtime.verification
+        runtime.verification = {"verification_skipped": reason.value}
+        return runtime.verification
+
     def dispatch(self, assignments: list[Assignment], roster: Roster, **kwargs: Any) -> list[WorkerResult]:
         from .aboyeur import planning
 
@@ -598,6 +654,7 @@ class BatchExecution:
 
         def build_prompt(agent, assignment, **prompt_kwargs):
             task_id = str(assignment.task_id)
+            self.runtime[task_id].cloud = agent.cli.startswith("codex-cloud:")
             # Launch-point fence, independent of the request marker: a task the
             # journal shows as attempted is never invoked again. The request and
             # run locks serialize dispatchers, so this read cannot race a launch.

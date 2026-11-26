@@ -11,6 +11,7 @@ import sys
 import threading
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,15 @@ _VERIFY_INTERRUPTED_COMMAND_STATUS = "interrupted"
 _VERIFY_CANCELED_RECEIPT_STATUS = "canceled"
 
 
+@dataclass(frozen=True)
+class BatchReceipt:
+    """Coordinator-supplied receipt destination and attempt identity."""
+
+    root: Path
+    attempt_id: str
+    command_env: dict[str, str]
+
+
 class _VerifySignalCancel(KeyboardInterrupt):
     def __init__(self, signum: int) -> None:
         self.signum = signum
@@ -41,6 +51,7 @@ class _VerifyCancellation:
         self.deferred = 0
         self.interruption: dict[str, str] | None = None
         self.owned_receipt: tuple[Path, Path, dict[str, Any], Any] | None = None
+        self.git_env: dict[str, str] | None = None
 
     def raise_if_pending(self) -> None:
         if self.received is not None and not self.raised and not self.deferred:
@@ -51,6 +62,11 @@ class _VerifyCancellation:
 
 
 _ACTIVE_VERIFY_CANCEL: ContextVar[_VerifyCancellation | None] = ContextVar("verify_cancellation", default=None)
+
+
+def receipt_git_environment() -> dict[str, str] | None:
+    state = _ACTIVE_VERIFY_CANCEL.get()
+    return state.git_env if state is not None else None
 
 
 @contextmanager
