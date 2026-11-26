@@ -332,6 +332,22 @@ def test_land_retry_preserves_closes_after_pr_create_failure(landing, capsys):
     assert entry["landing_closes"] is True
 
 
+def test_land_retry_preserves_intent_after_checkout_failure(landing, monkeypatch, capsys):
+    caller, state, _ = landing
+    argv = ["run", "cloud", "land", "--provider", "codex-cloud", "--task-id", "task_example", "--target", str(caller)]
+
+    def fail_checkout(*args):
+        raise codex_cloud_land.LandError("checkout-failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(codex_cloud_land, "_reconcile_checkouts", fail_checkout)
+        assert cli.main([*argv, "--issue", "2473", "--closes"]) == 2
+    assert capsys.readouterr().err == "error: checkout-failed\n"
+
+    assert cli.main(argv) == 0
+    assert state["body"].startswith("Closes #2473.")
+
+
 def test_collection_command_includes_recorded_closes(tmp_path):
     entry = cloud_tracker.register(tmp_path, provider="codex-cloud", task_id="task_example", label="example")
     codex_cloud_land._update(tmp_path, entry, landing_issue=2473, landing_closes=True)
@@ -362,6 +378,32 @@ def test_land_retry_refuses_conflicting_issue(landing):
     calls.clear()
     with pytest.raises(codex_cloud_land.LandError, match="^issue-mismatch$"):
         codex_cloud_land.land(caller, "task_example", 9999)
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "branch", ["codex/issue-2473-0123456789ab", "codex/task-0123456789ab"], ids=["issue-branch", "task-branch"]
+)
+def test_land_retry_refuses_conflicting_issue_from_legacy_branch(landing, branch):
+    caller, _, calls = landing
+    entry = cloud_tracker.load_registry(caller)["entries"][0]
+    codex_cloud_land._update(
+        caller, entry, landing_branch=branch, landing_state="branch-pushed", landing_commit="a" * 40
+    )
+    with pytest.raises(codex_cloud_land.LandError, match="^issue-mismatch$"):
+        codex_cloud_land.land(caller, "task_example", 9999)
+    assert calls == []
+
+
+def test_land_retry_refuses_conflicting_closes(landing):
+    caller, state, calls = landing
+    state["failure"] = "pr"
+    with pytest.raises(codex_cloud_land.LandError, match="^pr-create-failed$"):
+        codex_cloud_land.land(caller, "task_example", 2473)
+    assert state["body"].startswith("Refs #2473.")
+    calls.clear()
+    with pytest.raises(codex_cloud_land.LandError, match="^closes-mismatch$"):
+        codex_cloud_land.land(caller, "task_example", closes=True)
     assert calls == []
 
 

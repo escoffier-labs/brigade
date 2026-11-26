@@ -759,19 +759,22 @@ def land(target: Path, task_id: str, issue: int | None = None, *, closes: bool |
                 if len(entries) != 1:
                     raise LandError("task-not-uniquely-registered")
                 entry = dict(entries[0])
-            if "landing_issue" in entry:
-                saved_issue = entry["landing_issue"]
-                if saved_issue is not None and (type(saved_issue) is not int or saved_issue < 1):
-                    raise LandError("invalid-landing-issue")
-                if issue is not None and issue != saved_issue:
-                    raise LandError("issue-mismatch")
-                issue = saved_issue
-            elif issue is None and isinstance(saved_branch := entry.get("landing_branch"), str):
+            saved_issue = entry.get("landing_issue", issue)
+            if "landing_issue" not in entry and isinstance(saved_branch := entry.get("landing_branch"), str):
                 match = _LANDING_BRANCH.fullmatch(saved_branch)
-                if match and match["issue"]:
-                    issue = int(match["issue"])
-            if closes is None:
-                closes = entry.get("landing_closes") is True
+                if match:
+                    saved_issue = int(match["issue"]) if match["issue"] else None
+            if saved_issue is not None and (type(saved_issue) is not int or saved_issue < 1):
+                raise LandError("invalid-landing-issue")
+            if issue is not None and issue != saved_issue:
+                raise LandError("issue-mismatch")
+            issue = saved_issue
+            saved_closes = entry.get("landing_closes", closes is True)
+            if not isinstance(saved_closes, bool):
+                raise LandError("invalid-landing-closes")
+            if closes is not None and closes != saved_closes:
+                raise LandError("closes-mismatch")
+            closes = saved_closes
             if closes and issue is None:
                 raise LandError("closes-requires-issue")
             if entry.get("pr_url"):
@@ -938,7 +941,12 @@ def _land_locked(
     branch = entry.get("landing_branch") or f"{branch_prefix}-{uuid4().hex[:12]}"
     if not isinstance(branch, str) or not _LANDING_BRANCH.fullmatch(branch):
         raise LandError("invalid-landing-branch")
-    _update(target, entry, landing_branch=branch)
+    updates: dict[str, Any] = {"landing_branch": branch}
+    if "landing_issue" not in entry:
+        updates["landing_issue"] = issue
+    if "landing_closes" not in entry:
+        updates["landing_closes"] = closes
+    _update(target, entry, **updates)
     commit = entry.get("landing_commit")
     published = entry.get("landing_state") in _PUBLISHED_STATES
     if published and not commit:
@@ -1008,8 +1016,6 @@ def _land_locked(
         # Unrecorded preparation refs belong only to this private repository.
         git.git(["branch", "-D", branch], git.repository, "branch-cleanup-failed")
     body = root / "pr-body.md"
-    if "landing_issue" not in entry or entry.get("landing_closes") is not closes:
-        _update(target, entry, landing_issue=issue, landing_closes=closes)
     issue_ref = f"{'Closes' if closes else 'Refs'} #{issue}.\n\n" if issue is not None else ""
     body.write_text(
         f"{issue_ref}Codex Cloud task {entry['task_id']}.\n\n"
