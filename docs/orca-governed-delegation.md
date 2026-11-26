@@ -83,8 +83,9 @@ to acknowledge, and the slot stays occupied.
 
 Use the returned `result_id` with
 `brigade orca ack <run> <task> --result-id <result-id> --target <workspace>`.
-The observation records release and terminal evidence from the same show.
-After ack, that recorded release frees the slot.
+The slot is free once Brigade records both the acknowledgement and proof of
+release. Brigade can record release during the terminal observation or from
+a later full show once it has a terminal result.
 
 Orca can clip oversized transcript text as `transcript_payload`. Brigade
 accepts that clipping when the exact transcript ends with a non-empty assistant
@@ -100,8 +101,9 @@ Each definite start refusal (`start-refused`, `circuit-broken` or
 `brigade orca ack <run> <task> --result-id <result-id> --target <workspace>`.
 Until ack, it holds capacity as `awaiting-ack`.
 
-If the terminal result was recorded before release, including after a confirmed
-cancellation, wait for Orca to release the worker and submit a fresh full show with
+If Brigade recorded a terminal result before release, wait for Orca to release
+the worker. For a cancelled worker, after a confirmed stop, use the fresh full
+show alone to verify release. Submit the fresh show with
 `brigade orca observe <run> <task> --native-json <show.json> --target <workspace>`.
 The retained terminal result lets Brigade check release with the show alone.
 A cancelled worker may not produce a worker_done report or transcript.

@@ -696,8 +696,7 @@ def test_orca_1_4_271_concurrent_closeout(coordinator):
 
         evidence = receipts[task]
         start_closeout.wait()
-        observed = invoke(
-            "observe",
+        proof = (
             "--native-json",
             evidence["released"],
             "--worker-done-json",
@@ -705,11 +704,13 @@ def test_orca_1_4_271_concurrent_closeout(coordinator):
             "--transcript-json",
             evidence["transcript"],
         )
+        observed = invoke("observe", *proof)
         assert observed["reason"] == "terminal-evidence-complete"
         assert observed["transcript_clipped"] is True
         result_id = observed["result_id"]
         assert isinstance(result_id, str) and result_id
         assert invoke("ack", "--result-id", result_id)["acknowledged"]
+        assert invoke("observe", *proof)["result_id"] == result_id
 
     with ThreadPoolExecutor(max_workers=len(tasks)) as pool:
         list(pool.map(closeout, tasks))

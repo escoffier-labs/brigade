@@ -79,12 +79,13 @@ workspace run lock and return `run-busy` if it is still held.
    `brigade orca ack <run> <task> --result-id <result-id> --target <workspace>`.
    When the preceding observation proved release, ack frees the slot.
 
-If Brigade recorded the terminal result before release, including after a
-confirmed cancellation, submit a fresh full show after Orca releases the
-worker with
+If Brigade recorded a terminal result before release, wait for Orca to release
+the worker. For a cancelled worker, after a confirmed stop, use the fresh full
+show alone to verify release. A cancelled worker may not produce a worker_done
+report or transcript. Submit the fresh show with
 `brigade orca observe <run> <task> --native-json <show.json> --target <workspace>`.
 The retained terminal result lets Brigade check release with the show alone.
-Finalization waits until Brigade records that release.
+`release-unverified` blocks finalization until Brigade records that release.
 
 `finalize` fails immediately if the workspace run lock is held.
 After every task's closeout chain finishes, run
