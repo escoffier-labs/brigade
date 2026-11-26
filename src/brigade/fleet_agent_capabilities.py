@@ -124,12 +124,12 @@ AGENT_CAPABILITIES = (
         "`messaging_enabled: true` required for all messaging tools. "
         "All cloud workers share one principal, so the Hub cannot tell one cloud run from another. "
         "Credentials reach a task as Codex Cloud HTTP network secrets, which the environment proxy "
-        "substitutes in requests to the connector host. Tasks start by hand from the Codex app's cloud "
+        "substitutes only in HTTPS requests on port 443 to allowed hosts, such as the connector. Tasks start by hand from the Codex app's cloud "
         "environment, because `brigade run cloud launch` reads only the legacy environment store (#2995). "
         + CLOUD_HANDOFF_LIMIT,
         memory_status=(
             "not yet: the connector has no memory scope granted. Read access to the shared fleet scope only "
-            "(never private scopes) waits on Brigade-launched cloud workers (#2995). " + CLOUD_HANDOFF_LIMIT
+            "(never private scopes) was deferred on 2026-11-26 until Brigade can launch cloud workers (#2995). " + CLOUD_HANDOFF_LIMIT
         ),
         work_status="not yet: the cloud-agent profile has no work view",
         evidence="https://github.com/escoffier-labs/brigadestack/issues/2592#issuecomment-7203762111",
