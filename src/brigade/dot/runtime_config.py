@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from .contracts import DUET_DISPATCH_TOOLS, DotError, ToolClass
-from .safe_state import private_directory, private_file, require_local_platform
+from .safe_state import private_directory, private_file, require_local_platform, unique_object
 from .tool_grants import ToolGrants
 
 CLOUD_AGENT_RUNTIME_SCHEMA = "brigade.cloud-agent.runtime.v1"
@@ -479,7 +479,8 @@ def load_runtime(path: Path, *, schema: str = RUNTIME_SCHEMA, planned_token: boo
             private_file(os.fstat(stream.fileno()))
         if len(raw) > MAX_RUNTIME_BYTES:
             raise _invalid()
-        payload = json.loads(raw.decode("utf-8"))
+        # Duplicate keys fail closed: a later key must never silently override an earlier one.
+        payload = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_object)
     except (DotError, OSError, UnicodeError, ValueError):
         raise _invalid() from None
     finally:
