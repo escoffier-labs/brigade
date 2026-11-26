@@ -11,6 +11,7 @@ import sys
 import threading
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -25,6 +26,15 @@ from . import verify_reaper
 _VERIFY_CANCELED_RC = 130
 _VERIFY_INTERRUPTED_COMMAND_STATUS = "interrupted"
 _VERIFY_CANCELED_RECEIPT_STATUS = "canceled"
+
+
+@dataclass(frozen=True)
+class BatchReceipt:
+    """Coordinator-supplied receipt destination and attempt identity."""
+
+    root: Path
+    attempt_id: str
+    command_env: dict[str, str]
 
 
 class _VerifySignalCancel(KeyboardInterrupt):

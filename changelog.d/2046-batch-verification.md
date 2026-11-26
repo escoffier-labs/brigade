@@ -1,0 +1,1 @@
+- Set `"verify": true` on an explicit batch to run required checks in local isolated task worktrees and record the coordinator's receipt digest with each verified attempt.
