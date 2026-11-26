@@ -1,14 +1,20 @@
 import json
+import shlex
 import sys
 from pathlib import Path
 
 from brigade import cli
+from brigade import toml_format
 from brigade import work_cmd
 
 from tests.work_cmd_test_helpers import (
     _write_json,
     _init_git_repo,
 )
+
+
+def _review_command_value(*argv: str) -> str:
+    return toml_format.format_toml_value(shlex.join(argv))
 
 
 def test_work_review_init_and_plan_text_and_json(tmp_path, capsys):
@@ -32,9 +38,34 @@ def test_work_review_init_and_plan_text_and_json(tmp_path, capsys):
     assert {item["id"] for item in payload["planned"]} >= {"codex-review", "claude-opus-review", "custom"}
 
 
+def test_work_review_plan_preserves_quoted_windows_paths(tmp_path, monkeypatch, capsys):
+    argv = [r"C:\Program Files\Python\python.exe", r"C:\Example's Review\review.py", "diff"]
+    monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: name if name == argv[0] else None)
+    config = tmp_path / ".brigade" / "reviews.toml"
+    config.parent.mkdir()
+    config.write_text(
+        f"""
+[[reviewer]]
+id = "custom"
+name = "Custom review"
+command = {_review_command_value(*argv)}
+output_path = ".brigade/reviews/output.json"
+findings_path = ".brigade/reviews/findings.json"
+privacy_mode = "safe-summary"
+""",
+        encoding="utf-8",
+    )
+
+    assert work_cmd.review_plan(target=tmp_path, json_output=True) == 0
+    planned = json.loads(capsys.readouterr().out)["planned"]
+    assert len(planned) == 1
+    assert planned[0]["blocker"] is None
+    assert planned[0]["argv"] == argv
+
+
 def test_work_review_run_writes_receipts_for_fake_codex_and_claude(tmp_path, capsys):
     _init_git_repo(tmp_path)
-    script = tmp_path / "reviewer.py"
+    script = tmp_path / "fake reviewer.py"
     script.write_text(
         """
 import json
@@ -55,7 +86,7 @@ print("review complete " + reviewer)
 [[reviewer]]
 id = "codex-review"
 name = "Codex review"
-command = "{sys.executable} {script} .brigade/reviews/codex-findings.json codex"
+command = {_review_command_value(sys.executable, str(script), ".brigade/reviews/codex-findings.json", "codex")}
 cwd = "."
 enabled = true
 timeout = 30
@@ -69,7 +100,7 @@ privacy_mode = "safe-summary"
 [[reviewer]]
 id = "claude-opus-review"
 name = "Claude Opus review"
-command = "{sys.executable} {script} .brigade/reviews/claude-findings.json claude"
+command = {_review_command_value(sys.executable, str(script), ".brigade/reviews/claude-findings.json", "claude")}
 cwd = "."
 enabled = true
 timeout = 30
@@ -131,7 +162,7 @@ elif mode == "malformed":
 [[reviewer]]
 id = "timeout-review"
 name = "Timeout review"
-command = "{sys.executable} {script} timeout"
+command = {_review_command_value(sys.executable, str(script), "timeout")}
 cwd = "."
 enabled = true
 timeout = 0.01
@@ -145,7 +176,7 @@ privacy_mode = "safe-summary"
 [[reviewer]]
 id = "fail-review"
 name = "Fail review"
-command = "{sys.executable} {script} fail"
+command = {_review_command_value(sys.executable, str(script), "fail")}
 cwd = "."
 enabled = true
 timeout = 30
@@ -159,7 +190,7 @@ privacy_mode = "safe-summary"
 [[reviewer]]
 id = "malformed-review"
 name = "Malformed review"
-command = "{sys.executable} {script} malformed"
+command = {_review_command_value(sys.executable, str(script), "malformed")}
 cwd = "."
 enabled = true
 timeout = 30
