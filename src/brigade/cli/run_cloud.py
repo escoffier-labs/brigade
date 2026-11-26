@@ -504,14 +504,21 @@ def dispatch(args) -> int:
                 from .. import codex_cloud
 
                 codex_cloud.require_hub_lease_storage()
-                entry = next(
-                    (
-                        row
-                        for row in cloud_tracker.load_registry(target)["entries"]
-                        if row.get("provider") == "codex-cloud" and row.get("task_id") == args.task_id
-                    ),
-                    None,
+                entry = codex_cloud.recover_registered_launch(
+                    target,
+                    task_id=args.task_id,
+                    repo=args.repo,
                 )
+                recovered = entry is not None
+                if not recovered:
+                    entry = next(
+                        (
+                            row
+                            for row in cloud_tracker.load_registry(target)["entries"]
+                            if row.get("provider") == "codex-cloud" and row.get("task_id") == args.task_id
+                        ),
+                        None,
+                    )
             if entry is None:
                 entry = cloud_tracker.register(
                     target,
@@ -535,16 +542,19 @@ def dispatch(args) -> int:
                     ),
                 )
             if args.provider == "codex-cloud":
-                from .. import codex_cloud
-
-                codex_cloud.acquire_registered_task_lease(
-                    target,
-                    task_id=str(entry["task_id"]),
-                    label=str(entry["label"]),
-                    prompt_hash=entry.get("prompt_hash"),
-                    repo=args.repo or codex_cloud._repo_from_cwd(target),
-                )
-                entry = {key: value for key, value in entry.items() if key != "lease_holder"}
+                if not recovered:
+                    entry = (
+                        codex_cloud.acquire_registered_task_lease(
+                            target,
+                            task_id=args.task_id,
+                            label=str(entry["label"]),
+                            prompt_hash=entry.get("prompt_hash"),
+                            repo=args.repo or codex_cloud._repo_from_cwd(target),
+                            check_launch_title=False,
+                        )
+                        or entry
+                    )
+                entry = {key: value for key, value in entry.items() if key not in {"lease_holder", "launch_lease_id"}}
         except (ValueError, OSError, RuntimeError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2

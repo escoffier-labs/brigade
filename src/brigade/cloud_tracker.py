@@ -345,6 +345,7 @@ def register(
     observed_status: str | None = None,
     launch_tag: str | None = None,
     launch_lease_id: str | None = None,
+    launch_repo: str | None = None,
 ) -> dict[str, Any]:
     if provider not in TRACKER_PROVIDERS:
         raise ValueError("provider must be one of: codex-cloud, cursor-cloud, grokbot-cloud, claude-cloud")
@@ -374,7 +375,7 @@ def register(
         raise ValueError("Codex Cloud launch intents require an unassigned dispatch")
     if source == "dispatch" and not task_id and launch_tag is None:
         raise ValueError("dispatch registration requires task_id")
-    entry = {
+    entry: dict[str, Any] = {
         "id": _new_id(),
         "provider": provider,
         "task_id": task_id,
@@ -395,7 +396,13 @@ def register(
     if isinstance(lease_holder, str) and lease_holder:
         entry["lease_holder"] = lease_holder
     if launch_tag is not None:
-        entry.update(launch_tag=launch_tag, launch_state="needs-reconcile", launch_lease_id=launch_lease_id)
+        entry.update(
+            launch_tag=launch_tag,
+            launch_state="needs-reconcile",
+            launch_lease_id=launch_lease_id,
+            launch_requires_lease=launch_lease_id is not None,
+            launch_repo=launch_repo,
+        )
     if binding is not None:
         entry.update(binding)
         digest = hashlib.sha256(f"claude-cloud\0{entry['session_id']}".encode()).hexdigest()[:24]
@@ -409,7 +416,8 @@ def register(
                 matches = [
                     row
                     for row in registry["entries"]
-                    if row.get("provider") == provider and row.get("task_id") == task_id
+                    if row.get("provider") == provider
+                    and (row.get("task_id") == task_id or row.get("launch_candidate_id") == task_id)
                 ]
                 if len(matches) > 1:
                     raise ValueError("Codex Cloud task not uniquely registered")

@@ -2,7 +2,9 @@ import hashlib
 import json
 import subprocess
 import sys
+from concurrent.futures import ThreadPoolExecutor
 from datetime import timedelta
+from threading import Event
 
 import pytest
 
@@ -304,7 +306,11 @@ def test_launch_task_releases_lease_when_submission_fails(launch_branch, monkeyp
         return
     codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
     calls = _grant_hub(monkeypatch)
-    monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(code=127, stderr="command not found: codex"))
+    monkeypatch.setattr(
+        codex_cloud.proc,
+        "run",
+        lambda *a, **k: proc.Result(code=127, stdout="", stderr="command not found: codex", launch_failed=True),
+    )
 
     launched = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
 
@@ -840,7 +846,8 @@ def test_codex_tracking_failure_recovers_holder_for_manual_registration_and_sync
     entries = cloud_tracker.load_registry(tmp_path)["entries"]
     registered = next(entry for entry in entries if entry.get("task_id") == "task_recovery99")
     assert registered["lease_holder"] == "h1"
-    assert len(calls["admit"]) == len(calls["bind"]) == 1
+    assert len(entries) == len(calls["admit"]) == 1
+    assert [call["args"][0] for call in calls["bind"]] == ["lease-1", "lease-1"]
     payload = cloud_tracker.sync_payload(
         tmp_path,
         provider_tasks={"task_recovery99": {"state": state}},
@@ -3026,3 +3033,266 @@ def test_codex_launch_reconcile_preserves_legacy_rows(monkeypatch, tmp_path):
     assert cloud_tracker.load_registry(tmp_path)["entries"] == [legacy]
     monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: pytest.fail("legacy row reached provider"))
     assert codex_cloud.reconcile_launches(tmp_path) == []
+
+
+@pytest.mark.parametrize("inventory_case", ["truncated", "blank_titles", "duplicate"])
+def test_reconcile_binds_only_unique_tags_in_observed_pages(launch_branch, monkeypatch, tmp_path, inventory_case):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path)
+        return
+    calls = _grant_hub(monkeypatch)
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(code=124))
+    codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
+    (entry,) = cloud_tracker.load_registry(tmp_path)["entries"]
+    title = f"[{entry['launch_tag']}] Fix parser"
+    tasks = [{"id": "task_match", "title": title}]
+    cursor = "another-page" if inventory_case in ("truncated", "duplicate") else None
+    if inventory_case == "blank_titles":
+        tasks += [{"id": "task_blank", "title": ""}, {"id": "task_missing"}]
+    if inventory_case == "duplicate":
+        tasks.append({"id": "task_duplicate", "title": title})
+    monkeypatch.setattr(codex_cloud, "MAX_LIST_PAGES", 1)
+    monkeypatch.setattr(
+        codex_cloud.proc, "run", lambda *a, **k: _result(stdout=json.dumps({"tasks": tasks, "cursor": cursor}))
+    )
+    inventory = codex_cloud.list_tasks(include_launch_tags=True)
+    assert inventory.ok and inventory.complete is (inventory_case == "blank_titles")
+    (outcome,) = codex_cloud.reconcile_launches(tmp_path)
+    if inventory_case == "duplicate":
+        assert outcome["reason"] == "ambiguous-match"
+        assert outcome["state"] == "needs-reconcile"
+        assert calls["bind"] == []
+    else:
+        assert outcome["state"] == "tracked"
+        assert calls["bind"][0]["kwargs"]["provider_task_id"] == "task_match"
+    assert calls["release"] == []
+
+
+def test_launched_child_exit_127_preserves_intent_and_lease(launch_branch, monkeypatch, tmp_path):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path)
+        return
+    calls = _grant_hub(monkeypatch)
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(code=127, stderr="command not found: codex"))
+    assert codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch") == {
+        "ok": False,
+        "reason": "uncertain",
+    }
+    (entry,) = cloud_tracker.load_registry(tmp_path)["entries"]
+    assert entry["launch_state"] == "needs-reconcile"
+    assert entry["launch_lease_id"] == "lease-1"
+    assert calls["release"] == []
+
+
+@pytest.mark.parametrize("via_inventory", [False, True])
+def test_late_confirmation_reopens_not_launched_intent(launch_branch, monkeypatch, tmp_path, via_inventory):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path)
+        return
+    calls = _grant_hub(monkeypatch)
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    grant = fleet_client.admit_cloud
+
+    def admit(*args, **kwargs):
+        if kwargs.get("lease_id"):
+            calls["admit"].append({"args": args, "kwargs": kwargs})
+            return fleet_client.CloudDecision(
+                True, "ok", lease={"lease_id": kwargs["lease_id"]}, holder=kwargs["holder"]
+            )
+        return grant(*args, **kwargs)
+
+    monkeypatch.setattr(fleet_client, "admit_cloud", admit)
+    bind = fleet_client.bind_cloud
+
+    def expire_original(lease_id, **kwargs):
+        if lease_id == "lease-1":
+            return fleet_client.CloudDecision(False, "refused")
+        return bind(lease_id, **kwargs)
+
+    monkeypatch.setattr(fleet_client, "bind_cloud", expire_original)
+    monkeypatch.setattr(fleet_client, "fetch_cloud", lambda: {"leases": []})
+    monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: codex_cloud.ListTasksResult([]))
+
+    def submit(*args, **kwargs):
+        if via_inventory:
+            return proc.Result(code=127, stdout="", stderr="command not found: codex", launch_failed=True)
+        (entry,) = cloud_tracker.load_registry(tmp_path)["entries"]
+        started = cloud_tracker._parse_time(entry["dispatched_at"])
+        assert (
+            codex_cloud.reconcile_launches(tmp_path, now=started + timedelta(minutes=6))[0]["state"] == "not-launched"
+        )
+        return _result(stdout="task_late")
+
+    monkeypatch.setattr(codex_cloud.proc, "run", submit)
+    result = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
+    if via_inventory:
+        assert result["reason"] == "submit-failed"
+        (entry,) = cloud_tracker.load_registry(tmp_path)["entries"]
+        assert entry["launch_state"] == "not-launched"
+        item = {"id": "task_late", "launch_tag": entry["launch_tag"]}
+        monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: codex_cloud.ListTasksResult([item]))
+        started = cloud_tracker._parse_time(entry["dispatched_at"])
+        assert codex_cloud.reconcile_launches(tmp_path, now=started + timedelta(hours=25)) == []
+        assert codex_cloud.reconcile_launches(tmp_path, now=started + timedelta(hours=23))[0]["state"] == "tracked"
+        assert len(calls["release"]) == 1
+    else:
+        assert result["ok"]
+        assert calls["release"] == []
+    (tracked,) = cloud_tracker.load_registry(tmp_path)["entries"]
+    assert tracked["task_id"] == "task_late"
+    assert len(calls["admit"]) == 2
+    replacement = calls["admit"][-1]["kwargs"]
+    assert replacement["repo"] == "owner/repo"
+    assert replacement["lease_id"] != "lease-1"
+    assert calls["bind"][-1]["args"] == (replacement["lease_id"],)
+    assert calls["bind"][-1]["kwargs"]["holder"] == replacement["holder"]
+
+
+def test_concurrent_launch_can_write_registry_while_reconcile_binds(launch_branch, monkeypatch, tmp_path):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path)
+        return
+    _grant_hub(monkeypatch)
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(code=124))
+    codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="first")
+    (entry,) = cloud_tracker.load_registry(tmp_path)["entries"]
+    item = {"id": "task_first", "launch_tag": entry["launch_tag"]}
+    monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: codex_cloud.ListTasksResult([item]))
+    bind_started, finish_bind = Event(), Event()
+    bind = fleet_client.bind_cloud
+
+    def blocking_bind(lease_id, **kwargs):
+        if kwargs["provider_task_id"] == "task_first":
+            bind_started.set()
+            assert finish_bind.wait(5)
+        return bind(lease_id, **kwargs)
+
+    monkeypatch.setattr(fleet_client, "bind_cloud", blocking_bind)
+    monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(stdout="task_second"))
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        reconcile = pool.submit(codex_cloud.reconcile_launches, tmp_path)
+        try:
+            assert bind_started.wait(5)
+            monkeypatch.setattr(
+                fleet_client,
+                "admit_cloud",
+                lambda *a, **k: fleet_client.CloudDecision(True, "ok", lease={"lease_id": "lease-2"}, holder="h2"),
+            )
+            launch = pool.submit(
+                codex_cloud.launch_task, "private prompt", target=tmp_path, repo="owner/repo", label="second"
+            )
+            assert launch.result(timeout=3)["ok"]
+        finally:
+            finish_bind.set()
+        assert reconcile.result(timeout=5)[0]["state"] == "tracked"
+    assert {entry["task_id"] for entry in cloud_tracker.load_registry(tmp_path)["entries"]} == {
+        "task_first",
+        "task_second",
+    }
+
+
+@pytest.mark.parametrize("search_title", [False, True])
+def test_manual_register_recovers_intent_without_second_admission(
+    launch_branch, monkeypatch, tmp_path, capsys, search_title
+):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="cli-register", capsys=capsys)
+        return
+    calls = _grant_hub(monkeypatch)
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    bind = fleet_client.bind_cloud
+    if search_title:
+        monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(code=124))
+    else:
+        monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(stdout="task_manual"))
+        monkeypatch.setattr(
+            fleet_client, "bind_cloud", lambda *a, **k: fleet_client.CloudDecision(False, "hub-unavailable")
+        )
+    result = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
+    assert result["reason"] == ("uncertain" if search_title else "bind-failed")
+    (entry,) = cloud_tracker.load_registry(tmp_path)["entries"]
+    monkeypatch.setattr(fleet_client, "bind_cloud", bind)
+    monkeypatch.setattr(fleet_client, "fetch_cloud", lambda: pytest.fail("lease is already recorded on the intent"))
+
+    def status(argv, **kwargs):
+        assert search_title and argv == ["codex", "cloud", "status", "task_manual"]
+        return _result(stdout=f"[READY] [{entry['launch_tag']}] Fix parser")
+
+    monkeypatch.setattr(codex_cloud.proc, "run", status)
+    assert (
+        cli.main(
+            [
+                "run",
+                "cloud",
+                "register",
+                "--provider",
+                "codex-cloud",
+                "--target",
+                str(tmp_path),
+                "--task-id",
+                "task_manual",
+                "--label",
+                "manual",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert output["id"] == entry["id"]
+    assert output["task_id"] == "task_manual"
+    assert "lease_holder" not in output and "launch_lease_id" not in output
+    (tracked,) = cloud_tracker.load_registry(tmp_path)["entries"]
+    assert tracked["launch_state"] == "tracked"
+    assert len(calls["admit"]) == len(calls["bind"]) == 1
+    assert calls["bind"][0]["args"] == ("lease-1",)
+    assert calls["bind"][0]["kwargs"]["holder"] == "h1"
+
+
+def test_scheduled_lease_sync_leaves_launch_reconciliation_to_regular_sync(monkeypatch, tmp_path, capsys):
+    cloud_tracker.register(
+        tmp_path,
+        provider="codex-cloud",
+        label="pending launch",
+        launch_tag="brigade-launch-00000000000000000000000000000001",
+    )
+    monkeypatch.setattr(
+        codex_cloud, "reconcile_launches", lambda *a, **k: pytest.fail("scheduled sync attempted launch recovery")
+    )
+    assert cli.main(["run", "cloud", "sync", "--codex-leases-only", "--target", str(tmp_path), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"renewed": 0, "released": 0, "errors": 0, "skipped": 0}
+    assert cloud_tracker.load_registry(tmp_path)["entries"][0]["launch_state"] == "needs-reconcile"
+
+
+def test_late_match_reuses_lease_when_clean_failure_release_was_unconfirmed(launch_branch, monkeypatch, tmp_path):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path)
+        return
+    calls = _grant_hub(monkeypatch)
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    monkeypatch.setattr(
+        codex_cloud.proc,
+        "run",
+        lambda *a, **k: proc.Result(code=127, stdout="", stderr="command not found: codex", launch_failed=True),
+    )
+    release = fleet_client.release_cloud
+
+    def unconfirmed_release(*args, **kwargs):
+        release(*args, **kwargs)
+        return fleet_client.CloudDecision(False, "hub-unavailable")
+
+    monkeypatch.setattr(fleet_client, "release_cloud", unconfirmed_release)
+    result = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
+    assert result["reason"] == "submit-failed"
+    (entry,) = cloud_tracker.load_registry(tmp_path)["entries"]
+    assert entry["launch_state"] == "not-launched"
+    assert entry["launch_lease_id"] == "lease-1"
+    item = {"id": "task_late", "launch_tag": entry["launch_tag"]}
+    monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: codex_cloud.ListTasksResult([item]))
+    assert codex_cloud.reconcile_launches(tmp_path)[0]["state"] == "tracked"
+    assert len(calls["admit"]) == len(calls["release"]) == len(calls["bind"]) == 1
+    assert calls["bind"][0]["args"] == ("lease-1",)
+    assert calls["bind"][0]["kwargs"]["holder"] == "h1"
