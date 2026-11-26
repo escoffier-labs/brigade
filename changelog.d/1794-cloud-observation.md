@@ -1,0 +1,2 @@
+- Cloud tracking reads Codex Cloud, Cursor Cloud, and GitHub inventories in parallel with separate deadlines and reports whether paging completed.
+- Regular cloud sync records when each tracked task was last seen and flags tasks missing from six hours of consecutive complete inventories.
