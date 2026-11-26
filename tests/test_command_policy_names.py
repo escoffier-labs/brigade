@@ -37,6 +37,10 @@ def policy_name(monkeypatch):
         "policy-tool.wsf",
         "policy-tool.wsh",
         "policy-tool.msc",
+        "policy-tool.",
+        "Policy-Tool.EXE. ",
+        r"C:\tools\policy-tool.exe:part",
+        "policy-tool.exe::$DATA",
     ],
 )
 @pytest.mark.parametrize("entry", ["scanner", "review", "verify-command", "verify-argv", "fleet-command", "fleet-argv"])
@@ -68,6 +72,9 @@ def test_policy_matches_normalized_names(spelling, entry, policy_name, tmp_path)
         ("Policy-Tool.EXE.CMD", "policy-tool.exe"),
         (r"C:Policy-Tool.EXE", "policy-tool"),
         (r"C:\Program Files/tools\Policy-Tool.EXE", "policy-tool"),
+        ("Policy-Tool. . ", "policy-tool"),
+        ("Policy-Tool.Exe:Part.Exe", "policy-tool"),
+        ("...", ""),
     ],
 )
 def test_normalize_policy_executable(spelling, name):

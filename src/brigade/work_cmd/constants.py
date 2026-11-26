@@ -241,7 +241,8 @@ _POLICY_EXECUTABLE_SUFFIXES = {".com", ".exe", ".bat", ".cmd", ".vbs", ".vbe", "
 def normalize_policy_executable(argv0: str) -> str:
     basename = PurePosixPath(argv0.replace("\\", "/")).name
     _, basename = ntpath.splitdrive(basename)
-    name = basename.casefold()
+    # Reduce platform-equivalent spellings of a name to one policy name.
+    name = basename.partition(":")[0].rstrip(". ").casefold()
     stem, dot, suffix = name.rpartition(".")
     return stem if dot + suffix in _POLICY_EXECUTABLE_SUFFIXES else name
 
