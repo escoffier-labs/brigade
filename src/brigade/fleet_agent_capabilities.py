@@ -3,17 +3,19 @@
 from dataclasses import dataclass
 from typing import Literal
 
+from .dot.cloud_runtime import CLOUD_AGENT_PRINCIPAL
 from .dot.profile import PROFILES, runtime_profile
+from .dot.runtime_config import DUET_PRINCIPAL
 from .fleet_inbox_delivery import TOOL_POLL_INTERVAL_SECONDS
 
-PrincipalSource = Literal["node", "agent:duet", "agent:miller", "agent:cloud-agent"]
 Wake = Literal["next-event", "next-start", "hosted-subscription"]
 
 
 @dataclass(frozen=True)
 class AgentCapability:
     kind: str
-    principal_source: PrincipalSource
+    # "node", or the hub principal the connector runtime enforces.
+    principal_source: str
     connector_profile: str | None
     send: str | None
     read: str | None
@@ -43,9 +45,7 @@ def _local(kind: str, evidence: str) -> AgentCapability:
     )
 
 
-def _connector(
-    kind: str, principal: PrincipalSource, wake: Wake, limits: str, evidence: str | None = None
-) -> AgentCapability:
+def _connector(kind: str, principal: str, wake: Wake, limits: str, evidence: str | None = None) -> AgentCapability:
     profile = runtime_profile(PROFILES[kind], dispatch_enabled=True, messaging_enabled=True)
     tools = {name: name for name in profile.tools}
     if profile.send_limit_per_hour is not None:
@@ -77,7 +77,7 @@ AGENT_CAPABILITIES = (
     ),
     _connector(
         "duet",
-        "agent:duet",
+        DUET_PRINCIPAL,
         "next-start",
         "`messaging_enabled` required for send and reply.",
         "https://github.com/escoffier-labs/brigadestack/issues/2592#issuecomment-7180093019",
@@ -90,7 +90,7 @@ AGENT_CAPABILITIES = (
     ),
     _connector(
         "cloud-agent",
-        "agent:cloud-agent",
+        CLOUD_AGENT_PRINCIPAL,
         "next-start",
         "`messaging_enabled: true` required for all messaging tools.",
     ),
