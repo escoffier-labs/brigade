@@ -99,11 +99,11 @@ func cmdCrawlExporter(ex nativeExporter, args []string, out, errw io.Writer) int
 		cancel()
 	}
 	waitErr := cmd.Wait()
-	if importErr != nil {
-		return fatalf(errw, "crawl %s: %s", ex.sourceKind, importErr)
-	}
 	if ctx.Err() == context.DeadlineExceeded {
 		return fatalf(errw, "crawl %s: timed out after %s", ex.sourceKind, externalScannerTimeout)
+	}
+	if importErr != nil {
+		return fatalf(errw, "crawl %s: %s", ex.sourceKind, importErr)
 	}
 	if waitErr != nil {
 		msg := strings.TrimSpace(stderr.String())

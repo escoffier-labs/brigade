@@ -1623,11 +1623,11 @@ func runStationTrailImport(db *sql.DB, sourceKind, sourcePath string, values map
 		cancel()
 	}
 	waitErr := cmd.Wait()
-	if importErr != nil {
-		return ingest.AdapterResult{}, stationTrailSummary{}, importErr
-	}
 	if ctx.Err() == context.DeadlineExceeded {
 		return ingest.AdapterResult{}, stationTrailSummary{}, fmt.Errorf("stationtrail timed out after %s", externalScannerTimeout)
+	}
+	if importErr != nil {
+		return ingest.AdapterResult{}, stationTrailSummary{}, importErr
 	}
 	if waitErr != nil {
 		msg := strings.TrimSpace(stderr.String())

@@ -17,6 +17,109 @@ import (
 	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources/opencode"
 )
 
+func TestImportAdapterReaderFinalRecord(t *testing.T) {
+	var stream bytes.Buffer
+	generated, err := opencode.Generate("../../testdata/harnesses/opencode-export.fixture.json", sources.Options{}, &stream)
+	if err != nil {
+		t.Fatal(err)
+	}
+	full := stream.String()
+	if generated.Records != 2 || !strings.HasSuffix(full, "\n") {
+		t.Fatalf("expected two newline-terminated producer records, got %d records", generated.Records)
+	}
+	first, tail, _ := strings.Cut(full, "\n")
+	last := strings.TrimSuffix(tail, "\n")
+	for _, tc := range []struct {
+		name, tail string
+		truncated  bool
+	}{
+		{"cut mid-record", last[:len(last)/2], true},
+		{"trailing newline", last + "\n", false},
+		{"empty final line", last + "\n\n", false},
+		// Strip the producer newline to model a complete record saved without it.
+		{"complete record without newline", last, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := archive.Open(t.TempDir() + "/brigade-evidence.db")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if err := archive.Migrate(db); err != nil {
+				t.Fatal(err)
+			}
+			res, err := ImportAdapterReader(db, strings.NewReader(first+"\n"+tc.tail), "reader://fixture", "")
+			if tc.truncated {
+				if err == nil || res.Status != "failed" || res.Inserted != 0 ||
+					!strings.Contains(strings.Join(res.Errors, " "), "line 2: truncated final record") {
+					t.Fatalf("expected a failed import with the truncation reason, got %+v, %v", res, err)
+				}
+				res, err = ImportAdapterReader(db, strings.NewReader(full), "reader://fixture", "")
+			}
+			if err != nil || res.Status != "complete" || res.Inserted != 2 || len(res.Warnings) != 0 {
+				t.Fatalf("expected a complete import of two records, got %+v, %v", res, err)
+			}
+		})
+	}
+}
+
+func TestImportAdapterReaderFinalRecordWarnings(t *testing.T) {
+	oversized := strings.TrimSuffix(adapterRecord("reader-test", "item:1", strings.Repeat("x", sources.MaxLineBytes), "fixture.jsonl", 1), "\n")
+	for _, tc := range []struct{ name, input, warning string }{
+		{"oversized with newline", oversized + "\n", "line too long"},
+		{"oversized without newline", oversized, "line too long"},
+		{"complete JSON with invalid schema", `{"schema":"unsupported"}`, "unsupported schema"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db, err := archive.Open(t.TempDir() + "/brigade-evidence.db")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if err := archive.Migrate(db); err != nil {
+				t.Fatal(err)
+			}
+			res, err := ImportAdapterReader(db, strings.NewReader(tc.input), "reader://fixture", "")
+			if err != nil || res.Status != "complete" || len(res.Warnings) != 1 ||
+				!strings.Contains(res.Warnings[0], tc.warning) {
+				t.Fatalf("expected a complete import with %q warning, got %+v, %v", tc.warning, res, err)
+			}
+		})
+	}
+}
+
+func TestImportAdapterReaderTruncationAfterBatch(t *testing.T) {
+	db, err := archive.Open(t.TempDir() + "/brigade-evidence.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	if err := archive.Migrate(db); err != nil {
+		t.Fatal(err)
+	}
+	var stream strings.Builder
+	for i := 0; i <= importBatchSize; i++ {
+		stream.WriteString(adapterRecord("reader-test", "item:"+strconv.Itoa(i), "record", "fixture.jsonl", i+1))
+	}
+	last := adapterRecord("reader-test", "item:last", "final record", "fixture.jsonl", importBatchSize+2)
+	res, err := ImportAdapterReader(db, strings.NewReader(stream.String()+last[:len(last)/2]), "reader://fixture", "")
+	if err == nil || res.Status != "partial" || res.Inserted != importBatchSize ||
+		!strings.Contains(strings.Join(res.Errors, " "), "truncated final record") {
+		t.Fatalf("expected partial import of one committed batch, got %+v, %v", res, err)
+	}
+	var count int
+	if err := db.QueryRow("select count(*) from items").Scan(&count); err != nil || count != importBatchSize {
+		t.Fatalf("items after rollback = %d, error = %v, want %d", count, err, importBatchSize)
+	}
+	res, err = ImportAdapterReader(db, strings.NewReader(stream.String()+last), "reader://fixture", "")
+	if err != nil || res.Status != "complete" || res.Inserted != 2 {
+		t.Fatalf("expected replay to insert only the last two records, got %+v, %v", res, err)
+	}
+	if err := db.QueryRow("select count(*) from items").Scan(&count); err != nil || count != importBatchSize+2 {
+		t.Fatalf("items after replay = %d, error = %v, want %d", count, err, importBatchSize+2)
+	}
+}
+
 func TestImportAdapterReaderIdempotent(t *testing.T) {
 	db, err := archive.Open(t.TempDir() + "/miseledger.db")
 	if err != nil {

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -324,12 +325,16 @@ func crawlFiles(args []string, out, errw io.Writer, walkDir func(string, fs.Walk
 			}
 			waitErr := cmd.Wait()
 			inserted += result.Inserted
-			if importErr != nil {
-				return importErr
-			}
-			if ctx.Err() == context.DeadlineExceeded {
+			truncated := errors.Is(importErr, ingest.ErrTruncatedFinalRecord)
+			if ctx.Err() == context.DeadlineExceeded && (importErr == nil || truncated) {
 				pending = true
 				return fs.SkipAll
+			}
+			if truncated {
+				return warnAndCheckpoint(path, importErr)
+			}
+			if importErr != nil {
+				return fmt.Errorf("%s: %w", path, importErr)
 			}
 			if waitErr != nil {
 				return warnAndCheckpoint(path, fmt.Errorf("sourceharvest: %s: %w", strings.TrimSpace(stderr.String()), waitErr))

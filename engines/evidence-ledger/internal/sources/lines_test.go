@@ -6,16 +6,17 @@ import (
 )
 
 type collectedLine struct {
-	line    string
-	tooLong bool
-	size    int64
+	line       string
+	tooLong    bool
+	size       int64
+	terminated bool
 }
 
 func collectLines(t *testing.T, input string, max int) []collectedLine {
 	t.Helper()
 	var out []collectedLine
-	err := EachLine(strings.NewReader(input), max, func(line []byte, tooLong bool, size int64) error {
-		out = append(out, collectedLine{line: string(line), tooLong: tooLong, size: size})
+	err := EachLine(strings.NewReader(input), max, func(line []byte, tooLong bool, size int64, terminated bool) error {
+		out = append(out, collectedLine{line: string(line), tooLong: tooLong, size: size, terminated: terminated})
 		return nil
 	})
 	if err != nil {
@@ -59,12 +60,12 @@ func TestEachLineOversizedSpansManyReadChunks(t *testing.T) {
 
 func TestEachLineFinalLineWithoutNewline(t *testing.T) {
 	got := collectLines(t, "a\nb", 10)
-	if len(got) != 2 || got[1].line != "b" || got[1].tooLong {
+	if len(got) != 2 || got[1].line != "b" || got[1].tooLong || !got[0].terminated || got[1].terminated {
 		t.Fatalf("lines = %+v", got)
 	}
 	// Oversized final line without a terminator is still reported.
 	got = collectLines(t, "a\n"+strings.Repeat("z", 20), 10)
-	if len(got) != 2 || !got[1].tooLong || got[1].size != 20 {
+	if len(got) != 2 || !got[1].tooLong || got[1].size != 20 || got[1].terminated {
 		t.Fatalf("lines = %+v", got)
 	}
 }

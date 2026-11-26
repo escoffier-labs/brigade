@@ -1,11 +1,13 @@
 package ingest
 
 import (
+	"bytes"
 	"compress/gzip"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -18,6 +20,9 @@ import (
 	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/sources"
 	"github.com/escoffier-labs/brigade/engines/evidence-ledger/internal/textnorm"
 )
+
+// ErrTruncatedFinalRecord indicates an unterminated, malformed adapter record at EOF.
+var ErrTruncatedFinalRecord = errors.New("truncated final record")
 
 type AdapterResult struct {
 	Status       string   `json:"status"`
@@ -165,16 +170,20 @@ func importAdapterReaderProgress(db *sql.DB, r io.Reader, sourcePath, sourceOver
 		return nil
 	}
 
-	scanErr := sources.EachLine(r, sources.MaxLineBytes, func(raw []byte, tooLong bool, size int64) error {
+	scanErr := sources.EachLine(r, sources.MaxLineBytes, func(raw []byte, tooLong bool, size int64, terminated bool) error {
 		ordinal++
 		if tooLong {
 			result.Warnings = append(result.Warnings, fmt.Sprintf("line %d: line too long (%d bytes > %d limit), skipped", ordinal, size, sources.MaxLineBytes))
 			return nil
 		}
-		line := append([]byte(nil), raw...)
-		if len(strings.TrimSpace(string(line))) == 0 {
+		if len(bytes.TrimSpace(raw)) == 0 {
 			return nil
 		}
+		// A complete JSON value at EOF is valid framing even without a newline.
+		if !terminated && !json.Valid(raw) {
+			return fmt.Errorf("line %d: %w", ordinal, ErrTruncatedFinalRecord)
+		}
+		line := append([]byte(nil), raw...)
 		if recordScan != nil {
 			file, ok, err := parseSourceScanSentinel(line)
 			if err != nil {
