@@ -12,7 +12,7 @@ from tests.test_dot_adapter import Fixture
 
 from brigade.dot.contracts import DotError
 from brigade.dot.profile import CLOUD_AGENT, runtime_profile
-from brigade.dot.runtime_config import CLOUD_AGENT_RUNTIME_SCHEMA, parse_runtime
+from brigade.dot.runtime_config import CLOUD_AGENT_RUNTIME_SCHEMA, load_runtime, parse_runtime
 from brigade.dot.token_auth import TokenVerifier
 from tests.cloud_agent_support import _memory_document
 from tests.test_dot_lifecycle import config
@@ -68,6 +68,107 @@ def test_closed_runtime(tmp_path, key, value):
     data[key] = value
     with pytest.raises(DotError):
         parse_runtime(data, schema=CLOUD_AGENT_RUNTIME_SCHEMA)
+
+
+def test_cloud_runtime_parses_tool_grants(tmp_path):
+    data = cloud_document(tmp_path)
+    data["tool_grants"] = {"classes": ["read", "messaging"], "deny": ["handoff_write", "inbox_ack"]}
+    runtime = parse_runtime(data, schema=CLOUD_AGENT_RUNTIME_SCHEMA)
+    assert runtime.messaging_enabled is False
+    assert runtime.tool_grants is not None
+    assert {kind.value for kind in runtime.tool_grants.classes} == {"read", "messaging"}
+    assert runtime.tool_grants.deny == {"handoff_write", "inbox_ack"}
+
+
+@pytest.mark.parametrize(
+    "grants",
+    [
+        {"classes": ["read"], "deny": ["unknown"]},
+        {"classes": ["read"], "deny": ["fleet_submit"]},
+        {"classes": [], "deny": []},
+    ],
+)
+def test_cloud_runtime_rejects_invalid_tool_grants(tmp_path, grants):
+    data = cloud_document(tmp_path)
+    data["tool_grants"] = grants
+    with pytest.raises(DotError, match="^invalid_config$"):
+        parse_runtime(data, schema=CLOUD_AGENT_RUNTIME_SCHEMA)
+
+
+@requires_local_state
+def test_cloud_runtime_rejects_duplicate_grant_key(dot_private_dir):
+    parent = dot_private_dir.parent
+    document = json.dumps(cloud_document(parent))
+    path = parent / "runtime.json"
+    path.write_text(document[:-1] + ', "tool_grants": {"classes": [], "classes": ["read"], "deny": []}}')
+    path.chmod(0o600)
+    with pytest.raises(DotError, match="^invalid_config$"):
+        load_runtime(path, schema=CLOUD_AGENT_RUNTIME_SCHEMA)
+
+
+@requires_local_state
+@pytest.mark.parametrize("deny_handoff", [False, True])
+def test_cloud_listener_tool_grants(dot_private_dir, deny_handoff):
+    pytest.importorskip("mcp.server")
+    from brigade.dot.adapter import build_tools
+    from tests.test_dot_adapter import VALID_CALLS
+    from tests.test_dot_lifecycle import event_service, request
+    from tests.test_dot_tool_grants import assert_rpc_denied
+
+    data = cloud_document(dot_private_dir.parent)
+    data["messaging_enabled"] = True
+    if deny_handoff:
+        data["tool_grants"] = {"classes": ["read", "messaging"], "deny": ["handoff_write"]}
+    runtime = parse_runtime(data, schema=CLOUD_AGENT_RUNTIME_SCHEMA)
+    expected = {"inbox_ack", "inbox_list", "inbox_reply", "memory_card", "memory_search", "message_send"}
+    if not deny_handoff:
+        expected.add("handoff_write")
+    inbox = runtime.paths.workspace / CLOUD_AGENT.handoff_inbox
+    inbox.mkdir(parents=True, mode=0o700)
+    headers = [
+        (b"host", b"dot.example.test"),
+        (b"content-type", b"application/json"),
+        (b"accept", b"application/json, text/event-stream"),
+        (b"authorization", b"Bearer " + Path(data["auth"]["token_file"]).read_bytes()),
+    ]
+    arguments = VALID_CALLS["handoff_write"]
+    tools, state, _ = build_tools(runtime, CLOUD_AGENT)
+    with state:
+        app = lifecycle.build_app(
+            config(),
+            tools,
+            event_service(state),
+            TokenVerifier(runtime.auth),
+            events_enabled=False,
+            profile=tools.profile,
+        )
+
+        async def discover_and_call():
+            async with app.app.router.lifespan_context(app.app):
+                status, _, response = await request(
+                    app, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, headers=headers
+                )
+                assert status == 200
+                assert {tool["name"] for tool in response["result"]["tools"]} == expected
+                if deny_handoff:
+                    assert_rpc_denied(
+                        await request(
+                            app,
+                            {
+                                "jsonrpc": "2.0",
+                                "id": 2,
+                                "method": "tools/call",
+                                "params": {"name": "handoff_write", "arguments": arguments},
+                            },
+                            headers=headers,
+                        )
+                    )
+
+        asyncio.run(discover_and_call())
+        if deny_handoff:
+            with pytest.raises(DotError, match=r"^tool_not_permitted:"):
+                tools.call(runtime.auth.approved_email, "handoff_write", arguments)
+            assert list(inbox.iterdir()) == []
 
 
 @pytest.mark.parametrize(

@@ -12,7 +12,7 @@ from typing import Mapping
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from .contracts import DUET_DISPATCH_TOOLS, MAX_PROMPT_BYTES, DotError, ToolClass
+from .contracts import MAX_PROMPT_BYTES, DotError, ToolClass
 from .safe_state import private_directory, private_file, require_local_platform, unique_object
 from .tool_grants import ToolGrants
 
@@ -263,9 +263,14 @@ def _parse_tool_grants(root: Mapping[str, object]) -> ToolGrants | None:
     if len(class_names) != len(classes) or len(denied) != len(deny):
         raise _invalid()
     # Profiles depend on the runtime schema constants in this module.
-    from .profile import DOT, DUET
+    from .profile import CLOUD_AGENT, DOT, DUET, runtime_profile
 
-    profile_tools = DUET.tools | DUET_DISPATCH_TOOLS if root["schema"] == DUET_RUNTIME_SCHEMA else DOT.tools
+    if root["schema"] == CLOUD_AGENT_RUNTIME_SCHEMA:
+        profile_tools = runtime_profile(CLOUD_AGENT, False, messaging_enabled=True).tools
+    elif root["schema"] == DUET_RUNTIME_SCHEMA:
+        profile_tools = runtime_profile(DUET, True).tools
+    else:
+        profile_tools = DOT.tools
     if not class_names <= {tool_class.value for tool_class in ToolClass} or not denied <= profile_tools:
         raise _invalid()
     return ToolGrants(frozenset(ToolClass(name) for name in class_names), denied)

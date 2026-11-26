@@ -1,0 +1,1 @@
+- The generic cloud-agent runtime accepts `tool_grants` to limit which tools the listener exposes and allows.
