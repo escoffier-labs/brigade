@@ -23,19 +23,45 @@ _RATCHET_EMPTY_MESSAGE = (
     "`brigade outcome reconcile --target . --report --proposals`."
 )
 _RATCHET_STALE_DAYS = 7
+_LEDGER_MAX_BYTES = 1024 * 1024
 
 
 def fetch(target: Path) -> dict:
     payload = data.run_json(target, ["outcome", "rank"])
     payload["ratchet"] = data.run_json(target, ["outcome", "ratchet"])
     try:
-        raw = Repo(target).show("HEAD", outcome_ledger.LEDGER_PATH, strict=True)
+        raw = _read_committed_ledger(Repo(target))
         if raw is not None:
             payload["ledger"] = outcome_ledger.parse_ledger(raw, allow_empty=True)
             payload["ledger_repo_slug"] = ci_attestation.repo_slug(target)
     except (GitError, outcome_ledger.LedgerError):
         payload["ledger_error"] = True
     return payload
+
+
+def _read_committed_ledger(repo: Repo) -> bytes | None:
+    # Resolve HEAD once so all checks and the read use the same commit.
+    head = repo._run("rev-parse", "--verify", "--quiet", "HEAD^{commit}", check=False)
+    if head.returncode == 1:
+        return None
+    if head.returncode != 0:
+        raise GitError("cannot resolve HEAD")
+    commit = head.stdout.decode("ascii").strip()
+    path = outcome_ledger.LEDGER_PATH
+    entry = repo._run("ls-tree", "--full-tree", commit, "--", path).stdout
+    if not entry:
+        return None
+    if not entry.startswith((b"100644 blob ", b"100755 blob ")):
+        raise GitError("ledger is not a regular file")
+
+    size = repo._run("cat-file", "-s", f"{commit}:{path}").stdout
+    try:
+        blob_bytes = int(size)
+    except ValueError as exc:
+        raise GitError("invalid ledger blob size") from exc
+    if blob_bytes > _LEDGER_MAX_BYTES:
+        raise GitError("ledger exceeds the byte cap")
+    return repo.show(commit, path, strict=True)
 
 
 def render(payload: dict, nonce: str) -> str:
@@ -72,11 +98,13 @@ def _ledger_panel(payload: dict) -> str:
 
 def _ledger_subject(skill_id: str, subject: dict, slug: str | None) -> str:
     decision = subject["decision"]
+    code = decision["code"]
+    code_html = f" (<code>{html.esc(code)}</code>)" if code is not None else ""
     parts = [
         f"<h3>{html.esc(skill_id)}</h3>",
         f"<p>Status {html.esc(subject['status'])} · Band {html.esc(subject['band'])}</p>",
-        f"<p>Decision <strong>{html.esc(decision['action'])}</strong> "
-        f"(<code>{html.esc(decision['code'])}</code>) · {html.esc(decision['decided_at'])}</p>",
+        f"<p>Decision <strong>{html.esc(decision['action'])}</strong>{code_html}"
+        f" · {html.esc(decision['decided_at'])}</p>",
         f"<p>{html.esc(decision['reason'])}</p>",
     ]
     restore = subject["restore"]

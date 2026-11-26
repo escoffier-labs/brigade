@@ -501,8 +501,59 @@ def test_ci_ledger_renders_install_rollback_and_attest_jobs(ledger_repo, with_sl
     assert (link in fragment) == with_slug
 
 
-def test_unreadable_ci_ledger_preserves_other_panels(ledger_repo, monkeypatch):
+def test_ci_ledger_omits_null_decision_code(ledger_repo):
+    target, commit_ledger = ledger_repo
+    subject = _subject("install", None, "promoted", "promoted", "helped", None)
+    commit_ledger(_ledger_bytes({"skill:alpha": subject}))
+
+    fragment = outcome_rank.render(outcome_rank.fetch(target), "unused")
+
+    assert f"<strong>install</strong> · {_STAMP}" in fragment
+
+
+def test_ci_ledger_rejects_oversized_blob_before_reading(ledger_repo, monkeypatch):
+    target, commit_ledger = ledger_repo
+    commit_ledger(_ledger_bytes({}).ljust(1024 * 1024 + 1, b" "))
+
+    def unexpected_read(*args, **kwargs):
+        pytest.fail("oversized ledger blob was read")
+
+    monkeypatch.setattr(outcome_rank.Repo, "show", unexpected_read)
+
+    fragment = outcome_rank.render(outcome_rank.fetch(target), "unused")
+
+    assert "CI outcome ledger is unreadable" in fragment
+
+
+def test_ci_ledger_rejects_committed_symlink(ledger_repo):
     target, _ = ledger_repo
+
+    def git(*args, **kwargs):
+        return subprocess.run(["git", "-C", str(target), *args], check=True, capture_output=True, **kwargs)
+
+    # Stage symlink mode directly so this test works without OS symlink privileges.
+    blob = git("hash-object", "-w", "--stdin", input=_ledger_bytes({})).stdout.decode().strip()
+    git("update-index", "--add", "--cacheinfo", "120000", blob, outcome_ledger.LEDGER_PATH)
+    git("commit", "-qm", "symlink ledger")
+
+    fragment = outcome_rank.render(outcome_rank.fetch(target), "unused")
+
+    assert "CI outcome ledger is unreadable" in fragment
+
+
+def test_unborn_head_has_no_ci_ledger(tmp_path, monkeypatch):
+    subprocess.run(["git", "-C", str(tmp_path), "init", "-q"], check=True, capture_output=True)
+    monkeypatch.setattr(outcome_rank.data, "run_json", lambda *_: {"ranking": []})
+
+    fragment = outcome_rank.render(outcome_rank.fetch(tmp_path), "unused")
+
+    assert "No CI outcome ledger in this repository" in fragment
+    assert 'class="error"' not in fragment
+
+
+def test_unreadable_ci_ledger_preserves_other_panels(ledger_repo, monkeypatch):
+    target, commit_ledger = ledger_repo
+    commit_ledger(_ledger_bytes({}))
 
     def unreadable(*args, **kwargs):
         raise outcome_rank.GitError("cannot read committed blob")
