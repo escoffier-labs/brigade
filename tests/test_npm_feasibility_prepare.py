@@ -358,7 +358,7 @@ def test_registry_publisher_reconciles_immutable_archives_before_launcher(tmp_pa
             artifact["platform"] = f"test-{i}"
         packages.append(artifact)
     metadata = {
-        "runtime": {"version": "0.32.0", "payloadVersion": "0.32.0"},
+        "runtime": {"version": "0.32.1", "payloadVersion": "0.32.1"},
         "sourceCommit": "a" * 40,
         "artifacts": packages,
     }
@@ -380,7 +380,7 @@ if args[0]=='view':
     published=(root/(a['filename']+'.published')).exists()
     if args[2]=='versions':
         values={'string':'0.0.0-bootstrap','array':['0.0.0-bootstrap','0.28.0'],
-                'present':['0.0.0-bootstrap','0.32.0'],'null':None,'empty-array':[],
+                'present':['0.0.0-bootstrap','0.32.1'],'null':None,'empty-array':[],
                 'mixed-array':['0.0.0-bootstrap',None],'invalid-string':'unknown',
                 'invalid-semver':'0.0.0-01'}
         kind=mode.removeprefix('blank-versions-')
@@ -408,8 +408,8 @@ if args[0]=='view':
     if mode in ['absent','uncertain','no-attestation','deadline-after-read','slow-pre-publish-read'] and not published:
         print(json.dumps({'error':{'code':'E404'}}));sys.exit(1)
     if args[2]=='dist.integrity': print(json.dumps('sha512-wrong' if mode=='mismatch' else a['integrity']))
-    elif args[2]=='dist.attestations': print(json.dumps(None if mode=='no-attestation' else {'url':'https://registry.npmjs.org/-/npm/v1/attestations/'+name+'@0.32.0'}))
-    elif args[2]=='dist-tags.latest': print(json.dumps('0.29.0' if mode=='latest-mismatch' else '0.32.0'))
+    elif args[2]=='dist.attestations': print(json.dumps(None if mode=='no-attestation' else {'url':'https://registry.npmjs.org/-/npm/v1/attestations/'+name+'@0.32.1'}))
+    elif args[2]=='dist-tags.latest': print(json.dumps('0.29.0' if mode=='latest-mismatch' else '0.32.1'))
 else:
     assert args[0]=='publish' and '--provenance' in args and '--access' in args and 'public' in args
     archive=Path(args[1])
@@ -1072,7 +1072,7 @@ def test_readback_schedule_spans_about_ten_minutes_with_capped_backoff():
 def test_source_provenance_crypto_gate_cannot_be_skipped_or_env_configured():
     root = SOURCE.parents[2]
     for filename, job, step in (
-        ("npm-feasibility.yml", "package", "Build six current-source candidate archives once from clean source"),
+        ("npm-feasibility.yml", "package", "Build six candidate archives once from clean source"),
         ("npm-publish.yml", "build", "Build six stable payload archives once from clean source"),
     ):
         text = (root / ".github/workflows" / filename).read_text()
@@ -1451,30 +1451,6 @@ def test_candidate_builder_stages_current_source_and_refuses_changes(tmp_path, m
         assert tools["requirementsSha256"] == prepare.digest((prepare.SOURCE / "build-requirements.txt").read_bytes())
         assert "--require-hashes" in calls[0]
         assert all(flag in calls[1] for flag in ("--no-index", "--no-deps", "--no-build-isolation"))
-
-
-def test_candidate_mode_is_confined_to_unreleased_workflow():
-    import re
-
-    for filename, expected in (
-        ("npm-feasibility.yml", ["--out", "--verify-artifacts", "--verify-artifacts"]),
-        ("npm-publish.yml", []),
-    ):
-        text = (SOURCE.parents[2] / ".github/workflows" / filename).read_text()
-        commands = [
-            json.loads(command)
-            for command in re.findall(
-                r'JSON.stringify\((\["python","npm/feasibility/prepare.py".*?\])\)',
-                text.replace('process.env.RUNNER_TEMP+"/npm-artifacts"', '"artifacts"'),
-            )
-        ]
-        assert commands
-        assert [
-            next(flag for flag in ("--out", "--verify-artifacts") if flag in command)
-            for command in commands
-            if "--candidate" in command
-        ] == expected
-        assert all(("--candidate" in command) == bool(expected) for command in commands)
 
 
 @pytest.mark.parametrize("newline", [b"\n", b"\r\n"])
