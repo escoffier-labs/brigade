@@ -153,8 +153,13 @@ brigade setup --manifest /path/to/component-manifest-v1.json --allow-compatible-
 ```
 
 An explicit manifest applies to one setup run. Its use leaves the saved beta pin
-in place. Repeat the captured verification to import pending receipts. An
-`indexed` result confirms receipt import even if doctor warns that the installed
+in place.
+
+When the evidence engine omits an acknowledgement, automatic receipt indexing
+pauses in that worktree. Captured verifications keep saving receipts. After an
+engine replacement, the next capture resumes indexing the backlog. To retry
+immediately from the worktree, run `brigade receipts export evidence --new-only --import`.
+An `indexed` result confirms receipt import even if doctor warns that the installed
 release differs from the CLI's bundled manifest.
 
 Setup authenticates a release manifest again when it is used with

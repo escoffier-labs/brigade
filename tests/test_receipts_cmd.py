@@ -7,6 +7,9 @@ import pytest
 
 from brigade import cli, localio, outcome, outcome_cmd, provenance, receipt_signing, receipts_cmd, runbook_cmd, work_cmd
 
+from brigade.receipts_cmd import _read_miseledger_cursor_hashes as _read_cursor_hashes
+from brigade.work_cmd.verification import _attach_miseledger_indexing as _attach_indexing
+
 from tests.work_cmd_test_helpers import _init_git_repo
 
 
@@ -2147,7 +2150,6 @@ def test_verify_receipt_import_names_repair_for_missing_acknowledgement(tmp_path
 
     import brigade
     from brigade import component_install, component_paths, distribution, update_cmd
-    from brigade.work_cmd import verification
 
     monkeypatch.setattr(distribution, "_name", "npm" if route in ("npm", "npm-beta") else None)
     monkeypatch.setattr(brigade, "__version__", "0.33.0.dev1" if route == "prerelease" else "0.33.0")
@@ -2176,7 +2178,9 @@ def test_verify_receipt_import_names_repair_for_missing_acknowledgement(tmp_path
             ),
         )
     _write_verify_export_receipt(tmp_path, "missing-ack", started_at="2026-07-08T12:00:00Z")
-    monkeypatch.setattr(receipts_cmd.component_bins, "resolve", lambda _: "fake-ledger")
+    engine = tmp_path / "test-engine"
+    engine.touch()
+    monkeypatch.setattr(receipts_cmd.component_bins, "resolve", lambda _: str(engine))
     monkeypatch.setattr(
         receipts_cmd.subprocess,
         "run",
@@ -2186,15 +2190,15 @@ def test_verify_receipt_import_names_repair_for_missing_acknowledgement(tmp_path
     )
 
     receipt = {}
-    verification._attach_miseledger_indexing(receipt, target=tmp_path, json_output=False)
+    _attach_indexing(receipt, target=tmp_path, json_output=False)
     output = capsys.readouterr()
     reason = "The installed evidence engine is older than this CLI expects."
     assert sum(reason in line for line in output.err.splitlines()) == 1
     assert "miseledger indexing: import failed (receipts pending)" in output.out
 
-    verification._attach_miseledger_indexing(receipt, target=tmp_path, json_output=True)
+    _attach_indexing(receipt, target=tmp_path, json_output=True)
     indexing = receipt["miseledger_indexing"]
-    assert indexing["status"] == "failed"
+    assert indexing["status"] == "paused"
     assert indexing["reason"] == "outdated_evidence_engine"
     assert indexing["repair"] in output.err
     assert ("brigade update --channel beta" in indexing["repair"]) == (route == "beta")
@@ -2203,8 +2207,11 @@ def test_verify_receipt_import_names_repair_for_missing_acknowledgement(tmp_path
         route in ("source", "prerelease", "npm-beta")
     )
     assert capsys.readouterr() == ("", "")
+    _attach_indexing(receipt, target=tmp_path, json_output=False)
+    paused = capsys.readouterr()
+    assert paused.out.count(indexing["repair"]) == 1 and not paused.err
     assert not (tmp_path / receipts_cmd.MISELEDGER_CURSOR_REL).exists()
-    assert len(list((tmp_path / ".brigade/work").glob("miseledger-export-*.jsonl"))) == 2
+    assert len(list((tmp_path / ".brigade/work").glob("miseledger-export-*.jsonl"))) == 1
 
 
 @pytest.mark.parametrize("status", [None, "complete"])
@@ -2295,7 +2302,7 @@ def test_overlapping_export_cursor_updates_keep_both_completed_sets(tmp_path):
     assert receipts_cmd._advance_miseledger_cursor(tmp_path, set(), ["sha256:first"]) == 0
     # Both exporters took their snapshot before the first completion.
     assert receipts_cmd._advance_miseledger_cursor(tmp_path, set(), ["sha256:second"]) == 0
-    assert receipts_cmd._read_miseledger_cursor_hashes(tmp_path) == {"sha256:first", "sha256:second"}
+    assert _read_cursor_hashes(tmp_path) == {"sha256:first", "sha256:second"}
 
 
 def test_concurrent_cursor_acknowledgements_serialize_read_merge_write(tmp_path, monkeypatch):
@@ -2325,7 +2332,7 @@ def test_concurrent_cursor_acknowledgements_serialize_read_merge_write(tmp_path,
         finally:
             release_first.set()
         assert first.result(timeout=5) == second.result(timeout=5) == 0
-    assert receipts_cmd._read_miseledger_cursor_hashes(tmp_path) == {"sha256:first", "sha256:second"}
+    assert _read_cursor_hashes(tmp_path) == {"sha256:first", "sha256:second"}
 
 
 @pytest.mark.parametrize(
@@ -2368,3 +2375,422 @@ def test_index_accepts_known_source_that_restores_pruned_items(tmp_path, monkeyp
     )
     assert receipts_cmd.index_miseledger_receipts(target=tmp_path, quiet=True)["status"] == "indexed"
     assert receipts_cmd.index_miseledger_receipts(target=tmp_path, quiet=True)["status"] == "nothing-new"
+
+
+def _replay_state_path(target):
+    return target / ".brigade/work/evidence-import-state.json"
+
+
+@pytest.fixture
+def replay_engine(tmp_path, monkeypatch):
+    engine = tmp_path / "test-engine"
+    engine.write_text("old")
+    monkeypatch.setattr(receipts_cmd.component_bins, "resolve", lambda _: str(engine))
+    original_run = subprocess.run
+    state = {"ack": False, "calls": [], "batches": [], "timeouts": [], "failure": None, "max_batch": None}
+
+    def run(argv, *args, **kwargs):
+        if argv[0] != str(engine):
+            return original_run(argv, *args, **kwargs)
+        rows = _jsonl(Path(argv[3]).read_text())
+        state["calls"].append(len(rows))
+        state["batches"].append([row["item"]["external_id"].rsplit(":", 1)[1] for row in rows])
+        state["timeouts"].append(kwargs["timeout"])
+        payload = {"inserted_items": len(rows), "already_known": False}
+        if state["ack"]:
+            payload["status"] = "complete"
+        failure = state["failure"]
+        if failure == "timeout" or (state["max_batch"] is not None and len(rows) > state["max_batch"]):
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        if failure == "error_field":
+            payload["errors"] = ["write failed"]
+        return subprocess.CompletedProcess(argv, int(failure == "exit_code"), json.dumps(payload), "")
+
+    monkeypatch.setattr(receipts_cmd.subprocess, "run", run)
+    return engine, state
+
+
+def _capture_for_replay(target, index, *, json_output=False):
+
+    _write_verify_export_receipt(target, f"capture-{index}", started_at=f"2026-07-08T12:00:{index:02d}Z")
+    receipt = {}
+    _attach_indexing(receipt, target=target, json_output=json_output)
+    return next(iter(receipt.values()))
+
+
+def test_automatic_replay_pauses_and_resumes_after_replacement(tmp_path, monkeypatch, capsys, replay_engine):
+    engine, state = replay_engine
+    assert _capture_for_replay(tmp_path, 1)["status"] == "failed"
+    marker = localio.read_json_dict(_replay_state_path(tmp_path))
+    assert marker["kind"] == "outdated_evidence_engine"
+    assert marker["engine"]["path"] == str(engine)
+    assert marker["engine"]["size"] == engine.stat().st_size
+    assert marker["engine"]["mtime_ns"] == engine.stat().st_mtime_ns
+    assert marker["failed_at"] > 0
+    assert marker["pending_count"] == 1
+    assert capsys.readouterr().err.count("The installed evidence engine is older than this CLI expects.") == 1
+    exports = set((tmp_path / ".brigade/work").glob("*-export-*.jsonl"))
+    assert len(exports) == 1
+
+    with monkeypatch.context() as context:
+
+        def unexpected_collect(*args, **kwargs):
+            pytest.fail("paused capture collected the export backlog")
+
+        context.setattr(receipts_cmd, "_collect_export_receipts", unexpected_collect)
+        assert _capture_for_replay(tmp_path, 2)["status"] == "paused"
+        captured = capsys.readouterr()
+        assert len((captured.out + captured.err).splitlines()) == 1
+        assert "2 receipt(s) pending" in captured.out
+        assert "brigade setup" in captured.out
+        assert captured.out.count("brigade receipts export evidence --new-only --import") == 1
+        assert _capture_for_replay(tmp_path, 3, json_output=True)["pending_count"] == 3
+        assert capsys.readouterr() == ("", "")
+    assert state["calls"] == [1]
+    assert not _read_cursor_hashes(tmp_path)
+    assert set((tmp_path / ".brigade/work").glob("*-export-*.jsonl")) == exports
+
+    engine.write_text("replacement")
+    state["ack"] = True
+    assert _capture_for_replay(tmp_path, 4)["status"] == "indexed"
+    assert state["calls"] == [1, 4]
+    assert len(_read_cursor_hashes(tmp_path)) == 4
+    assert not _replay_state_path(tmp_path).exists()
+    assert all(path.is_file() for path in exports)
+
+
+@pytest.mark.parametrize("route", ["console", "json", "fleet"])
+def test_manual_replay_bypasses_pause_and_clears_on_acknowledgement(tmp_path, capsys, replay_engine, route):
+    _, state = replay_engine
+    repo = tmp_path / "repo"
+    _capture_for_replay(repo, 1)
+    marker = _replay_state_path(repo)
+    assert marker.is_file()
+    capsys.readouterr()
+
+    args = ["receipts", "export", "evidence", "--import", "--new-only", "--target"]
+    if route == "fleet":
+        _write_repo_catalog(tmp_path, [("repo", "Repo", repo, True)])
+        args += [str(tmp_path), "--fleet", "--json"]
+    else:
+        args += [str(repo)]
+        if route == "json":
+            args += ["--json", "--out", str(tmp_path / "explicit.jsonl")]
+
+    assert cli.main(args) == 1
+    assert marker.is_file()
+    failed_output = capsys.readouterr().err
+    assert failed_output.count("The installed evidence engine is older than this CLI expects.") == 1
+    assert failed_output.count("Bypassing") == 1
+    state["ack"] = True
+    assert cli.main(args) == 0
+    assert state["calls"] == [1, 1, 1]
+    assert capsys.readouterr().err.count("Cleared") == 1
+    assert not marker.exists()
+    assert len(_read_cursor_hashes(repo)) == 1
+
+
+@pytest.mark.parametrize("failure", ["exit_code", "error_field"])
+def test_automatic_replay_does_not_pause_for_other_failures(tmp_path, replay_engine, failure):
+    _, state = replay_engine
+    state["failure"] = failure
+    for index in (1, 2):
+        assert _capture_for_replay(tmp_path, index)["status"] == "failed"
+        assert not _replay_state_path(tmp_path).exists()
+    assert state["calls"] == [1, 2]
+    assert not _read_cursor_hashes(tmp_path)
+
+
+@pytest.mark.parametrize("contents", [b"{", b"\xff", b'{"kind":"outdated_evidence_engine"}'])
+def test_automatic_replay_ignores_corrupt_or_partial_state(tmp_path, replay_engine, contents):
+    _, state = replay_engine
+    _capture_for_replay(tmp_path, 1)
+    _replay_state_path(tmp_path).write_bytes(contents)
+    state["ack"] = True
+    assert _capture_for_replay(tmp_path, 2)["status"] == "indexed"
+    assert state["calls"] == [1, 2]
+    assert not _replay_state_path(tmp_path).exists()
+
+
+def test_concurrent_automatic_replay_only_imports_once_and_keeps_both_receipts(tmp_path, monkeypatch, replay_engine):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Event
+
+    _, state = replay_engine
+    importing = Event()
+    release = Event()
+    run = subprocess.run
+
+    def hold_import(argv, *args, **kwargs):
+        if argv[1:3] == ["import", "adapter"]:
+            importing.set()
+            assert release.wait(5)
+        return run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(receipts_cmd.subprocess, "run", hold_import)
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        first = pool.submit(_capture_for_replay, tmp_path, 1)
+        try:
+            assert importing.wait(5)
+            second = pool.submit(_capture_for_replay, tmp_path, 2)
+            assert second.result(timeout=2)["status"] == "busy"
+        finally:
+            release.set()
+        assert first.result(timeout=5)["status"] == "failed"
+
+    assert state["calls"] == [1]
+    state["ack"] = True
+    assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path), "--import", "--new-only"]) == 0
+    assert state["calls"] == [1, 2]
+    assert len(_read_cursor_hashes(tmp_path)) == 2
+
+
+@pytest.mark.parametrize("retry", ["automatic", "explicit"])
+def test_automatic_replay_backs_off_after_consecutive_timeouts(tmp_path, monkeypatch, replay_engine, retry):
+    import time
+
+    _, state = replay_engine
+    now = 1800000000
+    monkeypatch.setattr(time, "time", lambda: now)
+    state["failure"] = "timeout"
+    for attempt, delay in enumerate((15, 30, 60, 120, 120)):
+        assert _capture_for_replay(tmp_path, 3 * attempt)["status"] == "failed"
+        marker = localio.read_json_dict(_replay_state_path(tmp_path))
+        assert marker["kind"] == "timeout"
+        assert marker["batch_size"] == 1
+        assert marker["retry_after"] - now == delay
+        assert _capture_for_replay(tmp_path, 3 * attempt + 1)["status"] == "backoff"
+        now += delay - 1
+        assert _capture_for_replay(tmp_path, 3 * attempt + 2)["status"] == "backoff"
+        assert state["calls"] == [1] * (attempt + 1)
+        assert state["timeouts"] == [20] + [5] * attempt
+        now += 1
+    assert not _read_cursor_hashes(tmp_path)
+
+    state["failure"] = None
+    state["ack"] = True
+    if retry == "automatic":
+        result = _capture_for_replay(tmp_path, 15)
+        assert result["status"] == "draining" and result["remaining_count"] == 15
+        assert state["calls"][-1] == 1
+    else:
+        now -= 1
+        assert cli.main(["receipts", "export", "evidence", "--target", str(tmp_path), "--import", "--new-only"]) == 0
+        assert state["calls"][-1] == 15
+    marker = localio.read_json_dict(_replay_state_path(tmp_path))
+    assert marker is None or marker["kind"] == "drain"
+
+
+def test_large_replay_adapts_and_resumes_after_interruption(tmp_path, monkeypatch, replay_engine):
+    import time
+
+    _, state = replay_engine
+    now = 1800000000
+    monkeypatch.setattr(time, "time", lambda: now)
+    state.update(ack=True, max_batch=8)
+    for index in range(39):
+        _write_verify_export_receipt(tmp_path, f"capture-{index}", started_at=f"2026-07-08T12:00:{index:02d}Z")
+    assert _capture_for_replay(tmp_path, 39)["status"] == "failed"
+    now += 15
+    assert _capture_for_replay(tmp_path, 40)["status"] == "failed"
+    now += 30
+    assert _capture_for_replay(tmp_path, 41)["status"] == "draining"
+    assert len(_read_cursor_hashes(tmp_path)) == 8
+    assert state["calls"] == [32, 16, 8]
+    assert state["timeouts"] == [20, 5, 5]
+    assert state["batches"][-1] == [f"capture-{n}" for n in range(8)]
+
+    # Simulate stopping between captures and re-entering with only durable state.
+    next_capture = _capture_for_replay(tmp_path, 42)
+    assert next_capture["status"] == "draining"
+    assert next_capture["remaining_count"] == 27
+    assert len(_read_cursor_hashes(tmp_path)) == 16
+    assert state["batches"][-1] == [f"capture-{n}" for n in range(8, 16)]
+    assert state["timeouts"][-1] == 5
+
+
+def test_pause_files_do_not_change_tree_fingerprint(tmp_path, replay_engine):
+    _init_git_repo(tmp_path)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-qm",
+            "initial",
+        ],
+        cwd=tmp_path,
+        check=True,
+    )
+    before = localio.tree_fingerprint(tmp_path)
+    assert before is not None
+    assert _capture_for_replay(tmp_path, 1)["status"] == "failed"
+    assert _capture_for_replay(tmp_path, 2)["status"] == "paused"
+    marker = _replay_state_path(tmp_path)
+    assert marker.is_file() and marker.with_suffix(".lock").is_file()
+    assert localio.tree_fingerprint(tmp_path) == before
+
+
+@pytest.mark.parametrize("unavailable", ["resolver", "stat"])
+def test_transient_engine_lookup_preserves_pause(tmp_path, monkeypatch, replay_engine, unavailable):
+    _, state = replay_engine
+    assert _capture_for_replay(tmp_path, 1)["status"] == "failed"
+    marker = _replay_state_path(tmp_path)
+    original = marker.read_bytes()
+    with monkeypatch.context() as context:
+        if unavailable == "resolver":
+            context.setattr(receipts_cmd.component_bins, "resolve", lambda _: None)
+        else:
+            context.setattr(receipts_cmd.receipt_replay, "engine_identity", lambda _: None)
+        assert _capture_for_replay(tmp_path, 2)["status"] == "paused"
+    assert marker.read_bytes() == original
+    assert _capture_for_replay(tmp_path, 3)["status"] == "paused"
+    assert state["calls"] == [1]
+
+
+def test_timeout_recovers_from_clock_rollback_and_ages_after_idle(tmp_path, monkeypatch, capsys, replay_engine):
+    import time
+
+    _, state = replay_engine
+    now = 1800000000
+    monkeypatch.setattr(time, "time", lambda: now)
+    state["failure"] = "timeout"
+    assert _capture_for_replay(tmp_path, 1)["status"] == "failed"
+    capsys.readouterr()
+    assert _capture_for_replay(tmp_path, 2)["status"] == "backoff"
+    from brigade.component_install import engine_repair_hint
+
+    cooldown = capsys.readouterr().out
+    assert engine_repair_hint() not in cooldown
+    assert "The evidence ledger did not answer in time." in cooldown
+    assert "Indexing will retry automatically." in cooldown
+    assert cooldown.count("brigade receipts export evidence --new-only --import") == 1
+    now -= 60
+    assert _capture_for_replay(tmp_path, 3)["status"] == "failed"
+    marker = _replay_state_path(tmp_path)
+    assert localio.read_json_dict(marker)["timeout_step"] == 0
+    now += 15
+    assert _capture_for_replay(tmp_path, 4)["status"] == "failed"
+    assert localio.read_json_dict(marker)["timeout_step"] == 1
+
+    for receipt in (tmp_path / ".brigade/work/verify-runs").glob("*/receipt.json"):
+        receipt.unlink()
+    now += 601
+    receipt = {}
+    _attach_indexing(receipt, target=tmp_path, json_output=True)
+    assert next(iter(receipt.values()))["status"] == "empty"
+    assert _capture_for_replay(tmp_path, 5)["status"] == "failed"
+    assert localio.read_json_dict(marker)["timeout_step"] == 0
+
+
+def test_pause_marker_deletion_retries_pending_receipts(tmp_path, replay_engine):
+    _, state = replay_engine
+    assert _capture_for_replay(tmp_path, 1)["status"] == "failed"
+    assert _capture_for_replay(tmp_path, 2)["status"] == "paused"
+    _replay_state_path(tmp_path).unlink()
+    state["ack"] = True
+    assert _capture_for_replay(tmp_path, 3)["status"] == "indexed"
+    assert state["calls"] == [1, 3]
+    assert len(_read_cursor_hashes(tmp_path)) == 3
+
+
+@pytest.mark.parametrize("fleet", [False, True])
+def test_manual_retry_reads_the_cursor_under_replay_lock(tmp_path, monkeypatch, replay_engine, fleet):
+    from brigade.inbox_lock import InboxLockTimeout
+
+    _, state = replay_engine
+    state["ack"] = True
+    repo = tmp_path / "repo"
+    _write_verify_export_receipt(repo, "pending", started_at="2026-07-08T12:00:00Z")
+    collect = receipts_cmd._collect_export_receipts
+
+    def collect_under_lock(target):
+        with pytest.raises(InboxLockTimeout), receipts_cmd.receipt_replay.replay_lock(target):
+            pass
+        return collect(target)
+
+    monkeypatch.setattr(receipts_cmd, "_collect_export_receipts", collect_under_lock)
+    args = ["receipts", "export", "evidence", "--import", "--new-only", "--target"]
+    if fleet:
+        _write_repo_catalog(tmp_path, [("repo", "Repo", repo, True)])
+        args += [str(tmp_path), "--fleet", "--json"]
+    else:
+        args += [str(repo)]
+    assert cli.main(args) == 0
+
+
+def test_process_holding_replay_lock_leaves_concurrent_capture_pending(tmp_path, replay_engine):
+    child = """import sys
+from pathlib import Path
+from brigade.receipt_replay import replay_lock
+with replay_lock(Path(sys.argv[1])):
+    print("locked", flush=True)
+    sys.stdin.read()
+"""
+    _, state = replay_engine
+    with subprocess.Popen(
+        [sys.executable, "-c", child, str(tmp_path)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
+    ) as proc:
+        try:
+            assert proc.stdout.readline() == "locked\n"
+            assert _capture_for_replay(tmp_path, 1)["status"] == "busy"
+            assert state["calls"] == []
+        finally:
+            proc.communicate(timeout=5)
+    state["ack"] = True
+    assert _capture_for_replay(tmp_path, 2)["status"] == "indexed"
+    assert state["calls"] == [2]
+
+
+def test_windows_pause_rechecks_digest_at_intervals(tmp_path, monkeypatch, replay_engine):
+    import time
+
+    engine, state = replay_engine
+    replay = receipts_cmd.receipt_replay
+    now = 1800000000
+    monkeypatch.setattr(time, "time", lambda: now)
+    monkeypatch.setattr(replay, "_CHECK_ENGINE_DIGEST", True, raising=False)
+    identity = replay.engine_identity(str(engine))
+    monkeypatch.setattr(replay, "engine_identity", lambda _: identity)
+    digest = localio.file_sha256
+    hashes = []
+
+    def tracked_hash(path):
+        if path == engine:
+            hashes.append(path)
+        return digest(path)
+
+    monkeypatch.setattr(localio, "file_sha256", tracked_hash)
+    assert _capture_for_replay(tmp_path, 1)["status"] == "failed"
+    assert hashes == [engine]
+    engine.write_text("new")
+    state["ack"] = True
+    now += 179
+    assert _capture_for_replay(tmp_path, 2)["status"] == "paused"
+    assert hashes == [engine]
+    now += 1
+    assert _capture_for_replay(tmp_path, 3)["status"] == "indexed"
+    assert hashes == [engine, engine]
+    assert state["calls"] == [1, 3]
+
+
+def test_relative_evidence_engine_is_keyed_and_invoked_by_absolute_path(tmp_path, monkeypatch, replay_engine):
+    engine, state = replay_engine
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(receipts_cmd.component_bins, "resolve", lambda _: engine.name)
+    assert _capture_for_replay(tmp_path, 1)["status"] == "failed"
+    assert state["calls"] == [1]
+    assert localio.read_json_dict(_replay_state_path(tmp_path))["engine"]["path"] == str(engine.resolve())
+
+
+def test_healthy_import_timeout_exceeds_engine_busy_wait():
+    import re
+
+    engine_db = Path(__file__).resolve().parents[1] / "engines/evidence-ledger/internal/archive/db.go"
+    setting = re.search(r"^const BusyTimeoutSeconds = (\d+)$", engine_db.read_text(encoding="utf-8"), re.MULTILINE)
+    assert setting is not None and int(setting[1]) == 10
+    assert receipts_cmd.receipt_replay.AUTO_HEALTHY_IMPORT_TIMEOUT > int(setting[1])

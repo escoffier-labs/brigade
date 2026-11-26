@@ -23,6 +23,8 @@ from typing import Any
 TREE_FINGERPRINT_EVIDENCE_PATHS = (
     ".brigade/work/verify-runs",
     ".brigade/work/verify-required",
+    ".brigade/work/evidence-import-state.json",
+    ".brigade/work/evidence-import-state.lock",
     "memory/outcome/records.jsonl",
     "memory/outcome/.records.lock",
     ".brigade/work/miseledger-export-cursor.json",
