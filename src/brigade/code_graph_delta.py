@@ -378,6 +378,9 @@ def _run_graphtrail(
     target they are working on. Without one, the root is derived from where the
     index lives, which fails for an index placed outside the repository.
     """
+    # The engine's store/sync.rs acquires the per-database writer lock before
+    # indexing. A competing sync fails fast in store/lock.rs, even when the
+    # foreground check races the detached worker after observing its state.
     # `graphtrail sync` rejects --json; only diff-style subcommands accept it.
     argv = [binary, "--db", str(db_path), command, *extra]
     if json_output:

@@ -2321,6 +2321,7 @@ def test_work_verify_defers_graph_sync_once_and_recovers_a_dead_launcher(
 
     monkeypatch.setattr(proc, "spawn_detached", spawn)
     monkeypatch.setattr(proc_group, "process_start_time", start_time)
+    monkeypatch.setattr(code_graph_background.nt_process, "process_creation_time", start_time)
     monkeypatch.setattr(runguard, "_pid_is_active", live_pids.__contains__)
     monkeypatch.setattr(code_graph_background, "Thread", reaper)
 
@@ -2345,7 +2346,7 @@ def test_work_verify_defers_graph_sync_once_and_recovers_a_dead_launcher(
     assert launch_order[:2] == ["read start time", "start reaper"]
 
 
-def test_work_verify_reports_and_replaces_stale_legacy_graph_reservation(tmp_path, capsys, monkeypatch):
+def test_work_verify_replaces_stale_legacy_graph_reservation_without_reporting_an_exit(tmp_path, capsys, monkeypatch):
     _init_git_repo_with_head(tmp_path)
     lock = tmp_path / ".brigade/code-graph/verify-sync.lock"
     reservation = lock.with_suffix(".json")
@@ -2359,7 +2360,8 @@ def test_work_verify_reports_and_replaces_stale_legacy_graph_reservation(tmp_pat
     assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True, reuse=False) == 0
     delta = json.loads(capsys.readouterr().out)["code_graph_delta"]
     assert delta["background_refresh"]["status"] == "started"
-    assert delta["background_refresh_last_exit"] == "last background refresh exited: stale startup reservation"
+    assert "background_refresh_last_exit" not in delta
+    assert not lock.with_suffix(".exit.json").exists()
     claim = localio.read_json_dict(reservation)
     assert claim["pid"] == 54321 and claim["token"]
 

@@ -12,11 +12,12 @@ from contextlib import closing, suppress
 from pathlib import Path
 from threading import Thread
 
-from . import engine_paths, inbox_lock, localio, proc, proc_group, runguard
+from . import engine_paths, inbox_lock, localio, nt_process, proc, proc_group, runguard
 
 _START_LOCK_TIMEOUT = 5.0
 # Cold interpreter startup on Windows can be delayed by antivirus scanning.
 _WINDOWS_START_WINDOW = 60.0
+_RESERVATION_MTIME_TOLERANCE = 2.0
 _EXIT_REASON_LIMIT = 160
 _SYNC_TIMEOUT = 120.0
 _WORKER = (
@@ -71,23 +72,37 @@ def _ignored_for_refresh(target: Path, db: Path, lock: Path, reservation: Path) 
     return result.returncode == 0 and set(result.stdout.rstrip(b"\0").split(b"\0")) == expected
 
 
-def _reservation_live(claim: dict) -> bool:
-    pid, started = claim.get("pid"), claim.get("started")
-    monotonic_created = claim.get("created_monotonic")
-    # Keep accepting reservations from older parents, which stored wall time.
-    created, now = (
-        (monotonic_created, time.monotonic()) if monotonic_created is not None else (claim.get("created"), time.time())
-    )
+def _process_start_time(pid: int) -> int | None:
+    if sys.platform == "win32":
+        return nt_process.process_creation_time(pid)
+    return proc_group.process_start_time(pid)
+
+
+def _reservation_live(claim: dict, reservation: Path | None = None) -> bool:
+    pid, created, started = claim.get("pid"), claim.get("created"), claim.get("started")
     if type(pid) is not int or pid <= 0 or not isinstance(created, (int, float)):
         return False
-    window = _WINDOWS_START_WINDOW if sys.platform == "win32" else _START_LOCK_TIMEOUT
-    if not now - window < created <= now or (started is not None and type(started) is not int):
+    windows = sys.platform == "win32"
+    window = _WINDOWS_START_WINDOW if windows else _START_LOCK_TIMEOUT
+    now = time.time()
+    if not now - window < created < now + window or (started is not None and type(started) is not int):
         return False
-    actual_start = proc_group.process_start_time(pid)
-    if started is None or actual_start is None:
-        # Platforms without /proc can still recognize a live startup reservation.
-        return runguard._pid_is_active(pid)
-    return actual_start == started
+    actual_start = _process_start_time(pid) if started is not None else None
+    if actual_start is not None and actual_start != started:
+        return False
+    if created > now:
+        # A small clock rollback can put both the claim and its mtime in the
+        # future. Only retain it when Windows also confirms the launcher's identity.
+        if not windows or actual_start is None or reservation is None:
+            return False
+        try:
+            modified = reservation.stat().st_mtime
+        except OSError:
+            return False
+        if not now < modified < now + window or abs(modified - created) > _RESERVATION_MTIME_TOLERANCE:
+            return False
+    # Windows can read creation time even for a process that has already exited.
+    return (not windows and actual_start is not None) or runguard._pid_is_active(pid)
 
 
 def status_or_start(target: Path, db: Path, binary: str | None = None) -> dict[str, str] | None:
@@ -103,17 +118,16 @@ def status_or_start(target: Path, db: Path, binary: str | None = None) -> dict[s
             if not _ignored_for_refresh(target, db, lock, reservation):
                 return {"status": "launch_failed", "reason": "index or lock path is not ignored"}
         with inbox_lock.held_file_lock(lock, deadline_seconds=0):
-            if _reservation_live(localio.read_json_dict(reservation) or {}):
+            if _reservation_live(localio.read_json_dict(reservation) or {}, reservation):
                 return {"status": "busy", "reason": "background sync starting"}
             if binary is None:
                 return None
             if lock_exists and not _ignored_for_refresh(target, db, lock, reservation):
                 return {"status": "launch_failed", "reason": "index or lock path is not ignored"}
             if reservation.exists():
-                # Keep the unlocked file as the stable lock inode for other openers.
+                # Replacing a claim does not establish that its worker failed.
+                # Keep the lock file as the stable inode for other openers.
                 reservation.unlink()
-                if not index_ready(db) and last_exit_reason(target) is None:
-                    _record_exit(lock, "stale startup reservation")
             # Prevent the engine's first-sync setup from editing .gitignore.
             db.parent.mkdir(parents=True, exist_ok=True)
             token = secrets.token_hex(16)
@@ -132,11 +146,11 @@ def status_or_start(target: Path, db: Path, binary: str | None = None) -> dict[s
                 ],
                 cwd=Path(sys.executable).resolve().parent,
             )
-            started = proc_group.process_start_time(child.pid)
+            started = _process_start_time(child.pid)
             Thread(target=child.wait, daemon=True).start()
             localio.write_json(
                 reservation,
-                {"pid": child.pid, "created_monotonic": time.monotonic(), "started": started, "token": token},
+                {"pid": child.pid, "created": time.time(), "started": started, "token": token},
             )
             return {"status": "started"}
     except inbox_lock.InboxLockTimeout:

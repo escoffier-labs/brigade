@@ -1,6 +1,7 @@
 import json
 import os
 import shlex
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -11,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from brigade import code_graph_background, code_graph_delta, component_bins, inbox_lock, localio, proc, proc_group
-from brigade import runguard
+from brigade import nt_process, runguard
 
 
 def test_work_verify_detached_worker_survives_and_releases_pipes(tmp_path, monkeypatch):
@@ -193,14 +194,69 @@ def test_owned_windows_worker_hides_console_and_records_timeout_under_lock(tmp_p
     assert reasons == ["graph sync timed out"]
 
 
-@pytest.mark.parametrize(("age", "launcher_alive", "busy"), [(20, True, True), (20, False, False), (61, True, False)])
-def test_windows_startup_window_survives_a_wall_clock_jump(monkeypatch, age, launcher_alive, busy):
+@pytest.mark.parametrize(
+    ("created", "mtime", "actual_start", "alive", "busy"),
+    [
+        (1010, 1000, 7, True, False),  # Future timestamp disagrees with its file.
+        (1061, 1061, 7, True, False),  # Even matching metadata has a bounded window.
+        (939, 939, 7, True, False),  # Expired.
+        (980, 980, 8, True, False),  # Reused PID.
+        (980, 980, None, True, True),  # Creation-time query unavailable.
+        (980, 980, 7, False, False),  # Exited launcher with a readable handle.
+        (1010, 1010, 7, True, True),  # Clock rolled back with the same live launcher.
+        (1010, 1010, None, True, False),  # A PID alone cannot explain future time.
+    ],
+)
+def test_windows_observes_startup_reservation_without_relaunch(
+    tmp_path, monkeypatch, created, mtime, actual_start, alive, busy
+):
     monkeypatch.setattr(code_graph_background, "sys", SimpleNamespace(platform="win32"))
-    monkeypatch.setattr(code_graph_background, "time", SimpleNamespace(time=lambda: 50, monotonic=lambda: 100))
+    monkeypatch.setattr(code_graph_background, "time", SimpleNamespace(time=lambda: 1000))
     monkeypatch.setattr(proc_group, "process_start_time", lambda pid: None)
-    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: pid == 12345 and launcher_alive)
-    claim = {"pid": 12345, "created": 1000, "created_monotonic": 100 - age, "started": None}
-    assert code_graph_background._reservation_live(claim) is busy
+    monkeypatch.setattr(nt_process, "process_creation_time", lambda pid: actual_start, raising=False)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: pid == 12345 and alive)
+    lock = code_graph_background._lock_path(tmp_path)
+    reservation = lock.with_suffix(".json")
+    claim = {"pid": 12345, "created": created, "started": 7, "token": "first"}
+    localio.write_json(reservation, claim)
+    os.utime(reservation, (mtime, mtime))
+    lock.touch()
+
+    if busy:
+        monkeypatch.setattr(proc, "spawn_detached", lambda *args, **kwargs: pytest.fail("duplicate launch"))
+    db = lock.parent / "code-graph.db"
+    result = code_graph_background.status_or_start(tmp_path, db, "engine" if busy else None)
+    assert result == ({"status": "busy", "reason": "background sync starting"} if busy else None)
+    assert localio.read_json_dict(reservation) == claim
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows process handles")
+def test_windows_reads_creation_time_from_a_real_process_handle():
+    started = nt_process.process_creation_time(os.getpid())
+    assert started is not None and started > 0
+    assert nt_process.process_creation_time(os.getpid()) == started
+
+
+def test_graph_engine_rejects_a_second_writer_before_sync(tmp_path):
+    engine = shutil.which("brigade-code-graph")
+    if engine is None:
+        pytest.skip("requires the native code graph engine")
+    db = tmp_path / "graph.db"
+    (tmp_path / "source.py").write_text("def first():\n    pass\n")
+    command = [engine, "--db", str(db), "sync", str(tmp_path)]
+    subprocess.run(command, capture_output=True, check=True, timeout=30)
+    lock = db.with_suffix(".db.lock")
+    lock.write_text(f"{os.getpid()}\n")
+    (tmp_path / "source.py").write_text("def second():\n    pass\n")
+
+    refused = subprocess.run(command, capture_output=True, text=True, check=False, timeout=30)
+
+    assert refused.returncode != 0
+    assert "another sync is already running" in refused.stderr
+    with closing(sqlite3.connect(db)) as connection:
+        symbols = connection.execute("SELECT name FROM symbols").fetchall()
+    assert ("first",) in symbols
+    assert ("second",) not in symbols
 
 
 @pytest.mark.parametrize("has_old_exit", [False, True])
@@ -230,20 +286,36 @@ def test_ready_graph_ignores_old_exit_and_observes_without_git(tmp_path, monkeyp
     assert lock.with_suffix(".exit.json").exists() is has_old_exit
 
 
-def test_replacing_stale_reservation_on_ready_index_does_not_record_an_exit(tmp_path, monkeypatch):
+def test_dead_launcher_replacement_and_late_worker_stay_silent(tmp_path, monkeypatch):
     lock = code_graph_background._lock_path(tmp_path)
     db = lock.parent / "code-graph.db"
     reservation = lock.with_suffix(".json")
-    localio.write_json(reservation, {"pid": 12345, "created": 0, "started": None})
+    localio.write_json(reservation, {"pid": 12345, "created": time.time(), "started": None, "token": "old"})
     lock.touch()
-    monkeypatch.setattr(code_graph_background, "index_ready", lambda path: path == db)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
     monkeypatch.setattr(code_graph_background, "_ignored_for_refresh", lambda *args: True)
     monkeypatch.setattr(
         proc, "spawn_detached", lambda *args, **kwargs: (SimpleNamespace(pid=54321, wait=lambda: 0), "detached")
     )
 
     assert code_graph_background.status_or_start(tmp_path, db, "engine") == {"status": "started"}
-    assert localio.read_json_dict(reservation)["pid"] == 54321
+    replacement = localio.read_json_dict(reservation)
+    assert replacement["pid"] == 54321
+    assert not lock.with_suffix(".exit.json").exists()
+
+    calls = []
+
+    def sync(argv, **kwargs):
+        calls.append(argv)
+        return subprocess.CompletedProcess(argv, 0)
+
+    monkeypatch.setattr(subprocess, "run", sync)
+    code_graph_background._worker(str(lock), "engine", str(db), str(tmp_path), "old")
+    assert localio.read_json_dict(reservation) == replacement
+    assert not lock.with_suffix(".exit.json").exists()
+    code_graph_background._worker(str(lock), "engine", str(db), str(tmp_path), replacement["token"])
+    assert calls == [["engine", "--db", str(db), "sync", str(tmp_path)]]
+    assert not reservation.exists()
     assert not lock.with_suffix(".exit.json").exists()
 
 
