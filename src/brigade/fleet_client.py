@@ -110,11 +110,14 @@ if TYPE_CHECKING:
 
 from . import fleet_claim_lifecycle as _claim_lifecycle
 from . import fleet_claim_target as _claim_target
-from .fleet_client_flush import flush_locked as _flush_locked
+from .fleet_client_flush import flush_locked as _flush_locked  # noqa: F401
 from .fleet_client_spool import append_record as _append_spool_record
 from .fleet_client_spool import ensure_directory as _ensure_spool_directory
 from .fleet_client_spool import fsync_parent as _fsync_spool_parent
 from .fleet_client_spool import parse_records as _parse_spool_records
+from .fleet_client_spool_entry import FLUSH_TIMEOUT_SECONDS as FLUSH_TIMEOUT_SECONDS
+from .fleet_client_spool_entry import flush_spool as flush_spool
+from .fleet_client_spool_entry import spool_path as spool_path
 from .fleet_client_spool_lock import _spool_lock as _spool_lock
 from .fleet_client_spool_lock import _validate_spool_lock_timeout as _validate_spool_lock_timeout
 
@@ -138,7 +141,6 @@ except ImportError:  # pragma: no cover - POSIX
 FLEET_CONFIG_REL_PATH = Path(".brigade") / "fleet.toml"
 SPOOL_DIRNAME = "fleet-spool"
 REPORT_TIMEOUT_SECONDS = 2.0
-FLUSH_TIMEOUT_SECONDS = 5.0
 FLUSH_BATCH_SIZE = 100
 MAX_SPOOL_BYTES = 16 * 1024 * 1024
 DEFAULT_CLAIM_TTL_SECONDS = 900
@@ -467,13 +469,6 @@ def _post_events(hub_url: str, token: str, body: Any, *, timeout: float) -> None
 # --- spool -------------------------------------------------------------------
 
 
-def spool_path(node_id: str) -> Path:
-    from .fleet_home_guard import fleet_home
-
-    safe_node_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in node_id) or "unknown"
-    return fleet_home() / SPOOL_DIRNAME / f"{safe_node_id}.jsonl"
-
-
 # Spool files are private (#1154): refuse a symlinked path where the OS can
 # tell us (O_NOFOLLOW is POSIX-only; Windows opens through the link target
 # but its per-user homes are not world-writable in the same way).
@@ -714,33 +709,6 @@ def _spool_append_locked(
         _LOG.warning("fleet spool %s refused: %s", path, type(exc).__name__)
         return False
     return True
-
-
-def flush_spool(
-    node_id: str,
-    *,
-    hub_url: str | None = None,
-    token: str | None = None,
-    max_batches: int | None = None,
-    timeout: float = FLUSH_TIMEOUT_SECONDS,
-) -> int:
-    """Re-POST spooled events in order, ``FLUSH_BATCH_SIZE`` per request.
-
-    Delivered events are removed from the spool via an atomic rewrite. A
-    rejected batch is bisected so only the rejected events move to the
-    bounded dead letter (``fleet_client_flush``); undelivered ones keep their
-    order so the next flush resumes where this one stopped. A flush that makes no progress leaves
-    the file untouched. Returns the number of delivered events. Never raises
-    for network failures.
-    """
-    config = load_fleet_config()
-    hub = hub_url or config["hub_url"]
-    tok = token or config["token"]
-    path = spool_path(node_id)
-    if not hub or not path.is_file():
-        return 0
-    with _spool_lock(path) as dir_fd:
-        return _flush_locked(path, hub, tok, max_batches=max_batches, timeout=timeout, dir_fd=dir_fd)
 
 
 # --- reporting ---------------------------------------------------------------
