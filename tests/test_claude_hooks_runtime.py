@@ -4232,6 +4232,8 @@ def _mock_windows_component_lookup(monkeypatch, winerror):
 
     def missing(path):
         if path.name == "x" * 300:
+            if winerror is None:
+                raise PermissionError(errno.EACCES, "fixture path access error")
             error = FileNotFoundError(errno.ENOENT, "fixture Windows path error")
             error.winerror = winerror
             raise error
@@ -4244,7 +4246,8 @@ def _mock_windows_component_lookup(monkeypatch, winerror):
 
 @pytest.mark.parametrize("mode", ["strict", "observe", "off"])
 @pytest.mark.parametrize(
-    "case", ["surrogate", "null", "long-component", "windows-missing-component", "attribution", "known-verifier"]
+    "case",
+    ["surrogate", "null", "long-component", "windows-missing-component", "path-io", "attribution", "known-verifier"],
 )
 def test_bash_pretooluse_unreadable_command_is_denied_only_in_strict(target, monkeypatch, mode, case):
     monkeypatch.setattr(runtime.work_mode, "resolve_mode", lambda _target: mode)
@@ -4254,11 +4257,14 @@ def test_bash_pretooluse_unreadable_command_is_denied_only_in_strict(target, mon
         "null": "echo a\x00b",
         "long-component": long_component,
         "windows-missing-component": long_component,
+        "path-io": long_component,
         "attribution": "echo done",
         "known-verifier": "pytest -q",
     }
     if case == "windows-missing-component":
         _mock_windows_component_lookup(monkeypatch, winerror=3)
+    if case == "path-io":
+        _mock_windows_component_lookup(monkeypatch, winerror=None)
     if case in {"attribution", "known-verifier"}:
 
         def unavailable(*_args, **_kwargs):

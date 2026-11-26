@@ -582,6 +582,8 @@ def _scan_candidate_paths(command: str, cwd: Path, *, depth: int = 0, include_cw
     nested = _nested_shell_script(tokens)
     if nested is not None and depth < 4:
         candidates.extend(_command_candidate_paths(nested, cwd, depth=depth + 1, include_cwd=include_cwd))
+    # Resolve shell words, so an attached redirection cannot become a filename.
+    tokens = _shell_tokens(command) if tokenized else []
     if tokenized:
         effective = cwd
         for separator, segment in groups:

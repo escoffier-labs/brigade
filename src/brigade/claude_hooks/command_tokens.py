@@ -180,9 +180,9 @@ def _path_status(path: Path) -> os.stat_result | None:
     except OSError as exc:
         # Windows reports invalid names, bad paths and overlong names with
         # different native codes, some of which Python maps to ENOENT.
-        if exc.errno in {errno.EINVAL, errno.ENAMETOOLONG} or getattr(exc, "winerror", None) in {123, 161, 206}:
-            raise UnreadableCommand from exc
-        if _WINDOWS and exc.errno in {errno.ENOENT, errno.ENOTDIR} and path.anchor:
+        if exc.errno not in {errno.ENOENT, errno.ENOTDIR} or getattr(exc, "winerror", None) in {123, 161, 206}:
+            raise
+        if _WINDOWS and path.anchor:
             # Windows can also report an overlong component as a missing path.
             # Use the volume's filename maximum, in UTF-16 code units.
             anchor = path.anchor
@@ -218,7 +218,7 @@ def resolve_command_path(raw: str, cwd: Path, *, expand_vars: bool = True) -> Pa
             result = candidate  # The hook already resolved the parent.
         else:
             result = candidate.resolve(strict=False)
-    except ValueError as exc:
+    except (OSError, ValueError) as exc:
         raise UnreadableCommand from exc
     if budget is not None:
         budget.paths[key] = result
