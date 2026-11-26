@@ -3932,8 +3932,11 @@ def test_undecided_recognition_enforces_only_strict(target, monkeypatch, mode, l
     else:
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
         reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-        assert ("65,536-character" if limit == "length" else "1-step") in reason
-        assert "move long content into a file" in reason
+        limit_text = "65,536-character" if limit == "length" else "1-step"
+        assert reason == (
+            f"This command exceeds the {limit_text} classification limit. "
+            "Split the command, or move the long content into a file and run the command using that file."
+        )
 
 
 def test_recognizer_finds_verifier_after_long_control_prefix():
@@ -4114,6 +4117,20 @@ def test_claude_bash_event_work_bound(target, monkeypatch, shape, event):
             if len(command) <= command_tokens.MAX_COMMAND_CHARS:
                 assert "classification limit" not in output.get("permissionDecisionReason", "")
     _assert_hook_scaling(*steps)
+
+
+def test_strict_pretooluse_allows_long_git_add_path_list(target, monkeypatch):
+    from brigade.claude_hooks import command_tokens
+
+    assert runtime.work_mode.is_strict(target)
+    paths = [f"src/example/features/feature_{index:04d}/fixtures/configuration_example.json" for index in range(600)]
+    command = shlex.join(["git", "add", "--", *paths])
+    assert 30_000 <= len(command) < command_tokens.MAX_COMMAND_CHARS
+    budgets = _measure_event_budget(monkeypatch)
+    event = "PreToolUse"
+    payload = _payload(target, event, tool_name="Bash", tool_input={"command": command})
+    assert runtime.handle_payload(event, payload) is None
+    assert "classification" not in _assert_hook_steps(command, budgets).stopped
 
 
 @pytest.mark.parametrize("form", ["copy", "list", "islice", "iterate", "slice"])

@@ -2132,7 +2132,8 @@ def _undecided_pretooluse(target: Path | None, command: object) -> dict[str, Any
         else f"{command_step_limit():,}-step"
     )
     return _bash_permission(
-        f"This command exceeds the {limit} classification limit. Split it or move long content into a file."
+        f"This command exceeds the {limit} classification limit. "
+        "Split the command, or move the long content into a file and run the command using that file."
     )
 
 
