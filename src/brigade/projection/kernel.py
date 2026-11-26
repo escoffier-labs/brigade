@@ -499,7 +499,6 @@ class _HeldParent:
     fd: int
     chain: tuple[tuple[int, int], ...]
     remaining: tuple[str, ...]
-    filename: str
 
 
 _HELD_PARENTS: contextvars.ContextVar[dict[str, _HeldParent] | None] = contextvars.ContextVar(
@@ -569,14 +568,21 @@ def _hold_parents(mutations: tuple[MutationSpec, ...]) -> dict[str, _HeldParent]
     held: dict[str, _HeldParent] = {}
     try:
         for spec in mutations:
-            held[spec.destination.as_posix()] = _walk_existing_parent(spec.destination)
+            if not spec.destination.is_absolute():
+                raise PlanError("destination must be absolute")
+            if spec.destination.name in {"", ".", ".."}:
+                raise PlanError("unsafe destination name")
+            parent = spec.destination.parent
+            key = parent.as_posix()
+            if key not in held:
+                held[key] = _walk_existing_parent(parent)
         return held
     except OSError as exc:
         _close_held(held)
         if _is_unsafe_parent_oserror(exc):
             raise PlanError("unsafe symlink destination") from exc
         raise
-    except Exception:
+    except BaseException:
         _close_held(held)
         raise
 
@@ -593,20 +599,13 @@ def _open_walk_child(parent: int, component: str, flags: int) -> int:
     return os.open(component, flags, dir_fd=parent)
 
 
-def _walk_existing_parent(destination: Path, *, mutable: bool = True) -> _HeldParent:
-    """Open the deepest existing parent of ``destination`` one component at a time without following links.
+def _walk_existing_parent(parent: Path, *, mutable: bool = True) -> _HeldParent:
+    """Open as much of ``parent`` as exists, one component at a time without following links.
 
     ``mutable`` asks for a parent that can be renamed into and created under,
     which on Windows means reopening the final handle with write rights.
     """
-    if not destination.is_absolute():
-        raise PlanError("destination must be absolute")
-    filename = destination.name
-    if not filename or filename in {".", ".."}:
-        raise PlanError("unsafe destination name")
-    parts = destination.parent.parts
-    if not parts:
-        raise PlanError("unsafe destination path")
+    parts = parent.parts
     flags = 0 if _nt_handles() else _directory_flags()
     fd = _open_walk_root(parts[0])
     remaining: list[str] = []
@@ -636,14 +635,14 @@ def _walk_existing_parent(destination: Path, *, mutable: bool = True) -> _HeldPa
             writable = dirfd_mod.reopen_directory_writable(fd)
             os.close(fd)
             fd = writable
-        return _HeldParent(fd=fd, chain=tuple(chain), remaining=tuple(remaining), filename=filename)
-    except Exception:
+        return _HeldParent(fd=fd, chain=tuple(chain), remaining=tuple(remaining))
+    except BaseException:
         os.close(fd)
         raise
 
 
 def _assert_held_parent_current(destination: Path, held: _HeldParent) -> None:
-    again = _walk_existing_parent(destination, mutable=False)
+    again = _walk_existing_parent(destination.parent, mutable=False)
     try:
         if len(again.chain) < len(held.chain) or again.chain[: len(held.chain)] != held.chain:
             raise OSError("refusing swapped projection parent")
@@ -683,7 +682,7 @@ def _materialize_parent(held: _HeldParent) -> tuple[int, list[int]]:
             fd = child
             _dir_identity(fd)
         return fd, extra
-    except Exception:
+    except BaseException:
         _close_descriptors(extra)
         raise
 
@@ -692,7 +691,7 @@ def _current_held_parent(spec: MutationSpec) -> _HeldParent | None:
     held = _HELD_PARENTS.get()
     if not held:
         return None
-    return held.get(spec.destination.as_posix())
+    return held.get(spec.destination.parent.as_posix())
 
 
 def _materialize_held_parent(spec: MutationSpec, held: _HeldParent | None) -> tuple[int | None, list[int]]:
@@ -732,7 +731,7 @@ def _unlink_via_parent(parent_fd: int, name: str) -> None:
 
 def _apply_mode(spec: MutationSpec, parent_fd: int | None, held: _HeldParent | None, mode: int) -> None:
     if parent_fd is not None and held is not None and not _nt_handles():
-        _chmod_via_parent(parent_fd, held.filename, mode)
+        _chmod_via_parent(parent_fd, spec.destination.name, mode)
     else:
         # Windows has no permission bits to set through a handle; the pathname chmod only
         # toggles the read-only attribute, as it always did there.
@@ -802,10 +801,10 @@ def _apply_writer(spec: MutationSpec, *, held: _HeldParent | None, parent_fd: in
     # There is no pathname that opens through a Windows handle, so a writer there
     # gets the destination path and the held handle keeps its parent in place.
     writer(
-        spec.destination if _nt_handles() else _path_via_held_parent(parent_fd, held.filename),
+        spec.destination if _nt_handles() else _path_via_held_parent(parent_fd, spec.destination.name),
         spec.staged_bytes,
     )
-    _assert_regular_on_held_parent(parent_fd, held.filename)
+    _assert_regular_on_held_parent(parent_fd, spec.destination.name)
     _assert_held_parent_current(spec.destination, held)
 
 
@@ -817,8 +816,8 @@ def _apply_remover(spec: MutationSpec, *, held: _HeldParent | None, parent_fd: i
         remover(spec.destination)
         return
     _assert_held_parent_current(spec.destination, held)
-    remover(spec.destination if _nt_handles() else _path_via_held_parent(parent_fd, held.filename))
-    _assert_absent_on_held_parent(parent_fd, held.filename)
+    remover(spec.destination if _nt_handles() else _path_via_held_parent(parent_fd, spec.destination.name))
+    _assert_absent_on_held_parent(parent_fd, spec.destination.name)
     _assert_held_parent_current(spec.destination, held)
 
 
@@ -841,8 +840,8 @@ def _quarantine_for_verify(spec: MutationSpec, held: _HeldParent | None, parent_
         or spec.remover is not None
     ):
         return None
-    name = f".{held.filename}.{uuid.uuid4().hex}.quarantine"
-    _quarantine_rename(parent_fd, held.filename, name)
+    name = f".{spec.destination.name}.{uuid.uuid4().hex}.quarantine"
+    _quarantine_rename(parent_fd, spec.destination.name, name)
     try:
         observed = _digest_via_parent(parent_fd, name)
     except OSError:
@@ -850,7 +849,7 @@ def _quarantine_for_verify(spec: MutationSpec, held: _HeldParent | None, parent_
     if observed == spec.expected_before:
         return name
     try:
-        _restore_quarantined(parent_fd, name, held.filename)
+        _restore_quarantined(parent_fd, name, spec.destination.name)
     except OSError as error:
         raise DriftError(f"destination drift between check and commit; moved aside as {name}") from error
     raise DriftError("destination drift between check and commit")
@@ -908,10 +907,10 @@ def _apply_mutation(spec: MutationSpec) -> None:
             _apply_verified_mutation(spec, held=held, parent_fd=parent_fd, quarantined=quarantined is not None)
         except BaseException:
             if quarantined is not None and parent_fd is not None and held is not None:
-                _finish_quarantine(parent_fd, quarantined, held.filename, published=False)
+                _finish_quarantine(parent_fd, quarantined, spec.destination.name, published=False)
             raise
         if quarantined is not None and parent_fd is not None and held is not None:
-            _finish_quarantine(parent_fd, quarantined, held.filename, published=True)
+            _finish_quarantine(parent_fd, quarantined, spec.destination.name, published=True)
     finally:
         _close_descriptors(extra)
 
@@ -926,7 +925,7 @@ def _apply_verified_mutation(
             # A quarantined destination is already out of the way; deleting the
             # verified moved copy is the removal.
             if not quarantined:
-                _unlink_via_parent(parent_fd, held.filename)
+                _unlink_via_parent(parent_fd, spec.destination.name)
         else:
             spec.destination.unlink()
         return
@@ -935,7 +934,7 @@ def _apply_verified_mutation(
     if spec.writer is not None:
         _apply_writer(spec, held=held, parent_fd=parent_fd)
     elif parent_fd is not None and held is not None:
-        _publish_bytes_via_parent(parent_fd, held.filename, spec.staged_bytes)
+        _publish_bytes_via_parent(parent_fd, spec.destination.name, spec.staged_bytes)
     else:
         spec.destination.parent.mkdir(parents=True, exist_ok=True)
         localio.write_bytes_atomic(spec.destination, spec.staged_bytes)
@@ -955,7 +954,7 @@ def _restore_one(op_dir: Path, spec: MutationSpec, index: int | None = None) -> 
         if absent_marker.is_file() or spec.expected_before == ABSENT:
             if parent_fd is not None and held is not None:
                 try:
-                    _unlink_via_parent(parent_fd, held.filename)
+                    _unlink_via_parent(parent_fd, spec.destination.name)
                 except FileNotFoundError:
                     pass
             elif spec.destination.exists() or spec.destination.is_symlink():
@@ -963,7 +962,7 @@ def _restore_one(op_dir: Path, spec: MutationSpec, index: int | None = None) -> 
             return
         payload = data_path.read_bytes()
         if parent_fd is not None and held is not None:
-            _publish_bytes_via_parent(parent_fd, held.filename, payload)
+            _publish_bytes_via_parent(parent_fd, spec.destination.name, payload)
         else:
             spec.destination.parent.mkdir(parents=True, exist_ok=True)
             localio.write_bytes_atomic(spec.destination, payload)
