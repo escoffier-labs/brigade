@@ -14,14 +14,15 @@ from .. import localio
 _OUTCOMES = ("passed", "failed", "errors", "skipped", "xfailed", "xpassed", "deselected")
 # Outcomes that mean a test was actually run or reported, as opposed to left out.
 _RAN = ("passed", "failed", "errors", "skipped", "xfailed", "xpassed")
-_ITEM = r"\d+ (?:passed|failed|errors?|skipped|xfailed|xpassed|deselected|warnings?|rerun)"
+_LABEL = r"passed|failed|errors?|skipped|xfailed|xpassed|deselected|warnings?|rerun|subtests (?:passed|failed|skipped|xfailed|xpassed)"
+_ITEM = rf"\d+ (?:{_LABEL})"
 _DURATION = r" in \d+(?:\.\d+)?s(?: \([^)]*\))?"
 # pytest's terminal summary line, with or without the ``===`` rule that -q drops.
 _SUMMARY = re.compile(rf"^(?:=+ )?(?P<body>{_ITEM}(?:, {_ITEM})*){_DURATION}(?: =+)?$")
 _NO_TESTS = re.compile(rf"^(?:=+ )?no tests ran{_DURATION}(?: =+)?$")
 # The full gate prints one combined line for all shards (scripts/verify_parallel.py).
 _AGGREGATE = re.compile(rf"^Aggregate: (?P<body>{_ITEM}(?:, {_ITEM})*)$")
-_COUNT = re.compile(r"(?P<count>\d+) (?P<name>[a-z]+)")
+_COUNT = re.compile(rf"(?P<count>\d+) (?P<name>{_LABEL})")
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")
 
 _ENV_VALUE_LIMIT = 2048
@@ -70,10 +71,15 @@ def pytest_outcomes(stdout: str) -> dict[str, int | bool] | None:
         if match is None:
             continue
         counts = dict.fromkeys(_OUTCOMES, 0)
+        failed_subtests = 0
         for item in _COUNT.finditer(match.group("body")):
             name = "errors" if item.group("name") == "error" else item.group("name")
-            if name in counts:
+            if name == "subtests failed":
+                failed_subtests = int(item.group("count"))
+            elif name in counts:
                 counts[name] = int(item.group("count"))
+        # A failed subtest disqualifies the run. Only top-level passes count as passed tests.
+        counts["failed"] += failed_subtests
         return {**counts, "no_tests_ran": sum(counts[name] for name in _RAN) == 0}
     return None
 

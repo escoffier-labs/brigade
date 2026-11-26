@@ -128,6 +128,23 @@ def test_pytest_outcomes_read_the_summary_line_not_stray_text():
     assert (error_only["errors"], error_only["no_tests_ran"]) == (1, False)
 
 
+@pytest.mark.parametrize(
+    ("stdout", "passed", "failed"),
+    [
+        # Captured from pytest 9.2.0 with -o verbosity_subtests=1.
+        ("===================== 1 passed, 3 subtests passed in 0.03s =====================", 1, 0),
+        ("12 passed, 3 subtests passed, 2 skipped, 1 xfailed, 2 warnings, 1 deselected, 1 rerun in 1.23s", 12, 0),
+        ("2 subtests failed, 1 failed, 4 passed, 3 subtests passed, 1 error in 1.23s", 4, 3),
+        ("1 passed, 2 subtests failed in 0.03s", 1, 2),
+        ("2 subtests failed in 0.03s", 0, 2),
+    ],
+)
+def test_pytest_outcomes_read_summaries_with_subtests(stdout, passed, failed):
+    result = verify_receipt_details.pytest_outcomes(stdout)
+    assert result is not None
+    assert (result["passed"], result["failed"], result["no_tests_ran"]) == (passed, failed, False)
+
+
 def test_pytest_outcomes_count_a_run_that_only_deselected_as_no_tests():
     result = verify_receipt_details.pytest_outcomes("==== 10 deselected in 0.05s ====\n")
     assert (result["deselected"], result["no_tests_ran"]) == (10, True)
