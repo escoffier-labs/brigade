@@ -1,4 +1,4 @@
-"""Package-pinned asset fingerprints for the receipt acknowledgement migration."""
+"""Package-pinned fingerprints for historical engine repair releases."""
 
 from __future__ import annotations
 
@@ -6,10 +6,10 @@ from __future__ import annotations
 MANIFEST_DIGESTS = {
     "v0.30.0+02270bc7ffd92640cd8debf39711eca7c8678fc0": "046dcba26923a792cb49bea266bfad7c0c8d44beb10c2249356faaa346620ba9",
     "v0.32.0+682a0ce07a397e058697c40122d94c4ce02f7db8": "9325fe49f5a37e32d65d8931ef85e682aac5e061a319cdbc1c187509f6f00e59",
+    "v0.32.1+088da09cb0561c62e5121156b07dfdffe6807f9c": "f9550013ac429bcb5696dce17ad91a222125825155e1b6496c3bf6e711dff671",
 }
 
-# From the published component-manifest-v1.json assets. Keep these pins limited to the
-# v0.30.0 affected release and the v0.32.0 bundle documented for explicit repair.
+# From the published component-manifest-v1.json assets for releases used in engine repair.
 _ASSET_PINS: dict[str, dict[tuple[str, str], tuple[int, str]]] = {
     "v0.30.0+02270bc7ffd92640cd8debf39711eca7c8678fc0": {
         ("agent-notify", "darwin-amd64"): (7446896, "f377fc34b417cafaef47ae1588174de4b458ea1ad708a69ef9c371de197d2c51"),
@@ -167,6 +167,86 @@ _ASSET_PINS: dict[str, dict[tuple[str, str], tuple[int, str]]] = {
         ("sessionfind", "windows-amd64"): (
             19869696,
             "acbe03400588a9eabc25ecacc7f19566288e2011410da75c97bf7e3f9a7bec7e",
+        ),
+    },
+    "v0.32.1+088da09cb0561c62e5121156b07dfdffe6807f9c": {
+        ("agent-notify", "darwin-amd64"): (7450992, "b2741032012801bf3090e045f6dc6bac36e30cb08d016a548e3e510283dc5517"),
+        ("agent-notify", "darwin-arm64"): (6877250, "776bba9c1ee6ae9040d33fc2dc0cdf5d78505dd3a13c3a4b00b30c79d878cab6"),
+        ("agent-notify", "linux-amd64"): (7282848, "538a7b00fb7e965517676263756bbbbc331874f01e0acc43e421617bd0a90f45"),
+        ("agent-notify", "linux-arm64"): (6684832, "beaea25b070047083e6cc04d1e59a596419f59ffe1a3983e482e7941168dbff1"),
+        ("agent-notify", "windows-amd64"): (
+            7496192,
+            "aa31b07988f77c992df8dfa2ad24be8a79bedc046a26d25978c650bc84e8dc0e",
+        ),
+        ("brigade-code-graph", "darwin-amd64"): (
+            12268544,
+            "48e350170a8fa802107b8408d981dd130495a27f13d6d0b3e89e4631ee65ad51",
+        ),
+        ("brigade-code-graph", "darwin-arm64"): (
+            11965648,
+            "9180fdfff94ede0254a4650f14f8de1a865786a79c5b5c81c5ec894a3ad90f2a",
+        ),
+        ("brigade-code-graph", "linux-amd64"): (
+            13742736,
+            "df0a56fc81314cab5fbbe47d2fcc603ed20b261b8258e21d9ad74d9ac4dfc41e",
+        ),
+        ("brigade-code-graph", "linux-arm64"): (
+            13013640,
+            "f991c0af580d39607af8f810e935d5d3697074ee4b9c9af278a36a60bf3ab2ee",
+        ),
+        ("brigade-code-graph", "windows-amd64"): (
+            11309056,
+            "9ed1361a4eca7ef5526b44c7e70819784b9f266267954af3683815f3da9f6745",
+        ),
+        ("brigade-code-graph-mcp", "darwin-amd64"): (
+            11449936,
+            "a4083e0831266172d283b4d55cb84b236e69ac83e09692ee8c9f26100600aaa7",
+        ),
+        ("brigade-code-graph-mcp", "darwin-arm64"): (
+            11205744,
+            "530cbc0f4d625dc9fab2ec57780a60daff17a8537a1d65300fba6998d9635c4f",
+        ),
+        ("brigade-code-graph-mcp", "linux-amd64"): (
+            12818312,
+            "cdac322d6f53bbaa9fb5a9c6d2794fe7d218e64f1cd8b3ad7d0c9d254788c239",
+        ),
+        ("brigade-code-graph-mcp", "linux-arm64"): (
+            12161968,
+            "4f44d1ff2016ddad60d3641d774a1526d310e734ccdf946c5b1262b28a81f8e7",
+        ),
+        ("brigade-code-graph-mcp", "windows-amd64"): (
+            10480640,
+            "08ab026564f63b1a10466329db699c436602e9234e7463e8845896fb495f41a7",
+        ),
+        ("brigade-evidence", "darwin-amd64"): (
+            19811136,
+            "6b18ab8b621c95f67cdce7a8b576010447e358ebf16c4f0c673eed5ea0fc02f8",
+        ),
+        ("brigade-evidence", "darwin-arm64"): (
+            18679746,
+            "98f1ca4ec8797b946a6059cb044d4889a4ba4d2c0f09f4d327bc33c441dff54e",
+        ),
+        ("brigade-evidence", "linux-amd64"): (
+            19772149,
+            "cdcc00970d3235665c52427609e627948141747c922d15ee49085e1c6adf982d",
+        ),
+        ("brigade-evidence", "linux-arm64"): (
+            18560919,
+            "9c6ae0af42e8913c9918d7f1e67569071717eaef72bc7670118ca1eef2c2aa5e",
+        ),
+        ("brigade-evidence", "windows-amd64"): (
+            19868160,
+            "cec1a6b0247c86d0593d9b34de38aac53dbcc056fa2073298cadba596102b7db",
+        ),
+        ("brigade-hub", "linux-amd64"): (17633072, "040307d55eb923525e8c5c74f9cc7eea136b8980eae5776ce5a8c69d2c0e264b"),
+        ("brigade-hub", "linux-arm64"): (16535928, "0cc28e16f4491b2fde34029f4146be07b3b8a735a994ae5d599c37a29001456a"),
+        ("sessionfind", "darwin-amd64"): (19815072, "e6259799083f6a0a65806711a7b16bcef50ff750f368a0dd99c54422e45342c0"),
+        ("sessionfind", "darwin-arm64"): (18679586, "186576798af44fd2413d3276ee789022b161b268474b49c051a6ac45bd311a05"),
+        ("sessionfind", "linux-amd64"): (19768809, "525a4a1664969f83f87dd94aedca646f25b8b33de7319141fba045f98561f432"),
+        ("sessionfind", "linux-arm64"): (18562467, "76cb8e51ef5b4073f0487ac9a89f85686f27992ff46c5f3573262a0f51bd584b"),
+        ("sessionfind", "windows-amd64"): (
+            19869696,
+            "1b14120238a65be3eac4c3ee4b2ad0654f708bbcaf7de329b03363d017caa720",
         ),
     },
 }

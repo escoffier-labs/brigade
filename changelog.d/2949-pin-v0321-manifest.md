@@ -1,0 +1,1 @@
+- Authenticate the v0.32.1 engine manifest during offline setup so cached engine assets can be installed or repaired.
