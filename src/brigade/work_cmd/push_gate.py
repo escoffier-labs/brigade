@@ -290,7 +290,14 @@ def _install(repo: Repository, mode: str) -> None:
 _BLOCK_MARKER = re.compile(rb"^[ \t]*#[ \t]*(?:BEGIN|END)[ \t]+Brigade push gate[^\n]*", re.M)
 _BLOCK_BOUNDARY = re.compile(rb"# (BEGIN|END) Brigade push gate v([0-9]+)\r?")
 _BASH_SHEBANG = re.compile(rb"#![ \t]*(?:(?:\S*/)?env[ \t]+(?:-S[ \t]+)?)?(?:\S*/)?bash(?:\.exe)?(?:[ \t][^\r]*)?\r?")
-_GATE_INVOCATION = re.compile(rb"\bbrigade[ \t]+work[ \t]+verify[ \t]+push-gate[ \t]+run\b")
+_GATE_INVOCATION = re.compile(
+    rb"""(?<![\w./'"-])"""
+    + rb"[ \t]+".join(
+        rb"(?:" + word + rb"|'" + word + rb"'|\"" + word + rb"\")"
+        for word in (b"brigade", b"work", b"verify", b"push-gate", b"run")
+    )
+    + rb"""(?![\w./'"-])"""
+)
 _CAPTURE_REFS = re.compile(rb'^STDIN_REFS="\$\(cat\)"(\r?\n)', re.M)
 
 
@@ -298,13 +305,23 @@ def _block_replacement(raw: bytes, *, insert: bool, preview: bool) -> tuple[byte
     if not _BASH_SHEBANG.fullmatch(raw.partition(b"\n")[0]):
         raise ValueError("The effective pre-push hook must start with a Bash interpreter line.")
     markers = list(_BLOCK_MARKER.finditer(raw))
+    calls = [
+        match
+        for match in _GATE_INVOCATION.finditer(raw)
+        if not raw[raw.rfind(b"\n", 0, match.start()) + 1 : match.start()].lstrip().startswith(b"#")
+    ]
+    block_start, block_end = (markers[0].start(), markers[1].end()) if len(markers) == 2 else (0, 0)
+    if len(markers) in {0, 2}:
+        for call in calls:
+            if not block_start <= call.start() < block_end:
+                line = raw.count(b"\n", 0, call.start()) + 1
+                raise ValueError(
+                    f"Brigade gate invocation on line {line} is outside the marked block. "
+                    "Move it inside the markers or remove it."
+                )
     if not markers:
         if not (insert or preview):
             raise ValueError("No Brigade block found. Pass --confirm-insert to insert it.")
-        if _GATE_INVOCATION.search(raw):
-            raise ValueError(
-                "Add Brigade block markers around the existing gate invocation or remove it before inserting."
-            )
         captures = list(_CAPTURE_REFS.finditer(raw))
         if len(captures) != 1:
             raise ValueError('Insertion needs one STDIN_REFS="$(cat)" line to locate the gate.')
@@ -329,7 +346,9 @@ def _block_replacement(raw: bytes, *, insert: bool, preview: bool) -> tuple[byte
         begin, finish = boundaries
         if begin[1] != b"BEGIN" or finish[1] != b"END" or begin[2] != finish[2]:
             raise ValueError("The hook contains damaged Brigade push gate block markers.")
-        start, end = markers[0].start(), markers[1].end()
+        if len(calls) != 1:
+            raise ValueError("The marked Brigade block must contain exactly one gate invocation.")
+        start, end = block_start, block_end
         end += raw[end : end + 1] == b"\n"
         newline = b"\r\n" if markers[0].group().endswith(b"\r") else b"\n"
         action = f"Replace the Brigade push gate block v{begin[2].decode('ascii')}"

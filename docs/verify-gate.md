@@ -137,34 +137,21 @@ identity have no effect. The declaration comes from the merge base of the
 pushed tip and the fetched default branch.
 
 The gate compares the recorded command with the current required argv
-prefix. A pass requires the same executable spelling and exact prefix
-arguments. A bare program matches a bare program, and a policy path
-matches the same path, including any leading `./`. On Windows the gate
-normalizes slash direction and case. An explicitly declared extension
-must match. A policy without an extension can match an `.exe`, `.cmd`,
-or `.bat` executable. A different path to a program with the same name,
-or the alternate spelling `py.test` for `pytest`, is ambiguous. A failed
-or unfinished ambiguous run makes the verdict indeterminate.
+prefix. A pass requires the recorded command to start with that exact
+prefix, including the executable spelling on Windows, and to meet the tree,
+policy, and coverage requirements. A run through a wrapper such as `env`
+or `timeout`, with an environment variable set in front, or under another
+spelling of the program does not count as a pass. This includes assignments
+recorded separately from argv and alternate names such as `py.test`.
 
-A pass must meet the tree, policy, and coverage requirements. The gate can
-recheck coverage using the saved plan and pushed tree when the executable
-matches after normalization. The gate recognizes up to eight layers of
-the bare wrappers `env`, `command`, `nice`, `nohup`, `time`, `timeout`,
-and `stdbuf` with supported options. Assignment-free `env` invocations
-with supported options are transparent. The environment allowlist is
-empty. Leading assignments, assignments passed to `env`, and assignment
-names saved in a command receipt make a possible required run ambiguous.
-The list excludes `PY` because it selects the tools the required
-verification scripts execute.
-
-**Adding a variable to the list**
-
-The list is `_CHECK_ENV_NAMES` in `src/brigade/work_cmd/verify_push.py`.
-Adding a name requires a reviewed change to that constant and a note in this
-guide explaining why the variable cannot change what the check runs or which
-tests it selects. There is deliberately no per-machine configuration key or
-environment switch for this list. In the meantime, run the required check
-without the prefix or set the variable inside the check script itself.
+The gate recognizes up to eight layers of `env`, `command`, `nice`,
+`nohup`, `time`, `timeout`, and `stdbuf` with supported options.
+Recognized wrappers, environment prefixes, and alternate spellings make
+the invocation ambiguous. A failed, timed-out, or unfinished ambiguous
+run makes the verdict indeterminate. A completed ambiguous run leaves an
+earlier pass in place. When such an invocation affects the verdict, the
+gate names the wrapper, variable, or executable spelling and prints the
+plain policy command to run again.
 
 A newer matching failure
 takes precedence over an older pass regardless of the policy declaration
@@ -176,8 +163,8 @@ run that started on the pushed tree still counts if the tree changed during
 the run. Rerun the required check on the pushed tree to clear the failure.
 
 A failed or timed-out run of the required check counts even when it
-collected no tests or omitted a test selector. A run of the required check
-that completed without meeting the current eligibility rules, or was
+collected no tests or omitted a test selector. A run with the exact declared
+prefix that completed without meeting the current eligibility rules, or was
 explicitly rejected, also takes precedence over an older pass. A terminal
 run whose recorded commands are all unrelated leaves an earlier verdict in
 place. A newer possible run of the required check gives an indeterminate
@@ -190,9 +177,8 @@ module or script, the gate uses that target for mentions. A script name
 can mention it as a whole segment delimited by a hyphen or underscore.
 A different target with no such mention is unrelated. So is an invocation
 of the required executable with just one of `--version`, `--help`, `-h`,
-`--collect-only`, or `--co`. Only an exact normalized prefix can supply
-passing evidence. A policy with no required command prefix accepts any
-eligible receipt for the tree.
+`--collect-only`, or `--co`. A policy with no required command prefix
+accepts any eligible receipt for the tree.
 
 When a receipt lists its planned commands, the gate compares the plan with
 recorded commands in order using the same identity rules. A missing or
@@ -327,8 +313,10 @@ upgrade preserves the surrounding bytes, line endings, file mode, and Git
 configuration. It saves a timestamped backup beside the hook and prints a
 Bash command to restore it. If the hook has no block, pass
 `--confirm-insert` to insert it immediately after its single
-`STDIN_REFS="$(cat)"` line. If the hook already invokes the gate outside
-a block, add markers around that invocation or remove it before inserting.
+`STDIN_REFS="$(cat)"` line. An upgrade requires exactly one gate invocation
+inside the markers. If the hook invokes the gate outside the block, the
+installer reports its line number. Move the invocation inside the markers or
+remove it before trying again.
 Status reports the block version and identifies a customised hook as unverified.
 
 ### Known limits

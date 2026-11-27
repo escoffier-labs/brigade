@@ -1430,10 +1430,20 @@ def test_planned_commands_in_hook(push_repo, monkeypatch, capsys, mode, later_pl
 @pytest.mark.parametrize(
     ("argv", "older_pass", "status", "verdict"),
     [
-        *(([*wrapper, *PREFIX, SELECTOR], True, "failed", "rejected") for wrapper in IDENTITY_WRAPPERS),
+        *(
+            ([*wrapper, *PREFIX, SELECTOR], older_pass, status, verdict)
+            for wrapper in IDENTITY_WRAPPERS
+            for older_pass, status, verdict in [
+                (True, "failed", "indeterminate"),
+                (True, "timed_out", "indeterminate"),
+                (True, "running", "indeterminate"),
+                (False, "completed", "rejected"),
+                (True, "completed", "ok"),
+            ]
+        ),
         (["bash", "-c", shlex.join([*PREFIX, SELECTOR])], True, "failed", "indeterminate"),
         (["bash", "-c", shlex.join([*PREFIX, SELECTOR])], False, "completed", "rejected"),
-        (["env", *PREFIX, SELECTOR], False, "completed", "ok"),
+        ([*PREFIX, SELECTOR], False, "completed", "ok"),
         (["ruff", "check", "."], True, "failed", "ok"),
         (["python", "-m", "mypy", "src"], True, "failed", "ok"),
     ],
@@ -1586,7 +1596,7 @@ def test_block_only_inserts_after_capturing_refs_with_confirmation(push_repo, ca
         (
             _CUSTOM_PREFIX + b"brigade work verify push-gate run\n",
             ["--confirm-insert"],
-            "around the existing gate invocation",
+            "Brigade gate invocation on line 4 is outside the marked block.",
         ),
         (b"#!/bin/bash\n", ["--confirm-insert"], "needs one STDIN_REFS"),
         (_CUSTOM_PREFIX + b'STDIN_REFS="$(cat)"\n', ["--confirm-insert"], "needs one STDIN_REFS"),
@@ -1599,6 +1609,42 @@ def test_block_only_refuses_unsafe_hook_contents(push_repo, capsys, custom_hook,
     assert _gate(push_repo, "install", "--block-only", *options) == 1
     assert error in capsys.readouterr().err
     assert custom_hook.read_bytes() == raw
+    assert not list(custom_hook.parent.glob("pre-push.*.bak"))
+
+
+@pytest.mark.parametrize(
+    ("body", "line"),
+    [
+        (b"cat <<'END'\n" + _V1_BLOCK + b"END\nbrigade work verify push-gate run\n", 9),
+        (
+            b"".join(b"# " + line for line in _V1_BLOCK.splitlines(keepends=True))
+            + b"brigade work verify push-gate run\n",
+            7,
+        ),
+        (_V1_BLOCK + b"\n'brigade' work \"verify\" 'push-gate' run\n", 8),
+        (b"brigade work verify push-gate run\n" + _V1_BLOCK, 4),
+    ],
+)
+def test_block_only_refuses_gate_invocation_outside_markers(push_repo, capsys, custom_hook, body, line):
+    original = _CUSTOM_PREFIX + body
+    custom_hook.write_bytes(original)
+    assert _gate(push_repo, "install", "--block-only", "--confirm-insert") == 1
+    assert (
+        f"Brigade gate invocation on line {line} is outside the marked block. Move it inside the markers or remove it."
+    ) in capsys.readouterr().err
+    assert custom_hook.read_bytes() == original
+    assert not list(custom_hook.parent.glob("pre-push.*.bak"))
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_block_only_requires_one_gate_invocation_inside_markers(push_repo, capsys, custom_hook, count):
+    start, call, end = _V1_BLOCK.splitlines(keepends=True)
+    mentions = b"# " + call + b"echo 'brigade work verify push-gate run'\n"
+    original = _CUSTOM_PREFIX + start + mentions + call * count + end + _CUSTOM_SUFFIX
+    custom_hook.write_bytes(original)
+    assert _gate(push_repo, "install", "--block-only") == 1
+    assert "The marked Brigade block must contain exactly one gate invocation." in capsys.readouterr().err
+    assert custom_hook.read_bytes() == original
     assert not list(custom_hook.parent.glob("pre-push.*.bak"))
 
 
@@ -1655,10 +1701,10 @@ def test_block_only_upgraded_custom_hook_runs_in_real_push(push_repo, capsys, mo
 @pytest.mark.parametrize(
     ("wrapper", "selectors", "status", "older_pass", "expected"),
     [
-        (["env"], ["a", "b"], "completed", False, "ok"),
+        (["env"], ["a", "b"], "completed", False, "rejected"),
         (["./python"], ["a", "b"], "completed", False, "rejected"),
         (["env"], ["a"], "completed", False, "rejected"),
-        (["env"], ["a", "b"], "failed", True, "rejected"),
+        (["env"], ["a", "b"], "failed", True, "indeterminate"),
         ([], ["a", "b"], "completed", False, "ok"),
         ([], ["a"], "completed", False, "rejected"),
         ([], ["a", "b"], "failed", True, "rejected"),
@@ -1666,7 +1712,7 @@ def test_block_only_upgraded_custom_hook_runs_in_real_push(push_repo, capsys, mo
         (["env", "PYTEST_ADDOPTS=-k example"], ["a", "b"], "completed", True, "ok"),
     ],
 )
-def test_normalised_coverage_controls_hook(
+def test_only_plain_check_can_cover_required_files_in_hook(
     push_repo, monkeypatch, capsys, wrapper, selectors, status, older_pass, expected
 ):
     from tests.test_verify_plan_coverage import A, B, _setup
@@ -1695,13 +1741,13 @@ def test_normalised_coverage_controls_hook(
     assert (code == 0) is (expected == "ok"), err
     (row,) = _log_rows(push_repo)
     assert row["result"] == expected
-    if status == "completed" and selectors == ["a"]:
+    if not wrapper and status == "completed" and selectors == ["a"]:
         assert f"missed required test files {B}." in err
 
 
 @pytest.mark.parametrize("name", CHECK_ENV_NAMES)
 @pytest.mark.parametrize("coverage", [False, True])
-def test_wrapped_environment_allowlist_in_hook(push_repo, monkeypatch, capsys, name, coverage):
+def test_wrapped_environment_prefix_in_hook(push_repo, monkeypatch, capsys, name, coverage):
     from tests.test_verify_plan_coverage import A, B, _setup
 
     if coverage:
@@ -1765,6 +1811,55 @@ def test_environment_prefix_diagnostic_in_real_push(push_repo, monkeypatch, caps
     assert SENTINEL_ENV_VALUE not in log.read_text(encoding="utf-8")
     (row,) = _log_rows(push_repo)
     assert row["result"] == ("rejected" if status == "completed" else "indeterminate")
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "status", "older_pass", "mode", "expected"),
+    [
+        (["env"], "completed", False, "warn", "rejected"),
+        (["env", "--"], "completed", False, "enforce", "rejected"),
+        (["env", "-i"], "completed", True, "enforce", "ok"),
+        (["env", "-u", "SETTING"], "failed", True, "enforce", "indeterminate"),
+        (["timeout", "10"], "completed", False, "enforce", "rejected"),
+        (["timeout", "10"], "failed", True, "warn", "indeterminate"),
+        (["py.test"], "completed", False, "enforce", "rejected"),
+        (["py.test"], "completed", True, "enforce", "ok"),
+        (["py.test"], "failed", True, "enforce", "indeterminate"),
+    ],
+)
+def test_wrapped_or_aliased_required_check_in_real_push(
+    push_repo, monkeypatch, capsys, wrapper, status, older_pass, mode, expected
+):
+    from brigade.work_cmd.push_gate_display import shell_arg
+
+    argv = ["pytest", "-q", SELECTOR]
+    _policy(push_repo, prefix=argv[:2])
+    _bare_remote(push_repo)
+    monkeypatch.setenv("PATH", _path_with_brigade())
+    assert _gate(push_repo, "install", "--mode", mode) == 0
+    capsys.readouterr()
+    tree = _tree(push_repo)
+    if older_pass:
+        _receipt(push_repo, tree, argv=argv)
+    alias = wrapper == ["py.test"]
+    recorded = [*wrapper, *(argv[1:] if alias else argv)]
+    path = _receipt(push_repo, tree, second=2, status=status, argv=recorded)
+    receipt = json.loads(path.read_bytes())
+    receipt["planned_commands"] = [shlex.join(recorded)]
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    pushed = _push_with_verdict(push_repo)
+    assert (pushed.returncode != 0) is (mode == "enforce" and expected != "ok"), pushed.stderr
+    assert _log_rows(push_repo)[0]["result"] == expected
+    if expected != "ok":
+        form = "under the spelling" if alias else "through"
+        assert (
+            f"A run of the required check {form} {wrapper[0]} does not count. Run the required check again as declared."
+        ) in pushed.stderr
+        remedy = (
+            f"brigade work verify run --target {shell_arg(str(push_repo))} "
+            f"--argv-json {shell_arg(json.dumps([*argv[:2], 'tests/test_example.py']))} --no-reuse"
+        )
+        assert remedy in pushed.stderr
 
 
 @pytest.mark.parametrize(("program", "alternate"), SAME_NAME_SPELLINGS)
