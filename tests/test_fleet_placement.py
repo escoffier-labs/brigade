@@ -218,6 +218,24 @@ def test_omitted_agent_session_weight_preserves_legacy_load(fleet):
     assert omitted["recommended"]["machine"] == "worker-linux-2"
 
 
+def test_explicit_zero_agent_session_weight_matches_omitted_weight(fleet, monkeypatch):
+    _session(fleet, NODE_LINUX, "standalone")
+    omitted = _place(fleet)
+
+    _save(fleet, agent_session_weight=0.0)
+    current = fleet_hub_policy.current_policy(fleet)
+    routing = current["document"]["routing"]
+    assert "agent_session_weight" not in routing
+    omitted["policy_version"] = current["revision"]
+    assert _place(fleet) == omitted
+
+    # The save path omits zero. Supply it at the placement boundary to also
+    # exercise a document that still carries the explicit value.
+    routing["agent_session_weight"] = 0.0
+    monkeypatch.setattr(fleet_hub_policy, "current_policy", lambda _conn: current)
+    assert _place(fleet) == omitted
+
+
 def test_weighted_reports_shed_to_an_idle_node(fleet):
     _save(fleet, agent_session_weight=0.5)
     _session(fleet, NODE_LINUX, "standalone-one")

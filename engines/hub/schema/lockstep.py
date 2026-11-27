@@ -198,9 +198,13 @@ def discover_schema_helpers(conn: sqlite3.Connection) -> None:
             for name in helpers:
                 getattr(module, name)(conn)
         elif re.search(r"CREATE\s+(?:TABLE|INDEX|TRIGGER)\b", source, re.I):
-            assert path.stem in {"fleet_hub", "fleet_hub_claims", "fleet_ci_node", "fleet_export"}, (
-                f"unclassified schema owner: {path.name}"
-            )
+            assert path.stem in {
+                "fleet_hub",
+                "fleet_hub_claims",
+                "fleet_hub_session_indexes",  # Installed by fleet_hub's additive migration.
+                "fleet_ci_node",
+                "fleet_export",
+            }, f"unclassified schema owner: {path.name}"
     conn.commit()
 
 
@@ -315,6 +319,7 @@ def databases(directory: Path):
             "work-links-owner": ["DROP INDEX work_links_adapter", "DROP INDEX work_links_owner"],
             "work-import-owner": ["DROP INDEX work_import_keys_adapter", "DROP INDEX work_import_keys_owner"],
             "messages-sealed": ["DROP INDEX fleet_messages_sealed_acked"],
+            "sessions-provider": ["DROP INDEX interactive_sessions_active_observer"],
             "questions-late": ["DROP TRIGGER fleet_questions_reply"],
         }
         for sql in cleanup.get(name, []):

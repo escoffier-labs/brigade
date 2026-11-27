@@ -9423,6 +9423,135 @@
       ],
       "foreign_keys": [],
       "indexes": {
+        "interactive_sessions_active_expiry": {
+          "columns": [
+            [
+              0,
+              "expires_at",
+              0,
+              "BINARY",
+              1
+            ],
+            [
+              1,
+              null,
+              0,
+              "BINARY",
+              0
+            ]
+          ],
+          "origin": "c",
+          "partial": 1,
+          "sql": "CREATE INDEX interactive_sessions_active_expiry ON interactive_sessions (expires_at) WHERE state = 'active'",
+          "unique": 0
+        },
+        "interactive_sessions_active_observer": {
+          "columns": [
+            [
+              0,
+              "node_id",
+              0,
+              "BINARY",
+              1
+            ],
+            [
+              1,
+              "harness",
+              0,
+              "BINARY",
+              1
+            ],
+            [
+              2,
+              null,
+              0,
+              "BINARY",
+              1
+            ],
+            [
+              3,
+              null,
+              0,
+              "BINARY",
+              1
+            ],
+            [
+              4,
+              "checkout_path",
+              0,
+              "BINARY",
+              1
+            ],
+            [
+              5,
+              "expires_at",
+              0,
+              "BINARY",
+              1
+            ],
+            [
+              6,
+              null,
+              0,
+              "BINARY",
+              0
+            ]
+          ],
+          "origin": "c",
+          "partial": 1,
+          "sql": "CREATE INDEX interactive_sessions_active_observer ON interactive_sessions (node_id, harness, CAST(json_extract(provider_link_json, '$.harness') AS TEXT), CAST(json_extract(provider_link_json, '$.session_id') AS TEXT), checkout_path, expires_at) WHERE state = 'active' AND provider_link_json IS NOT NULL",
+          "unique": 0
+        },
+        "interactive_sessions_active_provider": {
+          "columns": [
+            [
+              0,
+              "node_id",
+              0,
+              "BINARY",
+              1
+            ],
+            [
+              1,
+              "harness",
+              0,
+              "BINARY",
+              1
+            ],
+            [
+              2,
+              "session_id",
+              0,
+              "BINARY",
+              1
+            ],
+            [
+              3,
+              "checkout_path",
+              0,
+              "BINARY",
+              1
+            ],
+            [
+              4,
+              "expires_at",
+              0,
+              "BINARY",
+              1
+            ],
+            [
+              5,
+              null,
+              0,
+              "BINARY",
+              0
+            ]
+          ],
+          "origin": "c",
+          "partial": 1,
+          "sql": "CREATE INDEX interactive_sessions_active_provider ON interactive_sessions (node_id, harness, session_id, checkout_path, expires_at) WHERE state = 'active'",
+          "unique": 0
+        },
         "sqlite_autoindex_interactive_sessions_1": {
           "columns": [
             [
@@ -26826,6 +26955,135 @@
         ],
         "foreign_keys": [],
         "indexes": {
+          "interactive_sessions_active_expiry": {
+            "columns": [
+              [
+                0,
+                "expires_at",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "c",
+            "partial": 1,
+            "sql": "CREATE INDEX interactive_sessions_active_expiry ON interactive_sessions (expires_at) WHERE state = 'active'",
+            "unique": 0
+          },
+          "interactive_sessions_active_observer": {
+            "columns": [
+              [
+                0,
+                "node_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                "harness",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                2,
+                null,
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                3,
+                null,
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                4,
+                "checkout_path",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                5,
+                "expires_at",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                6,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "c",
+            "partial": 1,
+            "sql": "CREATE INDEX interactive_sessions_active_observer ON interactive_sessions (node_id, harness, CAST(json_extract(provider_link_json, '$.harness') AS TEXT), CAST(json_extract(provider_link_json, '$.session_id') AS TEXT), checkout_path, expires_at) WHERE state = 'active' AND provider_link_json IS NOT NULL",
+            "unique": 0
+          },
+          "interactive_sessions_active_provider": {
+            "columns": [
+              [
+                0,
+                "node_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                "harness",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                2,
+                "session_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                3,
+                "checkout_path",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                4,
+                "expires_at",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                5,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "c",
+            "partial": 1,
+            "sql": "CREATE INDEX interactive_sessions_active_provider ON interactive_sessions (node_id, harness, session_id, checkout_path, expires_at) WHERE state = 'active'",
+            "unique": 0
+          },
           "sqlite_autoindex_interactive_sessions_1": {
             "columns": [
               [
@@ -27043,6 +27301,135 @@
         ],
         "foreign_keys": [],
         "indexes": {
+          "interactive_sessions_active_expiry": {
+            "columns": [
+              [
+                0,
+                "expires_at",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "c",
+            "partial": 1,
+            "sql": "CREATE INDEX interactive_sessions_active_expiry ON interactive_sessions (expires_at) WHERE state = 'active'",
+            "unique": 0
+          },
+          "interactive_sessions_active_observer": {
+            "columns": [
+              [
+                0,
+                "node_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                "harness",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                2,
+                null,
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                3,
+                null,
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                4,
+                "checkout_path",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                5,
+                "expires_at",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                6,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "c",
+            "partial": 1,
+            "sql": "CREATE INDEX interactive_sessions_active_observer ON interactive_sessions (node_id, harness, CAST(json_extract(provider_link_json, '$.harness') AS TEXT), CAST(json_extract(provider_link_json, '$.session_id') AS TEXT), checkout_path, expires_at) WHERE state = 'active' AND provider_link_json IS NOT NULL",
+            "unique": 0
+          },
+          "interactive_sessions_active_provider": {
+            "columns": [
+              [
+                0,
+                "node_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                "harness",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                2,
+                "session_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                3,
+                "checkout_path",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                4,
+                "expires_at",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                5,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "c",
+            "partial": 1,
+            "sql": "CREATE INDEX interactive_sessions_active_provider ON interactive_sessions (node_id, harness, session_id, checkout_path, expires_at) WHERE state = 'active'",
+            "unique": 0
+          },
           "sqlite_autoindex_interactive_sessions_1": {
             "columns": [
               [
