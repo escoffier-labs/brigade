@@ -26,7 +26,9 @@ from tests.test_verify_push import (
     CHECK_ENV_NAMES,
     ENV_PREFIX_MESSAGE,
     IDENTITY_WRAPPERS,
+    SAME_NAME_SPELLINGS,
     SENTINEL_ENV_VALUE,
+    SPELLING_WRAPPERS,
     PREFIX,
     SELECTOR,
     _commit,
@@ -1654,7 +1656,7 @@ def test_block_only_upgraded_custom_hook_runs_in_real_push(push_repo, capsys, mo
     ("wrapper", "selectors", "status", "older_pass", "expected"),
     [
         (["env"], ["a", "b"], "completed", False, "ok"),
-        (["./python"], ["a", "b"], "completed", False, "ok"),
+        (["./python"], ["a", "b"], "completed", False, "rejected"),
         (["env"], ["a"], "completed", False, "rejected"),
         (["env"], ["a", "b"], "failed", True, "rejected"),
         ([], ["a", "b"], "completed", False, "ok"),
@@ -1710,25 +1712,24 @@ def test_wrapped_environment_allowlist_in_hook(push_repo, monkeypatch, capsys, n
     selectors = [A, B] if coverage else [SELECTOR]
     argv = ["env", f"{name}=example", *PREFIX, *selectors]
     tree = _tree(push_repo)
-    allowed = name == "PY"
-    if not allowed:
-        _receipt(push_repo, tree, argv=[*PREFIX, *selectors], deselected=0)
+    _receipt(push_repo, tree, argv=[*PREFIX, *selectors], deselected=0)
     path = _receipt(
         push_repo,
         tree,
         second=2,
         argv=argv,
-        status="completed" if allowed else "failed",
-        passed=int(allowed),
+        status="failed",
+        passed=0,
         deselected=0,
     )
     receipt = json.loads(path.read_bytes())
     receipt["planned_commands"] = [shlex.join(argv)]
     path.write_text(json.dumps(receipt), encoding="utf-8")
     code, err = _evaluate_hook(push_repo, tip, "enforce", monkeypatch, capsys)
-    assert (code == 0) is allowed, err
+    assert code == 3, err
+    assert f"with {name} set in front" in err
     (row,) = _log_rows(push_repo)
-    assert row["result"] == ("ok" if allowed else "indeterminate")
+    assert row["result"] == "indeterminate"
 
 
 @pytest.mark.parametrize(
@@ -1746,21 +1747,48 @@ def test_environment_prefix_diagnostic_in_real_push(push_repo, monkeypatch, caps
     monkeypatch.setenv("PATH", _path_with_brigade())
     assert _gate(push_repo, "install", "--mode", mode) == 0
     capsys.readouterr()
-    assignment = f"PATH={SENTINEL_ENV_VALUE}"
+    assignment = f"PY={SENTINEL_ENV_VALUE}"
     argv = ["env", assignment, *PREFIX, SELECTOR] if form == "wrapper" else [*PREFIX, SELECTOR]
     path = _receipt(push_repo, _tree(push_repo), argv=argv, status=status)
     receipt = json.loads(path.read_bytes())
     if form == "leading":
-        receipt["commands"][0]["env"] = ["PATH"]
+        receipt["commands"][0]["env"] = ["PY"]
     receipt["planned_commands"] = [shlex.join(argv) if form == "wrapper" else assignment + " " + shlex.join(argv)]
     path.write_text(json.dumps(receipt), encoding="utf-8")
 
     pushed = _push_with_verdict(push_repo)
     assert (pushed.returncode != 0) is (mode == "enforce"), pushed.stderr
-    assert ENV_PREFIX_MESSAGE in pushed.stderr
+    assert ENV_PREFIX_MESSAGE.replace("PATH", "PY") in pushed.stderr
     assert "brigade work verify run" in pushed.stderr and " --no-reuse" in pushed.stderr
     assert SENTINEL_ENV_VALUE not in pushed.stdout + pushed.stderr
     log = push_repo / ".git" / "brigade" / "push-gate.jsonl"
     assert SENTINEL_ENV_VALUE not in log.read_text(encoding="utf-8")
     (row,) = _log_rows(push_repo)
     assert row["result"] == ("rejected" if status == "completed" else "indeterminate")
+
+
+@pytest.mark.parametrize(("program", "alternate"), SAME_NAME_SPELLINGS)
+@pytest.mark.parametrize("wrapper", SPELLING_WRAPPERS)
+@pytest.mark.parametrize("status", ["completed", "failed"])
+def test_same_name_spelling_in_real_push(push_repo, monkeypatch, capsys, program, alternate, wrapper, status):
+    _policy(push_repo, prefix=[program, "-q"])
+    _bare_remote(push_repo)
+    monkeypatch.setenv("PATH", _path_with_brigade())
+    assert _gate(push_repo, "install", "--mode", "enforce") == 0
+    capsys.readouterr()
+    tree = _tree(push_repo)
+    # The in-process matrix exercises both older-pass cases for every spelling.
+    older_pass = status == "failed" or wrapper == ("env",) or alternate.startswith(".")
+    if older_pass:
+        _receipt(push_repo, tree, argv=[program, "-q", SELECTOR])
+    argv = [*wrapper, alternate, "-q", SELECTOR]
+    path = _receipt(push_repo, tree, second=2, argv=argv, status=status)
+    receipt = json.loads(path.read_bytes())
+    receipt["planned_commands"] = [shlex.join(argv)]
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    push = _push_with_verdict(push_repo)
+    (row,) = _log_rows(push_repo)
+    expected = "indeterminate" if status == "failed" else "ok" if older_pass else "rejected"
+    assert row["result"] == expected, push.stderr
+    assert (push.returncode == 0) is (expected == "ok"), push.stderr

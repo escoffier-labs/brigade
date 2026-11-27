@@ -137,25 +137,25 @@ identity have no effect. The declaration comes from the merge base of the
 pushed tip and the fetched default branch.
 
 The gate compares the recorded command with the current required argv
-prefix. It compares arguments exactly and treats slash directions and a
-leading `./` as equivalent in the executable spelling. On Windows the
-executable path is case-insensitive. When the policy names an extension,
-the executable must use that extension. A policy without an extension can
-match an `.exe`, `.cmd`, or `.bat` executable. An absolute executable path
-can match by name when the policy names a bare program. The gate treats
-`py.test` as an alias for `pytest` and still compares their arguments exactly.
+prefix. A pass requires the same executable spelling and exact prefix
+arguments. A bare program matches a bare program, and a policy path
+matches the same path, including any leading `./`. On Windows the gate
+normalizes slash direction and case. An explicitly declared extension
+must match. A policy without an extension can match an `.exe`, `.cmd`,
+or `.bat` executable. A different path to a program with the same name,
+or the alternate spelling `py.test` for `pytest`, is ambiguous. A failed
+or unfinished ambiguous run makes the verdict indeterminate.
 
-A pass must match that identity and meet the existing tree, policy, and
-coverage requirements. The gate can recheck coverage for equivalent
-command spellings using the saved plan and the pushed tree. The gate
-recognizes up to eight layers of `env`, `command`, `nice`, `nohup`, `time`,
-`timeout`, and `stdbuf` with supported options. The only environment
-assignment allowed for a pass is `PY`, the toolchain selector documented
-for the required verification scripts. This applies to leading assignments,
-assignments passed to `env`, and names saved in the receipt's command
-environment. Other assignments make a possible required run ambiguous.
-The `env -i` and `env -u` options require at least one assignment from
-the same allowlist to be transparent.
+A pass must meet the tree, policy, and coverage requirements. The gate can
+recheck coverage using the saved plan and pushed tree when the executable
+matches after normalization. The gate recognizes up to eight layers of
+the bare wrappers `env`, `command`, `nice`, `nohup`, `time`, `timeout`,
+and `stdbuf` with supported options. Assignment-free `env` invocations
+with supported options are transparent. The environment allowlist is
+empty. Leading assignments, assignments passed to `env`, and assignment
+names saved in a command receipt make a possible required run ambiguous.
+The list excludes `PY` because it selects the tools the required
+verification scripts execute.
 
 **Adding a variable to the list**
 

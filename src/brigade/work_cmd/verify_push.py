@@ -6,6 +6,7 @@ import io
 import json
 import ntpath
 import os
+import posixpath
 import re
 import shlex
 import stat
@@ -44,7 +45,7 @@ _PLAN_TOKENS = 1024
 _WRAPPER_DEPTH = 8
 _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_CHECK_ENV_NAMES = {"PY"}  # The required verify scripts document PY as their toolchain selector.
+_CHECK_ENV_NAMES: set[str] = set()
 _READ_ONLY_OPTIONS = {"--version", "--help", "-h", "--collect-only", "--co"}
 _ARGV_VERDICTS = {"not_the_required_check", "no_selector", "no_tests_passed"}
 _TreeEntries = dict[str, tuple[bytes, bytes]]
@@ -540,17 +541,12 @@ def _check_env_allowed(names: Sequence[str], *, windows: bool) -> bool:
 
 def _unwrap(argv: tuple[str, ...], launcher: str, *, windows: bool) -> tuple[tuple[str, ...], bool, list[str]] | None:
     index = 1
-    changes_env = False
     values = _WRAPPER_VALUES.get(launcher, set())
     while index < len(argv):
         arg = argv[index]
         if arg == "--":
             index += 1
             break
-        if launcher == "env":
-            changes_env |= (
-                arg in {"-", "-i", "--ignore-environment"} or arg[:2] == "-u" or (arg.partition("=")[0] == "--unset")
-            )
         if arg in _WRAPPER_FLAGS[launcher] or (launcher == "nice" and re.fullmatch(r"-[0-9]+", arg)):
             index += 1
         elif arg in values:
@@ -574,8 +570,7 @@ def _unwrap(argv: tuple[str, ...], launcher: str, *, windows: bool) -> tuple[tup
     elif index < len(argv) and _ENV_ASSIGNMENT.match(argv[index]):
         return None
     names = [arg.partition("=")[0] for arg in argv[env_start:index]]
-    transparent = (not changes_env or bool(names)) and _check_env_allowed(names, windows=windows)
-    return argv[index:], transparent, names
+    return argv[index:], _check_env_allowed(names, windows=windows), names
 
 
 def _without_assignments(argv: Sequence[str]) -> tuple[str, ...]:
@@ -659,6 +654,16 @@ def _runner_alias(program: str) -> str:
     return directory + separator + _PYTEST_ALIAS.sub("pytest", name)
 
 
+def _program_spelling(executable: str, *, windows: bool, keep_extension: bool = False) -> str:
+    if not windows:
+        return executable
+    spelling = executable.replace("\\", "/")
+    normalized = constants.normalize_policy_executable(spelling, windows=True, keep_extension=keep_extension)
+    # The shared command policy strips a leading dot component. A push receipt
+    # must retain it so a path and a PATH lookup cannot qualify as the same run.
+    return "./" + normalized if spelling.startswith("./") else normalized
+
+
 def _required_identity(
     argv: Sequence[str],
     prefix: Sequence[str],
@@ -687,15 +692,16 @@ def _required_identity(
             return None
         return match(tuple(argv))
 
-    normalize = partial(constants.normalize_policy_executable, windows=windows)
-    policy_spelling = _runner_alias(normalize(prefix[0], keep_extension=True))
-    explicit_extension = windows and bool(ntpath.splitext(policy_spelling)[1])
-    policy_program = policy_spelling if explicit_extension else _runner_alias(normalize(prefix[0]))
-    policy_launcher = _runner_alias(normalize(prefix[0])).rsplit("/", 1)[-1]
-    policy_bare = "/" not in prefix[0].replace("\\", "/") and not (windows and ntpath.splitdrive(prefix[0])[0])
+    normalize = partial(_program_spelling, windows=windows)
+    basename = ntpath.basename if windows else posixpath.basename
+    policy_spelling = normalize(prefix[0], keep_extension=True)
+    explicit_extension = windows and bool(ntpath.splitext(_runner_alias(policy_spelling))[1])
+    policy_program = policy_spelling if explicit_extension else normalize(prefix[0])
+    policy_basename = _runner_alias(basename(policy_program))
+    policy_launcher = _runner_alias(basename(normalize(prefix[0])))
     generic_policy = _generic_launcher(policy_launcher)
     target = _launcher_target(policy_launcher, prefix[1:]) if generic_policy else ""
-    name = _runner_alias(normalize(target)).rsplit("/", 1)[-1] if target else policy_launcher
+    name = _runner_alias(basename(normalize(target))) if target else policy_launcher
     args = _without_assignments(argv)
     leading = [arg.partition("=")[0] for arg in argv[: len(argv) - len(args)]]
     transparent_env &= _check_env_allowed(leading, windows=windows)
@@ -705,16 +711,22 @@ def _required_identity(
     for depth in range(_WRAPPER_DEPTH + 1):
         if not args:
             break
-        program = _runner_alias(normalize(args[0], keep_extension=explicit_extension))
-        directory, _, basename = program.rpartition("/")
-        launcher = _runner_alias(normalize(args[0])).rsplit("/", 1)[-1] if explicit_extension else basename
-        absolute = program.startswith("/") or (windows and ntpath.splitdrive(program)[1].startswith("/"))
-        same_program = program == policy_program or (policy_bare and absolute and basename == policy_program)
+        program = normalize(args[0], keep_extension=explicit_extension)
+        wrapper_program = normalize(args[0]) if explicit_extension else program
+        launcher = basename(wrapper_program)
+        same_program = program == policy_program
         if same_program and len(args) == 2 and args[1] in _READ_ONLY_OPTIONS:
             return None
         if same_program and tuple(prefix[1:]) == args[1 : len(prefix)]:
+            if launcher == "env" and (declared_env := _unwrap(args, launcher, windows=windows)) is not None:
+                _, wrapper_env_allowed, wrapper_names = declared_env
+                transparent_env &= wrapper_env_allowed
+                if disallowed_env is not None:
+                    names.extend(wrapper_names)
             return match((*prefix, *args[len(prefix) :]))
-        if launcher in _WRAPPER_FLAGS and (not directory or absolute) and depth < _WRAPPER_DEPTH:
+        if not same_program and _runner_alias(basename(program)) == policy_basename:
+            return "ambiguous"
+        if wrapper_program == launcher and launcher in _WRAPPER_FLAGS and depth < _WRAPPER_DEPTH:
             unwrapped = _unwrap(args, launcher, windows=windows)
             if unwrapped is not None:
                 if same_program and _mentions_check(launcher, args[1:], name, windows=windows):

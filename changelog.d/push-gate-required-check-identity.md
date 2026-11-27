@@ -1,5 +1,6 @@
 - Use the same required-check identity for push gate passes, failures, and planned commands. Bound planned-command parsing.
 - Add a block-only push gate install option with a diff preview and backup for customised hooks.
-- Recheck required-test coverage against the pushed tree when a receipt uses an equivalent command spelling.
+- Recheck required-test coverage against the pushed tree when the executable matches the declared spelling after platform normalization.
 - Report an inconclusive verdict when a newer run of the same program fails with different required prefix arguments.
-- Apply an environment allowlist to push gate evidence and name disallowed variables when they affect a verdict.
+- Require the declared executable spelling for a passing push receipt, with Windows path and extension normalization.
+- Treat environment assignments as ambiguous under an empty allowlist and name the variables when they affect a verdict.
