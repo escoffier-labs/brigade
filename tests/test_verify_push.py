@@ -72,6 +72,7 @@ def _receipt(
     command_status=None,
     failed=0,
     errors=0,
+    deselected=None,
     started_at=None,
     extra_commands=(),
     tree_stable=True,
@@ -89,6 +90,7 @@ def _receipt(
                     "failed": failed,
                     "errors": errors,
                     "no_tests_ran": passed == failed == errors == 0,
+                    **({"deselected": deselected} if deselected is not None else {}),
                 },
                 **({"status": command_status} if command_status else {}),
             },
@@ -896,7 +898,15 @@ def test_required_check_identity(classification, prefix, selector):
         (r".\PYTEST.CmD", "pytest", True, True),
         ("PYTEST.BAT", "pytest", True, True),
         ("pytest.com", "pytest", True, False),
-        (r".\scripts\CHECK.CMD", "./scripts/check", True, True),
+        (r".\Scripts\CHECK.CMD", "./scripts/check", True, True),
+        (r".\Scripts\CHECK.ExE", "./scripts/check.exe", True, True),
+        (r".\Scripts\CHECK.CMD", "./scripts/check.exe", True, False),
+        (r".\Scripts\CHECK", "./scripts/check.exe", True, False),
+        ("CHECK.BAT", "check.cmd", True, False),
+        (r"C:\Tools\CHECK.EXE", "check.exe", True, True),
+        (r"C:\Tools\CHECK.EXE", "check.bat", True, False),
+        (r"C:Tools\CHECK.EXE", "check", True, False),
+        ("check.py.cmd", "check.py", True, False),
         (r"C:\scripts\CHECK.CMD", "./scripts/check", True, False),
         ("/tmp/pytest", "pytest", False, True),
         ("./pytest", "pytest", False, True),
@@ -942,10 +952,166 @@ def test_planned_command_limits_bound_parser_work(push_repo, capsys, monkeypatch
     parse = verify_push.shlex.split
     calls = []
 
-    def count(text):
+    def count(text, *args, **kwargs):
+        if len(text) > 16 * 1024 or limit == "commands":
+            pytest.fail("parser received data from an over-limit plan")
         calls.append(text)
-        return parse(text)
+        return parse(text, *args, **kwargs)
 
     monkeypatch.setattr(verify_push.shlex, "split", count)
     assert _single(push_repo, capsys)[1]["status"] == "indeterminate"
     assert calls == (planned if limit == "tokens" else [])
+
+
+@pytest.mark.parametrize(
+    ("policy", "matching", "unrelated", "ambiguous"),
+    [
+        (
+            ("pytest", "-q"),
+            ("command -p pytest -q tests/a.py",),
+            ("pytest-cov --version", "bash .pytest_cache", "bash scripts/run-pytest.sh"),
+            (
+                "pytest -v -q tests/a.py",
+                "bash pytest.sh",
+                "bash ./pytest.sh",
+                "python -m pytest",
+                "command -v pytest",
+                "command -V pytest",
+                "env -S 'pytest -q'",
+                "env --split-string='pytest -q'",
+                "env -C dir pytest -q",
+                "env -iu NAME pytest -q",
+                "timeout -vk 5 10 pytest -q",
+                "bin/env pytest -q",
+            ),
+        ),
+        (
+            ("python", "-m", "pytest", "-q", "tests/"),
+            ("python -m pytest -q tests/", "env python -m pytest -q tests/"),
+            ("python -m mypy src", "python3 -u -m mypy src", "uv run ruff check"),
+            (
+                "python -u -m pytest -q tests/",
+                "python3 -m pytest -q tests/",
+                "bash -c 'pytest -q tests/'",
+                "uv run pytest -q tests/",
+            ),
+        ),
+        (
+            ("python", "tools/focused.py"),
+            ("python tools/focused.py tests/a.py", "nohup python tools/focused.py tests/a.py"),
+            ("python tools/lint.py", "python3 tools/lint.py", "python -m mypy src"),
+            ("python3 tools/focused.py", "python -u tools/focused.py", "bash -c 'tools/focused.py'"),
+        ),
+        (
+            ("./scripts/check", "-q"),
+            ("./scripts/check -q", "nice ./scripts/check -q"),
+            ("./scripts/build -q", "git status", "python -m mypy src"),
+            ("./scripts/check -x -q", "bash ./scripts/check.sh", "uv run ./scripts/check"),
+        ),
+    ],
+)
+def test_required_identity_distinguishes_policy_targets(policy, matching, unrelated, ambiguous):
+    for text in matching:
+        assert isinstance(verify_push._required_identity(shlex.split(text), policy, windows=False), tuple), text
+    for text in unrelated:
+        assert verify_push._required_identity(shlex.split(text), policy, windows=False) is None, text
+    for text in ambiguous:
+        assert verify_push._required_identity(shlex.split(text), policy, windows=False) == "ambiguous", text
+
+
+@pytest.mark.parametrize("options", ["-sKILL", "-s KILL", "--signal=KILL", "--kill-after=5"])
+def test_required_identity_timeout_option_forms(options):
+    assert verify_push._required_identity(
+        shlex.split(f"timeout {options} 10 pytest -q"), ("pytest", "-q"), windows=False
+    ) == ("pytest", "-q")
+
+
+def test_assignment_at_start_of_policy_matches_literally():
+    policy = ("SETTING=yes", "pytest", "-q")
+    assert verify_push._required_identity(policy, policy, windows=False) == policy
+    assert verify_push._required_identity(policy[1:], policy, windows=False) is None
+
+
+@pytest.mark.parametrize(("status", "expected"), [("completed", "ok"), ("failed", "indeterminate")])
+def test_opaque_plan_with_leading_assignment(push_repo, capsys, status, expected):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree)
+    argv = ["uv", "run", *PREFIX, SELECTOR]
+    path = _receipt(push_repo, tree, second=2, argv=argv, status=status)
+    receipt = json.loads(path.read_bytes())
+    receipt["planned_commands"] = ["SETTING=yes " + shlex.join(argv)]
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    assert _single(push_repo, capsys)[1]["status"] == expected
+
+
+def test_unfinished_plan_lists_only_unrelated_commands(push_repo, capsys):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree)
+    path = _receipt(push_repo, tree, second=2, argv=["git", "status"], status="running")
+    receipt = json.loads(path.read_bytes())
+    receipt.update(commands=[], planned_commands=["git status", "ruff check ."])
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    assert _single(push_repo, capsys)[1]["status"] == "ok"
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "status", "older_pass", "expected"),
+    [
+        ([], "completed", False, "rejected"),
+        (["env"], "completed", False, "rejected"),
+        ([], "failed", True, "rejected"),
+        (["env"], "failed", True, "rejected"),
+        (["uv", "run"], "failed", True, "indeterminate"),
+    ],
+)
+def test_required_check_without_gating_stamp(push_repo, capsys, wrapper, status, older_pass, expected):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    if older_pass:
+        _receipt(push_repo, tree)
+    path = _receipt(push_repo, tree, second=2, argv=[*wrapper, *PREFIX, SELECTOR], status=status)
+    receipt = json.loads(path.read_bytes())
+    del receipt["gating"]
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    verdict = _single(push_repo, capsys)[1]
+    assert verdict["status"] == expected
+    if status == "completed":
+        assert "no required-check verdict" in verdict["reason"]
+
+
+@pytest.mark.parametrize(("selectors", "reason"), [([], "no_selector"), ([SELECTOR], "no_tests_passed")])
+def test_canonical_argv_rechecks_writer_verdict(push_repo, capsys, selectors, reason):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    path = _receipt(
+        push_repo,
+        tree,
+        argv=[*PREFIX, *selectors],
+        passed=0,
+        extra_commands=[
+            {
+                "argv": ["env", *PREFIX, SELECTOR],
+                "status": "completed",
+                "test_outcomes": {"passed": 1, "failed": 0, "errors": 0, "no_tests_ran": False},
+            },
+        ],
+    )
+    assert json.loads(path.read_bytes())["gating"]["reason"] == reason
+    assert _single(push_repo, capsys)[1]["status"] == "ok"
+
+
+@pytest.mark.parametrize(
+    ("policy", "command", "expected"),
+    [
+        ("python focused.py -m slow", "python3 focused.py -m slow", "ambiguous"),
+        ("env -u SETTING pytest -q", "env -i pytest -q", "ambiguous"),
+        ("env -u SETTING pytest -q", "env -i ruff check", None),
+        ("env -u SETTING pytest -q", "env -i env -u SETTING pytest -q", "required"),
+    ],
+)
+def test_launcher_target_stays_distinct_from_later_options(policy, command, expected):
+    prefix = tuple(shlex.split(policy))
+    identity = verify_push._required_identity(shlex.split(command), prefix, windows=False)
+    assert identity == (prefix if expected == "required" else expected)

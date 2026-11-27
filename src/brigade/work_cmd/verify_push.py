@@ -11,7 +11,7 @@ import shlex
 import stat
 import subprocess
 import sys
-from collections.abc import Iterator, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import cache, cached_property, partial
@@ -42,6 +42,8 @@ _PLAN_CHARS = 16 * 1024
 _PLAN_TOKENS = 1024
 _WRAPPER_DEPTH = 8
 _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_ARGV_VERDICTS = {"not_the_required_check", "no_selector", "no_tests_passed"}
+_TreeEntries = dict[str, tuple[bytes, bytes]]
 
 
 @dataclass(frozen=True)
@@ -134,6 +136,9 @@ def _valid_command(command: object) -> bool:
         return False
     if status is not None and not isinstance(status, str):
         return False
+    env = command.get("env")
+    if env is not None and (not isinstance(env, list) or not all(isinstance(name, str) for name in env)):
+        return False
     return outcomes is None or (
         isinstance(outcomes, dict)
         and all(
@@ -157,6 +162,9 @@ def _valid_receipt(data: object) -> bool:
             or not all(isinstance(command, str) and command.strip() for command in planned)
         ):
             return False
+    inherited = data.get("inherited_test_env")
+    if inherited is not None and not isinstance(inherited, dict):
+        return False
     stamp = data.get("gating")
     if stamp is not None and not isinstance(stamp, dict):
         return False
@@ -308,11 +316,21 @@ class _Receipts:
         return {
             **{
                 key: data[key]
-                for key in ("status", "tree_stable", "tree_fingerprint", "started_at", "gating", "planned_commands")
+                for key in (
+                    "status",
+                    "tree_stable",
+                    "tree_fingerprint",
+                    "started_at",
+                    "gating",
+                    "planned_commands",
+                    "inherited_test_env",
+                    "reused_from",
+                )
                 if key in data
             },
             "commands": [
-                {key: record.get(key) for key in ("argv", "status", "test_outcomes")} for record in data["commands"]
+                {key: record.get(key) for key in ("argv", "status", "test_outcomes", "env")}
+                for record in data["commands"]
             ],
         }
 
@@ -375,11 +393,30 @@ def _tree_verdict(
     target: Path, policy: verify_gate._GatePolicy, tree: str, receipts: _Receipts, deadline: float
 ) -> _Verdict:
     prefix = list(policy.argv_prefix)
+
+    @cache
+    def coverage_entries() -> _TreeEntries:
+        result = verify_manifest_git._git(
+            target, "ls-tree", "-rz", "--full-tree", tree, deadline=deadline, git_env=_offline_git_env()
+        )
+        if result.returncode:
+            raise _Indeterminate("Git could not read the required test files from the pushed tree.")
+        entries = {}
+        for entry in result.stdout.split(b"\0"):
+            _remaining(deadline)
+            if entry:
+                attrs, name = entry.split(b"\t", 1)
+                mode, kind, oid = attrs.split()
+                entries[name.decode("utf-8", "surrogateescape")] = (mode if kind == b"blob" else b"", oid)
+        return entries
+
     rejection: tuple[tuple[bool, datetime], dict[str, Any], str] | None = None
     failure: _Verdict | None = None
     try:
         for group in receipts.matching(tree):
-            candidates = (_classify_receipt(policy, prefix, tree, receipt, deadline) for receipt in group)
+            candidates = (
+                _classify_receipt(policy, prefix, tree, receipt, deadline, coverage_entries) for receipt in group
+            )
             ordered = _order_candidates(candidates) if prefix else list(candidates)
             for candidate in ordered:
                 if not prefix and candidate.receipt["status"] in _UNFINISHED:
@@ -431,7 +468,8 @@ def _tree_verdict(
 
 
 # Only options with a known command boundary are transparent. For example,
-# env's --split-string is not transparent because it parses its own command.
+# env's --split-string parses a command and env -C changes its working directory.
+# Combined short options are deliberately opaque.
 _WRAPPER_FLAGS = {
     "env": {"-", "-i", "--ignore-environment", "-v", "--debug"},
     "command": {"-p"},
@@ -448,7 +486,8 @@ _WRAPPER_VALUES = {
     "timeout": {"-k", "--kill-after", "-s", "--signal"},
     "stdbuf": {"-i", "--input", "-o", "--output", "-e", "--error"},
 }
-_OPAQUE_LAUNCHERS = constants.SCANNER_HIGH_RISK_COMMANDS | {"xargs", "sudo", "eval", "make", "npm", "uv"}
+_OPAQUE_LAUNCHERS = constants.SCANNER_HIGH_RISK_COMMANDS | constants._POLICY_LAUNCHERS | {"eval", "make"}
+_INTERPRETERS = {"node", "ruby", "perl", "php"}
 _DURATION = re.compile(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)[smhd]?")
 
 
@@ -484,40 +523,92 @@ def _unwrap(argv: tuple[str, ...], launcher: str) -> tuple[str, ...] | None:
     return argv[index:]
 
 
+def _without_assignments(argv: Sequence[str]) -> tuple[str, ...]:
+    start = next((i for i, arg in enumerate(argv) if not _ENV_ASSIGNMENT.match(arg)), len(argv))
+    return tuple(argv[start:])
+
+
+def _generic_launcher(name: str) -> bool:
+    return (
+        name in _OPAQUE_LAUNCHERS
+        or name in _WRAPPER_FLAGS
+        or name in _INTERPRETERS
+        or re.fullmatch(r"python[0-9.]*|py", name) is not None
+    )
+
+
+def _launcher_target(launcher: str, args: Sequence[str]) -> str:
+    if launcher in _WRAPPER_FLAGS:
+        unwrapped = _unwrap((launcher, *args), launcher)
+        if unwrapped:
+            return unwrapped[0]
+    subcommands = constants._POLICY_LAUNCHER_SUBCOMMANDS.get(launcher, set())
+    if launcher == "npm":
+        subcommands = subcommands | {"run"}
+    values = iter(args)
+    for arg in values:
+        if arg in {"-m", "--"}:
+            return next(values, "")
+        if arg and not arg.startswith("-") and not _ENV_ASSIGNMENT.match(arg):
+            if arg in subcommands:
+                continue
+            return arg
+    return ""
+
+
+def _mentions_check(args: Sequence[str], names: set[str], *, windows: bool) -> bool:
+    terms = "|".join(re.escape(name) for name in sorted(names) if name)
+    if not terms:
+        return False
+    script_suffix = r"(?:\.(?:py|sh|bash|rb|js|pl|exe|bat|cmd))?"
+    mention = re.compile(rf"(?<![\w.-])(?:{terms}){script_suffix}(?![\w.-])", re.IGNORECASE if windows else 0)
+    return any(mention.search(arg) for arg in args)
+
+
 def _required_identity(
     argv: Sequence[str], prefix: Sequence[str], *, windows: bool
 ) -> tuple[str, ...] | Literal["ambiguous"] | None:
-    """Return canonical argv for a match, or the weaker evidence from an opaque launcher."""
+    """Return canonical argv for a match, or ambiguous evidence of a possible match."""
     if not prefix:
         return None
+    if _ENV_ASSIGNMENT.match(prefix[0]):
+        return tuple(argv) if tuple(argv[: len(prefix)]) == tuple(prefix) else None
+
     normalize = partial(constants.normalize_policy_executable, windows=windows)
-    policy_program = normalize(prefix[0])
+    explicit_extension = windows and bool(ntpath.splitext(prefix[0])[1])
+    policy_program = normalize(prefix[0], keep_extension=explicit_extension)
+    policy_launcher = normalize(prefix[0]).rsplit("/", 1)[-1]
     policy_bare = "/" not in prefix[0].replace("\\", "/") and not (windows and ntpath.splitdrive(prefix[0])[0])
-    start = next((i for i, arg in enumerate(argv) if not _ENV_ASSIGNMENT.match(arg)), len(argv))
-    args = tuple(argv[start:])
+    generic_policy = _generic_launcher(policy_launcher)
+    names = {policy_launcher}
+    if generic_policy:
+        target = _launcher_target(policy_launcher, prefix[1:])
+        names.add(target.replace("\\", "/").rsplit("/", 1)[-1])
+    args = _without_assignments(argv)
+    possible_match = False
     for depth in range(_WRAPPER_DEPTH + 1):
         if not args:
-            return None
-        program = normalize(args[0])
-        directory, _, launcher = program.rpartition("/")
-        absolute = program.startswith("/") or (windows and bool(ntpath.splitdrive(program)[0]) and "/" in program)
-        if (program == policy_program or (policy_bare and absolute and launcher == policy_program)) and tuple(
-            prefix[1:]
-        ) == args[1 : len(prefix)]:
+            break
+        program = normalize(args[0], keep_extension=explicit_extension)
+        directory, _, basename = program.rpartition("/")
+        launcher = normalize(args[0]).rsplit("/", 1)[-1] if explicit_extension else basename
+        absolute = program.startswith("/") or (windows and ntpath.splitdrive(program)[1].startswith("/"))
+        same_program = program == policy_program or (policy_bare and absolute and basename == policy_program)
+        if same_program and tuple(prefix[1:]) == args[1 : len(prefix)]:
             return (*prefix, *args[len(prefix) :])
         if launcher in _WRAPPER_FLAGS and (not directory or absolute) and depth < _WRAPPER_DEPTH:
             unwrapped = _unwrap(args, launcher)
             if unwrapped is not None:
+                if same_program and _mentions_check(args[1:], names, windows=windows):
+                    possible_match = True
                 args = unwrapped
                 continue
-        if launcher in _WRAPPER_FLAGS or launcher in _OPAQUE_LAUNCHERS or re.fullmatch(r"python[0-9.]*|py", launcher):
-            name = policy_program.rsplit("/", 1)[-1]
-            suffix = r"(?:\.(?:exe|bat|cmd))?" if windows else ""
-            mention = re.compile(rf"(?<![\w.-]){re.escape(name)}{suffix}(?![\w.-])", re.IGNORECASE if windows else 0)
-            if name and any(mention.search(arg) for arg in args[1:]):
-                return "ambiguous"
-        return None
-    return None
+        if same_program and not generic_policy:
+            return "ambiguous"
+        if _generic_launcher(launcher) and _mentions_check(args[1:], names, windows=windows):
+            return "ambiguous"
+        break
+    return "ambiguous" if possible_match else None
 
 
 def _planned_argvs(command: str) -> set[tuple[str, ...]]:
@@ -564,13 +655,48 @@ def _required_plan_unconfirmed(
         elif any(isinstance(identity, tuple) for identity in planned_identities):
             return True
         elif "ambiguous" in planned_identities or recorded_identity == "ambiguous":
-            if record is None or tuple(record["argv"] or ()) not in possible:
+            if record is None:
+                return True
+            recorded = _without_assignments(record["argv"] or ())
+            if not any(recorded == _without_assignments(argv) for argv in possible):
                 return True
     return False
 
 
+def _canonical_coverage(
+    receipt: dict[str, Any],
+    policy: verify_gate._GatePolicy,
+    required: list[dict[str, Any]],
+    coverage_entries: Callable[[], _TreeEntries],
+) -> dict[str, Any]:
+    stamp = receipt["gating"]
+    plan = stamp["plan"]
+    files = plan.get("required_files")
+    if (
+        plan.get("mode") != "selective"
+        or not isinstance(files, list)
+        or not files
+        or not all(isinstance(path, str) and verify_gate._coverage_path(path) == path for path in files)
+    ):
+        raise _Indeterminate("The required-test plan does not establish which files the run needed to cover.")
+    covered = verify_gate._covered_files({**receipt, "commands": required}, policy, coverage_entries())
+    missing = sorted(set(files) - covered)
+    eligible, reason = verify_gate._required_check_verdict({"commands": required}, policy)
+    if missing:
+        eligible, reason = False, "plan_files_missing"
+    return {
+        **receipt,
+        "gating": {**stamp, "eligible": eligible, "reason": reason, "plan": {**plan, "missing_files": missing}},
+    }
+
+
 def _classify_receipt(
-    policy: verify_gate._GatePolicy, prefix: list[str], tree: str, receipt: dict[str, Any], deadline: float
+    policy: verify_gate._GatePolicy,
+    prefix: list[str],
+    tree: str,
+    receipt: dict[str, Any],
+    deadline: float,
+    coverage_entries: Callable[[], _TreeEntries],
 ) -> _Candidate:
     eligible, reason = verify_gate.evaluate_receipt(policy, receipt, tree, deadline=deadline)
     if reason == "policy_timeout":
@@ -578,12 +704,18 @@ def _classify_receipt(
     identities = []
     required = []
     ambiguous = False
+    canonicalised = False
     for command in receipt["commands"]:
         _remaining(deadline)
         identity = _required_identity(command["argv"] or (), prefix, windows=os.name == "nt")
         identities.append(identity)
         if isinstance(identity, tuple):
-            required.append({**command, "argv": list(identity)})
+            argv = list(identity)
+            canonicalised |= argv != command["argv"]
+            env = command.get("env") or []
+            if argv != command["argv"]:
+                env = [*env, *(arg.partition("=")[0] for arg in command["argv"] if _ENV_ASSIGNMENT.match(arg))]
+            required.append({**command, "argv": argv, "env": env})
         elif identity == "ambiguous":
             ambiguous |= _command_status(receipt, command) != "completed" or _failed_required_check(receipt, [command])
     statuses = {_command_status(receipt, command) for command in required}
@@ -610,13 +742,24 @@ def _classify_receipt(
         eligible, reason = False, _UNCONFIRMED_PLAN
     elif "timed_out" in statuses:
         eligible, reason = False, "required_check_timed_out"
-    elif (eligible or reason == "not_the_required_check") and (failed or uncertain or "rejected" in statuses):
-        eligible, reason = False, "not_completed"
-    elif prefix and (eligible or reason == "not_the_required_check"):
-        # The writer can reject on literal argv spelling. Recheck that verdict
-        # using canonical argv, retaining its tree, policy and coverage checks.
-        if required or eligible:
-            eligible, reason = verify_gate._required_check_verdict({**receipt, "commands": required}, policy)
+    elif failed or uncertain or "rejected" in statuses:
+        if eligible or reason in _ARGV_VERDICTS:
+            eligible, reason = False, "not_completed"
+    elif (
+        canonicalised
+        and reason == "plan_files_missing"
+        and policy.needs_plan_coverage
+        and receipt.get("tree_stable") is True
+        and not receipt.get("reused_from")
+    ):
+        # The saved plan already binds the trusted base and tree. Recheck its
+        # selectors against Git objects without running the planner again.
+        receipt = _canonical_coverage(receipt, policy, required, coverage_entries)
+        eligible, reason = verify_gate.evaluate_receipt(policy, receipt, tree, deadline=deadline)
+    elif prefix and (eligible or (canonicalised and reason in _ARGV_VERDICTS)):
+        eligible, reason = verify_gate._required_check_verdict({"commands": required}, policy)
+    if reason == "policy_timeout":
+        raise _Indeterminate(_TIMEOUT, "check_timeout")
     return _Candidate(
         receipt,
         _receipt_started_at(receipt),
@@ -680,17 +823,21 @@ def _rejected(
     )
 
 
-def _check(
-    target: Path, updates: list[tuple[str, str]], ref: str | None, deadline: float, *, details: bool = False
-) -> list[dict[str, Any]]:
+def _offline_git_env() -> dict[str, str]:
     # Object reads in partial clones must stay offline even on Git versions
     # that do not recognize GIT_NO_LAZY_FETCH.
-    git_env = {
+    return {
         **verify_manifest_git.trusted_git_env(),
         "GIT_NO_LAZY_FETCH": "1",
         "GIT_ALLOW_PROTOCOL": "",
         "GIT_NO_REPLACE_OBJECTS": "1",
     }
+
+
+def _check(
+    target: Path, updates: list[tuple[str, str]], ref: str | None, deadline: float, *, details: bool = False
+) -> list[dict[str, Any]]:
+    git_env = _offline_git_env()
     git = partial(verify_manifest_git._git, deadline=deadline, git_env=git_env)
     try:
         root = git(target, "rev-parse", "--show-toplevel")

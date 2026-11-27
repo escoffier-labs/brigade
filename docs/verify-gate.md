@@ -139,12 +139,15 @@ pushed tip and the fetched default branch.
 The gate compares the recorded command with the current required argv
 prefix. It compares arguments exactly and treats slash directions and a
 leading `./` as equivalent in the executable spelling. On Windows the
-executable name is case-insensitive and may have an `.exe`, `.cmd`, or
-`.bat` suffix. An absolute executable path can match by name when the
-policy names a bare program.
+executable path is case-insensitive. When the policy names an extension,
+the executable must use that extension. A policy without an extension can
+match an `.exe`, `.cmd`, or `.bat` executable. An absolute executable path
+can match by name when the policy names a bare program.
 
 A pass must match that identity and meet the existing tree, policy, and
-coverage requirements. The gate recognizes leading environment assignments
+coverage requirements. The gate can recheck coverage for equivalent
+command spellings using the saved plan and the pushed tree. The gate
+recognizes leading environment assignments
 and up to eight layers of `env`, `command`, `nice`, `nohup`, `time`,
 `timeout`, and `stdbuf` with supported options. A newer matching failure
 takes precedence over an older pass regardless of the policy declaration
@@ -163,16 +166,21 @@ run whose recorded commands are all unrelated leaves an earlier verdict in
 place. A newer possible run of the required check gives an indeterminate
 verdict when its identity or result is inconclusive and the receipt does
 not already record a required check failure. This includes unsuccessful
-or unfinished invocations through an uninterpreted launcher whose arguments
-mention the required program. Those launchers supply no passing evidence
-for the required check. A policy with no required command prefix accepts
+or unfinished invocations that use the required executable with different
+prefix arguments or use an interpreter or launcher whose arguments mention
+the required program, module, or script. A different interpreter target
+with no such mention is unrelated. Only an exact normalized prefix can
+supply passing evidence. A policy with no required command prefix accepts
 any eligible receipt for the tree.
 
 When a receipt lists its planned commands, the gate compares the plan with
 recorded commands in order using the same identity rules. A missing or
 conflicting result for a possible required check makes the verdict
-indeterminate. Receipts written before
-the plan field existed are evaluated using their recorded commands.
+indeterminate. An in-progress receipt whose plan lists only clearly
+unrelated commands leaves an earlier verdict in place. The writer records
+the plan before execution, so it identifies the required check when the
+run includes it. Receipts written before the plan field existed are
+evaluated using their recorded commands.
 
 Across seconds the check orders runs by the UTC timestamp in the directory
 name. The name must have the writer's timestamp and suffix format. For a
@@ -290,14 +298,16 @@ evaluation error before Brigade can read the policy, use the printed
 
 ### Upgrade the block in a customised hook
 
-Run `brigade work verify push-gate install --block-only --dry-run` to print
-the shipped block and preview its diff against the effective pre-push hook.
-Remove `--dry-run` to replace the block. The upgrade preserves the surrounding
-bytes, line endings, file mode, and Git configuration. It saves a timestamped
-backup beside the hook and prints a Bash command to restore it. If the hook
-has no block, pass `--confirm-insert` to insert it immediately after the
-`STDIN_REFS="$(cat)"` line. Status reports the block version and continues
-to identify a customised hook as unverified.
+The effective pre-push hook must start with a Bash interpreter line. Run
+`brigade work verify push-gate install --block-only --dry-run` to preview
+a unified diff. Remove `--dry-run` to replace the block atomically. The
+upgrade preserves the surrounding bytes, line endings, file mode, and Git
+configuration. It saves a timestamped backup beside the hook and prints a
+Bash command to restore it. If the hook has no block, pass
+`--confirm-insert` to insert it immediately after its single
+`STDIN_REFS="$(cat)"` line. If the hook already invokes the gate outside
+a block, add markers around that invocation or remove it before inserting.
+Status reports the block version and identifies a customised hook as unverified.
 
 ### Known limits
 

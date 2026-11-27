@@ -1451,8 +1451,8 @@ def test_block_only_upgrades_custom_hook(push_repo, capsys, custom_hook, newline
 
     assert _gate(push_repo, "install", "--block-only", "--dry-run") == 0
     preview = capsys.readouterr().out
-    assert push_gate._snippet().decode("ascii") in preview
-    assert "--- pre-push (before)" in preview
+    assert push_gate._snippet().decode("ascii") not in preview
+    assert preview.count("--- pre-push (before)") == 1
     assert "-# BEGIN Brigade push gate v1" in preview
     assert "+# BEGIN Brigade push gate v2" in preview
     assert custom_hook.read_bytes() == original
@@ -1535,3 +1535,137 @@ def test_block_only_inserts_after_capturing_refs_with_confirmation(push_repo, ca
     assert _gate(push_repo, "install", "--block-only", "--confirm-insert") == 0
     capture, suffix = original.split(b"# custom prefix")
     assert custom_hook.read_bytes() == capture + push_gate._snippet() + b"# custom prefix" + suffix
+
+
+@pytest.mark.parametrize(
+    ("raw", "options", "error"),
+    [
+        (b"#!/bin/sh\n" + _V1_BLOCK, [], "Bash interpreter line"),
+        (b"#!/bin/sh\n", ["--confirm-insert"], "Bash interpreter line"),
+        (
+            _CUSTOM_PREFIX + b"brigade work verify push-gate run\n",
+            ["--confirm-insert"],
+            "around the existing gate invocation",
+        ),
+        (b"#!/bin/bash\n", ["--confirm-insert"], "needs one STDIN_REFS"),
+        (_CUSTOM_PREFIX + b'STDIN_REFS="$(cat)"\n', ["--confirm-insert"], "needs one STDIN_REFS"),
+        (_CUSTOM_PREFIX + b" " + _V1_BLOCK, [], "line 4"),
+        (_CUSTOM_PREFIX + _V1_BLOCK.replace(b"v1\n", b"v1 \n", 1), [], "no indentation or trailing spaces"),
+    ],
+)
+def test_block_only_refuses_unsafe_hook_contents(push_repo, capsys, custom_hook, raw, options, error):
+    custom_hook.write_bytes(raw)
+    assert _gate(push_repo, "install", "--block-only", *options) == 1
+    assert error in capsys.readouterr().err
+    assert custom_hook.read_bytes() == raw
+    assert not list(custom_hook.parent.glob("pre-push.*.bak"))
+
+
+@pytest.mark.parametrize("kind", ["missing", "dangling", "directory"])
+def test_block_only_reports_unusable_hook_path(push_repo, capsys, custom_hook, kind):
+    custom_hook.unlink()
+    if kind == "dangling":
+        try:
+            custom_hook.symlink_to(custom_hook.with_name("absent"))
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+    elif kind == "directory":
+        custom_hook.mkdir()
+    assert _gate(push_repo, "install", "--block-only") == 1
+    expected = "regular file" if kind == "directory" else "no effective pre-push hook to update"
+    assert expected in capsys.readouterr().err.lower()
+    assert not list(custom_hook.parent.glob("pre-push.*.bak"))
+
+
+@pytest.mark.parametrize(
+    ("options", "error"),
+    [
+        (["--block-only", "--mode", "warn"], "cannot be used with --mode"),
+        (["--dry-run"], "require --block-only"),
+    ],
+)
+def test_block_only_reports_conflicting_options(push_repo, capsys, custom_hook, options, error):
+    raw = custom_hook.read_bytes()
+    config = _git(push_repo, "config", "--list", "--show-origin")
+    assert _gate(push_repo, "install", *options) == 2
+    assert error in capsys.readouterr().err
+    assert custom_hook.read_bytes() == raw
+    assert _git(push_repo, "config", "--list", "--show-origin") == config
+
+
+def test_block_only_upgraded_custom_hook_runs_in_real_push(push_repo, capsys, monkeypatch, custom_hook):
+    _policy(push_repo)
+    _bare_remote(push_repo)
+    monkeypatch.setenv("PATH", _path_with_brigade())
+    custom_hook.write_bytes(
+        _CUSTOM_PREFIX + b"echo custom-before >&2\n" + _V1_BLOCK + b"echo custom-after >&2\nexit 0\n"
+    )
+    _git(push_repo, "config", "--local", "brigade.pushGate", "warn")
+    assert _gate(push_repo, "install", "--block-only") == 0
+    capsys.readouterr()
+    result = subprocess.run(
+        ["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True, timeout=15
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.count("custom-before") == result.stderr.count("custom-after") == 1
+    assert result.stderr.count("refs/heads/main (missing_receipt)") == 1
+    (entry,) = _log_rows(push_repo)
+    assert entry["result"] == "missing_receipt"
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "selectors", "status", "older_pass", "expected"),
+    [
+        (["env"], ["a", "b"], "completed", False, "ok"),
+        (["./python"], ["a", "b"], "completed", False, "ok"),
+        (["env"], ["a"], "completed", False, "rejected"),
+        (["env"], ["a", "b"], "failed", True, "rejected"),
+        ([], ["a", "b"], "completed", False, "ok"),
+        ([], ["a"], "completed", False, "rejected"),
+        ([], ["a", "b"], "failed", True, "rejected"),
+        (["env"], ["a", "b"], "completed", True, "ok"),
+        (["env", "PYTEST_ADDOPTS=-k example"], ["a", "b"], "completed", True, "rejected"),
+    ],
+)
+def test_normalised_coverage_controls_real_push(
+    push_repo, monkeypatch, capsys, wrapper, selectors, status, older_pass, expected
+):
+    from tests.test_verify_plan_coverage import A, B, _setup
+
+    _git(push_repo, "remote", "remove", "origin")
+    base = _setup(push_repo)
+    _bare_remote(push_repo)
+    _git(push_repo, "push", "origin", "main")
+    monkeypatch.setenv("PATH", _path_with_brigade())
+    assert _gate(push_repo, "install", "--mode", "enforce") == 0
+    capsys.readouterr()
+    (push_repo / "src.py").write_text("value = 2\n", encoding="utf-8")
+    tip = _commit(push_repo)
+    tree = _tree(push_repo)
+    if older_pass:
+        old = _receipt(push_repo, tree, argv=[*PREFIX, A, B], deselected=0)
+        assert json.loads(old.read_bytes())["gating"]["eligible"]
+    selected = [path for name, path in (("a", A), ("b", B)) if name in selectors]
+    prefix = [*wrapper, *PREFIX] if wrapper != ["./python"] else ["./python", *PREFIX[1:]]
+    path = _receipt(
+        push_repo,
+        tree,
+        second=2,
+        status=status,
+        argv=[*prefix, *selected],
+        passed=int(status == "completed"),
+        deselected=0,
+    )
+    receipt = json.loads(path.read_bytes())
+    if wrapper and status == "completed":
+        assert receipt["gating"]["reason"] == "plan_files_missing"
+    result = subprocess.run(
+        ["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True, timeout=15
+    )
+    assert (result.returncode == 0) is (expected == "ok"), result.stderr
+    remote = Path(_git(push_repo, "remote", "get-url", "origin"))
+    assert _git(remote, "rev-parse", "refs/heads/main") == (tip if expected == "ok" else base)
+    (row,) = _log_rows(push_repo)
+    assert row["result"] == expected
+    if status == "completed" and selectors == ["a"]:
+        assert f"missed required test files {B}." in result.stderr

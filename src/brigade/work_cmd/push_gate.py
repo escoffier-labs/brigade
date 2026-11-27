@@ -289,14 +289,22 @@ def _install(repo: Repository, mode: str) -> None:
 
 _BLOCK_MARKER = re.compile(rb"^[ \t]*#[ \t]*(?:BEGIN|END)[ \t]+Brigade push gate[^\n]*", re.M)
 _BLOCK_BOUNDARY = re.compile(rb"# (BEGIN|END) Brigade push gate v([0-9]+)\r?")
+_BASH_SHEBANG = re.compile(rb"#![ \t]*(?:(?:\S*/)?env[ \t]+(?:-S[ \t]+)?)?(?:\S*/)?bash(?:\.exe)?(?:[ \t][^\r]*)?\r?")
+_GATE_INVOCATION = re.compile(rb"\bbrigade[ \t]+work[ \t]+verify[ \t]+push-gate[ \t]+run\b")
 _CAPTURE_REFS = re.compile(rb'^STDIN_REFS="\$\(cat\)"(\r?\n)', re.M)
 
 
 def _block_replacement(raw: bytes, *, insert: bool, preview: bool) -> tuple[bytes, str]:
+    if not _BASH_SHEBANG.fullmatch(raw.partition(b"\n")[0]):
+        raise ValueError("The effective pre-push hook must start with a Bash interpreter line.")
     markers = list(_BLOCK_MARKER.finditer(raw))
     if not markers:
         if not (insert or preview):
             raise ValueError("No Brigade block found. Pass --confirm-insert to insert it.")
+        if _GATE_INVOCATION.search(raw):
+            raise ValueError(
+                "Add Brigade block markers around the existing gate invocation or remove it before inserting."
+            )
         captures = list(_CAPTURE_REFS.finditer(raw))
         if len(captures) != 1:
             raise ValueError('Insertion needs one STDIN_REFS="$(cat)" line to locate the gate.')
@@ -307,15 +315,19 @@ def _block_replacement(raw: bytes, *, insert: bool, preview: bool) -> tuple[byte
     else:
         if len(markers) > 2:
             raise ValueError("The hook contains multiple Brigade push gate block markers.")
-        boundaries = [_BLOCK_BOUNDARY.fullmatch(marker.group()) for marker in markers]
-        if (
-            len(markers) != 2
-            or (begin := boundaries[0]) is None
-            or (finish := boundaries[1]) is None
-            or begin[1] != b"BEGIN"
-            or finish[1] != b"END"
-            or begin[2] != finish[2]
-        ):
+        boundaries = []
+        for marker in markers:
+            boundary = _BLOCK_BOUNDARY.fullmatch(marker.group())
+            if boundary is None:
+                line = raw.count(b"\n", 0, marker.start()) + 1
+                raise ValueError(
+                    f"Invalid Brigade block marker on line {line}. Use the exact marker with no indentation or trailing spaces."
+                )
+            boundaries.append(boundary)
+        if len(boundaries) != 2:
+            raise ValueError("The hook contains damaged Brigade push gate block markers.")
+        begin, finish = boundaries
+        if begin[1] != b"BEGIN" or finish[1] != b"END" or begin[2] != finish[2]:
             raise ValueError("The hook contains damaged Brigade push gate block markers.")
         start, end = markers[0].start(), markers[1].end()
         end += raw[end : end + 1] == b"\n"
@@ -325,13 +337,14 @@ def _block_replacement(raw: bytes, *, insert: bool, preview: bool) -> tuple[byte
 
 
 def _install_block(repo: Repository, *, insert: bool, preview: bool) -> None:
-    if preview:
-        print(_snippet().decode("ascii"), end="")
     hooks = repo.hook.parent.resolve()
-    path = repo.hook.resolve(strict=True)
+    try:
+        path = repo.hook.resolve(strict=True)
+        original = path.stat()
+    except FileNotFoundError:
+        raise ValueError("no effective pre-push hook to update") from None
     if not path.is_relative_to(hooks):
         raise ValueError("The effective pre-push hook points outside the hooks directory.")
-    original = path.stat()
     mode = stat.S_IMODE(original.st_mode)
     if not stat.S_ISREG(original.st_mode):
         raise ValueError("The effective pre-push hook must be a regular file.")
@@ -342,7 +355,6 @@ def _install_block(repo: Repository, *, insert: bool, preview: bool) -> None:
     if raw == updated:
         print("The Brigade push gate block is already current.")
         return
-    print(push_gate_display.terminal_text(f"{action} in {repo.hook}."))
     if preview:
         diff = difflib.diff_bytes(
             difflib.unified_diff,
@@ -355,6 +367,7 @@ def _install_block(repo: Repository, *, insert: bool, preview: bool) -> None:
             print(push_gate_display.terminal_text(line.rstrip(b"\r\n").decode("utf-8", errors="backslashreplace")))
         return
 
+    print(push_gate_display.terminal_text(f"{action} in {repo.hook}."))
     stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
     backup = repo.hook.with_name(f"{repo.hook.name}.{stamp}.bak")
     fd, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
@@ -500,7 +513,7 @@ def register(parsers: Any) -> None:
         if name == "install":
             parser.add_argument("--mode", metavar="{warn,enforce,off}")
             parser.add_argument("--block-only", action="store_true", help="Update only the Brigade block in the hook.")
-            parser.add_argument("--dry-run", action="store_true", help="Print the block and proposed diff.")
+            parser.add_argument("--dry-run", action="store_true", help="Print the proposed diff.")
             parser.add_argument(
                 "--confirm-insert", action="store_true", help="Allow insertion when the block is absent."
             )
@@ -520,10 +533,11 @@ def dispatch(args: argparse.Namespace) -> int:
         if args.mode not in {None, "warn", "enforce", "off"}:
             print("push gate: expected mode warn, enforce, or off", file=sys.stderr)
             return 2
-        if (args.block_only and args.mode is not None) or (
-            not args.block_only and (args.dry_run or args.confirm_insert)
-        ):
-            print("push gate: use --dry-run and --confirm-insert with --block-only, without --mode", file=sys.stderr)
+        if args.block_only and args.mode is not None:
+            print("push gate: --block-only cannot be used with --mode", file=sys.stderr)
+            return 2
+        if not args.block_only and (args.dry_run or args.confirm_insert):
+            print("push gate: --dry-run and --confirm-insert require --block-only", file=sys.stderr)
             return 2
     try:
         repo = Repository.locate(args.target)
