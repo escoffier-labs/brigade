@@ -6,6 +6,7 @@ import io
 import json
 import os
 import re
+import shlex
 import stat
 import subprocess
 import sys
@@ -13,7 +14,7 @@ from collections.abc import Iterator
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import cache, cached_property, partial
-from itertools import groupby
+from itertools import groupby, zip_longest
 from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
@@ -21,6 +22,7 @@ from time import monotonic
 from typing import Any
 
 from .. import config, localio, verify_manifest_git
+from ..verify_command import split_verify_command
 from . import push_gate_display, verify_gate
 from .verify_push_input import INPUT_BYTES, branch_updates
 
@@ -33,6 +35,8 @@ _OBJECT_ID = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
 _UNFINISHED = {"running", "busy", "canceled"}
 _EARLIEST = datetime.min.replace(tzinfo=UTC)
 _MASKED_PASS = "newer_required_failure"
+_UNCONFIRMED_PLAN = "planned_command_unconfirmed"
+_ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
 @dataclass(frozen=True)
@@ -140,6 +144,14 @@ def _valid_receipt(data: object) -> bool:
     status, commands = data.get("status"), data.get("commands")
     if not isinstance(status, str) or not isinstance(commands, list) or "tree_fingerprint" not in data:
         return False
+    if "planned_commands" in data:
+        planned = data["planned_commands"]
+        if (
+            not isinstance(planned, list)
+            or not planned
+            or not all(isinstance(command, str) and command.strip() for command in planned)
+        ):
+            return False
     stamp = data.get("gating")
     if stamp is not None and not isinstance(stamp, dict):
         return False
@@ -291,7 +303,7 @@ class _Receipts:
         return {
             **{
                 key: data[key]
-                for key in ("status", "tree_stable", "tree_fingerprint", "started_at", "gating")
+                for key in ("status", "tree_stable", "tree_fingerprint", "started_at", "gating", "planned_commands")
                 if key in data
             },
             "commands": [
@@ -372,6 +384,11 @@ def _tree_verdict(
                 if not prefix and candidate.receipt["status"] in _UNFINISHED:
                     continue
                 if candidate.uncertain:
+                    if candidate.reason == _UNCONFIRMED_PLAN:
+                        raise _Indeterminate(
+                            "The planned commands and recorded results do not establish "
+                            "an outcome for the required check."
+                        )
                     raise _Indeterminate(
                         "The most recent possible run of the required check has an inconclusive status."
                     )
@@ -412,6 +429,49 @@ def _tree_verdict(
     return _rejected(target, policy, receipt, reason, run_label)
 
 
+def _planned_argvs(command: str) -> set[tuple[str, ...]]:
+    # The writer preserves raw --command text but uses POSIX shlex.join for
+    # argv lists on every platform. The receipt does not identify the form.
+    parsers = (shlex.split, split_verify_command) if os.name == "nt" else (shlex.split,)
+    alternatives: set[tuple[str, ...]] = set()
+    for parse in parsers:
+        try:
+            argv = parse(command)
+        except ValueError:
+            continue
+        if not argv or not argv[0] or "\x00" in command:
+            continue
+        alternatives.add(tuple(argv))
+        # Raw commands may start with environment assignments removed from
+        # recorded argv. Pre-parsed argv lists do not strip these tokens.
+        start = next((index for index, arg in enumerate(argv) if not _ENV_ASSIGNMENT.match(arg)), len(argv))
+        if start < len(argv):
+            alternatives.add(tuple(argv[start:]))
+    return alternatives
+
+
+def _required_plan_unconfirmed(
+    planned: list[str], commands: list[dict[str, Any]], prefix: list[str], deadline: float
+) -> bool:
+    required = tuple(prefix)
+    for command, record in zip_longest(planned, commands):
+        _remaining(deadline)
+        recorded = tuple(record["argv"] or ()) if record is not None else ()
+        if command is None:
+            if recorded[: len(required)] == required:
+                return True
+            continue
+        possible = _planned_argvs(command)
+        if not possible:
+            return True
+        if recorded[: len(required)] == required:
+            if recorded not in possible:
+                return True
+        elif any(argv[: len(required)] == required for argv in possible):
+            return True
+    return False
+
+
 def _classify_receipt(
     policy: verify_gate._GatePolicy, prefix: list[str], tree: str, receipt: dict[str, Any], deadline: float
 ) -> _Candidate:
@@ -425,18 +485,23 @@ def _classify_receipt(
     ]
     statuses = {_command_status(receipt, command) for command in required}
     failed = _failed_required_check(receipt, required)
-    planned = receipt.get("planned_commands")
-    uncertain = (
+    plan_unconfirmed = (
+        bool(prefix)
+        and "planned_commands" in receipt
+        and _required_plan_unconfirmed(receipt["planned_commands"], receipt["commands"], prefix, deadline)
+    )
+    uncertain = plan_unconfirmed or (
         bool(prefix)
         and not failed
         and (
             receipt["status"] not in {"completed", "failed", "rejected", "timed_out"}
-            or (isinstance(planned, list) and len(planned) > len(receipt["commands"]))
             or any(command["argv"] is None for command in receipt["commands"])
             or bool(statuses - {"completed", "rejected"})
         )
     )
-    if "timed_out" in statuses:
+    if plan_unconfirmed:
+        eligible, reason = False, _UNCONFIRMED_PLAN
+    elif "timed_out" in statuses:
         eligible, reason = False, "required_check_timed_out"
     elif eligible and (failed or uncertain or "rejected" in statuses):
         eligible, reason = False, "not_completed"

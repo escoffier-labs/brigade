@@ -1322,3 +1322,51 @@ def test_report_escapes_observation_labels(push_repo, capsys):
     assert _gate(push_repo, "report") == 0
     output = capsys.readouterr().out
     assert r"bad\x1b\u202e=1" in output and "\x1b" not in output and "\u202e" not in output
+
+
+@pytest.mark.parametrize("mode", ["warn", "enforce"])
+@pytest.mark.parametrize(
+    ("later_plan", "indeterminate"),
+    [
+        ("contradictory", True),
+        ("malformed", True),
+        ("missing-result", True),
+        ("unrelated", False),
+        ("legacy", False),
+    ],
+)
+def test_planned_commands_in_real_push(push_repo, monkeypatch, capsys, mode, later_plan, indeterminate):
+    from tests.test_verify_push import PREFIX, SELECTOR
+
+    base = _policy(push_repo)
+    _bare_remote(push_repo)
+    remote = Path(_git(push_repo, "remote", "get-url", "origin"))
+    _git(push_repo, "push", "origin", "main")
+    monkeypatch.setenv("PATH", _path_with_brigade())
+    assert _gate(push_repo, "install", "--mode", mode) == 0
+    capsys.readouterr()
+    (push_repo / "src.py").write_text("value = 2\n", encoding="utf-8")
+    tip = _commit(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree)
+    required = shlex.join([*PREFIX, SELECTOR])
+    later = _receipt(push_repo, tree, second=2, argv=["git", "status"])
+    if later_plan != "legacy":
+        receipt = json.loads(later.read_text(encoding="utf-8"))
+        receipt["planned_commands"] = {
+            "contradictory": [required],
+            "malformed": required,
+            "missing-result": ["git status", required],
+            "unrelated": ["git 'status'"],
+        }[later_plan]
+        later.write_text(json.dumps(receipt), encoding="utf-8")
+
+    push = subprocess.run(["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True, timeout=15)
+    blocked = mode == "enforce" and indeterminate
+    assert (push.returncode != 0) is blocked
+    assert _git(remote, "rev-parse", "refs/heads/main") == (base if blocked else tip)
+    (row,) = _log_rows(push_repo)
+    assert row["result"] == ("indeterminate" if indeterminate else "ok")
+    if indeterminate:
+        assert "refs/heads/main (indeterminate)" in push.stderr
+        assert "brigade work verify run" in push.stderr or "mv --" in push.stderr

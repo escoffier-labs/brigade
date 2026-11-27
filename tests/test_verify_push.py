@@ -771,3 +771,62 @@ def test_stray_malformed_receipt_warns_without_masking_pass(push_repo, capsys):
     assert (code, json.loads(output.out)["refs"][0]["status"]) == (0, "ok")
     assert "ignoring malformed receipt in a non-run directory" in output.err and repr(str(stray)) in output.err
     assert stray.is_dir()
+
+
+@pytest.mark.parametrize(
+    ("recorded", "overall_status", "plan", "expected"),
+    [
+        (["git", "status"], "failed", ["git status", shlex.join([*PREFIX, SELECTOR])], "indeterminate"),
+        ([*PREFIX, SELECTOR], "completed", [shlex.join([*PREFIX, SELECTOR])] * 2, "indeterminate"),
+        ([*PREFIX, SELECTOR], "completed", ["git status"], "indeterminate"),
+        (["git", "status"], "completed", ["'unmatched"], "indeterminate"),
+        (["git", "status"], "completed", [None], "indeterminate"),
+        ([*PREFIX, "tests/has a space.py"], "completed", [shlex.join([*PREFIX, "tests/has a space.py"])], "ok"),
+        ([*PREFIX, SELECTOR], "completed", ["SETTING=yes " + shlex.join([*PREFIX, SELECTOR])], "ok"),
+    ],
+)
+def test_planned_command_agreement(push_repo, capsys, recorded, overall_status, plan, expected):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree)
+    path = _receipt(push_repo, tree, second=2, status=overall_status, argv=recorded, command_status="completed")
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    receipt["planned_commands"] = plan
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    assert _single(push_repo, capsys)[1]["status"] == expected
+
+
+def test_writer_bookkeeping_failure_before_required_command_is_indeterminate(push_repo, monkeypatch, capsys):
+    from pathlib import Path
+
+    from brigade.work_cmd import verification
+
+    _policy(push_repo)
+    older = _receipt(push_repo, _tree(push_repo))
+    write_text = Path.write_text
+
+    def fail_command_log(path, *args, **kwargs):
+        if path.name == "command-1-stdout.log":
+            raise OSError("fixture: command log write failed")
+        return write_text(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "write_text", fail_command_log)
+        assert (
+            verification.verify_run(
+                target=push_repo,
+                commands=[["git", "status"], [*PREFIX, SELECTOR]],
+                code_graph_timeout=0.1,
+                reuse=False,
+            )
+            == 1
+        )
+    capsys.readouterr()
+    (newer,) = set(older.parent.parent.glob("*/receipt.json")) - {older}
+    receipt = json.loads(newer.read_text(encoding="utf-8"))
+    assert receipt["status"] == "failed" and receipt["bookkeeping_error"] is True
+    assert receipt["planned_commands"] == ["git status", shlex.join([*PREFIX, SELECTOR])]
+    assert [record["argv"] for record in receipt["commands"]] == [["git", "status"]]
+    code, verdict = _single(push_repo, capsys)
+    assert (code, verdict["status"]) == (3, "indeterminate")
+    assert "planned commands and recorded results" in verdict["reason"]

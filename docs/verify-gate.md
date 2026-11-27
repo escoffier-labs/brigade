@@ -156,6 +156,11 @@ gives an indeterminate verdict unless it already records a required check
 failure. A policy with no required command prefix accepts any eligible
 receipt for the tree.
 
+When a receipt lists its planned commands, the gate compares the plan with
+recorded commands in order. A missing or conflicting result for a possible
+required check makes the verdict indeterminate. Receipts written before
+the plan field existed are evaluated using their recorded commands.
+
 Across seconds the check orders runs by the UTC timestamp in the directory
 name. The name must have the writer's timestamp and suffix format. For a
 matching receipt, the name and `started_at` must identify the same UTC
@@ -175,7 +180,7 @@ pass is present. The check reports ignored malformed entries once per push.
 
 | Result | Meaning |
 | --- | --- |
-| `ok` | An eligible receipt matches the tree and no newer run failed the same required check. |
+| `ok` | An eligible receipt matches the tree and no newer run supersedes it. |
 | `missing_receipt` | There is no matching local receipt. |
 | `rejected` | A newer run failed the required check, or the scan found matching receipts but none were eligible. |
 | `not_applicable` | Neither the base nor the fetched default branch tip declares a required check. Text output is silent for this result. |
