@@ -14,7 +14,9 @@ handoff directly must follow the same three steps (see
 
 from __future__ import annotations
 
+from collections.abc import Callable
 import os
+import stat
 import sys
 import tempfile
 from pathlib import Path
@@ -116,3 +118,46 @@ def _sync_directory(path: Path) -> None:
         pass
     finally:
         os.close(descriptor)
+
+
+def replace_held_card(
+    parent: int,
+    name: str,
+    content: bytes,
+    mode: int | None,
+    *,
+    replace: bool,
+    validate: Callable[[], None],
+    published: Callable[[], None] | None = None,
+    sync_directory: bool = True,
+) -> None:
+    """Stage a card under the held parent and signal when its name is published."""
+    staged = f".{name}.{uuid4().hex[:12]}.tmp"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    if dirfd.posix_available():
+        flags = dirfd.file_flags(flags)
+    try:
+        descriptor = dirfd.open_child_file(parent, staged, flags, 0o600)
+        with os.fdopen(descriptor, "wb") as handle:
+            if mode is not None and hasattr(os, "fchmod"):
+                os.fchmod(handle.fileno(), stat.S_IMODE(mode))
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        validate()
+        link = published is not None and not replace and dirfd.posix_available()
+        if link:
+            dirfd.link_child(parent, staged, name)
+        else:
+            dirfd.replace_children(parent, staged, name, replace=replace)
+        if published is not None:
+            published()
+        if link:
+            dirfd.unlink_child(parent, staged)
+        if sync_directory:
+            dirfd.fsync_directory(parent)
+    finally:
+        try:
+            dirfd.unlink_child(parent, staged)
+        except OSError:
+            pass

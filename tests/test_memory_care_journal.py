@@ -583,3 +583,32 @@ def test_refused_prepare_cleanup_keeps_a_directory_holding_state(tmp_path):
     (recorded / "decision.json").write_text("{}\n", encoding="utf-8")
     journal._discard_refused_prepare(tmp_path, "20261112T000001Z-archive-12345678")
     assert recorded.exists()
+
+
+def test_custom_writer_and_rollback_errors_keep_recovery_record(tmp_path):
+    path = tmp_path / "card.md"
+    path.write_bytes(b"old")
+    original = OSError("publication unavailable")
+
+    def write(_path, _data):
+        raise original
+
+    def rollback():
+        raise OSError("restore unavailable")
+
+    with pytest.raises(journal.JournalConflict) as result:
+        journal.commit(
+            tmp_path,
+            kind="fix",
+            reason="test",
+            card_id=None,
+            changes=[journal.Change("card.md", b"old", b"new")],
+            writer=write,
+            rollback=rollback,
+        )
+    assert result.value.__cause__ is original
+    assert "publication unavailable" in str(result.value)
+    assert "restore unavailable" in str(result.value)
+    (record,) = (tmp_path / journal.JOURNAL_REL).glob("*/decision.json")
+    decision = journal.load(tmp_path, record.parent.name)
+    assert journal.before_bytes(tmp_path, decision, "card.md") == b"old"

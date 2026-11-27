@@ -1,0 +1,1 @@
+- Evaluate verified unknown-origin card drafts with the full-draft content scans and workspace card size limit. Create cards at free names and apply updates with a matching expected SHA256. Save rollback data and mark filed cards as agent-unreviewed with a filing date. Worker drafts and unknown-origin document actions go to the review inbox.

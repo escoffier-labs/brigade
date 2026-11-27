@@ -495,14 +495,14 @@ def _render_frontmatter_value(value: Any) -> str:
 
 
 def _insert_frontmatter_fields(text: str, fields: dict[str, Any]) -> str:
-    lines = text.split("\n")
+    lines = text.splitlines(keepends=True)
     closing = next(i for i, line in enumerate(lines[1:], start=1) if line.strip() == "---")
-    additions = [f"{key}: {_render_frontmatter_value(value)}" for key, value in fields.items()]
-    return "\n".join(lines[:closing] + additions + lines[closing:])
+    additions = [f"{key}: {_render_frontmatter_value(value)}\n" for key, value in fields.items()]
+    return "".join(lines[:closing] + additions + lines[closing:])
 
 
 def _upsert_frontmatter_fields(text: str, fields: dict[str, Any]) -> str:
-    lines = text.split("\n")
+    lines = text.splitlines(keepends=True)
     closing = next(i for i, line in enumerate(lines[1:], start=1) if line.strip() == "---")
     remaining = dict(fields)
     for index in range(1, closing):
@@ -511,8 +511,9 @@ def _upsert_frontmatter_fields(text: str, fields: dict[str, Any]) -> str:
             continue
         key = line.split(":", 1)[0].strip()
         if key in remaining:
-            lines[index] = f"{key}: {_render_frontmatter_value(remaining.pop(key))}"
+            ending = line[len(line.splitlines()[0]) :]
+            lines[index] = f"{key}: {_render_frontmatter_value(remaining.pop(key))}{ending}"
     if remaining:
-        additions = [f"{key}: {_render_frontmatter_value(value)}" for key, value in remaining.items()]
+        additions = [f"{key}: {_render_frontmatter_value(value)}\n" for key, value in remaining.items()]
         lines = lines[:closing] + additions + lines[closing:]
-    return "\n".join(lines)
+    return "".join(lines)

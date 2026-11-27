@@ -20,11 +20,10 @@ import shutil
 import stat
 import subprocess
 import sys
-import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, NamedTuple
+from typing import Callable, Dict, Iterator, List, NamedTuple
 
 from . import dirfd, handoff_case_probe, handoff_worktrees, ingest_index, instruction_overflow, ingest_near_duplicate
 from .card_fingerprint import (
@@ -283,6 +282,8 @@ def ingest_into(
     exists but cannot be loaded. The fleet driver maps those statuses through
     `skip_reason` so a broken config is not reported as a missing inbox.
     """
+    from . import ingest_content_policy
+
     inbox_dir = owner / "memory" / "handoff-inbox"
     try:
         handoff_dirs = _resolve_inbox_paths(source)
@@ -311,8 +312,7 @@ def ingest_into(
             stats.skipped += 1
             stats.actions.append(_summary("skip", path.name, _TRACKED_SKIP_CODE))
         for path in handoffs:
-            # One unreadable or unarchivable handoff is recorded and skipped;
-            # it must not abort the rest of the batch.
+            # A failure on one handoff must leave the rest of the batch runnable.
             try:
                 # One read. The digest, the parse and every delivered copy
                 # come from these bytes, so the digest names what was handled.
@@ -339,47 +339,60 @@ def ingest_into(
                     stats.inboxed += 1
                     stats.actions.append(_summary("inbox", path.name, "handoff-too-large"))
                     continue
-                sidecar = handoff_origin.stamp_path(source, path)
+                except (handoff_origin.LinkedHandoffError, ChangedHandoffError):
+                    raise
+                except Exception:
+                    _record_pending_review(stats, path, inbox_dir, "handoff-unreadable", dry_run=dry_run)
+                    continue
+                sidecar = None
                 sha = hashlib.sha256(snapshot).hexdigest()
-                origin = handoff_origin.verify_handoff(source, path, snapshot)
-                trusted_origin = origin is not None and origin.allows_automatic_filing
+                try:
+                    sidecar = handoff_origin.stamp_path(source, path)
+                    origin = handoff_origin.verify_handoff(source, path, snapshot)
+                except Exception:
+                    origin = None
+                content_policy = (
+                    origin is not None and origin.session_kind == "unknown" and origin.untrusted_tools is not True
+                )
+                filing_eligible = origin is not None and (origin.allows_automatic_filing or content_policy)
                 if origin is not None:
                     sidecar = origin.stamp.sidecar
 
                 def claim_origin(verified: handoff_origin.VerifiedOrigin | None = origin) -> bool:
-                    nonlocal trusted_origin
+                    nonlocal filing_eligible
                     assert verified is not None
-                    trusted_origin = verified.stamp.claim()
-                    return trusted_origin
+                    try:
+                        filing_eligible = verified.stamp.claim()
+                    except Exception:
+                        filing_eligible = False
+                    return filing_eligible
 
-                # Bad bytes or malformed structure belong to this handoff
-                # only. Guard and invariant failures further on stay fatal.
                 try:
                     sections = parse(path, snapshot)
                 except UnicodeDecodeError:
-                    _record_failure(stats, path, "invalid-encoding")
+                    _record_pending_review(stats, path, inbox_dir, "invalid-encoding", dry_run=dry_run)
                     continue
-                except ValueError:
-                    _record_failure(stats, path, "invalid-content")
+                except Exception:
+                    _record_pending_review(stats, path, inbox_dir, "invalid-content", dry_run=dry_run)
                     continue
-                if trusted_origin and not dry_run:
+                if filing_eligible and not dry_run:
                     if _is_tracked(path, _git_tracked_files(path.parent)):
                         raise TrackedHandoffError("handoff became tracked before origin claim")
                     if sha in stats.seen_digests:
-                        assert origin is not None
-                        trusted_origin = claim_origin()
-                if trusted_origin and sha in stats.seen_digests:
+                        claim_origin()
+                if filing_eligible and sha in stats.seen_digests:
                     if not dry_run:
                         _archive(path, processed_dir, sha)
+                        assert sidecar is not None
                         handoff_origin.remove_stamp(sidecar)
                     stats.skipped += 1
                     stats.actions.append(_summary("skip", path.name, "duplicate-content"))
                     continue
-                if not trusted_origin:
-                    outcome = Outcome(
-                        "inboxed",
-                        code="origin-review-required",
-                        reason="missing, unverifiable or untrusted origin requires review",
+                if not filing_eligible:
+                    outcome = Outcome("inboxed", code="origin-review-required")
+                elif content_policy:
+                    outcome = ingest_content_policy.decide(
+                        sections, snapshot, owner=owner, promote_cards=promote_cards, card_ids=card_ids
                     )
                 else:
                     outcome = decide(
@@ -390,12 +403,9 @@ def ingest_into(
                         card_ids=card_ids,
                         routing=routing,
                     )
-                # A busy card lock has made no canonical writes. Claim its
-                # origin only after acquiring the lock, so it remains retryable.
-                if trusted_origin and outcome.kind not in {"promoted", "reinforced"} and not dry_run:
-                    assert origin is not None
+                # Keep a card's claim inside its publication lock.
+                if filing_eligible and outcome.kind not in {"promoted", "reinforced"} and not dry_run:
                     if not claim_origin():
-                        trusted_origin = False
                         outcome = Outcome("inboxed", code="origin-review-required")
                 action = _execute(
                     outcome,
@@ -408,14 +418,15 @@ def ingest_into(
                     snapshot=snapshot,
                     pending=pending,
                     card_ids=card_ids,
-                    promote_cards=promote_cards,
-                    route_documents=route_documents,
+                    promote_cards=promote_cards and not content_policy,
+                    route_documents=route_documents and not content_policy,
                     routing=routing,
                     claim_origin=claim_origin
-                    if trusted_origin and outcome.kind in {"promoted", "reinforced"}
+                    if filing_eligible and outcome.kind in {"promoted", "reinforced"}
                     else None,
+                    policy_origin=origin if content_policy else None,
                 )
-                if not dry_run and action.kind in _HANDLED_KINDS:
+                if not dry_run and sidecar is not None and action.kind in _HANDLED_KINDS:
                     handoff_origin.remove_stamp(sidecar)
             except TrackedHandoffError:
                 action = Action("skipped", _summary("skip", path.name, _TRACKED_SKIP_CODE))
@@ -436,10 +447,11 @@ def ingest_into(
             # Only content that was published, appended or archived counts as
             # handled. A retryable skip leaves the handoff pending, so a later
             # identical copy must not be archived as its duplicate.
-            if trusted_origin and action.kind in _HANDLED_KINDS:
+            if filing_eligible and action.kind in _HANDLED_KINDS:
                 stats.seen_digests.add(sha)
             stats.processed += 1
             stats.actions.append(action.summary)
+            stats.failed += action.failed
             if action.kind == "promoted":
                 stats.promoted += 1
             elif action.kind == "reinforced":
@@ -809,9 +821,10 @@ class Action:
     kind: str
     summary: str
     destination: str | None = None
+    failed: bool = False
 
 
-def _read_card_child(parent: int, name: str) -> tuple[bytes, int] | None:
+def _read_card_child(parent: int, name: str, *, limit: int | None = None) -> tuple[bytes, int] | None:
     """Exact bytes and mode of a card read relative to a held parent, or None when absent."""
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     if dirfd.posix_available():
@@ -829,7 +842,10 @@ def _read_card_child(parent: int, name: str) -> tuple[bytes, int] | None:
             os.set_blocking(descriptor, True)
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = -1
-            return handle.read(), metadata.st_mode
+            data = handle.read() if limit is None else handle.read(limit + 1)
+            if limit is not None and len(data) > limit:
+                raise OSError("publication exceeds inspection limit")
+            return data, metadata.st_mode
     finally:
         if descriptor != -1:
             os.close(descriptor)
@@ -858,55 +874,83 @@ def _assert_parent_unchanged(parent: int, parent_path: Path) -> None:
         raise OSError("publication parent changed")
 
 
+@contextmanager
+def _held_card_publication(
+    dest: Path,
+    target: Path,
+    *,
+    limit: int | None = None,
+    on_publish: Callable[[int, str, bytes | None, int | None, bytes], None] | None = None,
+) -> Iterator[tuple[bytes | None, Callable[[bytes, bool], None]]]:
+    """Read and publish the same card revision through a held directory."""
+    from .handoff_publish import replace_held_card
+
+    if not dirfd.available():
+        raise OSError("no-follow descriptor operations are unavailable; refusing a path-based publish")
+    parent_path = target.resolve() / dest.parent.relative_to(target)
+    name = dest.name
+
+    def read_child(parent: int) -> tuple[bytes, int] | None:
+        return _read_card_child(parent, name) if limit is None else _read_card_child(parent, name, limit=limit)
+
+    parent = dirfd.open_directory_chain(parent_path, create=True)
+    try:
+        found = read_child(parent)
+        data, mode = found if found is not None else (None, None)
+
+        def validate() -> None:
+            _assert_parent_unchanged(parent, parent_path)
+            again = read_child(parent)
+            if (again[0] if again is not None else None) != data:
+                raise OSError("publication revision changed")
+
+        def publish(content: bytes, replace: bool) -> None:
+            def recorded() -> None:
+                assert on_publish is not None
+                on_publish(parent, name, data, mode, content)
+
+            replace_held_card(
+                parent,
+                name,
+                content,
+                mode,
+                replace=replace,
+                validate=validate,
+                published=recorded if on_publish is not None else None,
+            )
+
+        yield data, publish
+    finally:
+        os.close(parent)
+
+
 def _write_card_descriptor_bound(
     dest: Path,
     target: Path,
     check_state: Callable[[bytes | None], str | None],
     build_content: Callable[[str | None], str],
 ) -> None:
-    """Inspect and replace a card through one held parent directory, on POSIX and Windows.
+    with _held_card_publication(dest, target) as (data, publish):
+        publish(build_content(check_state(data)).encode("utf-8"), True)
 
-    The parent is opened once without following links. The leaf is read, the staged copy
-    is written and the staged copy is renamed over the leaf, all relative to that held
-    handle. If no descriptor-relative backend exists this raises and nothing is written.
-    """
-    if not dirfd.available():
-        raise OSError("no-follow descriptor operations are unavailable; refusing a path-based publish")
-    root = target.resolve()
-    parent_path = root / dest.parent.relative_to(target)
-    name = dest.name
-    parent = dirfd.open_directory_chain(parent_path, create=True)
-    staged: str | None = None
-    try:
-        found = _read_card_child(parent, name)
-        data, mode = found if found is not None else (None, None)
-        content = build_content(check_state(data)).encode("utf-8")
-        staged = f".{name}.{uuid.uuid4().hex[:12]}.tmp"
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-        if dirfd.posix_available():
-            flags = dirfd.file_flags(flags)
-        descriptor = dirfd.open_child_file(parent, staged, flags, 0o600)
-        with os.fdopen(descriptor, "wb") as handle:
-            if mode is not None and hasattr(os, "fchmod"):
-                os.fchmod(handle.fileno(), stat.S_IMODE(mode))
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        # Publication boundary: same directory, and the leaf is still the revision checked.
-        _assert_parent_unchanged(parent, parent_path)
-        again = _read_card_child(parent, name)
-        if (again[0] if again is not None else None) != data:
-            raise OSError("publication revision changed")
-        dirfd.replace_children(parent, staged, name)
-        staged = None
-        dirfd.fsync_directory(parent)
-    finally:
-        try:
-            if staged is not None:
-                dirfd.unlink_child(parent, staged)
-        except OSError:
-            pass
-        os.close(parent)
+
+def _check_card_state(data: bytes | None, expected_sha: str) -> str | None:
+    """Check the exact bytes that publication would replace."""
+    text = None if data is None else data.decode("utf-8", errors="replace")
+    if text is not None and _identity_migration_fields(text):
+        raise OSError("governed destination requires review")
+    if expected_sha and (data is None or sha256_hex(data) != expected_sha):
+        raise StaleCardError("expected card SHA256 no longer matches the card")
+    return text
+
+
+def _build_promoted_card(sections: dict[str, str], existing: str | None) -> str:
+    from .card_identity import valid_card_id
+
+    content = ensure_fingerprint_frontmatter(sections.get("suggested card content", "").strip() + "\n")
+    meta, _ = _frontmatter(existing or "")
+    existing_id = valid_card_id(meta.get("id")) or valid_card_id(meta.get("card_id"))
+    return ensure_card_id_frontmatter(content, preserve_id=existing_id)
 
 
 def _publish_promoted_card(
@@ -926,33 +970,17 @@ def _publish_promoted_card(
     """
     from contextlib import nullcontext
 
-    from .card_identity import valid_card_id
     from .inbox_lock import held_file_lock
 
     def parent_fence(path: Path) -> None:
         if any(parent.is_symlink() for parent in (path.parent, *path.parents)):
             raise OSError("publication parent is symlinked")
 
-    def check_state(data: bytes | None) -> str | None:
-        """Decode the exact bytes, refuse a governed card or a stale SHA, return the text."""
-        text = None if data is None else data.decode("utf-8", errors="replace")
-        if text is not None and _identity_migration_fields(text):
-            raise OSError("governed destination requires review")
-        # decide() compared the SHA without the lock. Hash the exact bytes read here, the
-        # same bytes the boundary probe compares, so a card edited since then is never
-        # replaced by a stale handoff.
-        if expected_sha and (data is None or sha256_hex(data) != expected_sha):
-            raise StaleCardError("expected card SHA256 no longer matches the card")
-        return text
-
     built = ""
 
     def build_content(raw: str | None) -> str:
         nonlocal built
-        content = ensure_fingerprint_frontmatter(sections.get("suggested card content", "").strip() + "\n")
-        existing, _ = _frontmatter(raw or "")
-        existing_id = valid_card_id(existing.get("id")) or valid_card_id(existing.get("card_id"))
-        built = ensure_card_id_frontmatter(content, preserve_id=existing_id)
+        built = _build_promoted_card(sections, raw)
         return built
 
     lock_path = target / ".brigade/memory/proposals/proposal.lock"
@@ -967,11 +995,13 @@ def _publish_promoted_card(
             parent_fence(dest)
             if dest.is_symlink() or (dest.exists() and not dest.is_file()):
                 raise OSError("publication must be a regular file")
-            build_content(check_state(dest.read_bytes() if dest.exists() else None))
+            build_content(_check_card_state(dest.read_bytes() if dest.exists() else None, expected_sha))
         else:
             if claim_origin is not None and not claim_origin():
                 raise handoff_origin.OriginClaimRefused("origin claim unavailable")
-            _write_card_descriptor_bound(dest, target, check_state, build_content)
+            _write_card_descriptor_bound(
+                dest, target, lambda data: _check_card_state(data, expected_sha), build_content
+            )
     if card_ids is not None:
         # `built` is the text written, or in a dry run the text the same builder would
         # write, so an update-card that omits an id keeps the destination's id in both.
@@ -1160,6 +1190,7 @@ def _execute(
     routing: instruction_overflow.RouteContext | None = None,
     claim_origin: Callable[[], bool] | None = None,
     pending: list[ingest_near_duplicate.Pending] | None = None,
+    policy_origin: handoff_origin.VerifiedOrigin | None = None,
 ) -> Action:
     from .inbox_lock import InboxLockTimeout
     from .memory_evidence_log import log_match
@@ -1169,6 +1200,27 @@ def _execute(
     # Re-check before destination writes as well as at the final archive boundary.
     if not dry_run and _is_tracked(handoff_path, _git_tracked_files(handoff_path.parent)):
         raise TrackedHandoffError(f"refusing to ingest git-tracked handoff {handoff_path}")
+
+    if policy_origin is not None and outcome.kind == "promoted":
+        from .ingest_content_policy import file_card
+
+        assert card_ids is not None and claim_origin is not None
+        refusal = file_card(
+            outcome,
+            target,
+            sections,
+            policy_origin,
+            claim_origin=claim_origin,
+            card_ids=card_ids,
+            dry_run=dry_run,
+        )
+        if refusal == "card-publication-busy":
+            return Action("skipped", _summary("skip", name, refusal))
+        if refusal is None:
+            if not dry_run:
+                _archive(handoff_path, processed_dir, snapshot_sha)
+            return Action("promoted", _summary("promote", name, outcome.code))
+        outcome = Outcome("inboxed", code=refusal)
 
     if outcome.kind == "promoted":
         dest = outcome.dest
@@ -1445,7 +1497,7 @@ def _execute(
                 assert outcome.match is not None
                 pending.append(ingest_near_duplicate.Pending(content, dest, outcome.match.path, outcome.code))
         # Both inboxed and skipped are now archived; classify them uniformly.
-        return Action("inboxed", summary)
+        return Action("inboxed", summary, failed=outcome.code == "content-policy-error")
 
     return Action("skipped", _summary("skip", name, outcome.code))
 
@@ -1894,6 +1946,16 @@ def _match_meta(outcome: Outcome, target: Path) -> str:
     return meta
 
 
+def _record_pending_review(stats: IngestStats, path: Path, inbox_dir: Path, code: str, *, dry_run: bool) -> None:
+    from .ingest_content_policy import note_pending
+
+    if not dry_run:
+        note_pending(inbox_dir, path, code)
+    stats.processed += 1
+    stats.inboxed += 1
+    _record_failure(stats, path, "io-error" if code == "handoff-unreadable" else code)
+
+
 def _record_failure(stats: IngestStats, path: Path, code: str) -> None:
     stats.failed += 1
     stats.actions.append(_summary("fail", path.name, code) + f"  in={handoff_worktrees.safe_text(path.parent)}")
@@ -1912,7 +1974,7 @@ def _report(stats: IngestStats, dry_run: bool) -> None:
         f"Inboxed {stats.inboxed}  Skipped {stats.skipped}  Failed {stats.failed}"
     )
     if stats.failed:
-        print(f"{tag}PARTIAL: {stats.failed} handoff(s) failed and were left in place; the rest were ingested")
+        print(f"{tag}PARTIAL: {stats.failed} handoff(s) encountered processing errors")
     elif stats.processed == 0:
         print(f"{tag}NO_UPDATES")
     print(f"{tag}Status {stats.status}")

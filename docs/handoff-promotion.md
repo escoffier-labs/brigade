@@ -139,12 +139,12 @@ for the disposition table, safe skips and undo behavior.
 
 ## Origin gate for automatic filing
 
-Ingest now requires a verified origin before it can promote a card, reinforce an
-existing card, append to a document, or route content to an overflow card. Only
-an `interactive` origin with `untrusted_tools: false` reaches the existing filing
-rules. Worker, cron, subagent, unknown, and tool-touched origins go to
-`memory/handoff-inbox/` with reason `origin-review-required`. The inbox drain
-classifies that reason as human review and cannot retry it automatically.
+Ingest requires verified origin metadata for automatic filing. A clean
+interactive session can file cards or route documents when enabled. An
+interactive origin with unknown tool status requires review. An unknown-origin
+draft can file a card when promotion is enabled, its recorded tool status is
+false or unknown, and the draft passes the deterministic content policy. Worker, cron, and subagent
+drafts go to `memory/handoff-inbox/` for human review.
 
 Automatic filing works on Windows with an owner-only signing key.
 Regular-file, reparse-point, and single-link checks still apply.
@@ -206,25 +206,38 @@ workspace, unset `BRIGADE_RECEIPT_SIGNING_KEY_FILE` and run
 `brigade receipts keygen` to create a fresh owner-only key. Existing stamps
 still require review after the key changes.
 
-A missing key, missing sidecar, bad MAC, changed content, malformed stamp, or
-unknown tool status requires review. Neither drafting nor ingest creates a key.
+A missing key, missing sidecar, bad MAC, changed content, or malformed stamp
+requires review. Neither drafting nor ingest creates a key.
 Stamps are local to the source workspace and path. Worktree rescue and archive
 do not yet carry them, so rescued or renamed handoffs conservatively require
 review.
 
-### Current integration limit
+### Content policy for unknown-origin drafts
 
-This is the filing gate and stamp format slice of issue #2451. `handoff draft`
-writes a stamp when a usable receipt key exists. It records the detected harness
-and host, but records session kind and tool status as unknown. A Brigade run id
-can mark a draft as worker, which also requires review. There is no draft flag
-that can declare an interactive or clean session.
+When card promotion is enabled, ingest evaluates verified unknown-origin drafts
+for card filing. A `create-card` draft needs a free destination name. An
+`update-card` draft needs an `Expected card SHA256` that matches the current
+card. Ingest repeats the destination check under the publication lock.
 
-Claude and Codex hooks do not yet supply complete session-kind and tool-use
-observations to this API. Until that observer integration lands, normal drafts
-require review, including drafts from interactive sessions. Trusted harness
-integration can use the API with observed values. A verified clean interactive
-stamp preserves the existing opt-in filing behavior and all content checks.
+Both content scans cover the whole draft and evaluate each section separately.
+Drafts use LF or CRLF line endings. The final card must fit the
+workspace's `max_card_bytes` limit, which defaults to 12,000 bytes. Ingest
+writes `trust: agent-unreviewed` and an `auto_filed` date, replacing any trust,
+authorship, or pinning metadata from the draft. It computes the card fingerprint
+from the filed content. The card enters the memory
+review queue and follows the usual lifecycle policy.
+
+Document actions and drafts that fail a check go to the review inbox with a
+reason. Worker drafts go to the inbox with `origin-review-required`. If ingest
+cannot read or parse a draft, it writes a review note and leaves the original
+in the writer inbox. Interactive filing and approved re-apply follow their
+existing rules.
+
+Before filing, ingest saves the card's previous bytes or records that the card
+was absent. The journal records `decision: content-policy` and preserves the
+draft's origin metadata as recorded. A transient publication failure after the
+claim leaves the draft in review. A busy publication lock leaves the draft
+pending for the next ingest run.
 
 ### Threat model
 

@@ -18,6 +18,11 @@ LEDGER_REL = ".brigade/memory-care/inbox-ledger.jsonl"
 HUMAN_CODES = frozenset(
     {
         "origin-review-required",
+        "handoff-unreadable",
+        "invalid-encoding",
+        "invalid-content",
+        "content-policy-error",
+        "handoff-content-signal",
         "handoff-too-large",
         "preference-replacement-review",
         "card-injection-signal",
@@ -62,6 +67,11 @@ HOLD_CODES = frozenset(
         "card-frontmatter-invalid",
         "card-fence-error",
         "unknown-sections",
+        "handoff-line-boundary",
+        "card-name-occupied",
+        "expected-sha-required",
+        "card-budget-exceeded",
+        "duplicate-card-content",
         "expected-sha-invalid",
         "missing-action",
         "document-has-headings",
@@ -80,6 +90,11 @@ EXPIRE_CODES: frozenset[str] = frozenset()  # No ingest code proves that unappli
 # Per-code dependence on usable evidence-log proof, separate from destination reads.
 NEEDS_EVIDENCE_PROOF: dict[str, bool] = {
     "origin-review-required": False,
+    "handoff-unreadable": False,
+    "invalid-encoding": False,
+    "invalid-content": False,
+    "content-policy-error": False,
+    "handoff-content-signal": False,
     "handoff-too-large": False,
     "action-not-auto-handled": False,
     "bootstrap-budget-exceeded": False,
@@ -104,6 +119,11 @@ NEEDS_EVIDENCE_PROOF: dict[str, bool] = {
     "document-injection-signal": False,
     "document-routed-to-card": False,
     "empty-document-content": False,
+    "handoff-line-boundary": False,
+    "card-name-occupied": False,
+    "expected-sha-required": False,
+    "card-budget-exceeded": False,
+    "duplicate-card-content": False,
     "expected-sha-invalid": False,
     "expected-sha-mismatch": False,
     "expected-sha-stale": False,
@@ -166,6 +186,8 @@ def classify(code: str | None, text: str, table: dict[str, tuple[str, bool]] | N
         return "resolve"
     if code in RETRY_CODES:
         return "retry"
+    if code in HOLD_CODES:
+        return "hold"
     if table and code in table:
         return table[code][0]
     return "expire" if code in EXPIRE_CODES else "hold"
