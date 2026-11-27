@@ -18,6 +18,9 @@ LEDGER_PATH = "outcome-ledger/skills.json"
 LEDGER_SKILL_PREFIX = "src/brigade/templates/skills/"
 # Bot user ID of the brigadestack-ledger-writer GitHub App (App ID 5941791).
 LEDGER_WRITER_BOT_ID = 361688843
+# The ledger writer restore rule below relies on the required ledger-recompute job in ci-gate,
+# which re-derives the ledger from trusted main and checks every restored file and derived
+# snapshot byte for byte. Keep that job required while this rule exists.
 
 PROTECTED_PATTERNS = (
     ".content-guard-baseline.json",
@@ -186,6 +189,11 @@ def paginated_entries(endpoint: str) -> list[object]:
     return [entry for page in pages for entry in page]
 
 
+def is_plain_path(path: str) -> bool:
+    """True for a repository-relative path with no empty, current or parent components."""
+    return "\\" not in path and all(part not in ("", ".", "..") for part in path.split("/"))
+
+
 def is_ledger_writer(actor: object) -> bool:
     actor_id = object_field(actor, "id")
     return type(actor_id) is int and actor_id == LEDGER_WRITER_BOT_ID and object_field(actor, "type") == "Bot"
@@ -219,6 +227,7 @@ def read_pull_details(endpoint: str, base_ref: str, event: PullEvent | None) -> 
         and is_ledger_writer(pull.get("user"))
         and head.get("ref") == "ledger/auto"
         and object_field(head.get("repo"), "full_name") == event.repo
+        and event.base == event.default_branch
     )
     return (head_sha, base_sha, pull["changed_files"]), scheduled_restore
 
@@ -515,7 +524,8 @@ def main(argv: list[str] | None = None) -> int:
         and LEDGER_PATH in paths
         and ROLLBACK_DERIVED_PATHS.issuperset(matches)
         and all(
-            path == LEDGER_PATH or path in ROLLBACK_DERIVED_PATHS or path.startswith(LEDGER_SKILL_PREFIX)
+            is_plain_path(path)
+            and (path == LEDGER_PATH or path in ROLLBACK_DERIVED_PATHS or path.startswith(LEDGER_SKILL_PREFIX))
             for path in paths
         )
     ):

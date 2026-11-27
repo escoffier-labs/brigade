@@ -248,6 +248,11 @@ def test_scheduled_ledger_restore_passes_without_a_label(scheduled_restore, acti
         ({"head_repo": None}, 1),
         ({"status": None}, 1),
         ({"paths": (LEDGER, SNAPSHOT, SNAPSHOT)}, 1),
+        ({"status": "copied"}, 1),
+        ({"paths": (LEDGER, SNAPSHOT, "src/brigade/templates/skills/../../../scripts/workflow_guard.py")}, 1),
+        ({"paths": (LEDGER, SNAPSHOT, "src/brigade/templates/skills/./example/SKILL.md")}, 1),
+        ({"paths": (LEDGER, SNAPSHOT, "src/brigade/templates/skills//example/SKILL.md")}, 1),
+        ({"paths": (LEDGER, SNAPSHOT, "src/brigade/templates/skills/example\\SKILL.md")}, 1),
         ({"changed_files": 4}, 2),
         ({"fail": True}, 2),
     ],
@@ -255,6 +260,53 @@ def test_scheduled_ledger_restore_passes_without_a_label(scheduled_restore, acti
 def test_workflow_guard_checks_scheduled_ledger_restore_requirements(scheduled_restore, details, result):
     scheduled_restore(**details)
     assert workflow_guard.main(CLI_ARGS) == result
+
+
+def test_scheduled_ledger_restore_requires_the_default_branch_base(scheduled_restore, pull_request_event, fake_gh):
+    scheduled_restore()
+    pull_request_event(action="opened", sender={"id": 123, "type": "Bot"}, label=None, base="release/0.32")
+    fake_gh(
+        [[{"filename": path, "status": "modified"} for path in (LEDGER, SKILL, SNAPSHOT)]],
+        bases=("release/0.32", "release/0.32", "release/0.32"),
+        pull_identity={
+            "user": {"id": 123, "type": "Bot"},
+            "head": {"sha": HEAD, "ref": "ledger/auto", "repo": {"full_name": "example/project"}},
+        },
+    )
+    assert workflow_guard.main(CLI_ARGS) == 1
+
+
+def test_scheduled_ledger_restore_checks_both_sides_of_a_rename(scheduled_restore, pull_request_event, fake_gh):
+    scheduled_restore()
+    fake_gh(
+        [
+            [
+                {"filename": LEDGER, "status": "modified"},
+                {"filename": SNAPSHOT, "status": "modified"},
+                {"filename": SKILL, "status": "renamed", "previous_filename": "scripts/workflow_guard.py"},
+            ]
+        ],
+        pull_identity={
+            "user": {"id": 123, "type": "Bot"},
+            "head": {"sha": HEAD, "ref": "ledger/auto", "repo": {"full_name": "example/project"}},
+        },
+    )
+    assert workflow_guard.main(CLI_ARGS) == 1
+
+
+@pytest.mark.parametrize(
+    ("path", "plain"),
+    [
+        (SKILL, True),
+        ("src/brigade/templates/skills/../x", False),
+        ("./src/brigade/templates/skills/x", False),
+        ("src/brigade/templates/skills//x", False),
+        ("/src/brigade/templates/skills/x", False),
+        ("src/brigade/templates/skills/x\\y", False),
+    ],
+)
+def test_scheduled_ledger_restore_paths_must_be_plain(path, plain):
+    assert workflow_guard.is_plain_path(path) is plain
 
 
 def test_scheduled_ledger_restore_uses_the_ledger_derived_paths():
