@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import shlex
 import sys
 
 import pytest
 
-from brigade import work_cmd
 from brigade.repos_cmd import fleet
 from brigade.work_cmd import config, constants, verification
 
@@ -13,8 +13,172 @@ from brigade.work_cmd import config, constants, verification
 def policy_name(monkeypatch):
     name = "policy-tool"
     monkeypatch.setattr(constants, "SCANNER_HIGH_RISK_COMMANDS", {name})
-    monkeypatch.setattr(work_cmd, "SCANNER_HIGH_RISK_COMMANDS", {name})
     return name
+
+
+@pytest.fixture(params=["scanner", "review", "verify-command", "verify-argv", "fleet-command", "fleet-argv"])
+def policy_entry(request, tmp_path):
+    entry = request.param
+
+    def parse(argv):
+        command = shlex.join(argv)
+        if entry == "scanner":
+            return config._scanner_argv(command)
+        if entry == "review":
+            return config._review_argv(argv)
+        if entry == "verify-command":
+            result, _, reason = verification._verify_parse_command(command, tmp_path)
+            return result, reason
+        if entry == "verify-argv":
+            result, _, reason = verification._verify_parse_argv(argv, tmp_path)
+            return result, reason
+        raw = {"command": command} if entry == "fleet-command" else {"argv": argv}
+        return fleet._health_command_from_raw(raw, "demo", 1)
+
+    kind = "verification" if entry.startswith("verify-") else "scanner"
+    return parse, kind
+
+
+def test_policy_checks_arguments(policy_entry, monkeypatch):
+    argv = ["brigade", "--format", "sample", "report"]
+    observed = []
+
+    def check_policy(parts):
+        observed.append(parts)
+        return "policy-tool"
+
+    monkeypatch.setattr(constants, "policy_blocked_name", check_policy, raising=False)
+    parse, kind = policy_entry
+    result, reason = parse(argv)
+
+    assert observed == [argv]
+    assert result is None
+    assert reason is not None
+    assert f"high-risk {kind} command: policy-tool" in reason
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--format", "sample", "policy-tool"],
+        ["--name=Policy-Tool.EXE"],
+        ["-X/tools/POLICY-TOOL"],
+        ['"C:\\Program Files\\Policy-Tool.EXE" sample'],
+        ["fixture-wrapper", "--format", "sample", "policy-tool.exe"],
+        ["fixture-runner", "run", "policy-tool", "sample"],
+        ["fixture-runner run policy-tool sample"],
+    ],
+    ids=["plain", "named", "short", "quoted", "multiple", "flat-runner", "embedded-runner"],
+)
+def test_policy_matches_launcher_arguments(arguments, policy_entry, policy_name, monkeypatch):
+    monkeypatch.setattr(constants, "_POLICY_LAUNCHERS", {"fixture-wrapper", "fixture-runner"})
+    monkeypatch.setattr(constants, "_POLICY_LAUNCHER_SUBCOMMANDS", {"fixture-runner": {"run"}})
+    parse, kind = policy_entry
+    result, reason = parse(["Fixture-Wrapper.EXE", *arguments])
+
+    assert result is None
+    assert reason is not None
+    assert f"high-risk {kind} command: {policy_name}" in reason
+
+
+@pytest.mark.parametrize(("subcommand", "blocked"), [("run", True), ("inspect", False)])
+def test_policy_uses_launcher_subcommands(subcommand, blocked, policy_entry, policy_name, monkeypatch):
+    monkeypatch.setattr(constants, "_POLICY_LAUNCHERS", {"fixture-runner"})
+    monkeypatch.setattr(constants, "_POLICY_LAUNCHER_SUBCOMMANDS", {"fixture-runner": {"run"}})
+    monkeypatch.setattr(config.shutil, "which", lambda executable, *, path=None: executable)
+    parse, kind = policy_entry
+    result, reason = parse(["fixture-runner", subcommand, policy_name])
+
+    if blocked:
+        assert result is None
+        assert reason is not None
+        assert f"high-risk {kind} command: {policy_name}" in reason
+    else:
+        assert result is not None
+        assert reason is None
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--quiet", "run", "policy-tool", "sample"],
+        ["--style", "sample", "run", "--", "policy-tool"],
+        ["x", "policy-tool", "sample"],
+        ["tool", "run", "policy-tool", "sample"],
+    ],
+    ids=["option", "value", "alias", "qualified"],
+)
+def test_policy_matches_runner_arguments(arguments, policy_entry, policy_name, monkeypatch):
+    runner = "fixture-runner"
+    aliases = constants._POLICY_LAUNCHER_SUBCOMMANDS["npm"]
+    monkeypatch.setattr(constants, "_POLICY_LAUNCHERS", {runner})
+    monkeypatch.setattr(constants, "_POLICY_LAUNCHER_SUBCOMMANDS", {runner: {*aliases, "run"}})
+    parse, kind = policy_entry
+    result, reason = parse([runner, *arguments])
+
+    assert result is None
+    assert reason is not None
+    assert f"high-risk {kind} command: {policy_name}" in reason
+
+
+@pytest.mark.parametrize(
+    ("argument", "expected"),
+    [
+        ("--sample=MODE=demo policy-tool record", "policy-tool"),
+        ("-abcPolicy-Tool.EXE record", "policy-tool"),
+        ("demo policy-tool record", "policy-tool"),
+        ('--sample=record"note', "fixture-wrapper"),
+    ],
+    ids=["named", "short", "words", "invalid"],
+)
+def test_policy_matches_launcher_input(argument, expected, policy_entry, policy_name, monkeypatch):
+    launcher = "fixture-wrapper"
+    monkeypatch.setattr(constants, "_POLICY_LAUNCHERS", {launcher})
+    parse, kind = policy_entry
+    result, reason = parse([launcher, argument])
+
+    assert result is None
+    assert reason is not None
+    assert f"high-risk {kind} command: {expected}" in reason
+
+
+@pytest.mark.parametrize(
+    ("argv", "listed_name"),
+    [
+        (["pytest", "-k", "policy-tool"], "policy-tool"),
+        (["rg", "policy-tool", "sample"], "policy-tool"),
+        (["rg", "--type", "policy-tool", "sample"], "policy-tool"),
+        (["go", "test", "./cmd"], "cmd"),
+        (["brigade", "--name=/tools/policy-tool"], "policy-tool"),
+    ],
+    ids=["test-filter", "search-pattern", "file-type", "package-path", "named-value"],
+)
+def test_policy_accepts_arguments_for_other_commands(argv, listed_name, policy_entry, monkeypatch):
+    monkeypatch.setattr(constants, "SCANNER_HIGH_RISK_COMMANDS", {listed_name})
+    monkeypatch.setattr(config.shutil, "which", lambda executable, *, path=None: executable)
+    parse, _ = policy_entry
+    result, reason = parse(argv)
+
+    assert result is not None
+    assert reason is None
+
+
+@pytest.mark.parametrize("depth", [1, 2, 3, 4, 5])
+def test_policy_checks_nested_arguments(depth, policy_name, monkeypatch):
+    launcher = "fixture-wrapper"
+    monkeypatch.setattr(constants, "_POLICY_LAUNCHERS", {launcher})
+    target = policy_name if depth <= 3 else "fixture-report"
+    argv = [launcher, target, "sample"]
+    for _ in range(depth):
+        argv = [launcher, shlex.join(argv)]
+
+    expected = policy_name if depth <= 3 else None if depth == 4 else launcher
+    assert constants.policy_blocked_name(argv) == expected
+
+
+def test_fleet_refuses_empty_health_argv():
+    with pytest.raises(IndexError):
+        fleet._health_command_from_raw({"argv": []}, "demo", 1)
 
 
 @pytest.mark.parametrize(
@@ -43,22 +207,9 @@ def policy_name(monkeypatch):
         "policy-tool.exe::$DATA",
     ],
 )
-@pytest.mark.parametrize("entry", ["scanner", "review", "verify-command", "verify-argv", "fleet-command", "fleet-argv"])
-def test_policy_matches_normalized_names(spelling, entry, policy_name, tmp_path):
-    command = f"'{spelling}'"
-    if entry == "scanner":
-        result, reason = config._scanner_argv(command)
-    elif entry == "review":
-        result, reason = config._review_argv([spelling])
-    elif entry == "verify-command":
-        result, _, reason = verification._verify_parse_command(command, tmp_path)
-    elif entry == "verify-argv":
-        result, _, reason = verification._verify_parse_argv([spelling], tmp_path)
-    else:
-        raw = {"command": command} if entry == "fleet-command" else {"argv": [spelling]}
-        result, reason = fleet._health_command_from_raw(raw, "demo", 1)
-
-    kind = "verification" if entry.startswith("verify-") else "scanner"
+def test_policy_matches_normalized_names(spelling, policy_entry, policy_name):
+    parse, kind = policy_entry
+    result, reason = parse([spelling])
     assert result is None
     assert reason is not None
     assert f"high-risk {kind} command: {policy_name}" in reason

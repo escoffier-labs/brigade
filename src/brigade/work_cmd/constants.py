@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import ntpath
 import re
+import shlex
+from collections.abc import Iterator
 from pathlib import PurePosixPath
 
 
@@ -234,6 +236,50 @@ SCANNER_HIGH_RISK_COMMANDS = {
     "zsh",
 }
 
+_POLICY_LAUNCHER_SUBCOMMANDS = {
+    "conda": {"run"},
+    "direnv": {"exec"},
+    "hatch": {"run"},
+    "mise": {"exec"},
+    "npm": {"exec", "x"},
+    "pdm": {"run"},
+    "pipx": {"run"},
+    "pnpm": {"dlx", "exec"},
+    "poetry": {"run"},
+    "uv": {"run"},
+    "yarn": {"dlx", "exec"},
+}
+
+_POLICY_LAUNCHERS = {
+    "chroot",
+    "chrt",
+    "doas",
+    "env",
+    "flock",
+    "ionice",
+    "nice",
+    "nohup",
+    "npx",
+    "nsenter",
+    "runuser",
+    "script",
+    "setsid",
+    "stdbuf",
+    "sudo",
+    "taskset",
+    "time",
+    "timeout",
+    "unshare",
+    "uvx",
+    "xargs",
+    *_POLICY_LAUNCHER_SUBCOMMANDS,
+}
+
+_POLICY_FIRST_WORD_RE = re.compile(r"""^\s*("[^"]*"|'[^']*'|\S+)(?=\s|$)""")
+_POLICY_SPLIT_VALUE_RE = re.compile(r"""[\s"']""")
+_POLICY_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_POLICY_MAX_EMBEDDED_DEPTH = 4
+
 # Use the standard Windows PATHEXT suffixes for consistent policy matching on every host.
 _POLICY_EXECUTABLE_SUFFIXES = {".com", ".exe", ".bat", ".cmd", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".msc"}
 
@@ -245,6 +291,66 @@ def normalize_policy_executable(argv0: str) -> str:
     name = basename.partition(":")[0].rstrip(". ").casefold()
     stem, dot, suffix = name.rpartition(".")
     return stem if dot + suffix in _POLICY_EXECUTABLE_SUFFIXES else name
+
+
+def _policy_launcher_values(argument: str) -> Iterator[str]:
+    yield argument
+    _, equals, value = argument.partition("=")
+    if equals:
+        yield value
+    if argument.startswith("-") and not argument.startswith("--"):
+        for index, option in enumerate(argument[1:-1], start=2):
+            if not option.isascii() or not option.isalnum():
+                break
+            yield argument[index:]
+
+
+def policy_blocked_name(argv: list[str]) -> str | None:
+    """Return the first listed name identified by the command policy."""
+    if not argv:
+        return None
+    executable = normalize_policy_executable(argv[0])
+    if executable in SCANNER_HIGH_RISK_COMMANDS:
+        return executable
+    if executable not in _POLICY_LAUNCHERS:
+        return None
+
+    subcommands = _POLICY_LAUNCHER_SUBCOMMANDS.get(executable)
+    argument_start = 1
+    if subcommands is not None:
+        argument_start = next((after for after, arg in enumerate(argv[1:], start=2) if arg in subcommands), len(argv))
+    return _policy_blocked_arguments(argv[argument_start:], launcher=executable, depth=0)
+
+
+def _policy_blocked_arguments(arguments: list[str], *, launcher: str, depth: int) -> str | None:
+    for argument in arguments:
+        for value in _policy_launcher_values(argument):
+            name = _policy_blocked_value(value, launcher=launcher, depth=depth)
+            if name is not None:
+                return name
+    return None
+
+
+def _policy_blocked_value(value: str, *, launcher: str, depth: int) -> str | None:
+    name = normalize_policy_executable(value.strip("\"'"))
+    if name in SCANNER_HIGH_RISK_COMMANDS:
+        return name
+
+    first_word = _POLICY_FIRST_WORD_RE.match(value)
+    if first_word is not None and first_word[1] != value and not _POLICY_ASSIGNMENT_RE.match(first_word[1]):
+        name = normalize_policy_executable(first_word[1].strip("\"'"))
+        if name in SCANNER_HIGH_RISK_COMMANDS:
+            return name
+    if not _POLICY_SPLIT_VALUE_RE.search(value):
+        return None
+    if depth >= _POLICY_MAX_EMBEDDED_DEPTH:
+        return launcher
+    try:
+        words = shlex.split(value)
+    except ValueError:
+        return launcher
+    start = next((index for index, word in enumerate(words) if not _POLICY_ASSIGNMENT_RE.match(word)), len(words))
+    return _policy_blocked_arguments(words[start:], launcher=launcher, depth=depth + 1)
 
 
 SCANNER_SHELL_META_RE = re.compile(r"[;&|`<>]|\$\(")

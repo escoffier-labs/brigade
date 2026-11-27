@@ -1,0 +1,1 @@
+- Apply the command policy to programs started by launchers in scanners, reviewers, verification, and fleet health checks.
