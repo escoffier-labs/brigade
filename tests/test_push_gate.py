@@ -20,6 +20,7 @@ from brigade import doctor
 from brigade.cli import main
 from brigade.work_cmd import push_gate, push_gate_hook, verify_push
 
+from tests._home import set_home
 from tests.test_pre_push_hook import HELPER_TIMEOUT_SECONDS, _hook_shell
 from tests.test_verify_push import (
     CHECK_ENV_NAMES,
@@ -1461,7 +1462,7 @@ _V1_BLOCK = b"# BEGIN Brigade push gate v1\nbrigade work verify push-gate run ||
 
 @pytest.fixture
 def custom_hook(push_repo, monkeypatch):
-    monkeypatch.setenv("HOME", str(push_repo))
+    set_home(monkeypatch, push_repo)
     global_config = push_repo / "global config"
     global_config.write_bytes(b"[user]\n\tname = Test\n")
     monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
