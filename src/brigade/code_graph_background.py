@@ -8,11 +8,12 @@ import sqlite3
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from contextlib import closing, suppress
 from pathlib import Path
 from tempfile import TemporaryFile, gettempdir
 from threading import Thread
-from typing import IO, Any
+from typing import IO, Any, Literal
 
 from . import component_bins, engine_paths, inbox_lock, localio, nt_process, proc, proc_group, runguard
 
@@ -30,21 +31,31 @@ _WORKER = (
 )
 
 
-def may_run_killable_foreground_sync(binary: str | None = None) -> bool:
+_WINDOWS_LOCK_FIX_RELEASE = (0, 32, 1)  # PR #2963
+WindowsForegroundSync = Literal["enabled", "deferred_engine_older", "deferred_engine_unknown", "deferred_override"]
+
+
+def windows_foreground_sync(
+    binary: str | None, *, env: Mapping[str, str] | None = None
+) -> WindowsForegroundSync | None:
+    """Classify a selected executable on Windows. Other hosts need no install metadata."""
     if sys.platform != "win32":
-        return True
-    if not binary or (release := component_bins.managed_release("brigade-code-graph", binary)) is None:
-        return False
+        return None
+    name = "brigade-code-graph"
+    if component_bins.has_explicit_override(name, env=env):
+        return "deferred_override"
+    if not binary or (release := component_bins.managed_release(name, binary, env=env)) is None:
+        return "deferred_engine_unknown"
     from .component_install import release_version_tuple
 
-    # PR #2963 first shipped in v0.32.1. The parser drops pre-release
-    # qualifiers, so require the final tag (optionally with build metadata)
-    # when the release segments match the floor.
     version = release_version_tuple(release)
-    floor = (0, 32, 1)
-    return version is not None and (
-        version > floor or (version == floor and release.partition("+")[0].lower().removeprefix("v") == "0.32.1")
-    )
+    if version is None:
+        return "deferred_engine_unknown"
+    return "enabled" if version >= _WINDOWS_LOCK_FIX_RELEASE else "deferred_engine_older"
+
+
+def may_run_killable_foreground_sync(binary: str | None = None) -> bool:
+    return windows_foreground_sync(binary) in (None, "enabled")
 
 
 def run_windows_sync(argv: list[str], *, timeout: float, cwd: Path | None = None) -> proc.Result:

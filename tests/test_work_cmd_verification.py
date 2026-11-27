@@ -2721,7 +2721,9 @@ def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline
     real_run = code_graph_delta._run_graphtrail
     sync_calls = {"count": 0}
 
-    def timeout_first_sync(binary, db_path, command, *extra, timeout, json_output=False, stage=None, cwd=None):
+    def timeout_first_sync(
+        binary, db_path, command, *extra, timeout, json_output=False, stage=None, cwd=None, **kwargs
+    ):
         if command == "sync":
             sync_calls["count"] += 1
             if sync_calls["count"] == 1:
@@ -2744,6 +2746,7 @@ def test_work_verify_graphtrail_delta_preexisting_db_timeout_uses_stale_baseline
             json_output=json_output,
             stage=stage,
             cwd=cwd,
+            **kwargs,
         )
 
     if active_refresh or raced:

@@ -1524,26 +1524,6 @@ jobs:
           $python = Join-Path $venv "Scripts/python.exe"
           & $python -m pip install -e ".[dev]"
           if ($LASTEXITCODE -ne 0) { throw "containment test install failed" }
-      - name: Run native Windows process containment
-        shell: pwsh
-        run: |
-          $python = Join-Path $env:RUNNER_TEMP "containment-venv/Scripts/python.exe"
-          @'
-          import os
-          import sys
-          import pytest
-          assert os.name == "nt", "native Windows runner required"
-          class NoNativeSkips:
-              skipped = False
-              def pytest_runtest_logreport(self, report):
-                  self.skipped |= report.skipped
-              def pytest_collectreport(self, report):
-                  self.skipped |= report.skipped
-          guard = NoNativeSkips()
-          result = pytest.main(["-q", "-ra", "-o", "addopts=", "tests/test_windows_job.py::TestNativeContainment", "tests/test_proc.py::test_windows_job_reaps_live_descendant_after_leader_exit", "tests/test_skills_state_windows.py", "tests/test_claude_hooks_state_containment.py", "tests/test_dirfd.py::test_fsync_directory_accepts_native_windows_directory_handles", "tests/test_fleet_claim_loss_cancellation.py::test_native_windows_claim_loss_stops_silent_worker", "tests/test_nt_private_storage.py::TestNativePrivateStorage"], plugins=[guard])
-          sys.exit(1 if guard.skipped else int(result))
-          '@ | & $python -
-          if ($LASTEXITCODE -ne 0) { throw "native containment failed or skipped" }
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
@@ -1573,6 +1553,28 @@ jobs:
           go build -trimpath -o "$env:GITHUB_WORKSPACE/engine-bin/brigade-evidence.exe" ./cmd/brigade-evidence
           if ($LASTEXITCODE -ne 0) { throw "brigade-evidence build failed" }
           Pop-Location
+      - name: Run native Windows process containment
+        shell: pwsh
+        env:
+          BRIGADE_TEST_WINDOWS_GRAPH_ENGINE: ${{ github.workspace }}/engine-bin/brigade-code-graph.exe
+        run: |
+          $python = Join-Path $env:RUNNER_TEMP "containment-venv/Scripts/python.exe"
+          @'
+          import os
+          import sys
+          import pytest
+          assert os.name == "nt", "native Windows runner required"
+          class NoNativeSkips:
+              skipped = False
+              def pytest_runtest_logreport(self, report):
+                  self.skipped |= report.skipped
+              def pytest_collectreport(self, report):
+                  self.skipped |= report.skipped
+          guard = NoNativeSkips()
+          result = pytest.main(["-q", "-ra", "-o", "addopts=", "tests/test_windows_job.py::TestNativeContainment", "tests/test_proc.py::test_windows_job_reaps_live_descendant_after_leader_exit", "tests/test_skills_state_windows.py", "tests/test_claude_hooks_state_containment.py", "tests/test_dirfd.py::test_fsync_directory_accepts_native_windows_directory_handles", "tests/test_fleet_claim_loss_cancellation.py::test_native_windows_claim_loss_stops_silent_worker", "tests/test_nt_private_storage.py::TestNativePrivateStorage", "tests/test_proc.py::test_windows_verify_reaps_a_managed_graph_writer"], plugins=[guard])
+          sys.exit(1 if guard.skipped else int(result))
+          '@ | & $python -
+          if ($LASTEXITCODE -ne 0) { throw "native containment failed or skipped" }
       - name: Run Windows native acceptance (source install)
         shell: powershell
         run: |

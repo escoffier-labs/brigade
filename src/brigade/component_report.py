@@ -6,13 +6,14 @@ import ntpath
 import os
 import re
 import shutil
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
 import brigade
-from brigade import component_install, component_manifest, component_paths, component_state, localio
+from brigade import component_bins, component_install, component_manifest, component_paths, component_state, localio
 from brigade.component_release_pins import release_asset_pin
 from brigade.receipts_import_contract import MIN_EVIDENCE_ACK_RELEASE
 
@@ -308,7 +309,7 @@ def doctor_checks(
     from .doctor import FAIL, INFO
 
     report = inspect_components(env=env, system=system, manifest_path=manifest_path)
-    checks: list[tuple[str, str, str]] = []
+    checks = _windows_foreground_check(env, system)
     if report.manifest_schema_version is None:
         checks.append((FAIL, "components: manifest", report.platform_error or "manifest could not be loaded"))
         return checks
@@ -330,11 +331,28 @@ def outdated_doctor_checks(
     from .doctor import WARN
 
     report = inspect_components(env=env, system=system, verify_bytes=False)
-    return [
+    return _windows_foreground_check(env, system) + [
         (WARN, f"components: {component.component_id}", _doctor_detail(component))
         for component in report.components
         if component.outdated
     ]
+
+
+def _windows_foreground_check(env: Mapping[str, str] | None, system: str | None) -> list[tuple[str, str, str]]:
+    if sys.platform != "win32" or (system is not None and system.lower() != "windows"):
+        return []
+    from . import code_graph_background
+    from .doctor import INFO, WINDOWS_FOREGROUND_SYNC_CHECK
+
+    binary = component_bins.resolve("brigade-code-graph", env=env)
+    policy = code_graph_background.windows_foreground_sync(binary, env=env)
+    descriptions = {
+        "enabled": "enabled",
+        "deferred_engine_older": "deferred because the managed engine predates the writer lock fix",
+        "deferred_engine_unknown": "deferred because the managed engine release could not be verified",
+        "deferred_override": "deferred because an executable override is configured",
+    }
+    return [(INFO, WINDOWS_FOREGROUND_SYNC_CHECK, descriptions[policy])] if policy else []
 
 
 def render_text(report: ComponentReport) -> str:

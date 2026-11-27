@@ -28,7 +28,7 @@ def _patch_engine(monkeypatch, *, run_calls: list | None = None, stderr: str = "
         return proc.Result(0, stdout, stderr)
 
     monkeypatch.setattr(context_cmd, "_graphtrail_bin", lambda: "/fake/graphtrail")
-    monkeypatch.setattr(code_graph_background, "may_run_killable_foreground_sync", lambda: True)
+    monkeypatch.setattr(code_graph_background, "may_run_killable_foreground_sync", lambda *args: True)
     monkeypatch.setattr(proc, "run", fake_run)
 
 

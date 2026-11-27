@@ -21,8 +21,10 @@ name that depends on the spawning environment's PATH.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 from collections.abc import Mapping
+from functools import lru_cache
 from pathlib import Path
 
 from . import component_manifest, component_paths, component_state, engine_deprecation, localio
@@ -70,13 +72,9 @@ def _expand_home(value: str, environment: Mapping[str, str]) -> Path:
 
 
 def _managed_record(
-    name: str, env: Mapping[str, str] | None
+    name: str, state_path: Path
 ) -> tuple[component_state.InstalledState, component_state.InstalledComponentRecord] | None:
-    try:
-        data_root = component_paths.data_root(env=env)
-    except ValueError:
-        return None
-    state = component_state.load_installed_state(Path(component_paths.installed_state_path(data_root)))
+    state = component_state.load_installed_state(state_path)
     if state is None:
         return None
     key = component_manifest.wire_id(state.components, name)
@@ -86,7 +84,11 @@ def _managed_record(
 
 def managed_path(name: str, *, env: Mapping[str, str] | None = None) -> str | None:
     """Return the installed.json executable for ``name`` when present on disk."""
-    entry = _managed_record(name, env)
+    try:
+        state_path = _installed_state_path(env)
+    except ValueError:
+        return None
+    entry = _managed_record(name, state_path)
     if entry is None:
         return None
     _, record = entry
@@ -104,26 +106,63 @@ def _override_values(names: tuple[str, ...], environment: Mapping[str, str]) -> 
     ]
 
 
-def managed_release(name: str, binary: str) -> str | None:
-    """Return the recorded release only for a matching managed executable."""
-    if _override_values(component_manifest.family_names(name), os.environ):
-        return None
-    entry = _managed_record(name, None)
+def has_explicit_override(name: str, *, env: Mapping[str, str] | None = None) -> bool:
+    environment = os.environ if env is None else env
+    return any(value.strip() for value in _override_values(component_manifest.family_names(name), environment))
+
+
+def _installed_state_path(env: Mapping[str, str] | None) -> Path:
+    return Path(component_paths.installed_state_path(component_paths.data_root(env=env)))
+
+
+def _file_identity(path: Path) -> tuple[int, int, int, int, int]:
+    stat = path.stat()
+    return stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_dev, stat.st_ino
+
+
+# Release installation manifests use the release tag and optional full Git SHA.
+_RELEASE_REVISION = re.compile(r"v(?:0|[1-9][0-9]*)(?:\.(?:0|[1-9][0-9]*)){2}(?:\+[0-9a-f]{40})?")
+
+
+@lru_cache(maxsize=32)
+def _verified_managed_release(
+    name: str,
+    binary: Path,
+    binary_identity: tuple[int, ...],
+    state_path: Path,
+    state_identity: tuple[int, ...],
+) -> str:
+    entry = _managed_record(name, state_path)
     if entry is None:
-        return None
+        raise ValueError("no managed component record")
     state, record = entry
+    if not _RELEASE_REVISION.fullmatch(state.manifest_revision):
+        raise ValueError("not a release manifest revision")
+    if binary != Path(record.executable) or binary_identity[0] != record.byte_size:
+        raise ValueError("binary does not match the managed component record")
+    if localio.file_sha256(binary) != record.sha256:
+        raise ValueError("binary digest does not match the managed component record")
+    if _file_identity(binary) != binary_identity or _file_identity(state_path) != state_identity:
+        raise ValueError("managed component changed during verification")
+    return state.manifest_revision
+
+
+def managed_release(name: str, binary: str, *, env: Mapping[str, str] | None = None) -> str | None:
+    """Return the recorded release only for a matching managed executable."""
+    if has_explicit_override(name, env=env):
+        return None
     executable = Path(binary)
-    if not executable.is_absolute() or executable != Path(record.executable):
+    if not executable.is_absolute():
         return None
     try:
-        if not _is_executable(executable) or executable.stat().st_size != record.byte_size:
+        state_path = _installed_state_path(env)
+        if not _is_executable(executable):
             return None
-        if localio.file_sha256(executable) != record.sha256:
-            return None
-    except (OSError, ValueError):
+        return _verified_managed_release(
+            name, executable, _file_identity(executable), state_path, _file_identity(state_path)
+        )
+    except (OSError, ValueError, RecursionError):
         return None
-    # Published manifests carry the engine tag, even if a newer CLI installed it.
-    return state.manifest_revision
 
 
 def resolve(name: str, *, env: Mapping[str, str] | None = None) -> str | None:

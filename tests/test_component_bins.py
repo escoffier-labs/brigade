@@ -4,17 +4,21 @@ from __future__ import annotations
 
 import json
 import os
-import sqlite3
 import stat
-import subprocess
-import sys
-import time
-from contextlib import closing
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from brigade import code_graph_background, component_bins, engine_paths, proc, work_cmd
+from brigade import (
+    code_graph_background,
+    component_bins,
+    component_paths,
+    component_report,
+    component_state,
+    doctor,
+    localio,
+)
 from tests._home import set_home
 
 _SHA = "0" * 64
@@ -285,58 +289,88 @@ def test_nonrenamed_components_keep_empty_overrides_unset(tmp_path, monkeypatch)
         _assert_path_match(component_bins.resolve_argv([name, "version"])[0], binary)
 
 
-@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows Job Object and delete-on-close lock semantics")
-def test_windows_verify_reaps_a_managed_graph_writer(tmp_path, monkeypatch, capsys):
-    engine = component_bins.resolve("brigade-code-graph")
-    if engine is None or not code_graph_background.may_run_killable_foreground_sync(engine):
-        pytest.skip("requires a managed code graph engine with the v0.32.1 lock fix")
-    monkeypatch.delenv(engine_paths.CODE_GRAPH_DB_ENV, raising=False)
-    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, timeout=10)
-    (tmp_path / ".gitignore").write_text(".brigade/\n", encoding="utf-8")
-    source = tmp_path / "source.py"
-    source.write_text("def first(): pass\n", encoding="utf-8")
-    db = engine_paths.code_graph_db(tmp_path).path
-    db.parent.mkdir(parents=True)
-    argv = [engine, "--db", str(db), "sync"]
-    seeded = proc.run(argv, cwd=tmp_path, timeout=30)
-    assert seeded.code == 0, seeded.stderr
-    source.write_text("def second_function(): pass\n", encoding="utf-8")
-    lock = code_graph_background.engine_lock_path(db)
+def _write_graph_release(binary: Path, env: dict[str, str], revision: str) -> Path:
+    record = component_state.InstalledComponentRecord(
+        "a" * 40,
+        binary.name,
+        binary.stat().st_size,
+        localio.file_sha256(binary),
+        "https://example.invalid/engine",
+        str(binary),
+    )
+    state = component_state.InstalledState(
+        1,
+        "0.99.0",
+        revision,
+        "windows-amd64",
+        "2026-01-01T00:00:00Z",
+        {"brigade-code-graph": record},
+    )
+    path = Path(component_paths.installed_state_path(component_paths.data_root(env=env)))
+    component_state.write_installed_state(path, state)
+    return path
 
-    collect = proc._collect_process_output
-    writers = []
 
-    def observe_writer(process, **kwargs):
-        if process.args == argv:
-            writers.append(process)
-            assert kwargs["child_job"] is not None
-            # Let the real writer acquire its engine lock before the tiny
-            # collection budget begins. The held SQLite writer keeps it busy.
-            deadline = time.monotonic() + 10
-            while not lock.is_file() and process.poll() is None and time.monotonic() < deadline:
-                time.sleep(0.01)
-            assert lock.is_file()
-        return collect(process, **kwargs)
+def test_managed_release_follows_engine_revision_and_caches_verified_bytes(tmp_path, monkeypatch):
+    binary = _write_executable(tmp_path / "engine")
+    env = _env(tmp_path)
+    state = _write_graph_release(binary, env, "v0.32.0+" + "a" * 40)
+    name = "brigade-code-graph"
+    # Blank values supply no override for managed-release attribution.
+    env.update(
+        dict.fromkeys(
+            (component_bins.ENV_OVERRIDES[alias] for alias in component_bins.component_manifest.family_names(name)), ""
+        )
+    )
+    hashes = []
+    real_hash = localio.file_sha256
 
-    verify_options = {
-        "target": tmp_path,
-        "commands": [[sys.executable, "-V"]],
-        "json_output": True,
-        "reuse": False,
-    }
-    with monkeypatch.context() as scoped, closing(sqlite3.connect(db)) as blocker:
-        blocker.execute("BEGIN IMMEDIATE")
-        scoped.setattr(proc, "_collect_process_output", observe_writer)
-        assert work_cmd.verify_run(**verify_options, code_graph_timeout=0.001) == 0
-    receipt = json.loads(capsys.readouterr().out)["code_graph_delta"]
-    assert receipt["commands"]["before_sync"]["timed_out"]
-    assert writers and all(writer.poll() is not None for writer in writers)
-    assert not lock.exists()
-    assert not code_graph_background._lock_path(tmp_path).exists()
+    def record_hash(path):
+        hashes.append(path)
+        return real_hash(path)
 
-    assert work_cmd.verify_run(**verify_options, code_graph_timeout=10.0) == 0
-    receipt = json.loads(capsys.readouterr().out)["code_graph_delta"]
-    assert receipt["commands"]["before_sync"]["returncode"] == 0
-    assert receipt["commands"]["after_sync"]["returncode"] == 0
-    assert not receipt["stale_graph_used"]
-    assert not lock.exists()
+    monkeypatch.setattr(localio, "file_sha256", record_hash)
+    assert component_bins.managed_release(name, str(binary), env=env) == "v0.32.0+" + "a" * 40
+    assert component_bins.managed_release(name, str(binary), env=env) == "v0.32.0+" + "a" * 40
+    assert hashes == [binary]
+    override = {**env, "BRIGADE_CODE_GRAPH_BIN": str(binary)}
+    assert component_bins.managed_release(name, str(binary), env=override) is None
+
+    state_mtime = state.stat().st_mtime_ns
+    state.write_bytes(state.read_bytes().replace(b"v0.32.0", b"v0.32.1"))
+    os.utime(state, ns=(state_mtime, state_mtime + 2_000_000_000))
+    assert component_bins.managed_release(name, str(binary), env=env) == "v0.32.1+" + "a" * 40
+    assert hashes == [binary, binary]
+
+    binary_mtime = binary.stat().st_mtime_ns
+    binary.write_bytes(b"x" * binary.stat().st_size)
+    os.utime(binary, ns=(binary_mtime, binary_mtime + 2_000_000_000))
+    assert component_bins.managed_release(name, str(binary), env=env) is None
+    assert hashes == [binary, binary, binary]
+
+
+@pytest.mark.parametrize(
+    ("revision", "override", "detail"),
+    [
+        ("v0.32.1", False, "enabled"),
+        ("v0.32.0", False, "deferred because the managed engine predates the writer lock fix"),
+        ("2026-07-19", False, "deferred because the managed engine release could not be verified"),
+        ("v0.32.1", True, "deferred because an executable override is configured"),
+    ],
+)
+def test_windows_doctor_explains_foreground_graph_sync(tmp_path, monkeypatch, capsys, revision, override, detail):
+    binary = _write_executable(tmp_path / "engine")
+    env = _env(tmp_path)
+    _write_graph_release(binary, env, revision)
+    if override:
+        env["BRIGADE_CODE_GRAPH_BIN"] = str(binary)
+    platform = SimpleNamespace(platform="win32")
+    monkeypatch.setattr(code_graph_background, "sys", platform)
+    monkeypatch.setattr(component_report, "sys", platform)
+    rows = component_report.outdated_doctor_checks(env=env)
+    assert ("INFO", "Windows foreground graph sync", detail) in rows
+    assert doctor._report(rows, full=False) == 0
+    assert any(
+        "Windows foreground graph sync" in line and line.endswith(detail)
+        for line in capsys.readouterr().out.splitlines()
+    )

@@ -178,7 +178,7 @@ def fake_digest_engine(monkeypatch, tmp_path):
 
     monkeypatch.setattr(code_graph_delta, _ENGINE_PATH_ATTR, lambda: "fake-engine")
     monkeypatch.setattr(code_graph_delta, "_timed_snapshot", snapshot)
-    monkeypatch.setattr(code_graph_background, "may_run_killable_foreground_sync", lambda *args: True)
+    monkeypatch.setattr(code_graph_background, "windows_foreground_sync", lambda *args: None)
     monkeypatch.setattr(code_graph_delta, "sys", SimpleNamespace(platform="linux"))
     monkeypatch.setattr(subprocess, "run", engine)
     monkeypatch.delenv(engine_paths.CODE_GRAPH_DB_ENV, raising=False)
@@ -359,7 +359,7 @@ def test_digest_probes_share_spare_baseline_capture_budget(
 
 
 def test_background_only_graph_capture_does_not_probe_digest(fake_digest_engine, monkeypatch):
-    monkeypatch.setattr(code_graph_background, "may_run_killable_foreground_sync", lambda *args: False)
+    monkeypatch.setattr(code_graph_background, "windows_foreground_sync", lambda *args: "deferred_engine_unknown")
     monkeypatch.setattr(code_graph_background, "status_or_start", lambda *args, **kwargs: None)
     monkeypatch.setattr(code_graph_background, "index_ready", lambda db: True)
     monkeypatch.setattr(code_graph_background, "last_engine_lock_refusal", lambda *args: None)

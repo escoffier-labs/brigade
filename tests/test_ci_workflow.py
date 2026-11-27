@@ -1780,6 +1780,9 @@ def test_native_windows_containment_is_required_and_rejects_selected_skips():
     assert "$LASTEXITCODE -ne 0" in install
     probe = _workflow_step_section(text, "windows-native-acceptance", "Run native Windows process containment")
     assert 'assert os.name == "nt"' in probe
+    assert section.index("Build same-commit native engines") < section.index("Run native Windows process containment")
+    assert "BRIGADE_TEST_WINDOWS_GRAPH_ENGINE:" in probe
+    assert '"tests/test_proc.py::test_windows_verify_reaps_a_managed_graph_writer"' in probe
     assert '"tests/test_windows_job.py::TestNativeContainment"' in probe
     assert '"tests/test_skills_state_windows.py"' in probe
     assert '"tests/test_nt_private_storage.py::TestNativePrivateStorage"' in probe
