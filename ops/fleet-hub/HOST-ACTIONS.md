@@ -22,8 +22,8 @@ Conventions:
   ```
 
   Pick two performance cores for the hub, one for the embedder, and give the
-  agents every other core: 5 performance cores and all 16 efficiency cores on
-  this CPU. `lscpu --extended` shows which logical CPUs are performance cores.
+  agents every other core. `lscpu --extended` shows which logical CPUs are
+  performance cores.
 
 | # | Action | Kind | New package |
 |---|---|---|---|
@@ -320,7 +320,7 @@ Conventions:
 - Installs or changes: a line in `/sys/fs/cgroup/io.cost.qos` for the device
   that holds Docker's data root. It is a runtime kernel setting with no
   package, and it is lost at reboot.
-- Why: both NVMe devices use the `none` scheduler and `io.cost.qos` is empty,
+- Why: the database device uses the `none` scheduler and `io.cost.qos` is empty,
   so no controller enforces `IOWeight` and only the latency target acts. S31
   either shows the weight taking effect under a synthetic agent writer or
   records that only the latency target is in force.

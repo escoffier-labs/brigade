@@ -3331,7 +3331,7 @@ The embedder service:
   loaded beside it.
 
 Reserved CPU, memory and I/O. Agent fan-outs pushed the workstation's load
-average to about 170 on 24 threads on the night of 2026-11-02. Docker's `cpus`
+average to about 170 on the night of 2026-11-02. Docker's `cpus`
 and memory limits are caps, and a cap does not protect the hub from that load.
 The recipe ships a slice example that puts the hub and embedder containers
 under a dedicated systemd slice (compose `cgroup_parent` with the systemd
@@ -3340,9 +3340,9 @@ measure what a production move would get:
 
 | Resource | Hub container | Embedder container | How |
 |---|---|---|---|
-| CPU | 2 performance cores | 1 performance core | `AllowedCPUs` on the hub slice. The workstation's CPU has 8 performance cores and 16 efficiency cores, so agents keep 5 performance cores and all 16 efficiency cores. Agent work runs in user sessions under `user.slice`, an optional separate agent account's included, and in system services (the host model server, the production embedder and the agent session servers), not in a dedicated slice, so the exclusion is `AllowedCPUs` on `user.slice` and on drop-ins for those services. The hub slice sits outside `user.slice`, under rootful Docker. S31 reads `cpuset.cpus.effective` on each slice, never the configured value alone, because a cgroup whose configured set cannot be met falls back to its parent's set without an error. `CPUWeight=10000` on the hub slice as a second guard |
+| CPU | 2 performance cores | 1 performance core | `AllowedCPUs` on the hub slice. Agents use the cores outside those reservations. Agent work runs in user sessions under `user.slice`, an optional separate agent account's included, and in system services (the host model server, the production embedder and the agent session servers), not in a dedicated slice, so the exclusion is `AllowedCPUs` on `user.slice` and on drop-ins for those services. The hub slice sits outside `user.slice`, under rootful Docker. S31 reads `cpuset.cpus.effective` on each slice, never the configured value alone, because a cgroup whose configured set cannot be met falls back to its parent's set without an error. `CPUWeight=10000` on the hub slice as a second guard |
 | Memory | `MemoryMin` 1 GiB, `MemoryMax` 3 GiB | `MemoryMin` 2 GiB, `MemoryMax` 4 GiB | `MemoryMin` is a hard reservation under cgroup v2. A negative OOM score adjustment makes the kernel's OOM killer pick agent processes first |
-| I/O | `IOWeight=1000` and an I/O latency target on the database device | default | Not effective on the workstation as it stands: both NVMe devices use the `none` scheduler and `io.cost.qos` is empty, so no controller enforces weights and only the latency target would act. S31 either configures the cost model for the database device and shows the weight taking effect under a synthetic agent writer, or records that only the latency target is in force |
+| I/O | `IOWeight=1000` and an I/O latency target on the database device | default | The database device uses the `none` scheduler and `io.cost.qos` is empty, so no controller enforces weights and only the latency target would act. S31 either configures the cost model for the database device and shows the weight taking effect under a synthetic agent writer, or records that only the latency target is in force |
 
 The numbers are a starting point. On the reference allotment the hub runs
 everything on one core, and 2 cores give the Rust hub and the Python upstream
@@ -3355,9 +3355,8 @@ slice.
 I/O is the harder resource. A commit at `FULL` on the workstation inherits the
 sync tail in [Why production stays on the LXC hub
 host](#why-production-stays-on-the-lxc-hub-host) unless the hub's I/O is
-protected or its volume sits on a device agent work does not use. No such
-device is in use on the workstation today: Docker's data root is on the first
-NVMe device's system partition, and the home volume spans both NVMe devices.
+protected or its volume sits on a device agent work does not use. The
+dogfood deployment shares storage with agent workloads.
 S6 adds a deployment run on the dogfood hub inside this slice while a
 synthetic fan-out holds the load average near 170. It records `FULL` commit
 p99, claim p99 and wake p99 against the heartbeat, claims and long-poll
@@ -3366,9 +3365,8 @@ records authority-lock residence. A miss does not fail either slice. It keeps
 production where it is: the remedy before any move is a device of the
 volume's own (S32), not a lower `synchronous` level.
 
-The maintainer has spare 1 TB hard disks that could become that device
-through a spare SATA port later. A hard disk isolates the hub from the
-agents' NVMe I/O, so its sync tail stays stable, but its sync median is
+A dedicated hard disk could isolate the hub from the
+agents' I/O, so its sync tail stays stable, but its sync median is
 several milliseconds, against about 1 ms on NVMe. Group commit absorbs that: one
 sync covers a batch, and batches grow with load ([Durability cost with group
 commit](#durability-cost-with-group-commit)). It is a later option, not a
@@ -3521,17 +3519,15 @@ Backups:
   because committed rows can sit in the WAL. Shipping copies to another host
   belongs to S32. The production hub can run `fleet backup` inside its
   container once S31 ships.
-- Where the copies sit. The hub's named volume is under Docker's data root,
-  on the workstation's root filesystem, which had 22 GB free of 98 GB on
-  2026-11-03. Retention there could push the volume under the hub's 1 GiB
-  disk-pressure threshold ([Checkpoints and disk](#checkpoints-and-disk)), so
-  the backup directory is on the home volume, a separate filesystem across
-  both NVMe devices with 426 GB free that day. The production hub file is at
-  most a few GB today: the whole LXC container uses 3.2 GB. S31 records both
+- Where the copies sit. To keep backups from pushing the hub volume under
+  its 1 GiB disk-pressure threshold ([Checkpoints and disk](#checkpoints-and-disk)),
+  use a backup directory on a filesystem separate from the hub volume.
+  The production hub file is at most a few GB today: the whole LXC container
+  uses 3.2 GB. S31 records both
   of the dogfood hub's file sizes and sets retention from them so the
-  directory stays under 10% of the home volume's free space at setup,
+  directory stays under 10% of the backup filesystem's free space at setup,
   keeping fewer hourly copies if 48 do not fit. A copy that would leave that
-  volume under 20 GiB free is not written: the oldest hourly copy goes first,
+  filesystem under 20 GiB free is not written: the oldest hourly copy goes first,
   and the job reports it.
 - The backup directory holds message bodies, card text and the audit log. It
   belongs to the account that runs the compose project, mode 0700, and it is
@@ -4187,8 +4183,8 @@ Q4 from the first draft
 
 ### Hub throughput
 
-Measured 2026-11-01 and 2026-11-02 on a 24-thread desktop-class machine with
-NVMe storage, over loopback, with throwaway databases. No live hub was used.
+Measured 2026-11-01 and 2026-11-02 on a benchmark workstation, over loopback,
+with throwaway databases on NVMe storage. No live hub was used.
 
 Hub, as shipped (one event per request, one connection per request, `FULL`
 because the hub never sets `synchronous`): 220 req/s at 1 client, a peak of
@@ -4207,9 +4203,9 @@ async Python served 10,000 connections, and threaded Python failed past about
 
 ### Durability cost with group commit
 
-Measured 2026-11-03 on the same machine (ext4 on NVMe, SQLite 3.45.1) with
-throwaway databases. The machine was not quiet: load average was about 150 on
-24 threads, and the kernel reported I/O pressure of 17 to 24% from other jobs.
+Measured 2026-11-03 on the same benchmark workstation (ext4 on NVMe,
+SQLite 3.45.1) with throwaway databases. The load average was about 150,
+and the kernel reported I/O pressure of 17 to 24% from other jobs.
 The test is a Python model of the planned writer loop, since the Rust hub does not exist yet.
 Closed-loop clients each submit one command and wait for its reply. One writer
 thread takes up to 256 queued commands per transaction with no linger, and
@@ -4462,7 +4458,7 @@ has been reviewed yet.
 | E-n8 | minor | The front's header handling is never tested, and an SSH session into the front would sit in the hub's namespace | S31 sends a forged identity header through the real front, records what the front does with a client's forwarded-for header, and checks that the front's SSH server is off. `--trust-forwarded-for` takes the last address and ships only on S31's result | Admission and backpressure, Hosting, S31 | Resolved in F | No change |
 | E-n9 | minor | The release gate omits the `request_denied` fix that S26's tests need | It is part of `connectivity-pr` in the waves and the release gate, with the #2221 scan | Interim connectivity, Order and lanes, Release gate | Resolved in F | No change |
 | E-n10 | minor | S1's row still says golden envelopes, and the 184 count was unchecked | S1's row and the sealed-messages section say random bytes of valid lengths, and the count cites the drive's recorded `cases_total` | Sealed messages, Work in flight, S1 | Resolved in F | No change |
-| E-n11 | minor | Backup retention on an unnamed volume could push the hub under its disk-pressure threshold | The backup directory is on the home volume, apart from the root filesystem that holds Docker's data root. Free space on both is recorded, retention is set from measured file sizes, and the copy job keeps a free-space floor | Hosting, S31 | Resolved in F | No change |
+| E-n11 | minor | Backup retention on an unnamed volume could push the hub under its disk-pressure threshold | The backup directory and hub volume use separate filesystems. Free space on both is recorded, retention is set from measured file sizes, and the copy job keeps a free-space floor | Hosting, S31 | Resolved in F | No change |
 | Codex-2 | P2, Codex review of revision 4 | Advancing existing `claim_fences` rows does not fence a target first claimed after the copy, because `generation()` answers 0 for a target with no row and `_advance()` starts it at 1 | A recovery floor in `hub_meta` and generation allocation `max(current, floor) + 1` for every target, with every claim in the copy ended. S7 honors the floor, and S31 tests a target first claimed on a second hub started from the copy | Hosting, S7, S31, Risks | Resolved in F. Revision 6 guards the floor with a `user_version` bump (F-m3) | No change. Revision 7 applies the floor to every lossy restore |
 
 ### Re-check of revision 5
