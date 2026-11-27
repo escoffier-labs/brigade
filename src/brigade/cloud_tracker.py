@@ -30,12 +30,14 @@ PRESERVED_RETENTION_REASONS = ("active", "ambiguous", "orphaned", "needs-investi
 
 DEFAULT_STALE_READY_HOURS = 6
 MISSING_INVENTORY_HOURS = 6
-CLOUD_BRANCH_PREFIXES = ("codex/", "cursor/", "grokbot/", "claude/")
+CLOUD_BRANCH_PREFIXES = ("codex/", "cursor/", "claude/")
 # The work brief's GitHub observation shares this budget across its reads and
 # fits inside the brief's own section deadline.
 BRIEF_GITHUB_BUDGET_SECONDS = 4.0
 TRACKER_PROVIDERS = frozenset({"codex-cloud", "cursor-cloud", "claude-cloud"})
-_REGISTRY_PROVIDERS = TRACKER_PROVIDERS | {"grokbot-cloud"}
+# Legacy provider names remain readable so historical registry rows still render.
+_LEGACY_READ_PROVIDERS = frozenset({"grokbot-cloud"})
+_READABLE_PROVIDERS = TRACKER_PROVIDERS | _LEGACY_READ_PROVIDERS
 
 READY_STATES = frozenset({"ready", "completed", "succeeded", "applied"})
 FAILED_STATES = frozenset({"failed", "errored", "error", "cancelled", "canceled", "expired"})
@@ -340,8 +342,8 @@ def register(
     launch_lease_id: str | None = None,
     launch_repo: str | None = None,
 ) -> dict[str, Any]:
-    if provider not in _REGISTRY_PROVIDERS:
-        raise ValueError("provider must be one of: codex-cloud, cursor-cloud, grokbot-cloud, claude-cloud")
+    if provider not in TRACKER_PROVIDERS:
+        raise ValueError("provider must be one of: codex-cloud, cursor-cloud, claude-cloud")
     if not label.strip():
         raise ValueError("label must not be empty")
     binding = None
@@ -660,10 +662,8 @@ def _classify_entry(
                 classification = "stale"
             else:
                 classification = "ready-to-land"
-    elif provider_state in FAILED_STATES and expects_branch:
-        # A local queue failure needs attention even while GitHub is unavailable.
-        if artifact_absent or entry.get("source") == "grokbot-queue":
-            classification = "needs-investigation"
+    elif provider_state in FAILED_STATES and expects_branch and artifact_absent:
+        classification = "needs-investigation"
 
     seen = isinstance(provider_info, dict)
     complete_github = github.get("branches_complete") is True and github.get("prs_complete") is True
@@ -866,113 +866,9 @@ def _orphan_branch_rows(
 def _provider_for_branch(branch: str) -> str:
     if branch.startswith("cursor/"):
         return "cursor-cloud"
-    if branch.startswith("grokbot/"):
-        return "grokbot-cloud"
     if branch.startswith("claude/"):
         return "claude-cloud"
     return "codex-cloud"
-
-
-def _grokbot_rows(
-    target: Path, *, github: dict[str, Any], now: datetime, stale_ready_hours: int
-) -> list[dict[str, Any]]:
-    """Project retained local queue jobs into tracker rows."""
-    from . import grokbot_jobs
-
-    try:
-        queue_rows = grokbot_jobs.tracker_rows(target)
-    except Exception:  # noqa: BLE001 - tracker remains available when queue storage is unavailable
-        return []
-
-    rows: list[dict[str, Any]] = []
-    for job in queue_rows:
-        job_id = job.get("job_id")
-        if not isinstance(job_id, str):
-            continue
-        raw_artifact = job.get("artifact")
-        artifact: dict[str, Any] = raw_artifact if isinstance(raw_artifact, dict) else {}
-        raw_completed = job.get("result_artifact")
-        completed: dict[str, Any] = raw_completed if isinstance(raw_completed, dict) else {}
-        branch = completed.get("branch") if isinstance(completed.get("branch"), str) else None
-        refs = _grokbot_artifact_refs(artifact=artifact, completed=completed, github=github, branch=branch)
-        augmented_github = github
-        if branch and refs.get("pr_url") and not _prs_for_branch(github, branch):
-            raw_prs = github.get("prs")
-            prs: list[Any] = list(raw_prs) if isinstance(raw_prs, list) else []
-            augmented_github = {
-                **github,
-                "prs": [
-                    *prs,
-                    {"head": branch, "state": "OPEN", "url": refs["pr_url"]},
-                ],
-            }
-        classification_row = _classify_entry(
-            {
-                "id": f"grokbot:{job_id}",
-                "provider": "grokbot-cloud",
-                "task_id": job_id,
-                "label": job.get("label"),
-                "branch": branch,
-                "dispatched_at": job.get("queued_at"),
-                "source": "grokbot-queue",
-                "expected_artifact": artifact,
-            },
-            provider_tasks={job_id: {"state": job.get("state"), "ready_at": job.get("updated_at")}},
-            github=augmented_github,
-            stale_ready_hours=stale_ready_hours,
-            now=now,
-            cursor_wired=False,
-        )
-        row: dict[str, Any] = {
-            "id": f"grokbot:{job_id}",
-            "provider": "grokbot-cloud",
-            "job_id": job_id,
-            "label": job.get("label"),
-            "task_hash": job.get("task_hash"),
-            "state": job.get("state"),
-            "classification": classification_row["classification"],
-            "artifact_refs": refs,
-            "source": "grokbot-queue",
-        }
-        for key in ("created_at", "updated_at", "queued_at", "claimed_at"):
-            if isinstance(job.get(key), str):
-                row[key] = job[key]
-        rows.append(row)
-    return rows
-
-
-def _grokbot_artifact_refs(
-    *, artifact: dict[str, Any], completed: dict[str, Any], github: dict[str, Any], branch: str | None
-) -> dict[str, Any]:
-    """Keep only artifact identifiers and GitHub PR metadata safe for operators."""
-    kind = artifact.get("kind") if isinstance(artifact.get("kind"), str) else None
-    refs: dict[str, Any] = {"kind": kind}
-    if branch:
-        refs["branch"] = branch
-    if kind == "draft-pr":
-        url = completed.get("url") if isinstance(completed.get("url"), str) else None
-        pr = _prs_for_branch(github, branch)[0] if branch and _prs_for_branch(github, branch) else None
-        if isinstance(pr, dict):
-            if isinstance(pr.get("url"), str):
-                url = pr["url"]
-            if isinstance(pr.get("isDraft"), bool):
-                refs["is_draft"] = pr["isDraft"]
-            if isinstance(pr.get("headRefOid"), str):
-                refs["head_sha"] = pr["headRefOid"]
-        if url:
-            refs["pr_url"] = url
-    elif kind == "branch" and isinstance(completed.get("commit"), str):
-        refs["head_sha"] = completed["commit"]
-    elif kind == "report":
-        if isinstance(completed.get("sha256"), str):
-            refs["sha256"] = completed["sha256"]
-        if isinstance(completed.get("private_snapshot_id"), str):
-            refs["private_snapshot_id"] = completed["private_snapshot_id"]
-        if type(completed.get("size")) is int:
-            refs["size"] = completed["size"]
-        if isinstance(completed.get("path"), str) and not completed.get("private_snapshot_id"):
-            refs["path"] = completed["path"]
-    return refs
 
 
 def status_payload(
@@ -984,7 +880,7 @@ def status_payload(
     cursor_wired: bool = False,
     provider_observations: dict[str, ProviderObservation] | None = None,
 ) -> dict[str, Any]:
-    from . import codex_cloud_land, grokbot_jobs
+    from . import codex_cloud_land
 
     observed = now or datetime.now(timezone.utc)
     if observed.tzinfo is None:
@@ -1006,22 +902,14 @@ def status_payload(
             provider_observations=provider_observations,
         )
         for entry in registry["entries"]
-        if entry.get("provider") in _REGISTRY_PROVIDERS
+        if entry.get("provider") in _READABLE_PROVIDERS
     ]
     codex_cloud_land.add_landing_commands(target, entries, registry["entries"])
-    grokbot_rows = _grokbot_rows(target, github=github, now=observed, stale_ready_hours=stale_ready_hours)
-    entries.extend(grokbot_rows)
-    known_queue_branches = {
-        refs["branch"]
-        for row in grokbot_rows
-        if isinstance((refs := row.get("artifact_refs")), dict) and isinstance(refs.get("branch"), str)
-    }
     entries.extend(
         _orphan_branch_rows(
             registry_entries=registry["entries"],
             github=github,
             now=observed,
-            known_branches=known_queue_branches,
         )
     )
 
@@ -1039,8 +927,6 @@ def status_payload(
         },
         "github": {"wired": True, "authority": "ground-truth"},
     }
-    if not grokbot_jobs.hub_authority(target):
-        sources["grokbot-cloud"] = {"wired": True, "authority": "local-queue"}
     if "complete" in github:
         sources["github"].update(
             complete=github["complete"],
@@ -1967,7 +1853,7 @@ def health(
     """Return a bounded local queue health summary for operator consumers."""
     snapshot = github if isinstance(github, dict) else observe_github(target)
     payload = status_payload(target, now=now, provider_tasks={}, github=snapshot)
-    entries = [row for row in payload.get("entries", []) if row.get("provider") == "grokbot-cloud"]
+    entries = [row for row in payload.get("entries", []) if row.get("provider") in _LEGACY_READ_PROVIDERS]
     classifications = {name: sum(1 for row in entries if row.get("classification") == name) for name in CLASSIFICATIONS}
     attention = classifications["stale"] + classifications["needs-investigation"] + classifications["orphaned"]
     top = next(
