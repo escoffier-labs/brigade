@@ -20,8 +20,9 @@ from . import memory_bm25, memory_cmd, memory_scope
 from .card_fingerprint import read_text_nofollow
 from .handoff_cmd import drafts as handoff_drafts
 from .handoff_cmd.models import DEFAULT_DRAFT_DOCUMENT
-from .memory_content_scan import BLOCKED, FLAGGED, card_texts, scan_verdict
+from .memory_content_scan import BLOCKED, FLAGGED, scan_verdict
 from .memory_scope import REPO, USER, MemoryStore, Resolution
+from .untrusted import card_texts
 
 SERVER_NAME = "brigade-memory"
 CARD_URI_PREFIX = "card://"

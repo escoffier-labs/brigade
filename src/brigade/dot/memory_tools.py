@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterator
 from uuid import uuid4
 from ..fleet_client import FleetClientError
 from ..fleet_client_message_credentials import MessageAuthority
-from ..memory_content_scan import card_texts
+from ..untrusted import card_texts
 from .contracts import MAX_CARD_FILE_BYTES, DotError, require
 from .hub_tools import BRIGADE_TIMEOUT, MAX_SMALL_CAPTURE
 from .process import CommandRunner, child_environment, child_path, parse_json_bytes
