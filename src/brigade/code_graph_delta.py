@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import subprocess
 import tempfile
 import time
 from contextlib import closing
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +22,9 @@ SNAPSHOT_AFTER_NAME = "code-graph-after.db"
 SIDECAR_NAME = "graph-delta.json"
 CHANGED_SYMBOL_LIMIT = 20
 CODE_REFERENCE_NODE_LIMIT = 20
+_DIGEST_TIMEOUT_SECONDS = 0.75
+_DIGEST_FORMAT_VERSION = 2
+_DIGEST_SCHEMA_VERSION = 9
 LINE_KEYS = {
     "line",
     "line_number",
@@ -31,6 +36,13 @@ LINE_KEYS = {
     "span",
     "range",
 }
+
+
+@dataclass(frozen=True)
+class _BaselineDigest:
+    digest: dict[str, Any]
+    snapshot_signature: tuple[int, ...]
+    remaining_seconds: float
 
 
 def _request_background_refresh(target: Path, db: Path, binary: str, details: dict[str, Any]) -> dict[str, Any] | None:
@@ -48,6 +60,7 @@ def capture_before(
     timeout: float = 10.0,
     snapshot_timeout: float | None = None,
     defer_sync: bool = False,
+    digest_shortcut: bool = False,
 ) -> dict[str, Any]:
     """Sync and snapshot the index, retaining a stale baseline when possible."""
     try:
@@ -140,6 +153,16 @@ def capture_before(
         if defer_sync and sync and sync.get("timed_out"):
             if refresh := _request_background_refresh(target, db_path, binary, details):
                 details["background_refresh"] = refresh
+        if digest_shortcut and not stale:
+            remaining = backup_budget - details["snapshots"]["before"]["duration_seconds"]
+            if remaining > 0 and (signature := _snapshot_signature(snapshot_path)) is not None:
+                # Digest the exact backup that a fallback diff would use.
+                started = time.monotonic()
+                before_digest = _read_graph_digest(binary, snapshot_path, target, timeout=remaining)
+                if before_digest is not None:
+                    details["_before_digest"] = _BaselineDigest(
+                        before_digest, signature, remaining - (time.monotonic() - started)
+                    )
         return {
             **details,
             "ok": True,
@@ -151,6 +174,41 @@ def capture_before(
         }
     except Exception as exc:
         return _status("capture_failed", f"code graph delta unavailable: {type(exc).__name__}: {exc}")
+
+
+def _snapshot_signature(path: Path) -> tuple[int, ...] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+def _read_graph_digest(binary: str, db: Path, target: Path, *, timeout: float) -> dict[str, Any] | None:
+    try:
+        result = _run_graphtrail(
+            binary, db, "digest", timeout=min(timeout, _DIGEST_TIMEOUT_SECONDS), json_output=True, cwd=target
+        )
+        if result["returncode"] != 0 or result.get("timed_out"):
+            return None
+        # Retain object pairs so duplicate fields cannot be silently overwritten.
+        fields = json.loads(result["stdout"], object_pairs_hook=tuple)
+        if not isinstance(fields, tuple) or len(fields) != 3:
+            return None
+        digest = dict(fields)
+        format_version = digest.get("format_version")
+        schema_version = digest.get("schema_version")
+        sha256 = digest.get("sha256")
+        if type(format_version) is not int or format_version != _DIGEST_FORMAT_VERSION:
+            return None
+        if type(schema_version) is not int or schema_version != _DIGEST_SCHEMA_VERSION:
+            return None
+        if not isinstance(sha256, str) or re.fullmatch(r"[0-9a-fA-F]{64}", sha256) is None:
+            return None
+        return digest
+    except Exception:
+        # This is an optional probe. The existing snapshot and diff report failures.
+        return None
 
 
 def _timed_snapshot(db: Path, path: Path, timeout: float, timings: dict[str, Any], stage: str) -> str:
@@ -278,6 +336,28 @@ def capture_after_and_diff(
             )
             return _write_and_compact(run_dir, payload, snapshot_path=snapshot_path)
 
+        baseline = before.get("_before_digest")
+        if (
+            isinstance(baseline, _BaselineDigest)
+            and baseline.remaining_seconds > 0
+            and not stale_after
+            and sync is not None
+            and sync["returncode"] == 0
+            and not sync.get("timed_out")
+            and _snapshot_signature(snapshot_path) == baseline.snapshot_signature
+        ):
+            # Both probes use spare baseline capture time. The fallback keeps its original timeouts.
+            after_digest = _read_graph_digest(binary, db_path, target, timeout=baseline.remaining_seconds)
+            if (
+                after_digest is not None
+                and after_digest == baseline.digest
+                and _snapshot_signature(snapshot_path) == baseline.snapshot_signature
+            ):
+                payload = _success_payload(
+                    target, db_path, snapshot_path, before, sync, timeout, {}, digest=after_digest
+                )
+                return _write_and_compact(run_dir, payload, snapshot_path=snapshot_path)
+
         after_snapshot_path = run_dir / SNAPSHOT_AFTER_NAME
         try:
             after_snapshot_sha256 = _timed_snapshot(
@@ -352,36 +432,18 @@ def capture_after_and_diff(
                 run_dir, payload, snapshot_path=snapshot_path, after_snapshot_path=after_snapshot_path
             )
 
-        changed_symbols = _changed_symbols(diff_payload)
-        # graphtrail names its counts block "summary" (locked by the diff golden fixture).
-        counts_value = diff_payload.get("summary")
-        raw_counts: dict[str, Any] = counts_value if isinstance(counts_value, dict) else {}
-        edge_churn = _edge_churn(diff_payload)
-        payload = {
-            "ok": True,
-            "status": "ok",
-            "target": str(target),
-            "graphtrail_timeout_seconds": timeout,
-            "summary": _summary("ok", raw_counts, edge_churn, len(changed_symbols))
-            + (" (stale after-state)" if stale_after else ""),
-            "raw_counts": raw_counts,
-            "changed_symbols": changed_symbols,
-            "changed_symbol_count": len(changed_symbols),
-            "changed_symbols_truncated": _symbol_count(diff_payload) > CHANGED_SYMBOL_LIMIT,
-            **_code_reference_node_metadata(diff_payload),
-            "edge_churn": edge_churn,
-            "line_insensitive_edge_churn": edge_churn,
-            "before_snapshot_path": str(snapshot_path),
-            "db_path": str(db_path),
-            "commands": {"before_sync": before.get("sync"), "after_sync": sync, "diff": diff},
-            "attestations": {
-                "before_snapshot_sha256": before.get("before_snapshot_sha256"),
-                "after_snapshot_sha256": after_snapshot_sha256,
-                "diff_stdout_sha256": _sha256_text(diff["stdout"]),
-            },
-            "stale_graph_used": before.get("stale_graph_used") is True,
-            **_capture_metadata(before),
-        }
+        payload = _success_payload(
+            target,
+            db_path,
+            snapshot_path,
+            before,
+            sync,
+            timeout,
+            diff_payload,
+            diff=diff,
+            after_snapshot_sha256=after_snapshot_sha256,
+            stale_after=stale_after,
+        )
         return _write_and_compact(
             run_dir, payload, snapshot_path=snapshot_path, after_snapshot_path=after_snapshot_path
         )
@@ -546,6 +608,68 @@ def _backup_sqlite(source: Path, destination: Path, *, timeout: float | None = N
         raise
 
 
+def _success_payload(
+    target: Path,
+    db_path: Path,
+    snapshot_path: Path,
+    before: dict[str, Any],
+    after_sync: dict[str, Any] | None,
+    timeout: float,
+    diff_payload: dict[str, Any],
+    *,
+    diff: dict[str, Any] | None = None,
+    after_snapshot_sha256: str | None = None,
+    stale_after: bool = False,
+    digest: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    changed_symbols = _changed_symbols(diff_payload)
+    # graphtrail names its counts block "summary" (locked by the diff golden fixture).
+    counts_value = diff_payload.get("summary")
+    raw_counts = counts_value if isinstance(counts_value, dict) else {}
+    digest_metadata = {}
+    if digest is not None:
+        raw_counts = dict.fromkeys(
+            (
+                "added_nodes",
+                "removed_nodes",
+                "changed_nodes",
+                "added_edges",
+                "removed_edges",
+                "added_edges_line_insensitive",
+                "removed_edges_line_insensitive",
+            ),
+            0,
+        )
+        digest_metadata = {"delta_source": "digest_equal", "digest": digest}
+    edge_churn = _edge_churn(diff_payload)
+    return {
+        "ok": True,
+        "status": "ok",
+        "target": str(target),
+        "graphtrail_timeout_seconds": timeout,
+        "summary": _summary("ok", raw_counts, edge_churn, len(changed_symbols))
+        + (" (stale after-state)" if stale_after else ""),
+        "raw_counts": raw_counts,
+        "changed_symbols": changed_symbols,
+        "changed_symbol_count": len(changed_symbols),
+        "changed_symbols_truncated": _symbol_count(diff_payload) > CHANGED_SYMBOL_LIMIT,
+        **_code_reference_node_metadata(diff_payload),
+        "edge_churn": edge_churn,
+        "line_insensitive_edge_churn": edge_churn,
+        "before_snapshot_path": str(snapshot_path),
+        "db_path": str(db_path),
+        "commands": {"before_sync": before.get("sync"), "after_sync": after_sync, "diff": diff},
+        "attestations": {
+            "before_snapshot_sha256": before.get("before_snapshot_sha256"),
+            "after_snapshot_sha256": after_snapshot_sha256,
+            "diff_stdout_sha256": _sha256_text(diff["stdout"]) if diff is not None else None,
+        },
+        "stale_graph_used": before.get("stale_graph_used") is True,
+        **_capture_metadata(before),
+        **digest_metadata,
+    }
+
+
 def _failure_payload(
     target: Path,
     before: dict[str, Any],
@@ -614,6 +738,8 @@ def _capture_metadata(payload: dict[str, Any]) -> dict[str, Any]:
             "graph_sync_reason",
             "foreground_fallback",
             "stale_after",
+            "delta_source",
+            "digest",
         )
         if payload.get(key) is not None
     }

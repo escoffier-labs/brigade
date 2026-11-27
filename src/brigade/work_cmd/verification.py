@@ -1527,7 +1527,12 @@ def _run_verify_commands(
         try:
             if batch_receipt is None:
                 graph_delta_before = code_graph_delta.capture_before(
-                    target, run_dir, timeout=code_graph_timeout, snapshot_timeout=graph_capture_timeout, defer_sync=True
+                    target,
+                    run_dir,
+                    timeout=code_graph_timeout,
+                    snapshot_timeout=graph_capture_timeout,
+                    defer_sync=True,
+                    digest_shortcut=True,
                 )
         except KeyboardInterrupt:
             canceled = True

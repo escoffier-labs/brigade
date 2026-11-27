@@ -1,0 +1,1 @@
+- Skip the final code-graph snapshot and diff in work verification when the engine confirms that graph content stayed the same.
