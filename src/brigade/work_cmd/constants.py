@@ -240,7 +240,7 @@ _POLICY_LAUNCHER_SUBCOMMANDS = {
     "conda": {"run"},
     "direnv": {"exec"},
     "hatch": {"run"},
-    "mise": {"exec"},
+    "mise": {"exec", "x"},
     "npm": {"exec", "x"},
     "pdm": {"run"},
     "pipx": {"run"},
@@ -279,6 +279,7 @@ _POLICY_FIRST_WORD_RE = re.compile(r"""^\s*("[^"]*"|'[^']*'|\S+)(?=\s|$)""")
 _POLICY_SPLIT_VALUE_RE = re.compile(r"""[\s"']""")
 _POLICY_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _POLICY_MAX_EMBEDDED_DEPTH = 4
+_POLICY_MAX_ARGUMENT_LENGTH = 4096
 
 # Use the standard Windows PATHEXT suffixes for consistent policy matching on every host.
 _POLICY_EXECUTABLE_SUFFIXES = {".com", ".exe", ".bat", ".cmd", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".msc"}
@@ -298,10 +299,16 @@ def _policy_launcher_values(argument: str) -> Iterator[str]:
     _, equals, value = argument.partition("=")
     if equals:
         yield value
-    if argument.startswith("-") and not argument.startswith("--"):
-        for index, option in enumerate(argument[1:-1], start=2):
-            if not option.isascii() or not option.isalnum():
-                break
+    if options := re.match(r"-[A-Za-z0-9]+", argument):
+        prefix_limit = max(1, max(map(len, SCANNER_HIGH_RISK_COMMANDS), default=0))
+        prefix_kinds: set[bool] = set()
+        for index in range(2, min(options.end() + 1, len(argument))):
+            if index < options.end() - prefix_limit:
+                # Longer prefixes are equivalent within each assignment-leading character class.
+                starts_with_letter = argument[index].isalpha()
+                if starts_with_letter in prefix_kinds:
+                    continue
+                prefix_kinds.add(starts_with_letter)
             yield argument[index:]
 
 
@@ -324,8 +331,12 @@ def policy_blocked_name(argv: list[str]) -> str | None:
 
 def _policy_blocked_arguments(arguments: list[str], *, launcher: str, depth: int) -> str | None:
     for argument in arguments:
+        if len(argument) > _POLICY_MAX_ARGUMENT_LENGTH:
+            return launcher
         for value in _policy_launcher_values(argument):
             name = _policy_blocked_value(value, launcher=launcher, depth=depth)
+            if name is None and launcher == "hatch" and (separator := value.find(":")) >= 0:
+                name = _policy_blocked_value(value[separator + 1 :], launcher=launcher, depth=depth)
             if name is not None:
                 return name
     return None

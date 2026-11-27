@@ -50,7 +50,7 @@ command = ['C:\Program Files\Python\python.exe', "scripts/review.py", "--finding
 
 The array must contain at least one string, and each string must be non-empty. The first element is the executable. Brigade passes the remaining elements as arguments exactly as written. Text plans and receipt command labels use `shlex.join` to display arrays. JSON plans and receipts also contain the exact argument list in `argv`.
 
-Brigade runs both forms directly without a shell and refuses high-risk shell commands and shell metacharacters. On Windows, array commands also refuse batch files because Windows can launch them through a shell. All review state and logs stay under `.brigade/` and should remain gitignored.
+Brigade runs both forms directly without a shell and refuses high-risk shell commands and shell metacharacters under the [command policy](scanner-registry.md#command-policy). On Windows, array commands also refuse batch files because Windows can launch them through a shell. All review state and logs stay under `.brigade/` and should remain gitignored.
 
 ## Findings Contract
 
