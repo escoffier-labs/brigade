@@ -159,3 +159,62 @@ def test_overview_routing_escapes_display_fields_and_excludes_stored_notes(tmp_p
             for i, (tag, _) in enumerate(parsed.tags)
             if root in parsed.ancestors[i]
         )
+
+
+def test_deck_sections_have_stable_open_disclosure_controls():
+    from brigade import fleet_command_deck as deck, fleet_live_routing
+    from tests.test_fleet_deck_overview import NOW, _mixed_view
+
+    routing = fleet_live_routing.Routing((), (), "fixture", "active", "Example", False)
+    markup = Markup(deck.render_deck(_mixed_view(), nonce="fixture", now=NOW, routing=routing))
+    expected = {
+        "overview-machines-title": "Machines",
+        "overview-routing-title": "Live routing",
+        "approved-models": "Approved models (display only)",
+        "attention-title": "Needs attention",
+        "working-title": "Work",
+    }
+    for heading_id, label in expected.items():
+        (heading,) = [i for i, (_, attrs) in enumerate(markup.tags) if attrs.get("id") == heading_id]
+        (button,) = markup.descendants(heading, "button")
+        attrs = markup.tags[button][1]
+        assert attrs["type"] == "button"
+        assert attrs["aria-expanded"] == "true"
+        assert attrs["aria-controls"] == heading_id + "-content"
+        assert label in markup.text[button]
+        (panel,) = [attrs for _, attrs in markup.tags if attrs.get("id") == heading_id + "-content"]
+        assert "hidden" not in panel
+
+
+def test_deck_disclosure_restores_before_and_after_refresh_and_handles_blocked_storage():
+    from brigade import fleet_command_deck as deck, fleet_deck_disclosure
+    from tests.fleet_script_dom import run_script
+    from tests.test_fleet_deck_overview import NOW, _mixed_view
+
+    page = deck.render_deck(_mixed_view(), nonce="fixture", now=NOW)
+    run_script(
+        page,
+        """
+document.getElementById=id=>document.querySelectorAll('*').find(el=>el.id===id);
+document.querySelectorAll=selector=>selector==='*'?dom.querySelectorAll('div'):dom.querySelectorAll(selector);
+window.fleetOnInit=fn=>{window.init=fn;fn();};
+"""
+        + fleet_deck_disclosure.SCRIPT,
+        """
+const [machines, attention, work]=document.querySelectorAll('.overview-section-toggle');
+const panel=button=>document.getElementById(button.getAttribute('aria-controls'));
+machines.onclick();
+work.onclick();
+assert.equal(machines.getAttribute('aria-expanded'),'false');
+assert.ok(panel(machines).hidden && panel(work).hidden && !panel(attention).hidden);
+panel(machines).hidden=false;
+window.init();
+assert.ok(panel(machines).hidden);
+localStorage.getItem=()=>{throw Error('blocked');};
+localStorage.setItem=()=>{throw Error('blocked');};
+window.init();
+assert.ok(!panel(machines).hidden && !panel(work).hidden);
+machines.onclick();
+assert.ok(panel(machines).hidden);
+""",
+    )

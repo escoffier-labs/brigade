@@ -685,9 +685,10 @@ def render_overview(
     routing: fleet_live_routing.Routing | None = None,
 ) -> str:
     """A short operational scan with three intentional destinations."""
-    from . import fleet_admin_pages as pages
+    from . import fleet_admin_pages as pages, fleet_deck_disclosure as disclosure
 
-    attention = pages.overview_attention(view, now)
+    alerts = page_alerts(view, now)
+    attention = pages.overview_attention(view, now, alerts=alerts)
     entries = pages.activity_entries(view)
     current = [entry for entry in entries if entry.status.startswith(("Managed run", "Reported task"))]
     reported = [entry for entry in current if entry.status.startswith("Reported task")]
@@ -716,20 +717,15 @@ def render_overview(
     if worklore_enabled:
         ready_link = f'<p><a href="/deck/work">Ready to run: {_esc(ready)}</a></p>'
 
-    def card(identifier: str, title: str, href: str, content: str) -> str:
-        return (
-            f'<section class="admin-card" aria-labelledby="{identifier}"><header>'
-            f'<h2 id="{identifier}">{title}</h2><a class="card-link" href="{href}">View all</a>'
-            f"</header>{content}</section>"
-        )
-
     return (
         '<main class="deck-shell admin-page overview">'
         + pages.render_overview_machines(view, now)
         + (fleet_live_routing.render_overview(routing, now) if routing is not None else "")
         + '<div class="admin-cards">'
-        + card("attention-title", "Needs attention", "/deck/alerts", "<ul>" + attention + "</ul>")
-        + card("working-title", "Work", "/deck/activity", "<ul>" + work + "</ul>" + ready_link)
+        + disclosure.card(
+            "attention-title", "Needs attention", "/deck/alerts", "<ul>" + attention + "</ul>", len(alerts)
+        )
+        + disclosure.card("working-title", "Work", "/deck/activity", "<ul>" + work + "</ul>" + ready_link, len(current))
         + "</div></main>"
     )
 

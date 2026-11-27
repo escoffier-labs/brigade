@@ -341,7 +341,7 @@ dl.fields dd { margin:0; min-width:0; text-align:right; font-size:13px; white-sp
 .overview-machine-load > span, .overview-machine-age > span { display:block; font-size:10px; }
 .overview-machines-empty { margin:8px 0 2px; color:var(--muted); font-size:12px; }
 .overview-machine-rows { min-width:0; }
-.overview .admin-cards { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:16px; }
+.overview .admin-cards { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); align-items:start; gap:16px; }
 .overview .admin-cards .admin-card h2, .overview-machines h2 { font-weight:600; }
 .admin-card { border:1px solid var(--line); border-radius:8px; padding:0; min-width:0; }
 .admin-card header { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:12px 16px; border-bottom:1px solid var(--line); }
@@ -353,7 +353,7 @@ dl.fields dd { margin:0; min-width:0; text-align:right; font-size:13px; white-sp
 .admin-card li > a:hover { color:var(--ink); }
 .admin-card .row-title { font-size:13px; }
 .admin-card .row-sub { display:block; color:var(--muted); font-size:12px; }
-.admin-card > p { margin:0; padding:10px 16px; }
+.admin-card > .overview-section-body > p { margin:0; padding:10px 16px; }
 .admin-card li a { display:block; min-width:0; font-size:13px; }
 .admin-card small, .admin-card p { color:var(--muted); font-size:12px; }
 @media (max-width:900px) { .admin-cards, .overview .admin-cards { grid-template-columns:1fr; } }

@@ -8,7 +8,11 @@ from datetime import datetime
 from html import escape
 from typing import TYPE_CHECKING
 
-from . import fleet_admin_explorer as explorer, fleet_investigation as investigation
+from . import (
+    fleet_admin_explorer as explorer,
+    fleet_deck_disclosure as disclosure,
+    fleet_investigation as investigation,
+)
 
 if TYPE_CHECKING:
     from .fleet_hub_roster_page import RosterView, SeatRow, PolicySeat
@@ -200,17 +204,21 @@ def render_overview(routing: Routing, now: datetime) -> str:
         f"<div><strong>{escape(models)}</strong><code>{escape(model_ids)}</code></div></div>"
         for lane, models, model_ids in _APPROVED_MODELS
     )
-    return (
-        '<section class="overview-routing" id="overview-routing" aria-labelledby="overview-routing-title">'
-        '<header><h2 id="overview-routing-title">Live routing</h2>'
-        '<a class="card-link" href="/deck/roster">View live routing</a></header>'
+    live = (
         f'<div class="routing-roles">{rows}</div>'
         '<div data-audience="agent">'
-        f"<p>{escape(routing.detail)} Source: {escape(routing.source)} \u00b7 Activation: {escape(routing.activation)}.</p>"
+        f"<p>{escape(routing.detail)} Source: {escape(routing.source)} · Activation: {escape(routing.activation)}.</p>"
         "<p>Configured assignment; provider availability and sign-in are unverified.</p></div>"
         f"{prompt}"
+    )
+    approved = f'<p>Dispatch uses the assignment above.</p><div class="routing-roles">{approved_rows}</div>'
+    return (
+        '<div class="overview-routing">'
+        '<section id="overview-routing" aria-labelledby="overview-routing-title">'
+        f"<header>{disclosure.heading('overview-routing-title', 'Live routing', len(routing.roles))}"
+        '<a class="card-link" href="/deck/roster">View live routing</a></header>'
+        f"{disclosure.body('overview-routing-title', live)}</section>"
         '<section class="routing-approved" aria-labelledby="approved-models">'
-        '<header><h3 id="approved-models">Approved models (display only)</h3></header>'
-        "<p>Dispatch uses the assignment above.</p>"
-        f'<div class="routing-roles">{approved_rows}</div></section></section>'
+        f"<header>{disclosure.heading('approved-models', 'Approved models (display only)')}</header>"
+        f"{disclosure.body('approved-models', approved)}</section></div>"
     )

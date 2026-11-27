@@ -16,6 +16,7 @@ from . import fleet_project_board_page as board_page
 from . import fleet_projects_prs as pull_requests
 from . import fleet_command_deck as deck
 from . import fleet_deck_activity as activity
+from . import fleet_deck_disclosure as disclosure
 from . import fleet_deck_overview as overview
 from .fleet_hub_placement import DEFAULT_THRESHOLD
 from .fleet_machine_label import status_label
@@ -576,9 +577,10 @@ def render_overview_machines(view: deck.DeckView, now: datetime) -> str:
     body = "".join(rows) or '<p class="overview-machines-empty">No machines configured.</p>'
     return (
         '<section class="overview-machines" aria-labelledby="overview-machines-title"><header>'
-        f'<h2 id="overview-machines-title">Machines ({len(view.stations)})</h2>'
+        f"{disclosure.heading('overview-machines-title', f'Machines ({len(view.stations)})')}"
         '<a class="card-link" href="/deck/capacity">View capacity</a></header>'
-        f'<div class="overview-machine-rows">{body}</div></section>'
+        + disclosure.body("overview-machines-title", f'<div class="overview-machine-rows">{body}</div>')
+        + "</section>"
     )
 
 
@@ -864,10 +866,11 @@ def render_reporting(
     )
 
 
-def overview_attention(view: deck.DeckView, now: datetime) -> str:
+def overview_attention(view: deck.DeckView, now: datetime, *, alerts: tuple[overview.Alert, ...] | None = None) -> str:
     from . import fleet_deck_alerts
 
-    alerts = overview.page_alerts(view, now)
+    if alerts is None:
+        alerts = overview.page_alerts(view, now)
     ids = explorer.identifiers([fleet_deck_alerts.entry_key(alert) for alert in alerts])
     rows = "".join(
         f'<li><a href="/deck/alerts#{identifier}">{_esc(alert.title[:120])}</a>{explorer.pill(alert.kind)}</li>'

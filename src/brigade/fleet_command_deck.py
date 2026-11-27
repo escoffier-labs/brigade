@@ -1828,7 +1828,7 @@ def render_deck(
     routing: fleet_live_routing.Routing | None = None,
 ) -> str:
     # Imported here because fleet_deck_overview imports this module for its types.
-    from . import fleet_deck_overview, fleet_admin_explorer
+    from . import fleet_deck_overview, fleet_admin_explorer, fleet_deck_disclosure
 
     body = fleet_deck_overview.render_overview(
         view, now, worklore_enabled=worklore_enabled, action_sources=action_sources, routing=routing
@@ -1840,7 +1840,8 @@ def render_deck(
         active="overview",
         view=view,
         worklore_enabled=worklore_enabled,
-        extra_css=ui_theme.OVERVIEW_CSS + fleet_admin_explorer.CSS + fleet_live_routing.CSS,
+        extra_css=ui_theme.OVERVIEW_CSS + fleet_admin_explorer.CSS + fleet_live_routing.CSS + fleet_deck_disclosure.CSS,
+        script=fleet_deck_disclosure.SCRIPT,
     )
 
 
