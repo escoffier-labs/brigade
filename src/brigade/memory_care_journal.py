@@ -292,6 +292,7 @@ def commit(
                     desired_after=kernel.content_digest(c.after),
                     staged_bytes=c.after,
                     writer=writer,
+                    propagate_error=rollback is not None,
                 )
                 for c in changes
             ]
@@ -309,7 +310,10 @@ def commit(
             store.write_json(directory / "decision.json", committed)
     except Exception as exc:
         if rollback is not None:
-            rollback()
+            try:
+                rollback()
+            except Exception as rollback_error:
+                raise JournalConflict(f"{exc}; rollback failed: {rollback_error}") from exc
             shutil.rmtree(kernel.operation_dir(target, decision_id), ignore_errors=True)
         elif not isinstance(exc, (ValueError, OSError, kernel.ProjectionError)):
             raise

@@ -109,17 +109,13 @@ def _restore_card(parent: int, name: str, before: bytes | None, mode: int | None
         if current() != after:
             raise OSError("publication revision changed")
 
-    if current() == before:
-        return
-    validate()
-    if before is None:
-        dirfd.unlink_child(parent, name)
-    else:
-        replace_held_card(parent, name, before, mode, replace=True, validate=validate, sync_directory=False)
-    try:
-        dirfd.fsync_directory(parent)
-    except OSError:
-        print("warning: restored card directory sync failed", file=sys.stderr)
+    if current() != before:
+        validate()
+        if before is None:
+            dirfd.unlink_child(parent, name)
+        else:
+            replace_held_card(parent, name, before, mode, replace=True, validate=validate, sync_directory=False)
+    dirfd.fsync_directory(parent)
 
 
 def file_card(

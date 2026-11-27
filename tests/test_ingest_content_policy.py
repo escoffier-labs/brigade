@@ -695,3 +695,33 @@ def test_committed_card_index_error_reports_filing(tmp_path, monkeypatch, capsys
     assert decision.after_sha256[CARD_PATH] == hashlib.sha256((tmp_path / CARD_PATH).read_bytes()).hexdigest()
     assert not memory_inbox_drain.pending(tmp_path)
     assert run_ingest(tmp_path).promoted == 0
+
+
+@pytest.mark.parametrize("existing", [False, True], ids=["create", "update"])
+def test_card_rollback_sync_retains_recovery_record(tmp_path, monkeypatch, existing):
+    from brigade import dirfd
+
+    path = draft(tmp_path, monkeypatch)
+    dest = tmp_path / CARD_PATH
+    before = None
+    if existing:
+        before = current_card(tmp_path).read_bytes()
+        set_update(tmp_path, path, hashlib.sha256(before).hexdigest())
+    sync = dirfd.fsync_directory
+    phases = []
+
+    def sync_card_directory(fd):
+        info = os.fstat(fd)
+        if dest.parent.exists() and os.path.samestat(info, dest.parent.stat()):
+            phases.append(dest.read_bytes() if dest.exists() else None)
+            raise OSError("card directory sync unavailable")
+        return sync(fd)
+
+    monkeypatch.setattr(dirfd, "fsync_directory", sync_card_directory)
+    stats = run_ingest(tmp_path)
+    assert stats.inboxed == stats.failed == 1
+    assert len(phases) == 2 and phases[0] != before and phases[1] == before
+    (record,) = (tmp_path / journal.JOURNAL_REL).glob("*/decision.json")
+    assert json.loads(record.read_text())["status"] == "pending"
+    decision = journal.load(tmp_path, record.parent.name)
+    assert journal.before_bytes(tmp_path, decision, CARD_PATH) == before
