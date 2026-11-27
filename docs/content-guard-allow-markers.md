@@ -5,6 +5,8 @@
 Inline `content-guard: allow` comments tell the embedded scanner that a match
 is intentional. There are two scopes.
 
+The public docs and benchmark check covers tailnet addresses and hostnames, CPU models, kernel builds, and RAM sizes. Its only exceptions are the inline allow comment described in this page and an exact-value list in the test module.
+
 ## Line-scoped
 
 `content-guard: allow <rule-id>` (or `all`) applies to the marker's line and
