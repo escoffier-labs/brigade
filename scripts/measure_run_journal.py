@@ -191,7 +191,7 @@ def _directory_fsync_supported(root: Path) -> bool:
 def _environment(root: Path) -> dict[str, Any]:
     return {
         "python_version": sys.version,
-        "platform": platform.platform(),
+        "platform": f"{platform.system()} {platform.machine()}",
         "filesystem_type": _filesystem_type(root),
         "directory_fsync_supported": _directory_fsync_supported(root),
     }

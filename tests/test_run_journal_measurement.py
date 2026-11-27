@@ -5,6 +5,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import platform
 import subprocess
 import sys
 from pathlib import Path
@@ -67,6 +68,7 @@ def test_measure_runs_environment_metadata(tmp_path):
     environment = report["environment"]
     assert environment["python_version"] == sys.version
     assert isinstance(environment["platform"], str) and environment["platform"]
+    assert platform.release() not in environment["platform"]
     assert isinstance(environment["filesystem_type"], str) and environment["filesystem_type"]
     assert isinstance(environment["directory_fsync_supported"], bool)
 

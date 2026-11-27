@@ -1,0 +1,1 @@
+- Removed kernel and host details from measurement platform metadata.

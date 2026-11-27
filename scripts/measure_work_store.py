@@ -212,7 +212,7 @@ def environment_metadata(root: Path) -> dict[str, Any]:
     """Platform and filesystem class without hostnames."""
     return {
         "python_version": sys.version,
-        "platform": platform.platform(),
+        "platform": f"{platform.system()} {platform.machine()}",
         "filesystem_type": _filesystem_type(root),
         "directory_fsync_supported": _directory_fsync_supported(root),
         "sqlite_version": sqlite3.sqlite_version,
