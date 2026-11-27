@@ -43,7 +43,7 @@ from urllib.parse import urlsplit
 from . import __version__
 
 ResourceLister = Callable[[], list[dict[str, Any]]]
-ResourceReader = Callable[[str], "tuple[str | None, str | None]"]
+ResourceReader = Callable[[str], "tuple[str | None, str | None] | tuple[str | None, str | None, dict[str, Any] | None]"]
 ToolLister = Callable[[], list[dict[str, Any]]]
 ToolCaller = Callable[[str, dict[str, Any]], "tuple[object, bool]"]
 
@@ -258,7 +258,8 @@ def handle_message(
     """Handle one decoded JSON-RPC message and return its response.
 
     Returns None for notifications (no response is sent). read_resource returns
-    (text, mime_type) or (None, None) when the uri is not served. call_tool
+    (text, mime_type) or (None, None) when the uri is not served, and may add a
+    metadata mapping as a third element for the contents entry. call_tool
     returns (payload, is_error); a non-string payload is rendered as indented
     JSON. ``protocol_version`` is the transport-level version (HTTP header or
     stdio ``initialize``); a per-request ``_meta`` version overrides it. Every
@@ -367,10 +368,13 @@ def _dispatch_message(
         return response(request_id, result={"resources": list_resources()})
     if method == "resources/read":
         uri = str(params.get("uri") or "")
-        text, mime_type = read_resource(uri)
+        text, mime_type, *meta = read_resource(uri)
         if text is None:
             return response(request_id, error={"code": -32004, "message": f"resource not found: {uri}"})
-        return response(request_id, result={"contents": [{"uri": uri, "mimeType": mime_type, "text": text}]})
+        contents: dict[str, Any] = {"uri": uri, "mimeType": mime_type, "text": text}
+        if meta and meta[0]:
+            contents["_meta"] = meta[0]
+        return response(request_id, result={"contents": [contents]})
     if method == "tools/list":
         return response(request_id, result={"tools": list_tools()})
     if method == "tools/call":
