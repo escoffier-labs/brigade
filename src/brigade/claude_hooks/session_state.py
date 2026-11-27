@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .. import inbox_lock, localio
-from . import anchored_io, check_events, dependencies, envelope, producer_session
+from . import anchored_io, check_events, dependencies, envelope, producer_session, write_attribution
 
 _SESSION_STATE_PROCESS_LOCKS_GUARD = threading.Lock()
 _SESSION_STATE_PROCESS_LOCKS: dict[str, threading.Lock] = {}
@@ -291,6 +291,7 @@ def _write_session_state_preserving_latch(
     log_target: Path | None = None,
     patch_fields: tuple[str, ...] | None = None,
     capture_artifact_id: str | None = None,
+    pending_bash_update: Callable[[dict[str, Any]], None] | None = None,
 ) -> bool:
     """Preserve concurrent evidence; explicit capture intent may change attribution."""
     try:
@@ -349,6 +350,11 @@ def _write_session_state_preserving_latch(
                     updated.pop(key, None)
                     if key in current_state:
                         updated[key] = current_state[key]
+            write_attribution.restore_pending(
+                updated, current_state if updated.get("task_epoch") == current_epoch else {}
+            )
+            if pending_bash_update is not None:
+                pending_bash_update(updated)
             dependencies.merge_observations(updated, current_state, observed_fields=patch_fields or ())
             producer_session.merge_events(updated, current_state)
             if updated.get("task_epoch") == current_epoch:

@@ -1013,13 +1013,17 @@ def _prune_verify_runs(target: Path, keep: int | None = None, archive_root: Path
         except Exception:
             keep = VERIFY_RUNS_KEEP
     root = helpers._verify_runs_root(target)
-    if not root.is_dir():
+    if root.is_symlink() or not root.is_dir():
         return 0
     try:
         resolved_archive = _verify_archive_root(target, archive_root)
     except Exception:
         return 0
-    run_dirs = sorted((child for child in root.iterdir() if child.is_dir()), key=lambda p: p.name, reverse=True)
+    run_dirs = sorted(
+        (child for child in root.iterdir() if not child.is_symlink() and child.is_dir()),
+        key=lambda p: p.name,
+        reverse=True,
+    )
     removed = 0
     # Oldest first so the append-only archive index grows in chronological order.
     for stale in reversed(run_dirs[keep:]):

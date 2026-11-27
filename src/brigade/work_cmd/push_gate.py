@@ -1,4 +1,4 @@
-"""Configure and inspect the clone-local advisory Git push gate."""
+"""Configure and inspect the clone-local Git push gate."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import stat
 import subprocess
 import sys
@@ -16,9 +17,14 @@ from pathlib import Path
 from shutil import which
 from typing import Any
 
-from . import push_gate_log
+from .. import config
+from . import push_gate_display, push_gate_log
 
 _MODE_KEY = "brigade.pushGate"
+ENFORCE_V1_NOTICE = (
+    "enforce is configured but this hook block is version 1 and will not block pushes; replace the block"
+)
+_TIMEOUT_PROBE = ("-k", "1", "1", "true")
 _SHEBANG = b"#!/usr/bin/env bash\n"
 _MANAGED_HEADER = b"# Brigade managed minimal push gate\n"
 _GATE_BLOCK = re.compile(rb"^# BEGIN Brigade push gate v(\d+)\n.*?^# END Brigade push gate v\1\n", re.M | re.S)
@@ -28,10 +34,12 @@ def _git(target: Path, *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(["git", "-C", str(target), *args], capture_output=True, text=True, timeout=2, check=False)
 
 
-def _mode(target: Path) -> str | None:
-    result = _git(target, "config", "--get", _MODE_KEY)
-    if result.returncode not in (0, 1):
-        raise OSError(f"could not read Git config key {_MODE_KEY}")
+def _mode(target: Path, *, local: bool = True) -> str | None:
+    scope = ("--local", "--includes") if local else ()
+    result = _git(target, "config", *scope, "--get", _MODE_KEY)
+    if result.returncode and (result.returncode != 1 or result.stderr):
+        detail = result.stderr.strip() or f"Git exited with status {result.returncode}"
+        raise OSError(detail)
     return result.stdout.removesuffix("\n") if result.returncode == 0 else None
 
 
@@ -54,6 +62,9 @@ class Repository:
             target, "rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir", "--git-path", "hooks"
         )
         if result.returncode != 0:
+            error = result.stderr.strip()
+            if error and "not a git repository" not in error and "must be run in a work tree" not in error:
+                raise OSError(error)
             return None
         root, common, hooks = (Path(line) for line in result.stdout.splitlines())
         return cls(root, common.resolve(), hooks / "pre-push")
@@ -84,75 +95,194 @@ def _read_hook(path: Path) -> bytes | None:
         return None
 
 
+def _normalized_mode(mode: str | None) -> str:
+    return (mode or "").strip().lower()
+
+
+def _timeout_state() -> str:
+    command: list[str] = []
+    via_git_bash = False
+    if sys.platform == "win32" and (git := which("git")):
+        # Git for Windows runs hooks in Git Bash, whose tool lookup can
+        # select GNU timeout even when native PATH finds System32 first.
+        for root in Path(git).resolve().parents:
+            bash = root / "bin" / "bash.exe"
+            if (root / "cmd" / "git.exe").is_file() and bash.is_file():
+                command = [
+                    str(bash),
+                    "-c",
+                    'PATH="/usr/bin:$PATH"; command -v timeout >/dev/null 2>&1 || exit 127; timeout "$@" || exit 1',
+                    "push-gate-timeout-probe",
+                    *_TIMEOUT_PROBE,
+                ]
+                via_git_bash = True
+                break
+    if not command:
+        executable = which("timeout")
+        if executable is None:
+            return "missing"
+        command = [executable, *_TIMEOUT_PROBE]
+    try:
+        result = subprocess.run(command, capture_output=True, timeout=2, check=False)
+        if result.returncode == 0:
+            return "usable"
+        if via_git_bash and result.returncode == 127:
+            return "missing"
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return "incompatible"
+
+
+def _enforce_issue(info: dict[str, Any], *, will_create: bool = False) -> str | None:
+    if not info["wired"] and not will_create:
+        return "Wire the effective executable pre-push hook with the current Brigade block."
+    if info["hook_version"] == 1:
+        return (
+            ENFORCE_V1_NOTICE
+            if info["mode"] == "enforce"
+            else "Replace the version 1 hook block before enabling enforce mode."
+        )
+    if not info["current"] and not will_create:
+        return "Replace the installed Brigade hook block with the current block."
+    if not info["brigade_on_path"]:
+        return "Put brigade on Git's PATH."
+    if not info["timeout_on_path"]:
+        return "Put GNU coreutils timeout with -k support on Git's PATH."
+    return None
+
+
 def status(repo: Repository) -> dict[str, Any]:
-    mode = _mode(repo.root)
+    try:
+        configured = _mode(repo.root)
+        effective = _mode(repo.root, local=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise OSError(f"Git could not read the configuration: {exc}") from exc
+    mode = _normalized_mode(configured)
     raw = _read_hook(repo.hook)
-    match = _GATE_BLOCK.search(raw.replace(b"\r\n", b"\n")) if raw else None
+    normalized = raw.replace(b"\r\n", b"\n") if raw else b""
+    match = _GATE_BLOCK.search(normalized)
+    hook_verified = normalized in (_minimal_hook(), _guard_bytes())
     current = match is not None and match.group() == _snippet()
     executable = raw is not None and os.access(repo.hook, os.X_OK)
     wired = bool(executable and match and b"brigade work verify push-gate run" in match.group())
     brigade_on_path = which("brigade") is not None
-    timeout_on_path = which("timeout") is not None
+    timeout_state = _timeout_state()
+    timeout_on_path = timeout_state == "usable"
     rows = push_gate_log.read(push_gate_log.log_path(repo.common))
     recent = datetime.now(UTC) - timedelta(days=7)
     stamps = [datetime.fromisoformat(row["time"]) for row in rows]
-    return {
-        "mode": "warn" if mode in {"warn", "enforce"} else "off",
-        "configured_mode": mode,
+    info = {
+        "mode": mode if mode in {"warn", "enforce"} else "off",
+        "configured_mode": configured,
+        "ignored_mode": effective if effective != configured else None,
+        "invalid_mode": bool(mode and mode not in {"off", "warn", "enforce"}),
         "hook_path": str(repo.hook),
         "hook_exists": raw is not None,
         "hook_executable": executable,
         "hook_version": int(match[1]) if match else None,
         "current": current,
+        "hook_verified": hook_verified,
         "wired": wired,
         "brigade_on_path": brigade_on_path,
         "timeout_on_path": timeout_on_path,
+        "timeout_state": timeout_state,
         "will_run": mode in {"warn", "enforce"} and wired and brigade_on_path and timeout_on_path,
         "last_push": max(stamps).astimezone(UTC).isoformat() if stamps else None,
         "recent_gate_errors": sum(
             row["result"] == "gate_error" and stamp >= recent for row, stamp in zip(rows, stamps, strict=True)
         ),
     }
+    info["enforce_effective"] = mode == "enforce" and hook_verified and _enforce_issue(info) is None
+    return info
 
 
-def describe(info: dict[str, Any]) -> str:
+def describe(info: dict[str, Any], *, include_issue: bool = True) -> str:
     mode = info["mode"]
-    if info["configured_mode"] == "enforce":
-        mode += " (enforce does not exist yet)"
-    elif info["configured_mode"] not in {None, "off", "warn"}:
-        mode += " (unrecognized configuration)"
+    if info["invalid_mode"]:
+        mode += f" (unrecognised brigade.pushGate value {info['configured_mode']!r})"
     active = "wired" if info["wired"] else "not wired"
     path_status = "brigade on PATH" if info["brigade_on_path"] else "cannot run: brigade missing from PATH"
     if info["timeout_on_path"]:
         path_status += ", timeout on PATH"
+    elif info["timeout_state"] == "incompatible":
+        path_status += ", timeout on PATH does not support the required -k invocation"
     elif info["mode"] == "warn":
         path_status += ", configured but will not run: timeout missing from PATH"
     else:
         path_status += ", timeout missing from PATH"
     version = f"v{info['hook_version']}" if info["hook_version"] is not None else "none"
     freshness = ", update available" if info["wired"] and not info["current"] else ""
-    return (
+    description = (
         f"mode={mode}, {active}, hook={info['hook_path']}, version={version}{freshness}, {path_status}, "
         f"last push={info['last_push'] or 'none'}, last 7 days gate errors={info['recent_gate_errors']}"
     )
+    if info["ignored_mode"] is not None:
+        description += (
+            f". Ignored Git config value {info['ignored_mode']!r}. "
+            "Only clone-local config and its includes select the push gate mode."
+        )
+    if info["hook_version"] is not None and not info["hook_verified"]:
+        description += (
+            ". Block present, hook not verified. Enforcement cannot be confirmed because the hook has other content."
+        )
+    if include_issue and mode == "enforce" and (issue := _enforce_issue(info)):
+        description += f". {issue}"
+    return push_gate_display.terminal_text(description)
+
+
+def _create_minimal_hook(repo: Repository) -> bool:
+    repo.hook.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        stream = repo.hook.open("xb")
+    except FileExistsError:
+        return False
+    try:
+        with stream:
+            stream.write(_minimal_hook())
+        repo.hook.chmod(0o755)
+    except OSError:
+        repo.hook.unlink()
+        raise
+    return True
 
 
 def _install(repo: Repository, mode: str) -> None:
-    _write_mode(repo.root, mode)
-    if repo.hook.parent.resolve() == repo.common / "hooks" and not os.path.lexists(repo.hook):
-        repo.hook.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            with repo.hook.open("xb") as stream:
-                stream.write(_minimal_hook())
-            repo.hook.chmod(0o755)
-        except FileExistsError:
-            pass
+    can_create = repo.hook.parent.resolve() == repo.common / "hooks" and not os.path.lexists(repo.hook)
+    if mode != "enforce":
+        _write_mode(repo.root, mode)
+        if can_create:
+            _create_minimal_hook(repo)
     info = status(repo)
-    print(describe(info))
+    issue = _enforce_issue(info, will_create=can_create) if mode == "enforce" else None
+    write_mode = mode == "enforce" and info["mode"] != mode
+    if write_mode and issue is None:
+        source = _git(repo.root, "config", "--local", "--includes", "--null", "--show-origin", "--get", _MODE_KEY)
+        if source.returncode not in (0, 1):
+            raise OSError(f"could not locate Git config key {_MODE_KEY}")
+        origin = source.stdout.partition("\0")[0].removeprefix("file:")
+        if origin and (repo.root / origin).resolve() != repo.common / "config":
+            issue = f"Set {_MODE_KEY}=enforce in the included Git config {origin!r}."
+    if mode == "enforce" and issue is None:
+        created = can_create and _create_minimal_hook(repo)
+        if can_create and not created:
+            raise OSError("The effective pre-push hook appeared during install. Inspect it and retry.")
+        try:
+            if write_mode:
+                _write_mode(repo.root, mode)
+        except (OSError, subprocess.TimeoutExpired):
+            if created and _read_hook(repo.hook) == _minimal_hook():
+                repo.hook.unlink()
+            raise
+        info = status(repo)
+    print(describe(info, include_issue=issue is None))
     if not info["wired"] or not info["current"]:
         print("The effective hook was left in place. Add or update these lines after capturing pre-push input:")
         print(_snippet().decode("ascii"), end="")
+        if info["hook_version"] == 1 and issue is None and info["mode"] != "enforce":
+            print("The version 1 hook block must be replaced before it can enforce.")
         print("For a Brigade content guard hook, refresh from the shipped templates/hooks/pre-push file.")
+    if issue is not None:
+        raise ValueError(issue)
 
 
 def _uninstall(repo: Repository) -> None:
@@ -165,12 +295,89 @@ def _uninstall(repo: Repository) -> None:
         repo.hook.unlink()
 
 
+_PRUNE_GRACE_SECONDS = 60
+
+
+def _prune(repo: Repository) -> int:
+    from .verification import _archive_verify_run, _verify_archive_root
+    from .verify_push import _RECEIPT_LIMIT, _Indeterminate, _Receipts, _receipt_started_at
+
+    keep = config.resolve_verify_runs_keep(repo.root)
+    if keep > _RECEIPT_LIMIT:
+        raise ValueError(f"Set verify_runs_keep in {config.CONFIG_REL_PATH} to at most {_RECEIPT_LIMIT}.")
+    receipts = _Receipts(repo.root, float("inf"))
+    try:
+        named, stray = receipts.inventory()
+        for name in sorted(stray):
+            problem = receipts._entry_problem(name, "has a non-writer directory name")
+            push_gate_display.diagnostic(problem, remedy=problem.remedy)
+        now = datetime.now(UTC)
+        runs: list[tuple[datetime, str, bool]] = []
+        for name, second in named:
+            receipt = receipts._load(name)
+            if receipt is None:
+                continue
+            if isinstance(receipt, _Indeterminate):
+                raise receipt
+            started = _receipt_started_at(receipt)
+            if started is None or started.replace(microsecond=0) != second or started > now:
+                raise receipts._entry_problem(name, "has an invalid, mismatched, or future start timestamp")
+            runs.append((started, name, receipt["status"] == "running"))
+    except _Indeterminate as exc:
+        push_gate_display.diagnostic(f"push gate: {exc}", remedy=exc.remedy)
+        return 1
+
+    # The writer does not hold a retention lock. Preserve active runs and
+    # recent writes even when they fall outside the configured retention.
+    cutoff = now.timestamp() - _PRUNE_GRACE_SECONDS
+    stale = []
+    for started, name, running in sorted(runs, reverse=True)[keep:]:
+        if running or started.timestamp() > cutoff:
+            continue
+        path = receipts.root / name
+        if max(path.lstat().st_mtime, (path / "receipt.json").lstat().st_mtime) <= cutoff:
+            stale.append(path)
+
+    removed = 0
+    if stale:
+        _, configured_archive = config.resolve_verify_archive(repo.root)
+        try:
+            archive = _verify_archive_root(repo.root)
+            if archive is None:
+                raise OSError("verify archival is disabled")
+            if archive.exists() and not archive.stat().st_mode & 0o222:
+                raise PermissionError("archive directory has no write permissions")
+            for path in reversed(stale):
+                _archive_verify_run(path, archive)
+                if max(path.lstat().st_mtime, (path / "receipt.json").lstat().st_mtime) <= cutoff:
+                    shutil.rmtree(path)
+                    removed += 1
+        except (OSError, ValueError, RuntimeError) as exc:
+            raise OSError(
+                f"Could not write or complete pruning via verify archive {str(configured_archive)!r}: {exc}"
+            ) from exc
+
+    remaining = len(runs) - removed
+    if remaining > _RECEIPT_LIMIT:
+        raise ValueError(
+            f"{remaining} receipts remain in {str(receipts.root)!r}. "
+            f"Wait for active runs and the {_PRUNE_GRACE_SECONDS}-second grace period, then retry."
+        )
+    print(f"Pruned {removed} local verify run(s). Local receipts remaining: {remaining}.")
+    return 0
+
+
 def _report_text(report: dict[str, Any]) -> None:
     def line(label: str, info: dict[str, Any]) -> None:
         counts = ", ".join(f"{key}={value}" for key, value in sorted(info["results"].items())) or "no results"
+        median = f"{info['median_ms']} ms" if info["median_ms"] is not None else "n/a"
+        p95 = f"{info['p95_ms']} ms" if info["p95_ms"] is not None else "n/a"
         print(
-            f"{label}  {counts} | would block {info['would_block_share']:.1%} | gate errors {info['gate_errors']}"
-            f" | median {info['median_ms']} ms | p95 {info['p95_ms']} ms"
+            push_gate_display.terminal_text(
+                f"{label}  {counts} | would block {info['would_block_share']:.1%} | blocked rows {info['blocked']}"
+                f" | gate errors {info['gate_errors']}"
+                f" | median {median} | p95 {p95}"
+            )
         )
 
     line("Total", report)
@@ -179,14 +386,15 @@ def _report_text(report: dict[str, Any]) -> None:
 
 
 def register(parsers: Any) -> None:
-    gate = parsers.add_parser("push-gate", help="Manage the advisory pre-push verification gate.")
+    gate = parsers.add_parser("push-gate", help="Manage the pre-push verification gate.")
     commands = gate.add_subparsers(dest="push_gate_command", required=True)
-    commands.add_parser("run", help="Run the advisory check from a Git pre-push hook.")
-    for name in ("install", "status", "uninstall", "report"):
+    run = commands.add_parser("run", help="Run the configured check from a Git pre-push hook.")
+    run.add_argument("--hook-v2", action="store_true", help="Use the v2 hook protocol.")
+    for name in ("install", "status", "uninstall", "report", "prune"):
         parser = commands.add_parser(name)
         parser.add_argument("--target", "-t", type=Path, default=Path("."))
         if name == "install":
-            parser.add_argument("--mode", default="warn", metavar="{warn,off}")
+            parser.add_argument("--mode", default="warn", metavar="{warn,enforce,off}")
         if name in {"status", "report"}:
             parser.add_argument("--json", action="store_true")
         if name == "report":
@@ -198,10 +406,9 @@ def dispatch(args: argparse.Namespace) -> int:
     if command == "run":
         from .push_gate_hook import run
 
-        return run()
-    if command == "install" and args.mode not in {"warn", "off"}:
-        error = "enforce mode does not exist yet" if args.mode == "enforce" else "expected mode warn or off"
-        print(f"push gate: {error}", file=sys.stderr)
+        return run(hook_v2=args.hook_v2)
+    if command == "install" and args.mode not in {"warn", "enforce", "off"}:
+        print("push gate: expected mode warn, enforce, or off", file=sys.stderr)
         return 2
     try:
         repo = Repository.locate(args.target)
@@ -219,10 +426,12 @@ def dispatch(args: argparse.Namespace) -> int:
             print(json.dumps(info) if args.json else describe(info))
         elif command == "install":
             _install(repo, args.mode)
+        elif command == "prune":
+            return _prune(repo)
         else:
             _uninstall(repo)
-            print(f"push gate: mode unset for {repo.root}")
+            print(push_gate_display.terminal_text(f"push gate: mode unset for {repo.root}"))
     except (OSError, subprocess.TimeoutExpired, ValueError) as exc:
-        print(f"push gate: {exc}", file=sys.stderr)
+        push_gate_display.diagnostic(f"push gate: {exc}")
         return 1
     return 0

@@ -90,6 +90,7 @@ def _summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "results": dict(counts),
         "would_block": blocks,
         "would_block_share": blocks / len(rows) if rows else 0.0,
+        "blocked": sum(row.get("blocked") is True for row in rows),
         "gate_errors": counts["gate_error"],
         "median_ms": median(durations) if durations else None,
         "p95_ms": durations[math.ceil(len(durations) * 0.95) - 1] if durations else None,
