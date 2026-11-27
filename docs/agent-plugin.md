@@ -29,7 +29,7 @@ The Codex plugin ships no hook, because codex-cli 0.163.0 has no verified plugin
 | Tool | Kind | What it does |
 |---|---|---|
 | `list_cards` | read | Lists memory cards from the repo and user stores, labeled by origin. Takes an optional `scope` of `repo`, `user`, or `all`. |
-| `get_card` | read | Reads one card by reference. |
+| `get_card` | read | Reads one card by reference. The card text is marked untrusted; a card the content scan blocks or flags is withheld. |
 | `search_cards` | read | Keyword search across both stores; repo matches rank first on ties. |
 | `memory_status` | read | Shows the resolved stores, card counts, and whether the repo is Brigade-wired. |
 | `work_brief` | read | Compact work brief for the current repo: branch, dirty files, sessions, next task. |
@@ -41,6 +41,8 @@ Card references use one grammar:
 - `user:<path>` reads from the user store.
 - `card://<path>` is accepted as an alias for a bare path. Resources list repo cards as `card://<path>` and user-store cards as `user-card://<path>`.
 - A bare path resolves in the repo store first, then the user store.
+
+`get_card` returns the card text in `content` with `content_trust: untrusted`. Card resources return the text in the contents entry and carry the same marker in that entry's `_meta`. A card the content scan blocks or flags is withheld from both reads, and a scan error withholds rather than returning the text. Card listings and search results apply the content scan to their card-authored and location fields, mark returned items as untrusted, and omit or withhold blocked or flagged ones.
 
 `write_handoff` with `action` `create-card` or `update-card` (plus `target_card` and frontmatter `content`) is the reviewed route for proposing card changes. It never edits a canonical card. If the content fails lint, the draft is deleted and the tool returns the lint errors so the agent can retry. Content is capped at 256 KiB, and facts and evidence at 50 items each. Cards are served only when their real path stays inside the store, so a symlinked cards directory contributes nothing, and a handoff inbox that resolves outside the store is refused.
 

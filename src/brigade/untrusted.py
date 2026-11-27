@@ -14,7 +14,7 @@ from __future__ import annotations
 import re
 import secrets
 from dataclasses import dataclass
-from typing import Iterable, List, Optional
+from typing import Any, Iterable, List, Optional
 
 from .memory_content_scan import WHITESPACE
 
@@ -393,3 +393,13 @@ def scan_untrusted(content: str) -> InjectionSignal:
     warnings = _warning_hits(hits)
     markers = [hit.excerpt for hit in warnings]
     return InjectionSignal(flagged=bool(warnings), count=len(warnings), markers=markers)
+
+
+def card_texts(item: dict[str, Any]) -> list[str]:
+    """The card-authored text fields of a search match, as search results expose them."""
+    texts = [item.get(key) for key in ("card_id", "title", "summary")]
+    for key in ("tags", "card_aliases"):
+        values = item.get(key)
+        if isinstance(values, list):
+            texts.extend(values)
+    return [text for text in texts if isinstance(text, str)]
