@@ -565,8 +565,8 @@ def abort_t3(folder: Path, error: str) -> None:
     print(shlex.join((*CLI, "t3", "status", run_id, "--target", str(workspace))))
     finalize = shlex.join((*CLI, "t3", "finalize", run_id, "--target", str(workspace)))
     print(
-        f"Close this run with `{finalize}` once status shows no live or held tasks, "
-        "or run it now to close the run as failed."
+        f"Close this run with `{finalize}` once status shows no live or held tasks. "
+        "Resolve any hold first. Finalize records failed unless every task is terminal and acknowledged."
     )
 
 

@@ -95,8 +95,8 @@ def _finalize_command(workspace, run_id):
 def _operator_lines(workspace, run_id):
     return [
         _status_line(workspace, run_id),
-        f"Close this run with `{_finalize_command(workspace, run_id)}` once status shows no live or held tasks, "
-        "or run it now to close the run as failed.",
+        f"Close this run with `{_finalize_command(workspace, run_id)}` once status shows no live or held tasks. "
+        "Resolve any hold first. Finalize records failed unless every task is terminal and acknowledged.",
     ]
 
 
@@ -164,6 +164,11 @@ def test_abort_t3_acknowledges_an_all_terminal_run_without_finalizing(tmp_path, 
     assert report["tasks"][0]["acked"] is True
     printed = capsys.readouterr().out.splitlines()
     assert printed == _operator_lines(workspace, run_id)
+    instruction = printed[1]
+    assert instruction == (
+        f"Close this run with `{_finalize_command(workspace, run_id)}` once status shows no live or held tasks. "
+        "Resolve any hold first. Finalize records failed unless every task is terminal and acknowledged."
+    )
 
     finalize = shlex.split(printed[1].split("`")[1])
     assert cli.main(finalize[len(qualification.CLI) :]) == 0
@@ -194,7 +199,7 @@ def test_abort_t3_leaves_an_already_finalized_run_untouched(tmp_path, monkeypatc
 
 
 def test_abort_t3_prints_the_operator_lines_when_a_hold_lands_after_status(tmp_path, monkeypatch, capsys):
-    from brigade import native_t3_dispatch, native_t3_lifecycle
+    from brigade import cli, native_t3_dispatch, native_t3_lifecycle
     from tests.test_native_t3_claim import THREAD, _claim, _enroll, _terminal_reply
 
     workspace, run_id = _enroll(tmp_path, ("done",))
@@ -223,10 +228,18 @@ def test_abort_t3_prints_the_operator_lines_when_a_hold_lands_after_status(tmp_p
         patch.setattr(native_t3_lifecycle, "status", status_then_hold)
         _abort(patch, folder)
 
-    assert capsys.readouterr().out.splitlines() == _operator_lines(workspace, run_id)
+    printed = capsys.readouterr().out.splitlines()
+    assert printed == _operator_lines(workspace, run_id)
     report = real_status(workspace=workspace, run_id=run_id)
     assert report["status"] == "awaiting-native-parent"
     assert report["tasks"][0]["held_reason"] == "abandoned-unknown"
+
+    finalize = shlex.split(printed[1].split("`")[1])
+    assert cli.main(finalize[len(qualification.CLI) :]) == 2
+    assert "finalize-abandoned" in capsys.readouterr().err
+    held = real_status(workspace=workspace, run_id=run_id)
+    assert held["status"] == "awaiting-native-parent"
+    assert held["tasks"][0]["held_reason"] == "abandoned-unknown"
 
 
 def test_abort_t3_leaves_a_queued_task_open_for_the_printed_finalize(tmp_path, monkeypatch, capsys):

@@ -456,8 +456,9 @@ with `finalize-abandoned` rather than release live-work capacity.
 result row exists, and never finalizes. It ignores acknowledgement refusals and
 leaves every other task for the operator. It always ends by printing the
 `t3 status` command and one line asking the operator to close the run with
-`t3 finalize` once status shows no live or held tasks, or to run it now to close
-the run as failed.
+`t3 finalize` once status shows no live or held tasks, to resolve any hold
+first, and noting that finalize records failed unless every task is terminal
+and acknowledged.
 
 `t3 status <run> [--json]` is read-only and prints fixed tokens, booleans, the
 attempt number and a seat digest, with no task text, option values, native
