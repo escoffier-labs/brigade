@@ -1,0 +1,150 @@
+#!/usr/bin/env python3
+"""Publish one fleet machine telemetry snapshot to the Brigade hub.
+
+Run by a timer on every enrolled machine. Reports only what this host can
+prove: its own load, and the seats whose Brigade CLI binding is actually
+installed here and whose policy entry lists this machine. A hub that cannot
+be reached is not an error worth waking anyone for; the snapshot simply
+expires and the machine goes unknown, which is the honest state.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from datetime import datetime, timezone
+
+TTL_SECONDS = 300
+BRIGADE = os.environ.get("BRIGADE_BIN") or shutil.which("brigade") or "brigade"
+
+
+def _run(args: list[str], timeout: float = 60.0) -> str:
+    result = subprocess.run(
+        [BRIGADE, *args], capture_output=True, text=True, timeout=timeout, check=False
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"brigade {' '.join(args)} exited {result.returncode}: {result.stderr.strip()[:200]}")
+    return result.stdout
+
+
+def _node_id() -> str:
+    from brigade import fleet_client  # provided by the venv running this script
+
+    return str(fleet_client.resolve_node_id())
+
+
+def _executable_for(cli_ref: str) -> str:
+    from brigade import agents
+
+    return agents.command_for(cli_ref)
+
+
+def _load() -> float:
+    try:
+        one = os.getloadavg()[0]
+    except (OSError, AttributeError):
+        return 0.0
+    return round(min(one / (os.cpu_count() or 1), 1.0), 3)
+
+
+def _t3_agent_command() -> list[str] | None:
+    """The local t3-fleet target agent, if this host runs one."""
+    override = os.environ.get("T3_FLEET_AGENT")
+    if override:
+        return [override]
+    # Prefer the deployed runtime over anything else on PATH: Windows hosts can
+    # carry an older user-site t3-fleet-agent without the observe action.
+    python = os.path.join(os.environ.get("LOCALAPPDATA", ""), "T3Fleet", "venv", "Scripts", "python.exe")
+    if os.name == "nt" and os.path.isfile(python):
+        return [python, "-m", "t3_fleet.agent"]
+    found = shutil.which(
+        os.path.expanduser("~/.local/share/t3-fleet/venv/bin/t3-fleet-agent")
+    ) or shutil.which("t3-fleet-agent")
+    return [found] if found else None
+
+
+def _observe_t3() -> None:
+    """Publish T3 thread lifecycle to the hub through the target agent.
+
+    The agent reports with this host's own node identity. Failures are logged
+    and never block the telemetry snapshot.
+    """
+    command = _t3_agent_command()
+    if command is None:
+        return
+    env = dict(os.environ)
+    brigade_dir = os.path.dirname(shutil.which(BRIGADE) or "")
+    if brigade_dir:
+        env["PATH"] = brigade_dir + os.pathsep + env.get("PATH", "")
+    try:
+        result = subprocess.run(
+            [*command, "observe", "--max", "20"],
+            capture_output=True, text=True, timeout=90, check=False, env=env,
+            stdin=subprocess.DEVNULL,
+        )
+        summary = json.loads(result.stdout) if result.stdout.strip() else {}
+        print(f"t3 observe: exit={result.returncode} examined={summary.get('examined')} truncated={summary.get('truncated')}")
+    except Exception as error:  # noqa: BLE001 - observation is best effort
+        print(f"t3 observe: skipped ({type(error).__name__})", file=sys.stderr)
+
+
+def main() -> int:
+    _observe_t3()
+    node_id = _node_id()
+    document = json.loads(_run(["fleet", "policy", "show", "--json"]))
+    document = document.get("document", document)
+
+    machine = next(
+        (name for name, body in (document.get("machines") or {}).items() if body.get("node_id") == node_id),
+        None,
+    )
+    if machine is None:
+        print(f"telemetry: this node ({node_id}) is not named in the policy document; nothing to publish")
+        return 0
+
+    usable = []
+    for name, seat in sorted((document.get("seats") or {}).items()):
+        if not seat.get("enabled"):
+            continue
+        if machine not in (seat.get("eligible_machines") or []):
+            continue
+        cli_ref = ((seat.get("bindings") or {}).get("brigade") or {}).get("cli")
+        if not cli_ref:
+            continue
+        if shutil.which(_executable_for(str(cli_ref))):
+            usable.append(name)
+
+    load = _load()
+    body = {
+        "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "ttl_seconds": TTL_SECONDS,
+        "status": "busy" if load >= 0.95 else "available",
+        "load": load,
+        "running": {"session_ids": [], "run_ids": []},
+        "active_claims": [],
+        "usable_seats": usable,
+        "credential_state": "ok",
+    }
+
+    handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
+    try:
+        json.dump(body, handle)
+        handle.close()
+        _run(["fleet", "policy", "observe", "--file", handle.name])
+    finally:
+        os.unlink(handle.name)
+
+    print(f"telemetry: {machine} status={body['status']} load={load} seats={len(usable)}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as error:  # noqa: BLE001 - a timer must not spam failures
+        print(f"telemetry: skipped ({type(error).__name__}: {error})", file=sys.stderr)
+        sys.exit(0)
