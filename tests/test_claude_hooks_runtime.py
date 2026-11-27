@@ -1358,18 +1358,16 @@ def test_final_bash_handoff_write_does_not_require_verification_again(tmp_path: 
         + "\n"
     )
     handoff = target / ".claude" / "memory-handoffs" / "handoff.md"
-    handoff.write_text("durable finding\n")
-    command = "printf '%s\\n' finding >> .claude/memory-handoffs/handoff.md"
-    runtime.handle_payload(
-        "PostToolUse",
-        _payload(
-            target,
-            "PostToolUse",
-            session_id=session_id,
-            tool_name="Bash",
-            tool_input={"command": command},
-        ),
+    pre = _payload(
+        target,
+        "PreToolUse",
+        session_id=session_id,
+        tool_name="Bash",
+        tool_input={"command": "printf '%s\\n' finding >> .claude/memory-handoffs/handoff.md"},
     )
+    assert runtime.handle_payload("PreToolUse", pre) is None
+    handoff.write_text("durable finding\n")
+    runtime.handle_payload("PostToolUse", {**pre, "hook_event_name": "PostToolUse"})
 
     updated = runtime.read_session_state(target, session_id)
     assert updated["last_write_at"] >= updated["last_verification_write_at"]
@@ -1484,17 +1482,18 @@ def test_stop_ignores_postcapture_brigade_run_artifact_writes(tmp_path: Path, mo
         )
         + "\n"
     )
-    artifact = target / ".brigade" / "runs" / "detached-1" / "run.json"
-    runtime.handle_payload(
-        "PostToolUse",
-        _payload(
-            target,
-            "PostToolUse",
-            session_id=session_id,
-            tool_name="Bash",
-            tool_input={"command": f"mkdir -p {artifact.parent} && touch {artifact}"},
-        ),
+    artifact = Path(".brigade", "runs", "detached-1", "run.json")
+    pre = _payload(
+        target,
+        "PreToolUse",
+        session_id=session_id,
+        tool_name="Bash",
+        tool_input={"command": f"mkdir -p {artifact.parent.as_posix()} && touch {artifact.as_posix()}"},
     )
+    assert runtime.handle_payload("PreToolUse", pre) is None
+    (target / artifact).parent.mkdir(parents=True)
+    (target / artifact).write_text("{}\n")
+    runtime.handle_payload("PostToolUse", {**pre, "hook_event_name": "PostToolUse"})
 
     updated = runtime.read_session_state(target, session_id)
     assert updated["last_verification_write_at"] == state["last_verification_write_at"]
@@ -4384,3 +4383,553 @@ def test_bash_hook_transport_denies_unreadable_verifier(target, capsys):
     output = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
     assert output["permissionDecision"] == "deny"
     assert "brigade work verify run" in output["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize(
+    "event, interrupted",
+    [("PostToolUse", False), ("PostToolUseFailure", False), ("PostToolUseFailure", True)],
+    ids=["success", "failure", "interrupt"],
+)
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "unmatched",
+        "duplicate",
+        "overlap",
+        "anonymous-overlap",
+        "different-tool",
+        "different-target",
+        "read-only",
+        "no-bash-events",  # No post event is sent in this control, regardless of the event parameter.
+        "matched-write",
+        "evicted",
+        "evicted-at-stop",
+        "legacy",
+        "pending-only",
+    ],
+)
+def test_bash_pending_events_at_stop(tmp_path, event, interrupted, scenario):
+    target = _git_wired_claude(tmp_path)
+    session_id = "pending-session"
+    other = _wired_claude(tmp_path / "other") if scenario == "different-target" else target
+
+    def bash(name, tool_use_id="tool-first", *, cwd=target, tool="Bash", command="custom-generator"):
+        fields = {"tool_use_id": tool_use_id} if tool_use_id else {}
+        return runtime.handle_payload(
+            name,
+            _payload(
+                cwd,
+                name,
+                session_id=session_id,
+                tool_name=tool,
+                tool_input={"command": command},
+                is_interrupt=interrupted,
+                **fields,
+            ),
+        )
+
+    def edit(filename, session):
+        path = target / filename
+        path.write_text("value = 1\n")
+        runtime.handle_payload(
+            "PostToolUse",
+            _payload(target, "PostToolUse", session_id=session, tool_name="Write", tool_input={"file_path": str(path)}),
+        )
+
+    # The pending-only case has no previously observed write. Its receipt is real
+    # session evidence, with a timestamp taken before the command starts.
+    if scenario == "pending-only":
+        runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id))
+        state = runtime.read_session_state(target, session_id)
+        state["last_verification_write_at"] = localio.utc_now_iso()
+        runtime.write_session_state(target, session_id, state)
+    else:
+        edit("earlier.py", session_id)
+    before = _write_session_receipt(target, session_id, tree_fingerprint=localio.tree_fingerprint(target))
+    original_stamp = before.get("last_write_at")
+    command = "git status" if scenario in {"read-only", "duplicate"} else "custom-generator"
+    command_id = None if scenario in {"anonymous-overlap", "legacy"} else "tool-first"
+    if scenario == "legacy":
+        # Pre-upgrade state stored only these two fields on disk.
+        runtime.write_session_state(
+            target,
+            session_id,
+            {
+                **before,
+                "pending_bash_fingerprint": runtime.repo_worktree_fingerprint(target),
+                "pending_bash_started_at": localio.utc_now_iso(),
+            },
+        )
+    elif scenario not in {"unmatched", "no-bash-events"}:
+        assert bash("PreToolUse", command_id, command=command) is None
+    if scenario in {"unmatched", "overlap", "anonymous-overlap", "matched-write", "legacy"}:
+        (target / "owned.py").write_text("value = 2\n")
+    if scenario in {"overlap", "anonymous-overlap"}:
+        second_id = None if scenario == "anonymous-overlap" else "tool-second"
+        assert bash("PreToolUse", second_id) is None
+        if scenario == "anonymous-overlap":
+            assert runtime.read_session_state(target, session_id)["last_write_at"] > original_stamp
+        bash(event, command_id, command=command)
+        if scenario == "overlap":
+            assert set(runtime.read_session_state(target, session_id)["pending_bash_commands"]) == {"tool-second"}
+        bash(event, second_id)
+    elif scenario in {"evicted", "evicted-at-stop"}:
+        for index in range(8):
+            assert bash("PreToolUse", f"tool-{index}") is None
+        assert set(runtime.read_session_state(target, session_id)["pending_bash_commands"]) == {
+            f"tool-{index}" for index in range(8)
+        }
+        for index in range(8):
+            bash(event, f"tool-{index}")
+        if scenario == "evicted":
+            bash(event, command_id)
+    elif scenario not in {"no-bash-events", "pending-only"}:
+        if scenario == "duplicate":
+            bash(event, command_id, command=command)
+            assert runtime.read_session_state(target, session_id)["last_write_at"] == original_stamp
+        bash(
+            event,
+            command_id,
+            command=command,
+            tool="Glob" if scenario == "different-tool" else "Bash",
+            cwd=other,
+        )
+    state = runtime.read_session_state(target, session_id)
+    unresolved = scenario in {"different-tool", "different-target", "pending-only"}
+    assert bool(state.get("pending_bash_commands")) is unresolved
+    assert "pending_bash_fingerprint" not in state and "pending_bash_started_at" not in state
+    blocked = scenario not in {"read-only", "no-bash-events"}
+    if blocked and not unresolved:
+        assert state["last_write_at"] > original_stamp
+        assert state["last_write_at"] == state["last_attributed_write_at"] == state["last_verification_write_at"]
+    else:
+        assert state.get("last_write_at") == original_stamp
+
+    edit("foreign.py", "later-writer")
+    stop = _payload(target, "Stop", session_id=session_id)
+    assert ((runtime.handle_payload("Stop", stop) or {}).get("decision") == "block") is blocked
+    if unresolved:
+        assert runtime.read_session_state(target, session_id)["pending_bash_commands"] == state["pending_bash_commands"]
+        # A new receipt covers the unresolved start without consuming it.
+        receipt = target / ".brigade" / "work" / "verify-runs" / f"run-{session_id}" / "receipt.json"
+        saved = json.loads(receipt.read_text())
+        saved["started_at"] = saved["completed_at"] = localio.utc_now_iso()
+        saved["tree_fingerprint"] = localio.tree_fingerprint(target)
+        receipt.write_text(json.dumps(saved) + "\n")
+        assert (runtime.handle_payload("Stop", stop) or {}).get("decision") != "block"
+
+
+@pytest.mark.parametrize("interleave", ["PreToolUse", "PostToolUse"])
+def test_bash_pending_updates_merge_with_interleaved_events(tmp_path, monkeypatch, interleave):
+    target = _git_wired_claude(tmp_path)
+    session = "parallel-session"
+    runtime.handle_payload("PostToolUse", _write_payload(target, session_id=session))
+    _write_session_receipt(target, session, tree_fingerprint=localio.tree_fingerprint(target))
+
+    def bash(event, tool_id):
+        return runtime.handle_payload(
+            event,
+            _payload(
+                target,
+                event,
+                session_id=session,
+                tool_name="Bash",
+                tool_use_id=tool_id,
+                tool_input={"command": "custom-generator"},
+            ),
+        )
+
+    save = runtime._write_session_state_preserving_latch
+    calls = []
+
+    def save_after_other_event(*args, **kwargs):
+        if kwargs.get("pending_bash_update") is not None and not calls:
+            calls.append(interleave)
+            assert bash(interleave, "tool-second") is None
+        return save(*args, **kwargs)
+
+    if interleave == "PostToolUse":
+        assert bash("PreToolUse", "tool-first") is None
+        assert bash("PreToolUse", "tool-second") is None
+        (target / "owned.py").write_text("value = 1\n")
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime, "_write_session_state_preserving_latch", save_after_other_event)
+        assert bash(interleave, "tool-first") is None
+    assert calls == [interleave]
+
+    state = runtime.read_session_state(target, session)
+    if interleave == "PreToolUse":
+        assert set(state["pending_bash_commands"]) == {"tool-first", "tool-second"}
+        (target / "owned.py").write_text("value = 1\n")
+        assert bash("PostToolUse", "tool-first") is None
+        assert bash("PostToolUse", "tool-second") is None
+    assert "pending_bash_commands" not in runtime.read_session_state(target, session)
+    (target / "src.py").write_text("value = 2\n")
+    runtime.handle_payload("PostToolUse", _write_payload(target, session_id="later-writer"))
+    assert runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session))["decision"] == "block"
+
+
+def _pending_case_event(repo, event, session="pending-review", **fields):
+    return runtime.handle_payload(event, _payload(repo, event, session_id=session, **fields))
+
+
+def _pending_case_write(repo, session="pending-review"):
+    (repo / f"{session}.py").write_text("value = 1\n")
+    _pending_case_event(repo, "PostToolUse", session, tool_name="Write", tool_input={"file_path": f"{session}.py"})
+
+
+def _pending_case_start(repo, *, command="custom-generator", **fields):
+    return _pending_case_event(repo, "PreToolUse", tool_name="Bash", tool_input={"command": command}, **fields)
+
+
+def _pending_case_complete(repo, event="PostToolUse", *, command="custom-generator", **fields):
+    return _pending_case_event(repo, event, tool_name="Bash", tool_input={"command": command}, **fields)
+
+
+def _pending_case_verify(repo, monkeypatch):
+    state = runtime.read_session_state(repo, "pending-review")
+    monkeypatch.setenv(runtime.CLAUDE_SESSION_ENV, state["session_fingerprint"])
+    assert (
+        cli.main(
+            [
+                "work",
+                "verify",
+                "run",
+                "--target",
+                str(repo),
+                "--argv-json",
+                json.dumps([sys.executable, "-c", "pass"]),
+            ]
+        )
+        == 0
+    )
+
+
+@pytest.mark.parametrize("shape", ["missing-start", "legacy-future", "map-future", "malformed", "oversized"])
+def test_stop_repairs_pending_bash_state_and_accepts_new_verification(tmp_path, monkeypatch, shape):
+    repo = _git_wired_claude(tmp_path)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    _pending_case_write(repo)
+    state = runtime.read_session_state(repo, "pending-review")
+    now = localio.utc_now()
+    state["started_at"] = (now - timedelta(minutes=5)).isoformat()
+    earlier = (now - timedelta(minutes=3)).isoformat()
+    for field in ("last_write_at", "last_attributed_write_at", "last_verification_write_at"):
+        state[field] = earlier
+    runtime.write_session_state(repo, "pending-review", state)
+    _write_session_receipt(repo, "pending-review", tree_fingerprint=localio.tree_fingerprint(repo))
+
+    baseline = runtime.repo_worktree_fingerprint(repo)
+    assert baseline
+    future = (now + timedelta(days=1)).isoformat()
+    if shape in {"missing-start", "legacy-future"}:
+        state["pending_bash_fingerprint"] = baseline
+        if shape == "legacy-future":
+            state["pending_bash_started_at"] = future
+    elif shape == "malformed":
+        state["pending_bash_commands"] = {
+            "": [baseline, future],
+            "missing-baseline": [None, future],
+            "bad-pair": [baseline],
+            "unreadable": [baseline, "unknown"],
+        }
+    elif shape == "oversized":
+        state["pending_bash_commands"] = {
+            f"tool-{index}": [baseline, (now - timedelta(minutes=2, seconds=9 - index)).isoformat()]
+            for index in range(10)
+        }
+    else:
+        state["pending_bash_commands"] = {"tool-future": [baseline, future]}
+    runtime.write_session_state(repo, "pending-review", state)
+    _pending_case_write(repo, "foreign-review")
+    assert _pending_case_event(repo, "Stop")["decision"] == "block"
+
+    repaired = runtime.read_session_state(repo, "pending-review")
+    if shape == "oversized":
+        assert set(repaired["pending_bash_commands"]) == {f"tool-{index}" for index in range(2, 10)}
+        assert (
+            repaired["last_write_at"] == repaired["last_verification_write_at"] == repaired["last_attributed_write_at"]
+        )
+        assert repaired["last_write_at"] > earlier
+    else:
+        if shape == "malformed":
+            assert set(repaired["pending_bash_commands"]) == {"unreadable"}
+        if shape in {"missing-start", "legacy-future"}:
+            clamped = repaired["pending_bash_started_at"]
+        else:
+            ((_, clamped),) = repaired["pending_bash_commands"].values()
+        assert now <= datetime.fromisoformat(clamped) <= localio.utc_now()
+
+    monkeypatch.setenv(runtime.CLAUDE_SESSION_ENV, repaired["session_fingerprint"])
+    assert (
+        cli.main(
+            [
+                "work",
+                "verify",
+                "run",
+                "--target",
+                str(repo),
+                "--argv-json",
+                json.dumps([sys.executable, "-c", "pass"]),
+            ]
+        )
+        == 0
+    )
+    assert (_pending_case_event(repo, "Stop") or {}).get("decision") != "block"
+
+
+@pytest.mark.parametrize("event", ["PostToolUse", "PostToolUseFailure"])
+@pytest.mark.parametrize(
+    "order",
+    [
+        "same-id",
+        "completion-first",
+        "id-at-start",
+        "id-at-completion",
+        "late-after-block",
+        "late-after-receipt",
+        "late-read-after-receipt",
+        "shared-subagent-write",
+        "shared-subagent-read",
+    ],
+)
+def test_bash_pending_event_orders_at_stop(tmp_path, monkeypatch, order, event):
+    repo = _git_wired_claude(tmp_path)
+    _pending_case_write(repo)
+    before = _write_session_receipt(repo, "pending-review", tree_fingerprint=localio.tree_fingerprint(repo))
+    read_only = order in {"shared-subagent-read", "late-read-after-receipt"}
+    command = "git status" if read_only else "custom-generator"
+    first = {} if order == "id-at-completion" else {"tool_use_id": "tool-first"}
+    last = {} if order == "id-at-start" else {"tool_use_id": "tool-first"}
+    if order.startswith("shared-subagent"):
+        first.update(agent_id="fixture-child", agent_type="fixture")
+        last.update(agent_id="fixture-child", agent_type="fixture")
+        assert _pending_case_start(repo, tool_use_id="tool-parent") is None
+    if order == "completion-first":
+        assert _pending_case_complete(repo, event, command=command, **last) is None
+        assert runtime.read_session_state(repo, "pending-review")["last_write_at"] > before["last_write_at"]
+    assert _pending_case_start(repo, command=command, **first) is None
+    if order == "same-id":
+        assert _pending_case_start(repo, command=command, **first) is None
+        assert runtime.read_session_state(repo, "pending-review")["last_write_at"] > before["last_write_at"]
+    if order == "late-after-block":
+        assert _pending_case_event(repo, "Stop")["decision"] == "block"
+    if order in {"late-after-receipt", "late-read-after-receipt"}:
+        _pending_case_verify(repo, monkeypatch)
+        assert (_pending_case_event(repo, "Stop") or {}).get("decision") != "block"
+
+    if not read_only:
+        (repo / "owned.py").write_text("value = 2\n")
+    _pending_case_event(repo, "PreToolUse", tool_name="Write", tool_input={"file_path": "other.py"})
+    assert _pending_case_complete(repo, event, command=command, **last) is None
+    after = runtime.read_session_state(repo, "pending-review")
+    if order.startswith("shared-subagent"):
+        assert set(after["pending_bash_commands"]) == {"tool-parent"}
+        assert _pending_case_complete(repo, event, tool_use_id="tool-parent") is None
+    if not read_only:
+        assert after["last_write_at"] > before["last_write_at"]
+        assert "pending_write_at" not in after
+    else:
+        assert after["last_write_at"] == before["last_write_at"]
+        assert "pending_write_at" in after
+    state = runtime.read_session_state(repo, "pending-review")
+    assert not any(key.startswith("pending_bash_") for key in state)
+    _pending_case_write(repo, "foreign-review")
+    assert ((_pending_case_event(repo, "Stop") or {}).get("decision") == "block") is (not read_only)
+
+
+@pytest.mark.parametrize("event", ["PostToolUse", "PostToolUseFailure"])
+@pytest.mark.parametrize("identity", ["id-on-start", "id-on-completion", "matched"])
+def test_bash_completion_repairs_observation_only_repository(tmp_path, identity, event):
+    repo = _git_wired_claude(tmp_path / "origin")
+    observed = _git_wired_claude(tmp_path / "observation")
+    for target in (repo, observed):
+        _pending_case_write(target)
+        _write_session_receipt(target, "pending-review", tree_fingerprint=localio.tree_fingerprint(target))
+    command = {"tool_name": "Bash", "tool_input": {"command": f"cd {shlex.quote(observed.as_posix())} && git status"}}
+    identified = {"tool_use_id": "tool-first"}
+    pre = _payload(repo, "PreToolUse", session_id="pending-review", **command)
+    primary = runtime.effective_hook_target(pre)
+    assert primary in (repo, observed)
+    secondary = observed if primary == repo else repo
+    assert (
+        _pending_case_event(repo, "PreToolUse", **command, **({} if identity == "id-on-completion" else identified))
+        is None
+    )
+    assert any(key.startswith("pending_bash_") for key in runtime.read_session_state(secondary, "pending-review"))
+    assert _pending_case_event(repo, event, **command, **({} if identity == "id-on-start" else identified)) is None
+    for target in (repo, observed):
+        state = runtime.read_session_state(target, "pending-review")
+        assert not any(key.startswith("pending_bash_") for key in state)
+        _pending_case_write(target, "foreign-review")
+    assert ((_pending_case_event(repo, "Stop") or {}).get("decision") == "block") is (identity != "matched")
+
+
+@pytest.mark.parametrize("source", ["resume", "compact", "clear", "startup"])
+def test_session_start_preserves_pending_bash_only_within_task(tmp_path, monkeypatch, source):
+    repo = _git_wired_claude(tmp_path)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setattr(runtime, "_run_brief", lambda *_args: "brief")
+    _pending_case_event(repo, "SessionStart", source="startup")
+    _pending_case_write(repo)
+    _write_session_receipt(repo, "pending-review", tree_fingerprint=localio.tree_fingerprint(repo))
+    assert _pending_case_start(repo, tool_use_id="tool-first") is None
+    before = runtime.read_session_state(repo, "pending-review")
+    if source == "compact":
+        assert _pending_case_event(repo, "PreCompact", trigger="auto") is None
+        assert (
+            runtime.read_session_state(repo, "pending-review")["pending_bash_commands"]
+            == before["pending_bash_commands"]
+        )
+    _pending_case_event(repo, "SessionStart", source=source)
+    continuing = source in {"resume", "compact"}
+    after = runtime.read_session_state(repo, "pending-review")
+    assert after.get("pending_bash_commands") == (before["pending_bash_commands"] if continuing else None)
+    _pending_case_write(repo, "foreign-review")
+    assert ((_pending_case_event(repo, "Stop") or {}).get("decision") == "block") is continuing
+
+
+@pytest.mark.parametrize(
+    "shape",
+    ["bad-pair", "null-map", "linked-null-map", "bad-legacy", "legacy-start-only", "empty-map", "absent"],
+)
+def test_pending_bash_structural_repair_stamps_once(tmp_path, monkeypatch, shape):
+    repo = _git_wired_claude(tmp_path)
+    session = "pending-review"
+    stop_repo = _git_wired_claude(tmp_path / "primary") if shape == "linked-null-map" else repo
+    if stop_repo != repo:
+        _pending_case_write(stop_repo)
+        _write_session_receipt(stop_repo, session, tree_fingerprint=localio.tree_fingerprint(stop_repo))
+        command = f"cd {shlex.quote(repo.as_posix())} && git status"
+        assert _pending_case_start(stop_repo, command=command, tool_use_id="link") is None
+        assert _pending_case_complete(stop_repo, command=command, tool_use_id="link") is None
+    _pending_case_write(repo)
+    raw = runtime.read_session_state(repo, session)
+    now = localio.utc_now()
+    raw["started_at"] = (now - timedelta(minutes=5)).isoformat()
+    earlier = (now - timedelta(minutes=3)).isoformat()
+    fields = ("last_write_at", "last_attributed_write_at", "last_verification_write_at")
+    raw.update(dict.fromkeys(fields, earlier))
+    runtime.write_session_state(repo, session, raw)
+    _write_session_receipt(repo, session, tree_fingerprint=localio.tree_fingerprint(repo))
+    if shape == "bad-pair":
+        raw["pending_bash_commands"] = {"only-bad-pair": [raw["repo_fingerprint"]]}
+    elif shape in {"null-map", "linked-null-map"}:
+        raw["pending_bash_commands"] = None
+    elif shape == "bad-legacy":
+        raw["pending_bash_fingerprint"] = ""
+        raw["pending_bash_started_at"] = None
+    elif shape == "legacy-start-only":
+        raw["pending_bash_started_at"] = (now - timedelta(minutes=4)).isoformat()
+    elif shape == "empty-map":
+        raw["pending_bash_commands"] = {}
+    runtime.write_session_state(repo, session, raw)
+    _pending_case_write(repo, "foreign-review")
+    repaired = shape not in {"empty-map", "absent"}
+    assert ((_pending_case_event(stop_repo, "Stop") or {}).get("decision") == "block") is repaired
+    first = runtime.read_session_state(repo, session)
+    stamps = [first[field] for field in fields]
+    assert stamps == [stamps[0]] * 3
+    assert (stamps[0] > earlier) is repaired
+    assert "pending_bash_commands" not in first
+    if shape == "legacy-start-only":
+        assert first["pending_bash_fingerprint"] == runtime._UNAVAILABLE_FINGERPRINT
+        assert first["pending_bash_started_at"] == raw["pending_bash_started_at"]
+    assert ((_pending_case_event(stop_repo, "Stop") or {}).get("decision") == "block") is repaired
+    second = runtime.read_session_state(repo, session)
+    assert [second[field] for field in fields] == stamps
+    if repaired:
+        _pending_case_verify(repo, monkeypatch)
+        assert (_pending_case_event(stop_repo, "Stop") or {}).get("decision") != "block"
+
+
+@pytest.mark.parametrize("linked", [False, True], ids=["one-worktree", "two-worktrees"])
+def test_anonymous_bash_completion_preserves_multiple_keyed_starts(tmp_path, monkeypatch, linked):
+    repo = _git_wired_claude(tmp_path / "origin")
+    other = _git_wired_claude(tmp_path / "observation") if linked else None
+    targets = [repo, other] if other else [repo]
+    earlier = {}
+    for target in targets:
+        _pending_case_write(target)
+        earlier[target] = _write_session_receipt(
+            target, "pending-review", tree_fingerprint=localio.tree_fingerprint(target)
+        )["last_write_at"]
+    command = f"cd {shlex.quote(other.as_posix())} && git status" if other else "git status"
+    assert _pending_case_start(repo, command=command, tool_use_id="one") is None
+    assert _pending_case_start(repo, tool_use_id="two") is None
+    assert _pending_case_complete(repo, command=command) is None
+    for target in targets:
+        state = runtime.read_session_state(target, "pending-review")
+        assert set(state.get("pending_bash_commands", {})) == ({"one", "two"} if target == repo else set())
+        assert state["last_verification_write_at"] > earlier[target]
+        _pending_case_write(target, "foreign-review")
+    assert _pending_case_event(repo, "Stop")["decision"] == "block"
+    for target in targets:
+        _pending_case_verify(target, monkeypatch)
+    assert (_pending_case_event(repo, "Stop") or {}).get("decision") != "block"
+
+
+@pytest.mark.parametrize("identified", [True, False], ids=["identified", "anonymous"])
+def test_mixed_pending_formats_complete_independently(tmp_path, identified):
+    repo = _git_wired_claude(tmp_path)
+    _pending_case_write(repo)
+    before = _write_session_receipt(repo, "pending-review", tree_fingerprint=localio.tree_fingerprint(repo))
+    assert _pending_case_start(repo) is None
+    assert _pending_case_start(repo, tool_use_id="keyed") is None
+    assert _pending_case_complete(repo, **({"tool_use_id": "keyed"} if identified else {})) is None
+    state = runtime.read_session_state(repo, "pending-review")
+    assert state["last_write_at"] == before["last_write_at"]
+    assert ("pending_bash_fingerprint" in state) is identified
+    assert ("pending_bash_commands" in state) is not identified
+    _pending_case_write(repo, "foreign-review")
+    assert _pending_case_event(repo, "Stop")["decision"] == "block"
+    assert _pending_case_complete(repo, **({} if identified else {"tool_use_id": "keyed"})) is None
+    assert (_pending_case_event(repo, "Stop") or {}).get("decision") != "block"
+
+
+@pytest.mark.parametrize("repair_event", ["Stop", "PostToolUse"])
+def test_oversized_bash_map_clamps_before_keep_newest(tmp_path, monkeypatch, repair_event):
+    repo = _git_wired_claude(tmp_path)
+    _pending_case_write(repo)
+    before = _write_session_receipt(repo, "pending-review", tree_fingerprint=localio.tree_fingerprint(repo))
+    now = localio.utc_now()
+    baseline = before["repo_fingerprint"]
+    before["pending_bash_commands"] = {
+        f"tool-{i}": [baseline, (now - timedelta(minutes=1, seconds=9 - i)).isoformat()] for i in range(10)
+    }
+    before["pending_bash_commands"]["tool-0"][1] = (now + timedelta(days=1)).isoformat()
+    before["pending_bash_commands"]["tool-1"][1] = "unreadable"
+    runtime.write_session_state(repo, "pending-review", before)
+    _pending_case_write(repo, "foreign-review")
+    if repair_event == "Stop":
+        assert _pending_case_event(repo, "Stop")["decision"] == "block"
+    else:
+        assert _pending_case_event(repo, repair_event, tool_name="Glob") is None
+    repaired = runtime.read_session_state(repo, "pending-review")
+    commands = repaired["pending_bash_commands"]
+    assert set(commands) == {"tool-0", "tool-1", *(f"tool-{i}" for i in range(4, 10))}
+    for key in ("tool-0", "tool-1"):
+        assert now <= datetime.fromisoformat(commands[key][1]) <= localio.utc_now()
+    assert repaired["last_verification_write_at"] > before["last_verification_write_at"]
+    assert _pending_case_event(repo, "Stop")["decision"] == "block"
+    _pending_case_verify(repo, monkeypatch)
+    assert (_pending_case_event(repo, "Stop") or {}).get("decision") != "block"
+
+
+@pytest.mark.parametrize("stamp", ["unreadable", "future"])
+def test_producer_treats_repaired_bash_start_as_in_flight(tmp_path, monkeypatch, stamp):
+    repo = _git_wired_claude(tmp_path)
+    _pending_case_write(repo)
+    raw = _write_session_receipt(repo, "pending-review", tree_fingerprint=localio.tree_fingerprint(repo))
+    now = localio.utc_now()
+    value = (now + timedelta(days=1)).isoformat() if stamp == "future" else "unreadable"
+    raw["pending_bash_commands"] = {"tool-first": [raw["repo_fingerprint"], value]}
+    runtime.write_session_state(repo, "pending-review", raw)
+    assert runtime.producer_session._bash_in_flight(raw, now)
+    _pending_case_write(repo, "foreign-review")
+    assert _pending_case_event(repo, "Stop")["decision"] == "block"
+    repaired = runtime.read_session_state(repo, "pending-review")
+    assert runtime.producer_session._bash_in_flight(repaired, localio.utc_now())
+    assert not runtime.producer_session._bash_in_flight(repaired, now + timedelta(hours=2))
+    _pending_case_verify(repo, monkeypatch)
+    assert (_pending_case_event(repo, "Stop") or {}).get("decision") != "block"

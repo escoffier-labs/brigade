@@ -283,7 +283,7 @@ def test_stale_tool_snapshot_preserves_identity(target, monkeypatch, switch_firs
     interleaved = []
 
     def write_with_switch(target, session_id, state, **kwargs):
-        if not interleaved and "pending_bash_fingerprint" in state and kwargs.get("patch_fields") is None:
+        if not interleaved and kwargs.get("pending_bash_update") is not None:
             interleaved.append(dict(state))
             switch = _payload(target, "PostModelSwitch", to_model="claude-opus-4-6")
             if switch_first:
