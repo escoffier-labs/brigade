@@ -12,7 +12,7 @@ import hashlib
 import re
 import unicodedata
 from importlib.resources import files
-from typing import Iterable, Iterator
+from typing import Any, Iterable, Iterator
 
 BIDI_RULE = "bidi-control"
 INVISIBLE_RULE = "invisible-character"
@@ -337,6 +337,16 @@ def _findings(texts: Iterable[str], *, blocking_only: bool = False) -> Iterator[
         for char, rule in _PRIVATE_CHARACTERS.items():
             if char in text:
                 yield rule, "private"
+
+
+def card_texts(item: dict[str, Any]) -> list[str]:
+    """The card-authored text fields of a search match, as search results expose them."""
+    texts = [item.get(key) for key in ("card_id", "title", "summary")]
+    for key in ("tags", "card_aliases"):
+        values = item.get(key)
+        if isinstance(values, list):
+            texts.extend(values)
+    return [text for text in texts if isinstance(text, str)]
 
 
 def blocked_rule(texts: Iterable[str], *, blocking_only: bool = False) -> str | None:

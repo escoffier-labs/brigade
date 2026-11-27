@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Callable, Iterator
 from uuid import uuid4
 from ..fleet_client import FleetClientError
 from ..fleet_client_message_credentials import MessageAuthority
+from ..memory_content_scan import card_texts
 from .contracts import MAX_CARD_FILE_BYTES, DotError, require
 from .hub_tools import BRIGADE_TIMEOUT, MAX_SMALL_CAPTURE
 from .process import CommandRunner, child_environment, child_path, parse_json_bytes
@@ -376,7 +377,7 @@ class MemoryTools:
                     return _refused_match(item, {"blocked": MALFORMED_MATCH})
                 item["path"] = relative
             # The returned path and hub scope are scanned too: a file name or scope can carry the text.
-            refusal = egress_refusal([*_card_texts(item), *_location_texts(item)])
+            refusal = egress_refusal([*card_texts(item), *_location_texts(item)])
             if refusal:
                 return _refused_match(item, refusal)
             _keep_known_hub_labels(item)
@@ -836,17 +837,6 @@ class MemoryTools:
 
 
 _SAFE_CARD_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}")
-
-
-def _card_texts(item: dict[str, Any]) -> list[str]:
-    # Card-authored fields of a search match; path and score come from the search itself.
-    # A legacy card's id can come from its frontmatter, so it is card-authored too.
-    texts = [item.get("card_id"), item.get("title"), item.get("summary")]
-    for key in ("tags", "card_aliases"):
-        values = item.get(key)
-        if isinstance(values, list):
-            texts.extend(values)
-    return [text for text in texts if isinstance(text, str)]
 
 
 MALFORMED_MATCH = "malformed-match"
