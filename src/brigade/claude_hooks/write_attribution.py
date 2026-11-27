@@ -21,22 +21,27 @@ from .command_tokens import (
 _BASH_FINGERPRINT = "pending_bash_fingerprint"
 _BASH_STARTED = "pending_bash_started_at"
 _BASH_COMMANDS = "pending_bash_commands"
+PENDING_BASH_KEYS = (_BASH_FINGERPRINT, _BASH_STARTED, _BASH_COMMANDS)
 _MAX_PENDING_COMMANDS = 8
 
 
 def _tool_use_id(payload: Mapping[str, Any]) -> str | None:
+    """Read the optional Claude tool invocation identifier."""
     value = payload.get("tool_use_id")
     return value if isinstance(value, str) and value else None
 
 
-def restore_pending(state: dict[str, Any], current: Mapping[str, Any]) -> None:
-    for key in (_BASH_FINGERPRINT, _BASH_STARTED, _BASH_COMMANDS):
-        state.pop(key, None)
-        if key in current:
-            state[key] = current[key]
+def _clamp_start(value: object, now: datetime) -> datetime:
+    """Give an unreadable or future start a receipt boundary at the current time."""
+    try:
+        stamp = localio.parse_iso_datetime(value)
+    except OverflowError:
+        return now
+    return stamp if stamp is not None and stamp <= now else now
 
 
-def _pending_commands(state: Mapping[str, Any]) -> dict[str, list[str]]:
+def _pending_commands(state: Mapping[str, Any]) -> dict[str, list[Any]]:
+    """Read structurally valid records, including those whose timestamps need repair."""
     commands = state.get(_BASH_COMMANDS)
     if not isinstance(commands, dict):
         return {}
@@ -44,13 +49,38 @@ def _pending_commands(state: Mapping[str, Any]) -> dict[str, list[str]]:
         key: value
         for key, value in commands.items()
         if isinstance(key, str)
+        and key
         and isinstance(value, list)
         and len(value) == 2
-        and all(isinstance(item, str) and item for item in value)
+        and isinstance(value[0], str)
+        and value[0]
     }
 
 
+def restore_pending(state: dict[str, Any], current: Mapping[str, Any], *, now: datetime | None = None) -> None:
+    """Restore bounded, valid pending records from the current session state."""
+    now = now or localio.utc_now()
+    fingerprint, started = _pending_record(current, None)
+    commands = {
+        key: [baseline, _clamp_start(stamp, now).isoformat()]
+        for key, (baseline, stamp) in _pending_commands(current).items()
+    }
+    for key in PENDING_BASH_KEYS:
+        state.pop(key, None)
+    if isinstance(fingerprint, str) and fingerprint:
+        state[_BASH_FINGERPRINT] = fingerprint
+    if _BASH_FINGERPRINT in state or started is not None:
+        state[_BASH_STARTED] = _clamp_start(started, now).isoformat()
+    if len(commands) > _MAX_PENDING_COMMANDS:
+        newest = sorted(commands, key=lambda key: commands[key][1], reverse=True)[:_MAX_PENDING_COMMANDS]
+        commands = {key: commands[key] for key in newest}
+        _stamp_write(state, now.isoformat())
+    if commands:
+        state[_BASH_COMMANDS] = commands
+
+
 def _pending_record(state: Mapping[str, Any], tool_id: str | None) -> tuple[object, object]:
+    """Return the baseline and start for an identified tool or the legacy slot."""
     if tool_id is None:
         return state.get(_BASH_FINGERPRINT), state.get(_BASH_STARTED)
     record = _pending_commands(state).get(tool_id)
@@ -58,24 +88,33 @@ def _pending_record(state: Mapping[str, Any], tool_id: str | None) -> tuple[obje
 
 
 def pending_start(state: Mapping[str, Any], *, unknown_at: datetime) -> datetime | None:
+    """Return the newest pending Bash start in either state format."""
     legacy = _pending_record(state, None)
     starts: list[object] = [record[1] for record in _pending_commands(state).values()]
     if any(value is not None for value in legacy):
         starts.append(legacy[1])
-    return max((localio.parse_iso_datetime(stamp) or unknown_at for stamp in starts), default=None)
+    return max((_clamp_start(stamp, unknown_at) for stamp in starts), default=None)
 
 
 def include_pending_at_stop(state: dict[str, Any]) -> None:
+    """Include pending Bash work in Stop's receipt boundary without consuming it."""
     # Use the start as a receipt boundary without consuming the pending record.
     # A new receipt can cover it, and a delayed completion can still match it.
-    started = localio.parse_iso_datetime(state.get("started_at")) or localio.utc_now()
-    pending = pending_start(state, unknown_at=started)
+    pending = pending_start(state, unknown_at=localio.utc_now())
     if pending is None:
         return
     state["write_observed"] = True
     previous = localio.parse_iso_datetime(state.get("last_verification_write_at") or state.get("last_write_at"))
     if previous is None or pending > previous:
         state["last_verification_write_at"] = pending.isoformat()
+
+
+def _stamp_write(state: dict[str, Any], written_at: str, *, handoff: bool = False) -> None:
+    """Advance the session's write timestamps together."""
+    state["write_observed"] = True
+    state["last_write_at"] = state["last_attributed_write_at"] = written_at
+    if not handoff:
+        state["last_verification_write_at"] = written_at
 
 
 def record_write(
@@ -86,12 +125,10 @@ def record_write(
     handoff: bool = False,
     fingerprint: str | None = None,
 ) -> None:
+    """Record a completed or possible write and its producer evidence."""
     written_at = localio.utc_now_iso()
     producer_session.record_write(state, target, payload, written_at)
-    state["write_observed"] = True
-    state["last_write_at"] = state["last_attributed_write_at"] = written_at
-    if not handoff:
-        state["last_verification_write_at"] = written_at
+    _stamp_write(state, written_at, handoff=handoff)
     if fingerprint is not None:
         state["repo_fingerprint"] = fingerprint
 
@@ -99,16 +136,17 @@ def record_write(
 def begin_bash(
     target: Path, session_id: str, state: dict[str, Any], payload: dict[str, Any], baseline: str | None
 ) -> None:
+    """Store a Bash start against the latest state under the session lock."""
     rt = _rt()
     tool_id = _tool_use_id(payload)
     baseline = baseline or rt._UNAVAILABLE_FINGERPRINT
     started = localio.utc_now_iso()
-    proposed = {_BASH_FINGERPRINT: baseline, _BASH_STARTED: started} if tool_id is None else {}
 
     def save_pending(current: dict[str, Any]) -> None:
         if tool_id is None:
             occupied = any(value is not None for value in _pending_record(current, None))
-            current.update(proposed)
+            current[_BASH_FINGERPRINT] = baseline
+            current[_BASH_STARTED] = started
             if occupied:
                 # Either completion could arrive first when neither has an ID.
                 current[_BASH_FINGERPRINT] = rt._UNAVAILABLE_FINGERPRINT
@@ -126,7 +164,7 @@ def begin_bash(
         current[_BASH_COMMANDS] = commands
 
     rt._write_session_state_preserving_latch(
-        target, session_id, {**state, **proposed}, log_target=target, pending_bash_update=save_pending
+        target, session_id, state, log_target=target, pending_bash_update=save_pending
     )
 
 
@@ -423,6 +461,7 @@ def finish_bash(
     session_id: str,
     fingerprint: Callable[[Path], str | None],
 ) -> bool:
+    """Consume the completed start and atomically save its write evidence."""
     tool_id = _tool_use_id(payload)
     pending = _pending_record(state, tool_id)
     wrote, capture, handoff, updated_fp = post_bash_write(event, target, payload, pending, session_id, fingerprint)
@@ -432,18 +471,23 @@ def finish_bash(
         # Attribution runs outside the state lock. Use the locked record to
         # detect a competing completion, replacement, or eviction.
         matched_snapshot = pending == _pending_record(current, tool_id)
-        if tool_id is None:
+        commands = _pending_commands(current)
+        legacy_pending = any(key in current for key in (_BASH_FINGERPRINT, _BASH_STARTED))
+        if tool_id is not None and tool_id in commands:
+            del commands[tool_id]
+        elif legacy_pending and (tool_id is None or not commands):
             current.pop(_BASH_FINGERPRINT, None)
             current.pop(_BASH_STARTED, None)
+        elif tool_id is None and len(commands) == 1:
+            # An ID-less completion can retire a sole keyed start conservatively.
+            commands.clear()
+        if commands:
+            current[_BASH_COMMANDS] = commands
         else:
-            commands = _pending_commands(current)
-            commands.pop(tool_id, None)
-            if commands:
-                current[_BASH_COMMANDS] = commands
-            else:
-                current.pop(_BASH_COMMANDS, None)
+            current.pop(_BASH_COMMANDS, None)
         wrote = wrote or not matched_snapshot
         if wrote:
+            current.pop("pending_write_at", None)
             record_write(
                 current,
                 target,
@@ -477,6 +521,7 @@ def _linked_pending_roots(primary: Path, payload: dict[str, Any]) -> dict[Path, 
 
 
 def handle_event(event: str, payload: dict[str, Any], *, pin: Path | None) -> dict[str, Any] | None:
+    """Route Bash events to the wired primary and observed worktrees."""
     rt = _rt()
     budget = EVENT_BUDGET.get()
     if budget is None:
@@ -512,7 +557,7 @@ def handle_event(event: str, payload: dict[str, Any], *, pin: Path | None) -> di
             # A post event without a corresponding pre event has no baseline
             # to compare in an observation-only root. Do not create state there.
             state = rt.read_session_state(target, str(payload.get("session_id") or ""))
-            if not state or not _pending_record(state, _tool_use_id(payload))[0]:
+            if not state or pending_start(state, unknown_at=localio.utc_now()) is None:
                 continue
         budget.target = target
         with budget.in_phase("followup"):

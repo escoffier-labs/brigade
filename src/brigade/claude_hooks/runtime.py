@@ -128,7 +128,7 @@ _HEREDOC_DELIMITER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _WRITE_TOOLS = {"Edit", "Write", "NotebookEdit"}
 _UNAVAILABLE_FINGERPRINT = "unavailable"
 _STATE_TIMESTAMP_KEYS = tuple(
-    "pending_bash_started_at pending_write_at last_write_at last_verification_write_at last_attributed_write_at".split()
+    "pending_write_at last_write_at last_verification_write_at last_attributed_write_at".split()
 )
 _BASH_WRITE_COMMANDS = {
     "apply_patch",
@@ -1861,15 +1861,11 @@ def _normalize_state(
     normalized["briefed"] = payload.get("briefed") is True
     normalized["write_observed"] = payload.get("write_observed") is True
     dependencies.restore(normalized, payload)
-    pending_fp = payload.get("pending_bash_fingerprint")
-    if isinstance(pending_fp, str) and pending_fp:
-        normalized["pending_bash_fingerprint"] = pending_fp
-    if isinstance(payload.get("pending_bash_commands"), dict):
-        normalized["pending_bash_commands"] = payload["pending_bash_commands"]
     for key in _STATE_TIMESTAMP_KEYS:
         stamp = localio.parse_iso_datetime(payload.get(key))
         if stamp is not None and stamp <= now:
             normalized[key] = stamp.isoformat()
+    write_attribution.restore_pending(normalized, payload, now=now)
     denied = payload.get("verify_denied_count")
     if isinstance(denied, int) and not isinstance(denied, bool) and denied >= 0:
         normalized["verify_denied_count"] = denied
@@ -2430,10 +2426,14 @@ def _handle_event(
         for stop_target in _stop_targets(payload, session_id, task_epoch=task_epoch):
             if not stop_target.is_dir():
                 continue
-            stop_state = read_session_state(stop_target, session_id)
+            persisted_stop = read_session_state(stop_target, session_id)
             stop_state = _normalize_state(
-                stop_target, session_id, stop_state, task_epoch=task_epoch, fingerprint=event_fingerprint
+                stop_target, session_id, persisted_stop, task_epoch=task_epoch, fingerprint=event_fingerprint
             )
+            if persisted_stop and any(
+                stop_state.get(key) != persisted_stop.get(key) for key in write_attribution.PENDING_BASH_KEYS
+            ):
+                _write_session_state_preserving_latch(stop_target, session_id, stop_state, log_target=stop_target)
             write_attribution.include_pending_at_stop(stop_state)
             if not stop_state.get("write_observed"):
                 continue
