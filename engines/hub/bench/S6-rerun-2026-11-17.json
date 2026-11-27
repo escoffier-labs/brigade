@@ -1,0 +1,2364 @@
+[
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "reference",
+    "run": 1,
+    "target": "python",
+    "clients": 16,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 194.3,
+    "errors": 0,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 8.505942998453975,
+      "p90": 135.6724021025002,
+      "p95": 434.7608501557261,
+      "p99": 1234.8183169960976,
+      "p100": 3436.0910600516945
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_commit_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_batch_size": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_queue_depth": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      }
+    },
+    "commit_p99_bucket_upper_ms": null
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "reference",
+    "run": 1,
+    "target": "rust-native",
+    "clients": 16,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 2935.733333333333,
+    "errors": 0,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 5.259340163320303,
+      "p90": 6.4366040751338005,
+      "p95": 6.923655979335308,
+      "p99": 8.053730009123683,
+      "p100": 31.300642993301153
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": 0.00248,
+        "p90": 0.009726,
+        "p95": 0.017115000000000002,
+        "p99": 0.058113,
+        "p100": 0.07150799999999999
+      },
+      "writer_commit_seconds": {
+        "p50": 2.59104,
+        "p90": 3.964119,
+        "p95": 11.143084,
+        "p99": 29.228841,
+        "p100": 39.342257
+      },
+      "writer_batch_size": {
+        "p50": 7.0,
+        "p90": 15.0,
+        "p95": 15.0,
+        "p99": 15.0,
+        "p100": 15.0
+      },
+      "writer_queue_depth": {
+        "p50": 6.0,
+        "p90": 12.0,
+        "p95": 15.0,
+        "p99": 15.0,
+        "p100": 15.0
+      }
+    },
+    "commit_p99_bucket_upper_ms": 20.0
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "reference",
+    "run": 2,
+    "target": "python",
+    "clients": 16,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 189.1,
+    "errors": 0,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 8.437891956418753,
+      "p90": 183.74961405061185,
+      "p95": 435.3312880266458,
+      "p99": 1335.8101178891957,
+      "p100": 4236.945102922618
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_commit_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_batch_size": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_queue_depth": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      }
+    },
+    "commit_p99_bucket_upper_ms": null
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "reference",
+    "run": 2,
+    "target": "rust-native",
+    "clients": 16,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 2561.633333333333,
+    "errors": 0,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 5.207279929891229,
+      "p90": 6.658649072051048,
+      "p95": 7.636774098500609,
+      "p99": 25.93630994670093,
+      "p100": 84.19895800761878
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": 0.002982,
+        "p90": 0.013198,
+        "p95": 0.016033000000000002,
+        "p99": 0.027874,
+        "p100": 0.079633
+      },
+      "writer_commit_seconds": {
+        "p50": 2.767545,
+        "p90": 38.094888,
+        "p95": 38.890874,
+        "p99": 40.28384,
+        "p100": 58.563344
+      },
+      "writer_batch_size": {
+        "p50": 6.0,
+        "p90": 15.0,
+        "p95": 15.0,
+        "p99": 15.0,
+        "p100": 15.0
+      },
+      "writer_queue_depth": {
+        "p50": 6.0,
+        "p90": 14.0,
+        "p95": 15.0,
+        "p99": 15.0,
+        "p100": 15.0
+      }
+    },
+    "commit_p99_bucket_upper_ms": 50.0
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "reference",
+    "run": 1,
+    "target": "python",
+    "clients": 64,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 225.26666666666668,
+    "errors": 1514817,
+    "transport_errors": 1514813,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 0.0513540580868721,
+      "p90": 0.2417759969830513,
+      "p95": 0.361473998054862,
+      "p99": 0.9123820345848799,
+      "p100": 5005.012148991227
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_commit_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_batch_size": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_queue_depth": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      }
+    },
+    "commit_p99_bucket_upper_ms": null
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "reference",
+    "run": 1,
+    "target": "rust-native",
+    "clients": 64,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 8844.7,
+    "errors": 10225,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 5.939222872257233,
+      "p90": 7.626471109688282,
+      "p95": 8.741253986954689,
+      "p99": 48.046644078567624,
+      "p100": 84.54219321720302
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": 0.002946,
+        "p90": 0.008569,
+        "p95": 0.012904,
+        "p99": 0.055779,
+        "p100": 0.09187999999999999
+      },
+      "writer_commit_seconds": {
+        "p50": 2.773825,
+        "p90": 31.94528,
+        "p95": 37.433158,
+        "p99": 39.221699,
+        "p100": 53.647479
+      },
+      "writer_batch_size": {
+        "p50": 32.0,
+        "p90": 35.0,
+        "p95": 38.0,
+        "p99": 61.0,
+        "p100": 64.0
+      },
+      "writer_queue_depth": {
+        "p50": 22.0,
+        "p90": 34.0,
+        "p95": 35.0,
+        "p99": 61.0,
+        "p100": 62.0
+      }
+    },
+    "commit_p99_bucket_upper_ms": 50.0
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "reference",
+    "run": 2,
+    "target": "python",
+    "clients": 64,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 229.36666666666667,
+    "errors": 1402944,
+    "transport_errors": 1402939,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 0.05615595728158951,
+      "p90": 0.2633549738675356,
+      "p95": 0.3874129615724087,
+      "p99": 0.9582180064171553,
+      "p100": 5006.864764960483
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_commit_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_batch_size": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_queue_depth": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      }
+    },
+    "commit_p99_bucket_upper_ms": null
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "reference",
+    "run": 2,
+    "target": "rust-native",
+    "clients": 64,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 10224.1,
+    "errors": 8572,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 5.833459086716175,
+      "p90": 7.057859096676111,
+      "p95": 7.606170838698745,
+      "p99": 9.589256951585412,
+      "p100": 97.43284294381738
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": 0.002814,
+        "p90": 0.004134,
+        "p95": 0.005370000000000001,
+        "p99": 0.056307,
+        "p100": 0.13412600000000002
+      },
+      "writer_commit_seconds": {
+        "p50": 2.617665,
+        "p90": 3.400399,
+        "p95": 3.9551589999999996,
+        "p99": 19.746733,
+        "p100": 34.56628
+      },
+      "writer_batch_size": {
+        "p50": 32.0,
+        "p90": 34.0,
+        "p95": 36.0,
+        "p99": 55.0,
+        "p100": 55.0
+      },
+      "writer_queue_depth": {
+        "p50": 20.0,
+        "p90": 33.0,
+        "p95": 33.0,
+        "p99": 44.0,
+        "p100": 63.0
+      }
+    },
+    "commit_p99_bucket_upper_ms": 5.0
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "reference",
+    "run": 1,
+    "target": "python",
+    "clients": 256,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 228.53333333333333,
+    "errors": 1359964,
+    "transport_errors": 1359963,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 0.05852594040334225,
+      "p90": 0.49257208593189716,
+      "p95": 1.0719068814069033,
+      "p99": 5.181450862437487,
+      "p100": 5005.852215923369
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_commit_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_batch_size": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_queue_depth": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      }
+    },
+    "commit_p99_bucket_upper_ms": null
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "reference",
+    "run": 1,
+    "target": "rust-native",
+    "clients": 256,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 6709.166666666667,
+    "errors": 199815,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 17.198672983795404,
+      "p90": 26.618021074682474,
+      "p95": 30.0735121127218,
+      "p99": 44.08380901440978,
+      "p100": 175.22393190301955
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": 0.003128,
+        "p90": 0.004960999999999999,
+        "p95": 0.007821,
+        "p99": 0.06494,
+        "p100": 1.2755500000000002
+      },
+      "writer_commit_seconds": {
+        "p50": 2.707627,
+        "p90": 11.640725,
+        "p95": 38.098237,
+        "p99": 64.788681,
+        "p100": 77.464138
+      },
+      "writer_batch_size": {
+        "p50": 24.0,
+        "p90": 33.0,
+        "p95": 35.0,
+        "p99": 48.0,
+        "p100": 64.0
+      },
+      "writer_queue_depth": {
+        "p50": 13.0,
+        "p90": 29.0,
+        "p95": 33.0,
+        "p99": 48.0,
+        "p100": 63.0
+      }
+    },
+    "commit_p99_bucket_upper_ms": 20.0
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "reference",
+    "run": 2,
+    "target": "python",
+    "clients": 256,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 229.1,
+    "errors": 1302231,
+    "transport_errors": 1302229,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 0.05996786057949066,
+      "p90": 0.5468551535159349,
+      "p95": 1.2270028237253428,
+      "p99": 6.217831978574395,
+      "p100": 5012.272463878617
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_commit_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_batch_size": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_queue_depth": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      }
+    },
+    "commit_p99_bucket_upper_ms": null
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "reference",
+    "run": 2,
+    "target": "rust-native",
+    "clients": 256,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 6930.533333333334,
+    "errors": 211734,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 16.612445935606956,
+      "p90": 25.263597955927253,
+      "p95": 28.224363923072815,
+      "p99": 37.52062493003905,
+      "p100": 105.59181682765484
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": 0.002982,
+        "p90": 0.004561,
+        "p95": 0.007981,
+        "p99": 0.065811,
+        "p100": 0.698796
+      },
+      "writer_commit_seconds": {
+        "p50": 2.76691,
+        "p90": 5.7697210000000005,
+        "p95": 37.559065000000004,
+        "p99": 38.931826,
+        "p100": 39.806553
+      },
+      "writer_batch_size": {
+        "p50": 25.0,
+        "p90": 33.0,
+        "p95": 37.0,
+        "p99": 46.0,
+        "p100": 49.0
+      },
+      "writer_queue_depth": {
+        "p50": 14.0,
+        "p90": 28.0,
+        "p95": 35.0,
+        "p99": 46.0,
+        "p100": 49.0
+      }
+    },
+    "commit_p99_bucket_upper_ms": 20.0
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "constrained",
+    "run": 1,
+    "target": "python",
+    "clients": 32,
+    "allotment": "1cpu-512m",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": {
+      "cpu_max": [
+        "100000",
+        "100000"
+      ],
+      "memory_max": "536870912"
+    },
+    "ok_per_second": 200.33333333333334,
+    "errors": 30,
+    "transport_errors": 30,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 13.419288909062743,
+      "p90": 434.52037312090397,
+      "p95": 933.8794001378119,
+      "p99": 2035.3184989653528,
+      "p100": 4137.032039929181
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_commit_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_batch_size": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_queue_depth": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      }
+    },
+    "commit_p99_bucket_upper_ms": null
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "constrained",
+    "run": 1,
+    "target": "rust-native",
+    "clients": 32,
+    "allotment": "1cpu-512m",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": {
+      "cpu_max": [
+        "100000",
+        "100000"
+      ],
+      "memory_max": "536870912"
+    },
+    "ok_per_second": 4433.233333333334,
+    "errors": 0,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 5.848750006407499,
+      "p90": 7.680451963096857,
+      "p95": 8.740674005821347,
+      "p99": 59.545488096773624,
+      "p100": 472.46944694779813
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": 0.003031,
+        "p90": 0.007555,
+        "p95": 0.009340999999999999,
+        "p99": 0.012771,
+        "p100": 0.06284899999999999
+      },
+      "writer_commit_seconds": {
+        "p50": 2.919109,
+        "p90": 35.758257,
+        "p95": 38.446388,
+        "p99": 54.714639000000005,
+        "p100": 462.83361299999996
+      },
+      "writer_batch_size": {
+        "p50": 16.0,
+        "p90": 29.0,
+        "p95": 31.0,
+        "p99": 31.0,
+        "p100": 31.0
+      },
+      "writer_queue_depth": {
+        "p50": 7.0,
+        "p90": 25.0,
+        "p95": 31.0,
+        "p99": 31.0,
+        "p100": 32.0
+      }
+    },
+    "commit_p99_bucket_upper_ms": 50.0
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "constrained",
+    "run": 2,
+    "target": "python",
+    "clients": 32,
+    "allotment": "1cpu-512m",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": {
+      "cpu_max": [
+        "100000",
+        "100000"
+      ],
+      "memory_max": "536870912"
+    },
+    "ok_per_second": 195.03333333333333,
+    "errors": 33,
+    "transport_errors": 30,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 13.279753038659692,
+      "p90": 435.29944587498903,
+      "p95": 934.1782848350704,
+      "p99": 2037.709390046075,
+      "p100": 5005.1205810159445
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_commit_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_batch_size": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_queue_depth": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      }
+    },
+    "commit_p99_bucket_upper_ms": null
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "constrained",
+    "run": 2,
+    "target": "rust-native",
+    "clients": 32,
+    "allotment": "1cpu-512m",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": {
+      "cpu_max": [
+        "100000",
+        "100000"
+      ],
+      "memory_max": "536870912"
+    },
+    "ok_per_second": 3485.5,
+    "errors": 0,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 6.060234038159251,
+      "p90": 8.748103864490986,
+      "p95": 10.74727508239448,
+      "p99": 93.4205730445683,
+      "p100": 1440.8281280193478
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": 0.003431,
+        "p90": 0.013382,
+        "p95": 0.014256999999999999,
+        "p99": 0.019609,
+        "p100": 0.093783
+      },
+      "writer_commit_seconds": {
+        "p50": 3.184524,
+        "p90": 46.907254,
+        "p95": 67.22635000000001,
+        "p99": 406.147651,
+        "p100": 1293.235763
+      },
+      "writer_batch_size": {
+        "p50": 16.0,
+        "p90": 29.0,
+        "p95": 31.0,
+        "p99": 31.0,
+        "p100": 31.0
+      },
+      "writer_queue_depth": {
+        "p50": 8.0,
+        "p90": 26.0,
+        "p95": 31.0,
+        "p99": 31.0,
+        "p100": 31.0
+      }
+    },
+    "commit_p99_bucket_upper_ms": 50.0
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "mixed",
+    "run": 1,
+    "target": "python",
+    "clients": 64,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 187.13333333333333,
+    "errors": 1277431,
+    "transport_errors": 1277416,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 0.05816086195409298,
+      "p90": 0.27947407215833664,
+      "p95": 0.4358370788395405,
+      "p99": 1.1190678924322128,
+      "p100": 5022.197580896318
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_commit_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_batch_size": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_queue_depth": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      }
+    },
+    "commit_p99_bucket_upper_ms": null,
+    "mixed_claims": {
+      "attempts": 716,
+      "ok": 42,
+      "statuses": [
+        "200",
+        "None"
+      ],
+      "latency_ms": {
+        "p50": 21.097599994391203,
+        "p90": 111.21710599400103,
+        "p95": 158.70978496968746,
+        "p99": 210.4653581045568,
+        "p100": 210.4653581045568
+      }
+    }
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "mixed",
+    "run": 1,
+    "target": "rust-native",
+    "clients": 64,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 8815.1,
+    "errors": 0,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 5.994223989546299,
+      "p90": 7.685388205572963,
+      "p95": 8.887558011338115,
+      "p99": 56.82605993933976,
+      "p100": 118.24631900526583
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": 0.0028899999999999998,
+        "p90": 0.008993000000000001,
+        "p95": 0.012292,
+        "p99": 0.088548,
+        "p100": 63.58538800000001
+      },
+      "writer_commit_seconds": {
+        "p50": 2.7427070000000002,
+        "p90": 19.759298,
+        "p95": 37.273682,
+        "p99": 39.616457000000004,
+        "p100": 77.033147
+      },
+      "writer_batch_size": {
+        "p50": 32.0,
+        "p90": 36.0,
+        "p95": 38.0,
+        "p99": 47.0,
+        "p100": 65.0
+      },
+      "writer_queue_depth": {
+        "p50": 23.0,
+        "p90": 33.0,
+        "p95": 35.0,
+        "p99": 46.0,
+        "p100": 63.0
+      }
+    },
+    "commit_p99_bucket_upper_ms": 25.0,
+    "mixed_claims": {
+      "attempts": 30,
+      "ok": 30,
+      "statuses": [
+        "200"
+      ],
+      "latency_ms": {
+        "p50": 5.735711893066764,
+        "p90": 52.032697945833206,
+        "p95": 169.16146385483444,
+        "p99": 174.9112498946488,
+        "p100": 174.9112498946488
+      }
+    }
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "mixed",
+    "run": 2,
+    "target": "python",
+    "clients": 64,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 204.6,
+    "errors": 1421658,
+    "transport_errors": 1421655,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 0.05526794120669365,
+      "p90": 0.2574601676315069,
+      "p95": 0.3848387859761715,
+      "p99": 0.9624660015106201,
+      "p100": 5012.226158985868
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_commit_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_batch_size": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_queue_depth": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      }
+    },
+    "commit_p99_bucket_upper_ms": null,
+    "mixed_claims": {
+      "attempts": 905,
+      "ok": 36,
+      "statuses": [
+        "200",
+        "None"
+      ],
+      "latency_ms": {
+        "p50": 47.63923492282629,
+        "p90": 235.51003192551434,
+        "p95": 434.6353029832244,
+        "p99": 802.1216038614511,
+        "p100": 802.1216038614511
+      }
+    }
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "mixed",
+    "run": 2,
+    "target": "rust-native",
+    "clients": 64,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 9130.5,
+    "errors": 0,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 6.071988958865404,
+      "p90": 8.144797058776021,
+      "p95": 9.612587979063392,
+      "p99": 39.447027957066894,
+      "p100": 137.2040209826082
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": 0.0030819999999999997,
+        "p90": 0.00955,
+        "p95": 0.015146,
+        "p99": 0.043593,
+        "p100": 0.094393
+      },
+      "writer_commit_seconds": {
+        "p50": 2.793847,
+        "p90": 20.244679,
+        "p95": 35.160919,
+        "p99": 53.358911,
+        "p100": 72.009851
+      },
+      "writer_batch_size": {
+        "p50": 32.0,
+        "p90": 36.0,
+        "p95": 41.0,
+        "p99": 58.0,
+        "p100": 64.0
+      },
+      "writer_queue_depth": {
+        "p50": 19.0,
+        "p90": 34.0,
+        "p95": 35.0,
+        "p99": 63.0,
+        "p100": 63.0
+      }
+    },
+    "commit_p99_bucket_upper_ms": 25.0,
+    "mixed_claims": {
+      "attempts": 33,
+      "ok": 33,
+      "statuses": [
+        "200"
+      ],
+      "latency_ms": {
+        "p50": 4.9803489819169044,
+        "p90": 10.738146025687456,
+        "p95": 38.718857103958726,
+        "p99": 229.8906808719039,
+        "p100": 229.8906808719039
+      }
+    }
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "confirm-16",
+    "run": 1,
+    "target": "python",
+    "clients": 16,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 194.66666666666666,
+    "errors": 0,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 8.522996911779046,
+      "p90": 135.53522597067058,
+      "p95": 435.0987949874252,
+      "p99": 1237.074482953176,
+      "p100": 2736.3824150525033
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_commit_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_batch_size": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_queue_depth": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      }
+    },
+    "commit_p99_bucket_upper_ms": null
+  },
+  {
+    "setup": "A-loop-temp-dir",
+    "setting": "confirm-16",
+    "run": 1,
+    "target": "rust-native",
+    "clients": 16,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 2466.3,
+    "errors": 0,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 5.331059917807579,
+      "p90": 7.007787935435772,
+      "p95": 8.08417215012014,
+      "p99": 35.45455099083483,
+      "p100": 147.37587585113943
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": 0.003267,
+        "p90": 0.0131,
+        "p95": 0.016892,
+        "p99": 0.066027,
+        "p100": 31.470887000000005
+      },
+      "writer_commit_seconds": {
+        "p50": 2.808987,
+        "p90": 36.798238,
+        "p95": 38.86489,
+        "p99": 53.784835,
+        "p100": 107.37867399999999
+      },
+      "writer_batch_size": {
+        "p50": 11.0,
+        "p90": 15.0,
+        "p95": 15.0,
+        "p99": 15.0,
+        "p100": 16.0
+      },
+      "writer_queue_depth": {
+        "p50": 4.0,
+        "p90": 15.0,
+        "p95": 15.0,
+        "p99": 15.0,
+        "p100": 15.0
+      }
+    },
+    "commit_p99_bucket_upper_ms": 50.0
+  },
+  {
+    "setup": "B-real-disk",
+    "setting": "ref16",
+    "run": 1,
+    "target": "python",
+    "clients": 16,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 459.1666666666667,
+    "errors": 0,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 5.134616047143936,
+      "p90": 80.708660883829,
+      "p95": 132.6601360924542,
+      "p99": 633.4912779275328,
+      "p100": 2634.7155638504773
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_commit_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_batch_size": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_queue_depth": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      }
+    },
+    "commit_p99_bucket_upper_ms": null
+  },
+  {
+    "setup": "B-real-disk",
+    "setting": "ref16",
+    "run": 1,
+    "target": "rust-native",
+    "clients": 16,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 4522.233333333334,
+    "errors": 10170,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 2.9637969564646482,
+      "p90": 3.6893030628561974,
+      "p95": 4.089368972927332,
+      "p99": 15.420061070472002,
+      "p100": 124.76129899732769
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": 0.002554,
+        "p90": 0.008248,
+        "p95": 0.010917000000000001,
+        "p99": 0.016829,
+        "p100": 0.063815
+      },
+      "writer_commit_seconds": {
+        "p50": 1.5174120000000002,
+        "p90": 13.273794,
+        "p95": 19.207112,
+        "p99": 19.992129000000002,
+        "p100": 36.971267000000005
+      },
+      "writer_batch_size": {
+        "p50": 8.0,
+        "p90": 12.0,
+        "p95": 14.0,
+        "p99": 15.0,
+        "p100": 15.0
+      },
+      "writer_queue_depth": {
+        "p50": 5.0,
+        "p90": 11.0,
+        "p95": 13.0,
+        "p99": 15.0,
+        "p100": 15.0
+      }
+    },
+    "commit_p99_bucket_upper_ms": 20.0
+  },
+  {
+    "setup": "B-real-disk",
+    "setting": "ref16",
+    "run": 2,
+    "target": "python",
+    "clients": 16,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 458.4,
+    "errors": 0,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 5.206000991165638,
+      "p90": 58.149101911112666,
+      "p95": 132.78106902725995,
+      "p99": 632.9462348949164,
+      "p100": 2134.0399710461497
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_commit_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_batch_size": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_queue_depth": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      }
+    },
+    "commit_p99_bucket_upper_ms": null
+  },
+  {
+    "setup": "B-real-disk",
+    "setting": "ref16",
+    "run": 2,
+    "target": "rust-native",
+    "clients": 16,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 3899.633333333333,
+    "errors": 0,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 3.0388720333576202,
+      "p90": 3.9444270078092813,
+      "p95": 4.851523088291287,
+      "p99": 38.26492605730891,
+      "p100": 290.0900898966938
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": 0.002725,
+        "p90": 0.01049,
+        "p95": 0.011474,
+        "p99": 0.017280999999999998,
+        "p100": 0.115154
+      },
+      "writer_commit_seconds": {
+        "p50": 1.596762,
+        "p90": 19.181954,
+        "p95": 19.597140999999997,
+        "p99": 21.259377999999998,
+        "p100": 37.752624999999995
+      },
+      "writer_batch_size": {
+        "p50": 8.0,
+        "p90": 11.0,
+        "p95": 13.0,
+        "p99": 15.0,
+        "p100": 16.0
+      },
+      "writer_queue_depth": {
+        "p50": 6.0,
+        "p90": 10.0,
+        "p95": 12.0,
+        "p99": 15.0,
+        "p100": 15.0
+      }
+    },
+    "commit_p99_bucket_upper_ms": 20.0
+  },
+  {
+    "setup": "B-real-disk",
+    "setting": "con32",
+    "run": 1,
+    "target": "python",
+    "clients": 32,
+    "allotment": "1cpu-512m",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": {
+      "cpu_max": [
+        "100000",
+        "100000"
+      ],
+      "memory_max": "536870912"
+    },
+    "ok_per_second": 449.5,
+    "errors": 81,
+    "transport_errors": 81,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 7.901321863755584,
+      "p90": 133.74610198661685,
+      "p95": 332.5630638282746,
+      "p99": 1032.0182419382036,
+      "p100": 3635.5525699909776
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_commit_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_batch_size": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_queue_depth": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      }
+    },
+    "commit_p99_bucket_upper_ms": null
+  },
+  {
+    "setup": "B-real-disk",
+    "setting": "con32",
+    "run": 1,
+    "target": "rust-native",
+    "clients": 32,
+    "allotment": "1cpu-512m",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": {
+      "cpu_max": [
+        "100000",
+        "100000"
+      ],
+      "memory_max": "536870912"
+    },
+    "ok_per_second": 5143.166666666667,
+    "errors": 0,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 5.0816109869629145,
+      "p90": 6.271719001233578,
+      "p95": 10.182766010984778,
+      "p99": 38.66131301037967,
+      "p100": 402.7390810661018
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": 0.0026060000000000002,
+        "p90": 0.006137,
+        "p95": 0.007823,
+        "p99": 0.011332,
+        "p100": 0.097624
+      },
+      "writer_commit_seconds": {
+        "p50": 1.608838,
+        "p90": 18.810228,
+        "p95": 19.449149,
+        "p99": 27.561403000000002,
+        "p100": 380.852043
+      },
+      "writer_batch_size": {
+        "p50": 3.0,
+        "p90": 30.0,
+        "p95": 31.0,
+        "p99": 32.0,
+        "p100": 32.0
+      },
+      "writer_queue_depth": {
+        "p50": 3.0,
+        "p90": 29.0,
+        "p95": 31.0,
+        "p99": 31.0,
+        "p100": 31.0
+      }
+    },
+    "commit_p99_bucket_upper_ms": 20.0
+  },
+  {
+    "setup": "B-real-disk",
+    "setting": "con32",
+    "run": 2,
+    "target": "python",
+    "clients": 32,
+    "allotment": "1cpu-512m",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": {
+      "cpu_max": [
+        "100000",
+        "100000"
+      ],
+      "memory_max": "536870912"
+    },
+    "ok_per_second": 441.1,
+    "errors": 99,
+    "transport_errors": 99,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 7.288265973329544,
+      "p90": 133.54523503221571,
+      "p95": 332.7259130310267,
+      "p99": 1034.2332399450243,
+      "p100": 4035.8491470105946
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_commit_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_batch_size": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_queue_depth": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      }
+    },
+    "commit_p99_bucket_upper_ms": null
+  },
+  {
+    "setup": "B-real-disk",
+    "setting": "con32",
+    "run": 2,
+    "target": "rust-native",
+    "clients": 32,
+    "allotment": "1cpu-512m",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": {
+      "cpu_max": [
+        "100000",
+        "100000"
+      ],
+      "memory_max": "536870912"
+    },
+    "ok_per_second": 5352.133333333333,
+    "errors": 0,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 5.138528998941183,
+      "p90": 6.375211989507079,
+      "p95": 7.513376185670495,
+      "p99": 30.991264851763844,
+      "p100": 860.0798819679767
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": 0.002489,
+        "p90": 0.005558,
+        "p95": 0.006251,
+        "p99": 0.011637999999999999,
+        "p100": 0.020211
+      },
+      "writer_commit_seconds": {
+        "p50": 1.608705,
+        "p90": 16.334087,
+        "p95": 19.062319000000002,
+        "p99": 28.837336,
+        "p100": 854.2713650000001
+      },
+      "writer_batch_size": {
+        "p50": 3.0,
+        "p90": 19.0,
+        "p95": 29.0,
+        "p99": 32.0,
+        "p100": 32.0
+      },
+      "writer_queue_depth": {
+        "p50": 4.0,
+        "p90": 21.0,
+        "p95": 31.0,
+        "p99": 31.0,
+        "p100": 31.0
+      }
+    },
+    "commit_p99_bucket_upper_ms": 20.0
+  },
+  {
+    "setup": "B-real-disk",
+    "setting": "con32-load105",
+    "run": 1,
+    "target": "python",
+    "clients": 32,
+    "allotment": "1cpu-512m",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": {
+      "cpu_max": [
+        "100000",
+        "100000"
+      ],
+      "memory_max": "536870912"
+    },
+    "ok_per_second": 446.96666666666664,
+    "errors": 82,
+    "transport_errors": 82,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 7.538068108260632,
+      "p90": 135.2545979898423,
+      "p95": 333.31892592832446,
+      "p99": 1032.1274800226092,
+      "p100": 2935.7339330017567
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_commit_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_batch_size": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_queue_depth": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      }
+    },
+    "commit_p99_bucket_upper_ms": null
+  },
+  {
+    "setup": "B-real-disk",
+    "setting": "con32-load105",
+    "run": 1,
+    "target": "rust-native",
+    "clients": 32,
+    "allotment": "1cpu-512m",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": {
+      "cpu_max": [
+        "100000",
+        "100000"
+      ],
+      "memory_max": "536870912"
+    },
+    "ok_per_second": 4994.766666666666,
+    "errors": 0,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 5.105840973556042,
+      "p90": 6.346134003251791,
+      "p95": 8.348984876647592,
+      "p99": 39.00320315733552,
+      "p100": 477.5895490311086
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": 0.002551,
+        "p90": 0.005894,
+        "p95": 0.007956,
+        "p99": 0.013538,
+        "p100": 0.186716
+      },
+      "writer_commit_seconds": {
+        "p50": 1.6582400000000002,
+        "p90": 18.747664,
+        "p95": 19.662116,
+        "p99": 38.570052000000004,
+        "p100": 438.1365
+      },
+      "writer_batch_size": {
+        "p50": 2.0,
+        "p90": 29.0,
+        "p95": 31.0,
+        "p99": 31.0,
+        "p100": 32.0
+      },
+      "writer_queue_depth": {
+        "p50": 2.0,
+        "p90": 29.0,
+        "p95": 31.0,
+        "p99": 31.0,
+        "p100": 31.0
+      }
+    },
+    "commit_p99_bucket_upper_ms": 20.0
+  },
+  {
+    "setup": "B-real-disk",
+    "setting": "con32-load105",
+    "run": 2,
+    "target": "python",
+    "clients": 32,
+    "allotment": "1cpu-512m",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": {
+      "cpu_max": [
+        "100000",
+        "100000"
+      ],
+      "memory_max": "536870912"
+    },
+    "ok_per_second": 445.23333333333335,
+    "errors": 108,
+    "transport_errors": 108,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 7.771998178213835,
+      "p90": 133.69853398762643,
+      "p95": 431.1856818385422,
+      "p99": 1032.4884201399982,
+      "p100": 3533.391366014257
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_commit_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_batch_size": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_queue_depth": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      }
+    },
+    "commit_p99_bucket_upper_ms": null
+  },
+  {
+    "setup": "B-real-disk",
+    "setting": "con32-load105",
+    "run": 2,
+    "target": "rust-native",
+    "clients": 32,
+    "allotment": "1cpu-512m",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": {
+      "cpu_max": [
+        "100000",
+        "100000"
+      ],
+      "memory_max": "536870912"
+    },
+    "ok_per_second": 4959.6,
+    "errors": 0,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 5.121888825669885,
+      "p90": 6.335026118904352,
+      "p95": 7.38208694383502,
+      "p99": 39.611696964129806,
+      "p100": 691.935057984665
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": 0.0026520000000000003,
+        "p90": 0.007296,
+        "p95": 0.010258000000000001,
+        "p99": 0.013067,
+        "p100": 31.552119000000005
+      },
+      "writer_commit_seconds": {
+        "p50": 1.6151099999999998,
+        "p90": 19.331476,
+        "p95": 28.647483,
+        "p99": 39.464793,
+        "p100": 686.2324239999999
+      },
+      "writer_batch_size": {
+        "p50": 3.0,
+        "p90": 28.0,
+        "p95": 31.0,
+        "p99": 31.0,
+        "p100": 32.0
+      },
+      "writer_queue_depth": {
+        "p50": 3.0,
+        "p90": 30.0,
+        "p95": 31.0,
+        "p99": 31.0,
+        "p100": 31.0
+      }
+    },
+    "commit_p99_bucket_upper_ms": 20.0
+  },
+  {
+    "setup": "B-real-disk",
+    "setting": "wal-probe",
+    "run": 1,
+    "target": "python",
+    "clients": 16,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 437.0,
+    "errors": 0,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 5.037056049332023,
+      "p90": 60.705275973305106,
+      "p95": 133.0213090404868,
+      "p99": 633.8904341682792,
+      "p100": 2436.2304301466793
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_commit_seconds": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_batch_size": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      },
+      "writer_queue_depth": {
+        "p50": null,
+        "p90": null,
+        "p95": null,
+        "p99": null,
+        "p100": null
+      }
+    },
+    "commit_p99_bucket_upper_ms": null
+  },
+  {
+    "setup": "B-real-disk",
+    "setting": "wal-probe",
+    "run": 1,
+    "target": "rust-native",
+    "clients": 16,
+    "allotment": "reference",
+    "processes": 4,
+    "seconds": 30.0,
+    "warmup": 5.0,
+    "connection": "close",
+    "batch_events": 1,
+    "nodes": 1,
+    "initial_database": {
+      "status": "observed after run",
+      "main_bytes": 1003520,
+      "wal_bytes": 24752
+    },
+    "cgroup_limits": null,
+    "ok_per_second": 4464.266666666666,
+    "errors": 0,
+    "transport_errors": 0,
+    "refused_connections": 0,
+    "latency_ms": {
+      "p50": 2.9947638977319,
+      "p90": 3.8993970956653357,
+      "p95": 5.018621915951371,
+      "p99": 18.175330013036728,
+      "p100": 71.05763209983706
+    },
+    "sampled_writer_metrics": {
+      "writer_lock_wait_seconds": {
+        "p50": 0.002557,
+        "p90": 0.005005000000000001,
+        "p95": 0.009242,
+        "p99": 0.018978000000000002,
+        "p100": 0.062058999999999996
+      },
+      "writer_commit_seconds": {
+        "p50": 1.508802,
+        "p90": 6.87147,
+        "p95": 11.155708,
+        "p99": 19.036062,
+        "p100": 36.741874
+      },
+      "writer_batch_size": {
+        "p50": 8.0,
+        "p90": 11.0,
+        "p95": 12.0,
+        "p99": 14.0,
+        "p100": 15.0
+      },
+      "writer_queue_depth": {
+        "p50": 6.0,
+        "p90": 10.0,
+        "p95": 11.0,
+        "p99": 14.0,
+        "p100": 15.0
+      }
+    },
+    "commit_p99_bucket_upper_ms": 20.0
+  }
+]
