@@ -34,7 +34,7 @@ _KERNEL_BUILD_RE = re.compile(
     re.IGNORECASE,
 )
 _RAM_SIZE_RE = re.compile(
-    r"(?<![\d.])\d+(?:\.\d+)?\s+(?:G(?:i)?B\s+(?:of\s+)?RAM|GB\s+DDR[45])\b",
+    r"(?<![\d.])\d+(?:\.\d+)?\s?(?:G(?:i)?B\s+(?:of\s+)?RAM|GB\s+DDR[45])\b",
     re.IGNORECASE,
 )
 
@@ -64,6 +64,24 @@ def matching_host_details(text: str, exact_values: Iterable[str] = EXACT_VALUE_A
 def _is_scanned_path(path: str) -> bool:
     parts = PurePosixPath(path).parts
     return bool(parts and (parts[0] in {"docs", "benchmarks"} or (parts[0] == "engines" and "bench" in parts[2:])))
+
+
+def findings_for_text(text: str) -> list[tuple[int, str]]:
+    """Return (line number, rule id) pairs that no content-guard allow comment exempts."""
+    candidate_lines = [
+        (line_number, matches)
+        for line_number, line in enumerate(text.splitlines(), 1)
+        if (matches := matching_host_details(line))
+    ]
+    if not candidate_lines:
+        return []
+    allow_by_line, file_allows, _ignored = _allow_comments_by_line(text)
+    findings: list[tuple[int, str]] = []
+    for line_number, matches in candidate_lines:
+        for rule_id, _value in matches:
+            if _allowed_by(rule_id, "public-host-details", line_number, allow_by_line, file_allows) is None:
+                findings.append((line_number, rule_id))
+    return findings
 
 
 def test_public_docs_and_benchmarks_exclude_host_details() -> None:
@@ -103,18 +121,10 @@ def test_public_docs_and_benchmarks_exclude_host_details() -> None:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
             continue
-        candidate_lines = [
-            (line_number, matches)
-            for line_number, line in enumerate(text.splitlines(), 1)
-            if (matches := matching_host_details(line))
-        ]
-        if not candidate_lines:
+        file_findings = findings_for_text(text)
+        if not file_findings:
             continue
-        allow_by_line, file_allows, _ignored = _allow_comments_by_line(text)
-        for line_number, matches in candidate_lines:
-            for rule_id, _value in matches:
-                if _allowed_by(rule_id, "public-host-details", line_number, allow_by_line, file_allows) is None:
-                    findings.append(f"{relative}:{line_number} {rule_id}")
+        findings.extend(f"{relative}:{line_number} {rule_id}" for line_number, rule_id in file_findings)
 
     assert not findings, "public host details found:\n" + "\n".join(findings)
 
@@ -127,6 +137,8 @@ def test_public_docs_and_benchmarks_exclude_host_details() -> None:
         ("Intel Core Ultra 7 265K", "cpu-model"),
         ("6.8.0-45-generic", "kernel-build"),
         ("32 GB DDR5", "ram-size"),
+        ("32GB DDR5", "ram-size"),
+        ("64GB RAM", "ram-size"),
     ],
 )
 def test_matching_host_details_positive(value: str, rule_id: str) -> None:
@@ -135,7 +147,7 @@ def test_matching_host_details_positive(value: str, rule_id: str) -> None:
 
 @pytest.mark.parametrize(
     "value",
-    ["1.4 GB of memory", "16 cores", "100.63.255.1", "10.0.0.1", "1100.64.0.1"],
+    ["1.4 GB of memory", "16 cores", "100.63.255.1", "10.0.0.1", "1100.64.0.1"],  # content-guard: allow private-ipv4
 )
 def test_matching_host_details_negative(value: str) -> None:
     assert matching_host_details(value) == []
@@ -144,3 +156,15 @@ def test_matching_host_details_negative(value: str) -> None:
 def test_matching_host_details_honors_exact_value_list() -> None:
     value = "100.100.20.30"
     assert matching_host_details(value, {value}) == []
+
+
+def test_findings_for_text_honors_inline_allow_comment() -> None:
+    text = "tailnet host: 100.99.12.34 <!-- content-guard: allow tailnet-ipv4 -->\n"
+    assert matching_host_details(text) == [("tailnet-ipv4", "100.99.12.34")]
+    assert findings_for_text(text) == []
+
+
+def test_findings_for_text_keeps_finding_under_other_rule_allow_comment() -> None:
+    text = "tailnet host: 100.99.12.34 <!-- content-guard: allow ram-size -->\n"
+    assert matching_host_details(text) == [("tailnet-ipv4", "100.99.12.34")]
+    assert findings_for_text(text) == [(1, "tailnet-ipv4")]
