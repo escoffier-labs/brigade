@@ -8,6 +8,7 @@ import sys
 import time
 from contextlib import closing
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +18,8 @@ from brigade import (
     code_graph_background,
     code_graph_delta,
     component_bins,
+    component_paths,
+    component_state,
     engine_paths,
     inbox_lock,
     localio,
@@ -365,7 +368,7 @@ def graph_sync_platform(monkeypatch):
         monkeypatch.setattr(
             code_graph_background,
             "may_run_killable_foreground_sync",
-            lambda: platform != "win32",
+            lambda *args: platform != "win32",
         )
 
     return select
@@ -379,6 +382,7 @@ def test_verify_existing_graph_sync_policy(
     tmp_path, monkeypatch, capsys, graph_sync_platform, platform, detach_refused
 ):
     graph_sync_platform(platform)
+    monkeypatch.setattr(code_graph_delta, "sys", SimpleNamespace(platform="linux"))
     subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
     (tmp_path / ".gitignore").write_text(".brigade/\n")
     db = engine_paths.code_graph_db(tmp_path).path
@@ -726,3 +730,156 @@ def test_windows_aboyeur_snapshot_defaults_defer_to_one_refresh(tmp_path, monkey
     assert result["status"] == "ok" and result["stale_graph_used"]
     assert launches == ["engine"]
     assert result["background_refresh"]["status"] == "busy"
+
+
+def _fake_managed_graph(tmp_path, monkeypatch, release):
+    name = "brigade-code-graph"
+    binary = tmp_path / name
+    binary.write_bytes(b"test engine")
+    binary.chmod(0o755)
+    state_path = Path(component_paths.installed_state_path(component_paths.data_root()))
+    real_resolve = component_bins.resolve
+    # The default test resolver hides managed installs, including our sandboxed one.
+    monkeypatch.setattr(component_bins, "resolve", lambda key: component_bins.managed_path(key) or real_resolve(key))
+    if release is not None:
+        record = component_state.InstalledComponentRecord(
+            "0" * 40,
+            binary.name,
+            binary.stat().st_size,
+            localio.file_sha256(binary),
+            "https://example.invalid/engine",
+            str(binary),
+        )
+        state = component_state.InstalledState(
+            1,
+            "0.99.0",
+            release,
+            "windows-amd64",
+            "2026-01-01T00:00:00Z",
+            {name: record},
+        )
+        component_state.write_installed_state(state_path, state)
+    return binary, state_path
+
+
+@pytest.mark.parametrize(
+    ("release", "expected"),
+    [
+        ("0.32.0", False),
+        ("0.32.1", True),
+        ("0.32.10", True),
+        ("0.33.0", True),
+        ("v0.32.1+abcdef", True),
+        ("0.33.0.dev0", True),
+        ("v0.32.1rc1+abcdef", False),
+        ("0.32.1.dev0", False),
+        ("unparseable", False),
+        (None, False),
+    ],
+)
+def test_windows_foreground_sync_uses_recorded_managed_release(tmp_path, monkeypatch, release, expected):
+    binary, _ = _fake_managed_graph(tmp_path, monkeypatch, release)
+    monkeypatch.setattr(code_graph_background, "sys", SimpleNamespace(platform="win32"))
+    assert code_graph_background.may_run_killable_foreground_sync(str(binary)) is expected
+
+
+@pytest.mark.parametrize("problem", ["malformed", "unreadable", "different_path", "replaced", "override", "path"])
+def test_windows_foreground_sync_refuses_unproven_binary(tmp_path, monkeypatch, problem):
+    binary, state = _fake_managed_graph(tmp_path, monkeypatch, "v0.32.1+abcdef")
+    monkeypatch.setattr(code_graph_background, "sys", SimpleNamespace(platform="win32"))
+    selected = binary
+    if problem == "malformed":
+        state.write_bytes(b"{")
+    elif problem == "unreadable":
+        state.unlink()
+        state.mkdir()
+    elif problem == "different_path":
+        selected = binary.with_name("different.exe")
+        selected.write_bytes(binary.read_bytes())
+    elif problem == "replaced":
+        binary.write_bytes(b"dev binary!")
+    elif problem == "override":
+        # Even pointing the override at the managed path takes the override channel.
+        monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(binary))
+    else:
+        state.unlink()
+        monkeypatch.setenv("PATH", str(binary.parent))
+    assert not code_graph_background.may_run_killable_foreground_sync(str(selected))
+
+
+def test_non_windows_foreground_sync_does_not_need_a_resolved_binary(monkeypatch):
+    monkeypatch.setattr(code_graph_background, "sys", SimpleNamespace(platform="linux"))
+    assert code_graph_background.may_run_killable_foreground_sync(None)
+    assert code_graph_background.may_run_killable_foreground_sync("unknown")
+
+
+@pytest.mark.parametrize(
+    ("platform", "release", "timeout"),
+    [("win32", "v0.32.0", False), ("win32", "v0.32.1", False), ("win32", "v0.32.1", True), ("linux", "v0.32.0", True)],
+)
+def test_verify_uses_managed_graph_release(tmp_path, monkeypatch, capsys, platform, release, timeout):
+    binary, _ = _fake_managed_graph(tmp_path, monkeypatch, release)
+    monkeypatch.setattr(code_graph_background, "sys", SimpleNamespace(platform=platform, executable=sys.executable))
+    monkeypatch.setattr(code_graph_delta, "sys", SimpleNamespace(platform=platform))
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    db = engine_paths.code_graph_db(tmp_path).path
+    db.parent.mkdir(parents=True)
+    with closing(sqlite3.connect(db)) as connection, connection:
+        connection.execute("CREATE TABLE meta (key TEXT, value TEXT)")
+        connection.execute("INSERT INTO meta VALUES ('synced_at', '1')")
+
+    def refresh(target, db, candidate=None, **kwargs):
+        if platform == "win32" and release == "v0.32.1":
+            assert candidate is None, "foreground timeout must not launch a replacement writer"
+        return None
+
+    monkeypatch.setattr(code_graph_background, "status_or_start", refresh)
+    calls = []
+
+    def engine(argv, **kwargs):
+        command = argv[3]
+        calls.append(command)
+        if command == "sync" and timeout:
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        if command == "digest":
+            return json.dumps({"format_version": 2, "schema_version": 9, "sha256": "f" * 64})
+        return "{}"
+
+    real_subprocess_run, real_proc_run = subprocess.run, proc.run
+
+    def run(argv, *args, **kwargs):
+        if isinstance(argv, list) and argv[:1] == [str(binary)]:
+            assert platform == "linux" or argv[3] == "diff"
+            return subprocess.CompletedProcess(argv, 0, engine(argv, **kwargs), "")
+        return real_subprocess_run(argv, *args, **kwargs)
+
+    def run_owned(argv, *args, **kwargs):
+        if argv[:1] == [str(binary)]:
+            assert platform == "win32"
+            try:
+                return proc.Result(code=0, stdout=engine(argv, **kwargs), stderr="")
+            except subprocess.TimeoutExpired:
+                return proc.Result(code=124, stdout="", stderr="timeout", timed_out=True)
+        return real_proc_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(proc, "run", run_owned)
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True, reuse=False) == 0
+    receipt = json.loads(capsys.readouterr().out)["code_graph_delta"]
+    assert receipt["status"] == "ok"
+    if timeout:
+        assert calls == ["sync", "sync", "diff"]
+        assert receipt["stale_graph_used"] and receipt["stale_after"]
+        for stage in ("before_sync", "after_sync"):
+            result = receipt["commands"][stage]
+            assert result["returncode"] == 124 and result["timed_out"]
+            assert result["stage"] == "incremental-sync"
+    elif release == "v0.32.1":
+        assert calls == ["sync", "digest", "sync", "digest"]
+        assert receipt["delta_source"] == "digest_equal"
+        assert not receipt["stale_graph_used"]
+    else:
+        assert calls == ["diff"]
+        assert receipt["stale_graph_used"] and receipt["stale_after"]
+        assert receipt["commands"]["before_sync"] is None
+        assert receipt["commands"]["after_sync"] is None

@@ -4,10 +4,17 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import stat
+import subprocess
+import sys
+import time
+from contextlib import closing
 from pathlib import Path
 
-from brigade import component_bins
+import pytest
+
+from brigade import code_graph_background, component_bins, engine_paths, proc, work_cmd
 from tests._home import set_home
 
 _SHA = "0" * 64
@@ -276,3 +283,60 @@ def test_nonrenamed_components_keep_empty_overrides_unset(tmp_path, monkeypatch)
         monkeypatch.setenv("PATH", str(binary.parent))
         monkeypatch.setenv(key, "")
         _assert_path_match(component_bins.resolve_argv([name, "version"])[0], binary)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="requires Windows Job Object and delete-on-close lock semantics")
+def test_windows_verify_reaps_a_managed_graph_writer(tmp_path, monkeypatch, capsys):
+    engine = component_bins.resolve("brigade-code-graph")
+    if engine is None or not code_graph_background.may_run_killable_foreground_sync(engine):
+        pytest.skip("requires a managed code graph engine with the v0.32.1 lock fix")
+    monkeypatch.delenv(engine_paths.CODE_GRAPH_DB_ENV, raising=False)
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, timeout=10)
+    (tmp_path / ".gitignore").write_text(".brigade/\n", encoding="utf-8")
+    source = tmp_path / "source.py"
+    source.write_text("def first(): pass\n", encoding="utf-8")
+    db = engine_paths.code_graph_db(tmp_path).path
+    db.parent.mkdir(parents=True)
+    argv = [engine, "--db", str(db), "sync"]
+    seeded = proc.run(argv, cwd=tmp_path, timeout=30)
+    assert seeded.code == 0, seeded.stderr
+    source.write_text("def second_function(): pass\n", encoding="utf-8")
+    lock = code_graph_background.engine_lock_path(db)
+
+    collect = proc._collect_process_output
+    writers = []
+
+    def observe_writer(process, **kwargs):
+        if process.args == argv:
+            writers.append(process)
+            assert kwargs["child_job"] is not None
+            # Let the real writer acquire its engine lock before the tiny
+            # collection budget begins. The held SQLite writer keeps it busy.
+            deadline = time.monotonic() + 10
+            while not lock.is_file() and process.poll() is None and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert lock.is_file()
+        return collect(process, **kwargs)
+
+    verify_options = {
+        "target": tmp_path,
+        "commands": [[sys.executable, "-V"]],
+        "json_output": True,
+        "reuse": False,
+    }
+    with monkeypatch.context() as scoped, closing(sqlite3.connect(db)) as blocker:
+        blocker.execute("BEGIN IMMEDIATE")
+        scoped.setattr(proc, "_collect_process_output", observe_writer)
+        assert work_cmd.verify_run(**verify_options, code_graph_timeout=0.001) == 0
+    receipt = json.loads(capsys.readouterr().out)["code_graph_delta"]
+    assert receipt["commands"]["before_sync"]["timed_out"]
+    assert writers and all(writer.poll() is not None for writer in writers)
+    assert not lock.exists()
+    assert not code_graph_background._lock_path(tmp_path).exists()
+
+    assert work_cmd.verify_run(**verify_options, code_graph_timeout=10.0) == 0
+    receipt = json.loads(capsys.readouterr().out)["code_graph_delta"]
+    assert receipt["commands"]["before_sync"]["returncode"] == 0
+    assert receipt["commands"]["after_sync"]["returncode"] == 0
+    assert not receipt["stale_graph_used"]
+    assert not lock.exists()

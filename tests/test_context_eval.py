@@ -20,7 +20,7 @@ def _diff_node(file_path: str, name: str) -> dict:
 
 def _write_real_sidecar(monkeypatch, tmp_path: Path, diff_payload: dict, *, windows: bool = False) -> dict:
     """Run the real sidecar writer with graphtrail's diff output stubbed."""
-    monkeypatch.setattr(code_graph_background, "may_run_killable_foreground_sync", lambda: not windows)
+    monkeypatch.setattr(code_graph_background, "may_run_killable_foreground_sync", lambda *args: not windows)
     run_dir = tmp_path / "run"
     run_dir.mkdir()
     snapshot = run_dir / code_graph_delta.SNAPSHOT_NAME

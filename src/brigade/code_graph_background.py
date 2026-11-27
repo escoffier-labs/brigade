@@ -14,7 +14,7 @@ from tempfile import TemporaryFile, gettempdir
 from threading import Thread
 from typing import IO, Any
 
-from . import engine_paths, inbox_lock, localio, nt_process, proc, proc_group, runguard
+from . import component_bins, engine_paths, inbox_lock, localio, nt_process, proc, proc_group, runguard
 
 _START_LOCK_TIMEOUT = 5.0
 # Cold interpreter startup on Windows can be delayed by antivirus scanning.
@@ -30,10 +30,21 @@ _WORKER = (
 )
 
 
-def may_run_killable_foreground_sync() -> bool:
-    # Engines up to v0.32.0 cannot recover a killed writer's lock on Windows.
-    # Drop this workaround once Brigade requires a minimum engine release containing PR #2963.
-    return sys.platform != "win32"
+def may_run_killable_foreground_sync(binary: str | None = None) -> bool:
+    if sys.platform != "win32":
+        return True
+    if not binary or (release := component_bins.managed_release("brigade-code-graph", binary)) is None:
+        return False
+    from .component_install import release_version_tuple
+
+    # PR #2963 first shipped in v0.32.1. The parser drops pre-release
+    # qualifiers, so require the final tag (optionally with build metadata)
+    # when the release segments match the floor.
+    version = release_version_tuple(release)
+    floor = (0, 32, 1)
+    return version is not None and (
+        version > floor or (version == floor and release.partition("+")[0].lower().removeprefix("v") == "0.32.1")
+    )
 
 
 def run_windows_sync(argv: list[str], *, timeout: float, cwd: Path | None = None) -> proc.Result:

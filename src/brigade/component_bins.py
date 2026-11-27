@@ -25,7 +25,7 @@ import shutil
 from collections.abc import Mapping
 from pathlib import Path
 
-from . import component_manifest, component_paths, component_state, engine_deprecation
+from . import component_manifest, component_paths, component_state, engine_deprecation, localio
 
 # Engine name -> env var override honored before any other resolution step.
 ENV_OVERRIDES = {
@@ -69,8 +69,9 @@ def _expand_home(value: str, environment: Mapping[str, str]) -> Path:
     return Path(value).expanduser()
 
 
-def managed_path(name: str, *, env: Mapping[str, str] | None = None) -> str | None:
-    """Return the installed.json executable for ``name`` when present on disk."""
+def _managed_record(
+    name: str, env: Mapping[str, str] | None
+) -> tuple[component_state.InstalledState, component_state.InstalledComponentRecord] | None:
     try:
         data_root = component_paths.data_root(env=env)
     except ValueError:
@@ -80,8 +81,15 @@ def managed_path(name: str, *, env: Mapping[str, str] | None = None) -> str | No
         return None
     key = component_manifest.wire_id(state.components, name)
     record = state.components.get(key) if key is not None else None
-    if record is None:
+    return (state, record) if record is not None else None
+
+
+def managed_path(name: str, *, env: Mapping[str, str] | None = None) -> str | None:
+    """Return the installed.json executable for ``name`` when present on disk."""
+    entry = _managed_record(name, env)
+    if entry is None:
         return None
+    _, record = entry
     executable = Path(record.executable)
     return str(executable) if _is_executable(executable) else None
 
@@ -94,6 +102,28 @@ def _override_values(names: tuple[str, ...], environment: Mapping[str, str]) -> 
         and key in environment
         and (len(names) > 1 or bool(environment[key]))
     ]
+
+
+def managed_release(name: str, binary: str) -> str | None:
+    """Return the recorded release only for a matching managed executable."""
+    if _override_values(component_manifest.family_names(name), os.environ):
+        return None
+    entry = _managed_record(name, None)
+    if entry is None:
+        return None
+    state, record = entry
+    executable = Path(binary)
+    if not executable.is_absolute() or executable != Path(record.executable):
+        return None
+    try:
+        if not _is_executable(executable) or executable.stat().st_size != record.byte_size:
+            return None
+        if localio.file_sha256(executable) != record.sha256:
+            return None
+    except (OSError, ValueError):
+        return None
+    # Published manifests carry the engine tag, even if a newer CLI installed it.
+    return state.manifest_revision
 
 
 def resolve(name: str, *, env: Mapping[str, str] | None = None) -> str | None:

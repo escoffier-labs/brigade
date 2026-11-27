@@ -8,6 +8,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 from contextlib import closing
@@ -15,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import code_graph_background, code_references, component_bins, engine_paths
+from . import code_graph_background, code_references, component_bins, engine_paths, proc
 
 SNAPSHOT_NAME = "code-graph-before.db"
 SNAPSHOT_AFTER_NAME = "code-graph-after.db"
@@ -79,7 +80,9 @@ def capture_before(
             "graphtrail_timeout_seconds": backup_budget,
             "snapshots": {},
         }
-        defer_windows = not code_graph_background.may_run_killable_foreground_sync()
+        defer_windows = not code_graph_background.may_run_killable_foreground_sync(binary)
+        # On Windows, retry a timed-out foreground writer on the next run.
+        retry_in_background = defer_sync and sys.platform != "win32"
         sync_budget = timeout
         if defer_windows:
             refresh = code_graph_background.status_or_start(target, db_path, binary, initial_wait=backup_budget)
@@ -148,11 +151,11 @@ def capture_before(
             digest = _timed_snapshot(db_path, snapshot_path, backup_budget, details["snapshots"], "before")
         except TimeoutError:
             if sync and sync.get("timed_out"):
-                if defer_sync and (refresh := _request_background_refresh(target, db_path, binary, details)):
+                if retry_in_background and (refresh := _request_background_refresh(target, db_path, binary, details)):
                     details["background_refresh"] = refresh
                 return _status("sync_timed_out", f"code graph sync timed out after {sync_budget:g}s", **details)
             return _status("capture_failed", "code graph baseline snapshot timed out", **details)
-        if defer_sync and sync and sync.get("timed_out"):
+        if retry_in_background and sync and sync.get("timed_out"):
             if refresh := _request_background_refresh(target, db_path, binary, details):
                 details["background_refresh"] = refresh
         if digest_shortcut and not stale:
@@ -279,7 +282,8 @@ def capture_after_and_diff(
         before = before if isinstance(before, dict) else {}
         if before.get("status") == "unavailable":
             return _compact(_status("unavailable", str(before.get("summary") or "code graph delta unavailable")))
-        defer_windows = not code_graph_background.may_run_killable_foreground_sync()
+        binary = str(before.get("binary") or "")
+        defer_windows = not code_graph_background.may_run_killable_foreground_sync(binary)
         if defer_windows and (db_path_value := before.get("db_path")):
             _observe_windows_refresh(target, Path(db_path_value), before)
         if before.get("ok") is not True:
@@ -302,7 +306,6 @@ def capture_after_and_diff(
             )
             return _write_and_compact(run_dir, payload)
 
-        binary = str(before.get("binary") or "")
         db_path = Path(str(before.get("db_path") or engine_paths.code_graph_db(target).path))
         snapshot_path = Path(str(before.get("before_snapshot_path") or run_dir / SNAPSHOT_NAME))
         # A live refresh owns the write path. Read the last committed index instead.
@@ -318,7 +321,8 @@ def capture_after_and_diff(
             sync = _run_graphtrail(binary, db_path, "sync", timeout=sync_budget, stage="incremental-sync", cwd=target)
             if sync.get("timed_out") and sync_timeout is not None:
                 stale_after = True
-                refresh = _request_background_refresh(target, db_path, binary, before)
+                if sys.platform != "win32":
+                    refresh = _request_background_refresh(target, db_path, binary, before)
             elif sync["returncode"] != 0 and sync_timeout is not None:
                 refresh = code_graph_background.status_or_start(target, db_path)
                 stale_after = bool(refresh and refresh["status"] == "busy")
@@ -528,8 +532,13 @@ def _run_graphtrail(
         argv.append("--json")
     started = time.monotonic()
     engine_cwd = cwd or engine_paths.code_graph_repo_root(db_path)
-    if command == "sync" and not code_graph_background.may_run_killable_foreground_sync():
-        result = code_graph_background.run_windows_sync(argv, timeout=timeout, cwd=engine_cwd)
+    runner = None
+    if command == "sync" and not code_graph_background.may_run_killable_foreground_sync(binary if stage else None):
+        runner = code_graph_background.run_windows_sync
+    elif sys.platform == "win32" and command in ("sync", "digest"):
+        runner = proc.run
+    if runner is not None:
+        result = runner(argv, timeout=timeout, cwd=engine_cwd)
         return _command_result(
             argv=argv,
             returncode=result.code,
