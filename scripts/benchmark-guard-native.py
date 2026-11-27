@@ -62,7 +62,7 @@ def main() -> None:
             "kind": "meta",
             "smoke": args.smoke,
             "python": platform.python_version(),
-            "platform": platform.platform(),
+            "platform": f"{platform.system()} {platform.machine()}",
             "engine": engine_version(),
         }
     )

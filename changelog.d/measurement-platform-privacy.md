@@ -1,0 +1,1 @@
+- Record only the operating system and machine architecture as the platform in four measurement scripts, without the kernel release.

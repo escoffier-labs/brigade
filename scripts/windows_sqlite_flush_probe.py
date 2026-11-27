@@ -112,7 +112,7 @@ def main() -> None:
         parser.error("--samples must be positive")
 
     metadata = {
-        "platform": platform.platform(),
+        "platform": f"{platform.system()} {platform.machine()}",
         "python": platform.python_version(),
         "sqlite": sqlite3.sqlite_version,
         "image_os": os.environ.get("ImageOS"),
