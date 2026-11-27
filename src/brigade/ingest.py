@@ -417,7 +417,7 @@ def ingest_into(
                     snapshot=snapshot,
                     pending=pending,
                     card_ids=card_ids,
-                    promote_cards=promote_cards,
+                    promote_cards=promote_cards and not content_policy,
                     route_documents=route_documents and not content_policy,
                     routing=routing,
                     claim_origin=claim_origin
@@ -671,8 +671,6 @@ def decide(
                     reason=f"update-card {EXPECTED_SHA_SECTION} does not match the current card",
                 )
         sig = scan_untrusted(content)
-        if not isinstance(sig.flagged, bool):
-            raise ValueError("missing card injection scan result")
         if sig.flagged:
             return Outcome(
                 "inboxed",
@@ -1188,7 +1186,7 @@ def _execute(
     if not dry_run and _is_tracked(handoff_path, _git_tracked_files(handoff_path.parent)):
         raise TrackedHandoffError(f"refusing to ingest git-tracked handoff {handoff_path}")
 
-    if policy_origin is not None and outcome.kind in {"promoted", "reinforced"}:
+    if policy_origin is not None and outcome.kind == "promoted":
         from .ingest_content_policy import file_card
 
         assert card_ids is not None and claim_origin is not None
@@ -1196,7 +1194,6 @@ def _execute(
             outcome,
             target,
             sections,
-            handoff_path,
             policy_origin,
             claim_origin=claim_origin,
             card_ids=card_ids,
@@ -1204,9 +1201,8 @@ def _execute(
         )
         if refusal is None:
             if not dry_run:
-                log_match(target, outcome.match, _archive(handoff_path, processed_dir, snapshot_sha))
-            verb = "promote" if outcome.kind == "promoted" else "reinforce"
-            return Action(outcome.kind, _summary(verb, name, outcome.code))
+                _archive(handoff_path, processed_dir, snapshot_sha)
+            return Action("promoted", _summary("promote", name, outcome.code))
         outcome = Outcome("inboxed", code=refusal)
 
     if outcome.kind == "promoted":

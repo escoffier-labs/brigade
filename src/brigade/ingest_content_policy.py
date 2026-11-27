@@ -8,11 +8,52 @@ import hashlib
 import os
 from pathlib import Path
 from stat import S_IMODE
-from tempfile import TemporaryDirectory
 
-from . import dirfd, handoff_origin, handoff_worktrees, ingest, memory_content_scan
+from . import dirfd, handoff_origin, handoff_worktrees, ingest, memory_cmd, memory_content_scan
 from . import memory_care_journal as journal
+from .card_fingerprint import _insert_frontmatter_fields
+from .handoff_ingest_rules import CARDS_RELATIVE, EXPECTED_SHA_SECTION, SHA256_RE, sha_matches
 from .inbox_lock import InboxLockTimeout, held_file_lock
+from .memory_inbox_io import read
+
+_REPLACED_METADATA = frozenset({"trust", "author", "author_type", "pinned", "archive", "auto_filed"})
+
+
+def _destination_refusal(sections: dict[str, str], before: bytes | None, *, publishing: bool = False) -> str | None:
+    action = sections["recommended memory action"].strip().lower()
+    if action == "create-card":
+        return "card-name-occupied" if before is not None else None
+    if action != "update-card":
+        return "action-not-auto-handled"
+    expected = sections.get(EXPECTED_SHA_SECTION.lower(), "").strip().lower()
+    if not expected:
+        return "expected-sha-required"
+    if not SHA256_RE.fullmatch(expected):
+        return "expected-sha-invalid"
+    if before is None or not sha_matches(before, expected):
+        return "expected-sha-stale" if publishing else "expected-sha-mismatch"
+    return None
+
+
+def _mark_filed(card: str) -> str:
+    """Write the filing metadata and retain the rest of the card."""
+    lines = card.replace("\r\n", "\n").split("\n")
+    closing = next(i for i, line in enumerate(lines[1:], 1) if line.strip() == "---")
+    kept = [lines[0]]
+    dropped_indent = None
+    for line in lines[1:closing]:
+        key, sep, _ = line.partition(":")
+        indent = len(line) - len(line.lstrip())
+        if sep and key.strip().strip("\"'").casefold() in _REPLACED_METADATA:
+            dropped_indent = indent
+            continue
+        if dropped_indent is not None and (indent > dropped_indent or line.lstrip().startswith("- ")):
+            continue
+        if line.strip() and not line.lstrip().startswith("#"):
+            dropped_indent = None
+        kept.append(line)
+    text = "\n".join([*kept, *lines[closing:]])
+    return _insert_frontmatter_fields(text, {"trust": "agent-unreviewed", "auto_filed": date.today().isoformat()})
 
 
 def decide(
@@ -20,14 +61,25 @@ def decide(
 ) -> ingest.Outcome:
     try:
         outcome = ingest.decide(sections, owner, promote_cards, route_documents=False, card_ids=card_ids)
+        if outcome.kind in {"promoted", "reinforced"} or outcome.match is not None:
+            relative = (CARDS_RELATIVE / sections["target card"].strip()).as_posix()
+            refusal = _destination_refusal(sections, read(owner, relative, limit=ingest.INSPECTION_CEILING))
+            if refusal:
+                return ingest.Outcome("inboxed", code=refusal)
         if outcome.kind in {"promoted", "reinforced"}:
-            verdict, rules = memory_content_scan.scan_verdict([snapshot.decode("utf-8")])
+            text = snapshot.decode("utf-8")
+            verdict, rules = memory_content_scan.scan_verdict([text])
+            injection = ingest.scan_untrusted(text)
             if verdict in {memory_content_scan.BLOCKED, memory_content_scan.FLAGGED, memory_content_scan.PRIVATE}:
                 return ingest.Outcome("inboxed", code="handoff-content-signal")
-            if verdict != memory_content_scan.CLEAN or rules != () or outcome.dest is None:
-                raise ValueError("incomplete content policy result")
-            if outcome.kind == "reinforced" and outcome.match is None:
-                raise ValueError("missing reinforcement match")
+            if verdict != memory_content_scan.CLEAN or rules != () or type(injection.flagged) is not bool:
+                raise ValueError("incomplete content policy scan")
+            if injection.flagged:
+                return ingest.Outcome("inboxed", code="handoff-content-signal")
+            if outcome.kind == "reinforced":
+                return ingest.Outcome("inboxed", code="duplicate-card-content", match=outcome.match)
+            if outcome.dest is None:
+                raise ValueError("missing card destination")
         elif outcome.kind not in {"inboxed", "skipped"}:
             raise ValueError("unexpected content policy decision")
         if not outcome.code:
@@ -41,7 +93,6 @@ def file_card(
     outcome: ingest.Outcome,
     owner: Path,
     sections: dict[str, str],
-    path: Path,
     origin: handoff_origin.VerifiedOrigin,
     *,
     claim_origin: Callable[[], bool],
@@ -50,8 +101,6 @@ def file_card(
 ) -> str | None:
     """Return the refusal code, or journal and publish the card."""
     from contextlib import nullcontext
-
-    from .memory_inbox_io import read
 
     dest = outcome.dest
     assert dest is not None
@@ -62,25 +111,14 @@ def file_card(
             lock.parent.mkdir(parents=True, exist_ok=True)
         with nullcontext() if dry_run else held_file_lock(lock, deadline_seconds=1):
             before = read(owner, relative, limit=ingest.INSPECTION_CEILING)
-            if outcome.kind == "promoted":
-                expected = ""
-                if sections.get("recommended memory action", "").strip().lower() == "update-card":
-                    expected = sections.get(ingest.EXPECTED_SHA_SECTION.lower(), "").strip().lower()
-                built = ingest._build_promoted_card(sections, ingest._check_card_state(before, expected))
-                after = built.encode("utf-8")
-            else:
-                if before is None:
-                    return "card-publication-changed"
-                with TemporaryDirectory(prefix="handoff-reinforce-") as staging:
-                    copy = Path(staging) / dest.name
-                    copy.write_bytes(before)
-                    ingest.reinforce_existing_card(
-                        copy,
-                        today=date.today(),
-                        evidence_pointer=ingest._evidence_pointer(path, sections=sections, target=owner),
-                    )
-                    after = copy.read_bytes()
-                built = after.decode("utf-8")
+            refusal = _destination_refusal(sections, before, publishing=True)
+            if refusal:
+                return refusal
+            existing_meta = ingest._check_card_state(before, "")
+            built = _mark_filed(ingest._build_promoted_card(sections, existing_meta))
+            after = built.encode("utf-8")
+            if len(after) > memory_cmd._config_or_default(owner).max_card_bytes:
+                return "card-budget-exceeded"
             if not dry_run:
                 mode = 0o600 if before is None else S_IMODE(dest.stat(follow_symlinks=False).st_mode)
                 if not claim_origin():
@@ -98,8 +136,6 @@ def file_card(
                         },
                     },
                 )
-    except ingest.StaleCardError:
-        return "expected-sha-stale"
     except InboxLockTimeout:
         return "card-publication-busy"
     except Exception:

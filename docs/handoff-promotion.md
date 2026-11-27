@@ -214,12 +214,22 @@ review.
 ### Content policy for unknown-origin drafts
 
 When card promotion is enabled, ingest evaluates verified unknown-origin drafts
-using the card action, size, content, destination, and duplicate checks. A draft
-that fails a check goes to the inbox with that check's reason. The drain uses
-the reason to decide whether to hold the draft, retry it, or leave it for human
-review. Worker drafts stay in the inbox with `origin-review-required`. If ingest
+for card filing. A `create-card` draft needs a free destination name. An
+`update-card` draft needs an `Expected card SHA256` that matches the current
+card. Ingest repeats the destination check under the publication lock.
+
+Both content scans cover the full draft, including the title, summary, durable
+facts, evidence, and suggested card content. The final card must fit the
+workspace's `max_card_bytes` limit, which defaults to 12,000 bytes. Ingest
+writes `trust: agent-unreviewed` and an `auto_filed` date, replacing any trust,
+authorship, or pinning metadata from the draft. The card enters the memory
+review queue and follows the usual lifecycle policy.
+
+Document actions and drafts that fail a check go to the review inbox with a
+reason. Worker drafts go to the inbox with `origin-review-required`. If ingest
 cannot read or parse a draft, it writes a review note and leaves the original
-in the writer inbox.
+in the writer inbox. Interactive filing and approved re-apply follow their
+existing rules.
 
 Before filing, ingest saves the card's previous bytes or records that the card
 was absent. The journal records `decision: content-policy` and preserves the
