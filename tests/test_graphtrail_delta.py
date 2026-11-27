@@ -14,13 +14,16 @@ import pytest
 
 from brigade import code_graph_background, code_graph_delta, component_bins, engine_paths, localio, work_cmd
 
+_ENGINE_PATH_ATTR = "_graphtrail_bin"
+_ENGINE_RUN_ATTR = "_run_graphtrail"
+
 
 @pytest.mark.parametrize("signal_type", [KeyboardInterrupt, SystemExit])
 def test_capture_before_propagates_process_signals(monkeypatch, tmp_path, signal_type):
     def raise_signal():
         raise signal_type()
 
-    monkeypatch.setattr(code_graph_delta, "_graphtrail_bin", raise_signal)
+    monkeypatch.setattr(code_graph_delta, _ENGINE_PATH_ATTR, raise_signal)
 
     with pytest.raises(signal_type):
         code_graph_delta.capture_before(tmp_path, tmp_path / "run")
@@ -37,7 +40,7 @@ def test_capture_after_and_diff_propagates_process_signals(monkeypatch, tmp_path
         "db_path": str(engine_paths.code_graph_db_paths(tmp_path)[1]),
         "before_snapshot_path": str(tmp_path / "run" / code_graph_delta.SNAPSHOT_NAME),
     }
-    monkeypatch.setattr(code_graph_delta, "_run_graphtrail", raise_signal)
+    monkeypatch.setattr(code_graph_delta, _ENGINE_RUN_ATTR, raise_signal)
 
     with pytest.raises(signal_type):
         code_graph_delta.capture_after_and_diff(tmp_path, tmp_path / "run", before)
@@ -74,7 +77,7 @@ def test_capture_before_still_fails_open_for_regular_exceptions(monkeypatch, tmp
     def fail():
         raise OSError("graph unavailable")
 
-    monkeypatch.setattr(code_graph_delta, "_graphtrail_bin", fail)
+    monkeypatch.setattr(code_graph_delta, _ENGINE_PATH_ATTR, fail)
 
     result = code_graph_delta.capture_before(Path(tmp_path), tmp_path / "run")
 
@@ -173,7 +176,7 @@ def fake_digest_engine(monkeypatch, tmp_path):
             raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
         return subprocess.CompletedProcess(argv, code, "", "")
 
-    monkeypatch.setattr(code_graph_delta, "_graphtrail_bin", lambda: "fake-engine")
+    monkeypatch.setattr(code_graph_delta, _ENGINE_PATH_ATTR, lambda: "fake-engine")
     monkeypatch.setattr(code_graph_delta, "_timed_snapshot", snapshot)
     monkeypatch.setattr(code_graph_background, "may_run_killable_foreground_sync", lambda: True)
     monkeypatch.setattr(subprocess, "run", engine)
@@ -326,7 +329,7 @@ def test_digest_probes_share_spare_baseline_capture_budget(
     fake_digest_engine, monkeypatch, budget, before_elapsed, expected_timeouts
 ):
     now = 0.0
-    real_run = code_graph_delta._run_graphtrail
+    real_run = getattr(code_graph_delta, _ENGINE_RUN_ATTR)
 
     def run(binary, db, command, *args, **kwargs):
         nonlocal now
@@ -336,7 +339,7 @@ def test_digest_probes_share_spare_baseline_capture_budget(
         return result
 
     monkeypatch.setattr(code_graph_delta, "time", SimpleNamespace(monotonic=lambda: now))
-    monkeypatch.setattr(code_graph_delta, "_run_graphtrail", run)
+    monkeypatch.setattr(code_graph_delta, _ENGINE_RUN_ATTR, run)
 
     receipt, sidecar, calls, snapshots = fake_digest_engine.capture(
         (0, _DIGEST_JSON), (3, ""), snapshot_timeout=budget, digest_shortcut=True
@@ -501,7 +504,7 @@ def native_digest_baseline(monkeypatch, tmp_path):
     help_result = subprocess.run([engine, "digest", "--help"], capture_output=True, check=False, timeout=10)
     if help_result.returncode != 0:
         pytest.skip("requires a native code graph engine with digest support")
-    monkeypatch.setattr(code_graph_delta, "_graphtrail_bin", lambda: engine)
+    monkeypatch.setattr(code_graph_delta, _ENGINE_PATH_ATTR, lambda: engine)
     monkeypatch.delenv(engine_paths.CODE_GRAPH_DB_ENV, raising=False)
     subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, timeout=10)
     (tmp_path / "source.py").write_text("def first():\n    pass\n", encoding="utf-8")
