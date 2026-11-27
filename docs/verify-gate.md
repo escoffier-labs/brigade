@@ -155,7 +155,18 @@ for the required verification scripts. This applies to leading assignments,
 assignments passed to `env`, and names saved in the receipt's command
 environment. Other assignments make a possible required run ambiguous.
 The `env -i` and `env -u` options require at least one assignment from
-the same allowlist to be transparent. A newer matching failure
+the same allowlist to be transparent.
+
+**Adding a variable to the list**
+
+The list is `_CHECK_ENV_NAMES` in `src/brigade/work_cmd/verify_push.py`.
+Adding a name requires a reviewed change to that constant and a note in this
+guide explaining why the variable cannot change what the check runs or which
+tests it selects. There is deliberately no per-machine configuration key or
+environment switch for this list. In the meantime, run the required check
+without the prefix or set the variable inside the check script itself.
+
+A newer matching failure
 takes precedence over an older pass regardless of the policy declaration
 or base recorded in the receipt. A command that failed or timed out, or
 recorded failed or errored tests, counts as a failure. If an older

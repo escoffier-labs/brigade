@@ -16,7 +16,7 @@ from brigade import localio, verify_manifest_git
 from brigade.cli import main
 from brigade.work_cmd import verify_gate, verify_push, verify_required, verify_runtime
 
-from tests.test_pre_push_hook import _hook_shell
+from tests.test_pre_push_hook import HELPER_TIMEOUT_SECONDS, _hook_shell
 from tests.test_verify_gate import DECLARATION, PREFIX, SELECTOR, _declaration, _git
 
 EXTRA_SELECTOR = "tests/test_other.py"
@@ -726,7 +726,7 @@ def test_exact_store_remedy_restores_verdict(push_repo, capsys, monkeypatch, pro
     code, result = _single(push_repo, capsys)
     assert (code, result["status"]) == (3, "indeterminate")
     assert repr(str(offending)) in result["reason"] and result["remedy"].startswith("mv -- ")
-    subprocess.run([_hook_shell(), "-c", result["remedy"]], cwd=push_repo, check=True)
+    subprocess.run([_hook_shell(), "-c", result["remedy"]], cwd=push_repo, check=True, timeout=HELPER_TIMEOUT_SECONDS)
     assert not offending.exists()
     assert _single(push_repo, capsys)[0] == 0
 
@@ -1349,3 +1349,79 @@ def test_writer_strips_leading_assignment_but_push_uses_recorded_name(push_repo,
     assert receipt["commands"][0]["env"] == [name]
     assert receipt["gating"]["eligible"]
     assert _single(push_repo, capsys)[1]["status"] == verdict
+
+
+ENV_PREFIX_MESSAGE = (
+    "A run with PATH set in front of the required check does not count. "
+    "Run the required check again without the environment prefix."
+)
+SENTINEL_ENV_VALUE = "fixture_assignment_value"
+
+
+@pytest.mark.parametrize(
+    ("status", "expected", "message"),
+    [
+        ("completed", "rejected", ENV_PREFIX_MESSAGE),
+        (
+            "failed",
+            "indeterminate",
+            "A run with EXAMPLE_A, EXAMPLE_B, EXAMPLE_C, EXAMPLE_D and 2 more set in front of the required check "
+            "does not count. Run the required check again without the environment prefix.",
+        ),
+        ("running", "indeterminate", ENV_PREFIX_MESSAGE),
+    ],
+)
+def test_environment_prefix_diagnostic_selects_newest_relevant_receipt(push_repo, capsys, status, expected, message):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree, argv=["OLDER_SETTING=example", *PREFIX, SELECTOR])
+    names = ["PATH"] if status != "failed" else [f"EXAMPLE_{suffix}" for suffix in "FEDCBA"]
+    argv = ["env", *[f"{name}={SENTINEL_ENV_VALUE}" for name in names], *PREFIX, SELECTOR]
+    path = _receipt(push_repo, tree, second=2, status=status, argv=argv)
+    receipt = json.loads(path.read_bytes())
+    if status == "running":
+        receipt.update(commands=[], planned_commands=[shlex.join(argv)])
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    _receipt(push_repo, tree, second=3, argv=["git", "status"])
+    code, verdict = _single(push_repo, capsys)
+    assert (code, verdict["status"]) == ((1 if status == "completed" else 3), expected)
+    assert verdict["reason"] == message
+    assert " --no-reuse" in verdict["remedy"]
+    assert SENTINEL_ENV_VALUE not in json.dumps(verdict)
+    assert "OLDER_SETTING" not in json.dumps(verdict)
+
+
+def test_other_indeterminate_reason_does_not_name_unrelated_environment(push_repo, capsys):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree, argv=["PATH=example", *PREFIX, SELECTOR])
+    _receipt(push_repo, tree, second=2, argv=["bash", "-c", shlex.join([*PREFIX, SELECTOR])], status="failed")
+    _, verdict = _single(push_repo, capsys)
+    assert verdict["status"] == "indeterminate"
+    assert verdict["reason"] == "The most recent possible run of the required check has an inconclusive status."
+
+
+def test_environment_prefix_names_use_terminal_rendering():
+    assert r"BAD\x1b" in verify_push._env_prefix_message(("BAD\x1b",))
+
+
+def test_push_check_prints_environment_diagnostic_before_remedy(push_repo, capsys):
+    _policy(push_repo)
+    _receipt(push_repo, _tree(push_repo), argv=[f"PATH={SENTINEL_ENV_VALUE}", *PREFIX, SELECTOR])
+    assert main(["work", "verify", "push-check", "--target", str(push_repo), "--ref", "HEAD"]) == 1
+    output = capsys.readouterr()
+    _, message, remedy, *_ = output.out.splitlines()
+    assert message == ENV_PREFIX_MESSAGE
+    assert remedy.startswith("brigade work verify run ") and remedy.endswith(" --no-reuse")
+    assert SENTINEL_ENV_VALUE not in output.out + output.err
+
+
+def test_environment_diagnostic_explains_why_newer_completed_run_did_not_clear_failure(push_repo, capsys):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree)
+    _receipt(push_repo, tree, second=2, status="failed")
+    _receipt(push_repo, tree, second=3, argv=["PATH=example", *PREFIX, SELECTOR])
+    _, verdict = _single(push_repo, capsys)
+    assert verdict["status"] == "rejected"
+    assert verdict["reason"] == ENV_PREFIX_MESSAGE

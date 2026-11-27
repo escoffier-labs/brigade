@@ -2,3 +2,4 @@
 - Add a block-only push gate install option with a diff preview and backup for customised hooks.
 - Recheck required-test coverage against the pushed tree when a receipt uses an equivalent command spelling.
 - Report an inconclusive verdict when a newer run of the same program fails with different required prefix arguments.
+- Apply an environment allowlist to push gate evidence and name disallowed variables when they affect a verdict.
