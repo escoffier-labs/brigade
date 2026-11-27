@@ -198,13 +198,9 @@ def discover_schema_helpers(conn: sqlite3.Connection) -> None:
             for name in helpers:
                 getattr(module, name)(conn)
         elif re.search(r"CREATE\s+(?:TABLE|INDEX|TRIGGER)\b", source, re.I):
-            assert path.stem in {
-                "fleet_hub",
-                "fleet_hub_claims",
-                "fleet_hub_session_indexes",  # Installed by fleet_hub's additive migration.
-                "fleet_ci_node",
-                "fleet_export",
-            }, f"unclassified schema owner: {path.name}"
+            assert path.stem in {"fleet_hub", "fleet_hub_claims", "fleet_ci_node", "fleet_export"}, (
+                f"unclassified schema owner: {path.name}"
+            )
     conn.commit()
 
 

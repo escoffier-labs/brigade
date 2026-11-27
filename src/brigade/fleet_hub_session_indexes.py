@@ -1,5 +1,7 @@
 """Additive indexes for live presence counts and exact provider links."""
 
+from sqlite3 import Connection
+
 SESSION_INDEXES = (
     (
         "interactive_sessions_active_expiry",
@@ -19,3 +21,9 @@ SESSION_INDEXES = (
         "WHERE state = 'active' AND provider_link_json IS NOT NULL",
     ),
 )
+
+
+def ensure_schema(conn: Connection) -> None:
+    """Install the indexes after the hub has prepared the session table."""
+    for _, ddl in SESSION_INDEXES:
+        conn.execute(ddl)
