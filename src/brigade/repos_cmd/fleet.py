@@ -79,7 +79,7 @@ def _health_command_from_raw(raw: object, repo_id: str, index: int) -> tuple[con
             return None, f"repo {repo_id}: health command {label}: {error}"
     else:
         raw_argv = raw.get("argv")
-        if isinstance(raw_argv, list) and raw_argv and all(isinstance(part, str) and part.strip() for part in raw_argv):
+        if isinstance(raw_argv, list) and all(isinstance(part, str) and part.strip() for part in raw_argv):
             argv = [str(part) for part in raw_argv]
             blocker = work_cmd.config._scanner_argv_blocker(argv)
             if blocker is not None:

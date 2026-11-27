@@ -1,1 +1,1 @@
-- Apply the command policy to the full argument list for scanners, reviewers, verification, and fleet health checks.
+- Apply the command policy to programs started by launchers in scanners, reviewers, verification, and fleet health checks.

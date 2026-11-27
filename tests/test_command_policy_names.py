@@ -57,25 +57,84 @@ def test_policy_checks_arguments(policy_entry, monkeypatch):
     assert f"high-risk {kind} command: policy-tool" in reason
 
 
-@pytest.mark.parametrize("spelling", ["policy-tool", "/tools/POLICY-TOOL", r"C:\tools\Policy-Tool.EXE"])
-def test_policy_matches_argument_names(spelling, policy_name):
-    assert constants.policy_blocked_name(["report-tool", "--format", "sample", spelling]) == policy_name
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--format", "sample", "policy-tool"],
+        ["--name=Policy-Tool.EXE"],
+        ["-X/tools/POLICY-TOOL"],
+        ['"C:\\Program Files\\Policy-Tool.EXE" sample'],
+        ["fixture-wrapper", "--format", "sample", "policy-tool.exe"],
+        ["fixture-runner", "run", "policy-tool", "sample"],
+        ["fixture-runner run policy-tool sample"],
+    ],
+    ids=["plain", "named", "short", "quoted", "multiple", "flat-runner", "embedded-runner"],
+)
+def test_policy_matches_launcher_arguments(arguments, policy_entry, policy_name, monkeypatch):
+    monkeypatch.setattr(constants, "_POLICY_LAUNCHERS", {"fixture-wrapper", "fixture-runner"})
+    monkeypatch.setattr(constants, "_POLICY_LAUNCHER_SUBCOMMANDS", {"fixture-runner": {"run"}})
+    parse, kind = policy_entry
+    result, reason = parse(["Fixture-Wrapper.EXE", *arguments])
+
+    assert result is None
+    assert reason is not None
+    assert f"high-risk {kind} command: {policy_name}" in reason
 
 
-def test_policy_accepts_unlisted_arguments(policy_entry, policy_name, monkeypatch):
+@pytest.mark.parametrize(("subcommand", "blocked"), [("run", True), ("inspect", False)])
+def test_policy_uses_launcher_subcommands(subcommand, blocked, policy_entry, policy_name, monkeypatch):
+    monkeypatch.setattr(constants, "_POLICY_LAUNCHERS", {"fixture-runner"})
+    monkeypatch.setattr(constants, "_POLICY_LAUNCHER_SUBCOMMANDS", {"fixture-runner": {"run"}})
+    monkeypatch.setattr(config.shutil, "which", lambda executable, *, path=None: executable)
+    parse, kind = policy_entry
+    result, reason = parse(["fixture-runner", subcommand, policy_name])
+
+    if blocked:
+        assert result is None
+        assert reason is not None
+        assert f"high-risk {kind} command: {policy_name}" in reason
+    else:
+        assert result is not None
+        assert reason is None
+
+
+@pytest.mark.parametrize(
+    ("argv", "listed_name"),
+    [
+        (["pytest", "-k", "policy-tool"], "policy-tool"),
+        (["rg", "policy-tool", "sample"], "policy-tool"),
+        (["rg", "--type", "policy-tool", "sample"], "policy-tool"),
+        (["go", "test", "./cmd"], "cmd"),
+        (["brigade", "--name=/tools/policy-tool"], "policy-tool"),
+    ],
+    ids=["test-filter", "search-pattern", "file-type", "package-path", "named-value"],
+)
+def test_policy_accepts_arguments_for_other_commands(argv, listed_name, policy_entry, monkeypatch):
+    monkeypatch.setattr(constants, "SCANNER_HIGH_RISK_COMMANDS", {listed_name})
     monkeypatch.setattr(config.shutil, "which", lambda executable, *, path=None: executable)
     parse, _ = policy_entry
-    result, reason = parse(["brigade", "report", "sample", f"--name=/tools/{policy_name}"])
+    result, reason = parse(argv)
 
     assert result is not None
     assert reason is None
 
 
-def test_fleet_requires_a_health_command():
-    result, reason = fleet._health_command_from_raw({"argv": []}, "demo", 1)
+@pytest.mark.parametrize("depth", [1, 2, 3, 4, 5])
+def test_policy_checks_nested_arguments(depth, policy_name, monkeypatch):
+    launcher = "fixture-wrapper"
+    monkeypatch.setattr(constants, "_POLICY_LAUNCHERS", {launcher})
+    target = policy_name if depth <= 3 else "fixture-report"
+    argv = [launcher, target, "sample"]
+    for _ in range(depth):
+        argv = [launcher, shlex.join(argv)]
 
-    assert result is None
-    assert reason == "repo demo: health command health-1: command or argv is required"
+    expected = policy_name if depth <= 3 else None if depth == 4 else launcher
+    assert constants.policy_blocked_name(argv) == expected
+
+
+def test_fleet_refuses_empty_health_argv():
+    with pytest.raises(IndexError):
+        fleet._health_command_from_raw({"argv": []}, "demo", 1)
 
 
 @pytest.mark.parametrize(

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ntpath
 import re
+import shlex
 from pathlib import PurePosixPath
 
 
@@ -234,6 +235,48 @@ SCANNER_HIGH_RISK_COMMANDS = {
     "zsh",
 }
 
+_POLICY_LAUNCHER_SUBCOMMANDS = {
+    "conda": {"run"},
+    "direnv": {"exec"},
+    "hatch": {"run"},
+    "mise": {"exec"},
+    "npm": {"exec"},
+    "pdm": {"run"},
+    "pipx": {"run"},
+    "pnpm": {"dlx", "exec"},
+    "poetry": {"run"},
+    "uv": {"run"},
+    "yarn": {"dlx", "exec"},
+}
+
+_POLICY_LAUNCHERS = {
+    "chroot",
+    "chrt",
+    "doas",
+    "env",
+    "flock",
+    "ionice",
+    "nice",
+    "nohup",
+    "npx",
+    "nsenter",
+    "runuser",
+    "script",
+    "setsid",
+    "stdbuf",
+    "sudo",
+    "taskset",
+    "time",
+    "timeout",
+    "unshare",
+    "uvx",
+    "xargs",
+    *_POLICY_LAUNCHER_SUBCOMMANDS,
+}
+
+_POLICY_FIRST_WORD_RE = re.compile(r"""^\s*("[^"]*"|'[^']*'|\S+)(?=\s|$)""")
+_POLICY_MAX_EMBEDDED_DEPTH = 4
+
 # Use the standard Windows PATHEXT suffixes for consistent policy matching on every host.
 _POLICY_EXECUTABLE_SUFFIXES = {".com", ".exe", ".bat", ".cmd", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".msc"}
 
@@ -247,15 +290,65 @@ def normalize_policy_executable(argv0: str) -> str:
     return stem if dot + suffix in _POLICY_EXECUTABLE_SUFFIXES else name
 
 
+def _policy_launcher_values(argument: str) -> tuple[str, ...]:
+    if not argument.startswith("-"):
+        return (argument,)
+    _, equals, value = argument.partition("=")
+    values = (value,) if equals else ()
+    if len(argument) > 2 and not argument.startswith("--"):
+        return (*values, argument[2:])
+    return values
+
+
 def policy_blocked_name(argv: list[str]) -> str | None:
-    """Return the first listed name among the executable and non-option arguments."""
-    for index, argument in enumerate(argv):
-        if index > 0 and argument.startswith("-"):
-            continue
-        name = normalize_policy_executable(argument)
-        if name in SCANNER_HIGH_RISK_COMMANDS:
-            return name
+    """Return the first listed name identified by the command policy."""
+    return _policy_blocked_name(argv, depth=0)
+
+
+def _policy_blocked_name(argv: list[str], *, depth: int) -> str | None:
+    if not argv:
+        return None
+    executable = normalize_policy_executable(argv[0])
+    if executable in SCANNER_HIGH_RISK_COMMANDS:
+        return executable
+    if executable not in _POLICY_LAUNCHERS:
+        return None
+
+    subcommands = _POLICY_LAUNCHER_SUBCOMMANDS.get(executable)
+    if subcommands is not None and (len(argv) < 2 or argv[1] not in subcommands):
+        return None
+    argument_start = 2 if subcommands is not None else 1
+    for argument in argv[argument_start:]:
+        for value in _policy_launcher_values(argument):
+            name = _policy_blocked_value(value, depth=depth)
+            if name is not None:
+                return name
     return None
+
+
+def _policy_blocked_value(value: str, *, depth: int) -> str | None:
+    name = normalize_policy_executable(value.strip("\"'"))
+    if name in SCANNER_HIGH_RISK_COMMANDS:
+        return name
+
+    first_word = _POLICY_FIRST_WORD_RE.match(value)
+    if first_word is None or first_word[1] == value:
+        return None
+    executable = first_word[1].strip("\"'")
+    name = normalize_policy_executable(executable)
+    if name in SCANNER_HIGH_RISK_COMMANDS:
+        return name
+
+    arguments = value[first_word.end() :].strip()
+    if name not in _POLICY_LAUNCHERS or not arguments:
+        return None
+    if depth >= _POLICY_MAX_EMBEDDED_DEPTH:
+        return name
+    try:
+        nested_argv = [executable, *shlex.split(arguments)]
+    except ValueError:
+        return name
+    return _policy_blocked_name(nested_argv, depth=depth + 1)
 
 
 SCANNER_SHELL_META_RE = re.compile(r"[;&|`<>]|\$\(")
