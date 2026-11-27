@@ -428,6 +428,7 @@ class Result:
     stdout_bytes: int = 0
     stderr_bytes: int = 0
     timed_out: bool = False
+    launch_failed: bool = False
 
     @property
     def decode_failed(self) -> bool:
@@ -1648,6 +1649,7 @@ def _launch_and_collect(
                 code=126,
                 stdout="",
                 stderr=f"command launch failed: {command} (owned process-tree job object is unavailable)",
+                launch_failed=True,
             )
     try:
         popen_kwargs: dict[str, Any] = dict(_process_group_kwargs(suspend=windows_launch))
@@ -1668,11 +1670,11 @@ def _launch_and_collect(
             if bind_error is not None:
                 # The binder killed the suspended child and closed its job.
                 process = None
-                return Result(code=126, stdout="", stderr=bind_error)
+                return Result(code=126, stdout="", stderr=bind_error, launch_failed=True)
     except OSError as exc:
         _abort_windows_launch(process, child_job)
         code, message = _launch_failure(args, exc)
-        return Result(code=code, stdout="", stderr=message)
+        return Result(code=code, stdout="", stderr=message, launch_failed=process is None)
     except BaseException:
         # A ValueError, TypeError, or interrupt after the job existed must not
         # leak the handle or leave a suspended child behind.

@@ -2026,7 +2026,7 @@ exit 0
 ```markdown
 ---
 name: enforce
-description: Use when the user asks to turn on Brigade's full work loop (verification capture, raw-check blocking, and the handoff-before-stop gate) in the current repository.
+description: Use when the user asks to turn on Brigade's full work loop (verification capture and the strict Stop receipt gate) in the current repository.
 ---
 
 # Turn on the Brigade work loop
@@ -2152,7 +2152,7 @@ Added after an independent read-only Opus 5.5 review of `git diff origin/main...
 - [x] R2 handoff destination: `write_handoff` picks the repo inbox whenever `resolution.repo_root` is set, even when the repo store was dropped for an invalid memory-care config. Test: wired repo plus invalid config writes to the repo inbox with `origin: repo`.
 - [x] R3 explicit target: `serve_mcp` exits 2 with `error: --target is not a directory: <path>` when an explicit `--target` is not an existing directory (all modes).
 - [x] R4 `work_brief`: build the four keys (`git`, `active_session`, `latest_session`, `next`) from the cheap helpers the full brief uses (for example `_git_snapshot`, `_active_session_info`, `_collect_sessions`, `_resolve_next_task`; confirm the real names and signatures in `src/brigade/work_cmd/`), so the tool never contacts the fleet hub or publishes presence. If no cheap path exists for a key, return null for it rather than calling `_brief_payload`. Separately, `MemoryTools.call()` catches any other `Exception` and returns `"<tool> failed: <ExcType>: <msg>"` as a tool error, so one bad call cannot end the stdio server.
-- [x] R5 enforce skill and guide: the full enforced hooks (verify capture, raw-check blocking, Stop gate) are installed for Claude Code only; say what Codex gets from `brigade init` (skills and AGENTS guidance, no hooks). Remove the claim that nothing is committed; say `--git-exclude` keeps Brigade's own files out of git and that `.claude/settings.json` may be tracked in some repos.
+- [x] R5 enforce skill and guide: the full enforced hooks (verify capture and the strict Stop receipt gate) are installed for Claude Code only; say what Codex gets from `brigade init` (skills and AGENTS guidance, no hooks). Remove the claim that nothing is committed; say `--git-exclude` keeps Brigade's own files out of git and that `.claude/settings.json` may be tracked in some repos.
 - [x] R6 guide accuracy: `docs/agent-plugin.md` must not claim the `brigade-work` skill tells agents to call the `work_brief` tool. Say Codex users can call `work_brief` for the same brief. Do not edit the canonical skill.
 - [x] R7 docs: `README.md` and `docs/technical-guide.md` no longer call the memory MCP server read-only or list three tools; the skills server stays read-only. In `docs/agent-plugin.md`, state that the marketplace install works from the release that adds the marketplace entries (0.31.0) and that until then `plugins/brigade` can be loaded locally only with the `command` swapped to a `brigade` CLI built from this branch. Document that user-store handoffs are plain files under `$BRIGADE_HOME/memory/handoffs` and can be checked with `brigade handoff lint <file>` (confirm the exact command exists first).
 - [x] Nits:

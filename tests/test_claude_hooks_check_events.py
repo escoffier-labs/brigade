@@ -71,7 +71,7 @@ def test_ignore_non_raw_checks(target, command):
 
 def test_failure_followup_skips_oversized_commands(target, capsys):
     _set_mode(target, "strict", capsys)
-    payload = _bash(target, "PostToolUseFailure", "pytest " + "x" * 65536)
+    payload = _bash(target, "PostToolUseFailure", "brigade work verify run --command " + "x" * 65536)
     assert check_events.failure_followup(payload, target, "s1", {}) is None
 
 
@@ -79,8 +79,8 @@ def test_failure_followup_is_silent_when_recognition_raises(target, monkeypatch)
     def broken(_command):
         raise RuntimeError("recognition failed")
 
-    monkeypatch.setattr(check_events.observed_verifiers, "is_raw_verification", broken)
-    payload = _bash(target, "PostToolUseFailure", "pytest")
+    monkeypatch.setattr(runtime, "_is_routed_verify", broken)
+    payload = _bash(target, "PostToolUseFailure", "brigade work verify run --command pytest")
     assert check_events.failure_followup(payload, target, "s1", {}) is None
 
 
@@ -168,7 +168,7 @@ def test_hostile_stdin_fails_open_without_record(target, capsys, raw):
     assert capsys.readouterr().err == ""
 
 
-@pytest.mark.parametrize("tool_input", [None, [], "pytest", {"command": []}, {"command": "pytest " * 20000}])
+@pytest.mark.parametrize("tool_input", [None, [], "pytest", {"command": []}])
 def test_wrong_tool_input_has_no_record(target, tool_input):
     runtime.handle_payload("PostToolUse", _payload(target, "PostToolUse", tool_name="Bash", tool_input=tool_input))
     assert observed_checks.read_checks(target)[0] == []

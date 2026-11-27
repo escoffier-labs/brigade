@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shlex
@@ -17,7 +18,7 @@ import pytest
 from types import SimpleNamespace
 
 from brigade import cli, localio
-from brigade.claude_hooks import envelope, observed_verifiers
+from brigade.claude_hooks import command_tokens, envelope, observed_verifiers
 from brigade.claude_hooks.package import PACKAGE_REF
 from brigade.claude_hooks import fingerprint as hook_fingerprint
 from brigade.claude_hooks import runtime
@@ -1571,7 +1572,7 @@ def test_cli_accepts_managed_posttooluse_event(monkeypatch):
 
 
 def test_posttooluse_records_only_successful_confident_bash_writes(tmp_path: Path):
-    target = _wired_claude(tmp_path)
+    target = _git_wired_claude(tmp_path)
     command = "sed -i 's/old/new/' file.py"
     pretool = _payload(
         target,
@@ -3351,3 +3352,631 @@ def test_manifest_probe_git_calls_stay_inside_the_hook_budget(tmp_path: Path, mo
     assert manifest_loop.changed_paths(target) == [_MANIFEST_SUBJECT]
     assert timeouts and max(timeouts) <= 2.0  # one shared deadline, not 2 s per call
     assert manifest_loop._GIT_TIMEOUT_SECONDS <= 2.0
+
+
+@pytest.mark.parametrize(
+    "command, expected",
+    [
+        ("pytest -q", True),
+        ("uv run pytest", True),
+        ("npx jest", True),
+        ("npx --prefix /tmp jest", True),
+        ("env -S 'pytest -q'", True),
+        ("bash -lc 'pytest -q'", True),
+        ("command -p pytest", True),
+        ("make -j 4 check", True),
+        ("cd x && pytest", True),
+        ("npx --unknown option-value jest", True),
+        ("uv --unknown option-value run pytest", True),
+        ("poetry run --unknown option-value pytest", True),
+        ("npm --unknown option-value run check:types", True),
+        ("npx --package jest echo done", False),
+        ("npm run build", False),
+        ("uv run python -V", False),
+        ("echo pytest", False),
+        ("command -v pytest", False),
+        ("python -m brigade work verify run", False),
+        ("printf '%s' 'pytest -q'", False),
+    ],
+)
+def test_recognizer_matches_main(command, expected):
+    # Captured by running the recognizer at 41780bb5579c before editing it.
+    assert runtime.is_raw_verification(command) is expected
+
+
+def _recognition_input(shape, count):
+    words = " ".join(["arg"] * count)
+    if shape in {"npx", "uv", "poetry"}:
+        runner = shape if shape == "npx" else f"{shape} run"
+        return f"{runner} --unknown {words}"
+    if shape == "shell":
+        return shlex.join(["bash", "-lc", shlex.join(["bash", "-lc", f"echo {words}"])])
+    if shape == "chain":
+        return "true && " * count + "true"
+    assert shape == "env"
+    return "env " + "KEY=arg " * count + "echo"
+
+
+@pytest.mark.parametrize("shape", ["npx", "uv", "poetry", "shell", "chain", "env"])
+def test_recognizer_work_bound(shape):
+    from brigade.claude_hooks import command_tokens
+
+    for count in (1000, 2000, 4000, 8000):
+        command = _recognition_input(shape, count)
+        budget = command_tokens.RecognitionBudget()
+        assert not runtime._is_raw_verification_text(command, depth=0, budget=budget)
+        assert 0 < budget.steps <= 24 * len(command)
+
+    unit = len(_recognition_input(shape, 2)) - len(_recognition_input(shape, 1))
+    count = 1 + (65535 - len(_recognition_input(shape, 1))) // unit
+    command = _recognition_input(shape, count).ljust(65535)
+    budget = command_tokens.RecognitionBudget()
+    assert not runtime._is_raw_verification_text(command, depth=0, budget=budget)
+    assert 0 < budget.steps <= 24 * len(command)
+
+
+def test_recognizer_budget_exhaustion_returns_false(monkeypatch):
+    from brigade.claude_hooks import command_tokens
+
+    command = "cd src && env -S 'pytest -q'"
+    assert runtime.is_raw_verification(command)
+    monkeypatch.setattr(command_tokens, "MAX_RECOGNITION_STEPS", 5 * len(command) + 1)
+    assert runtime._recognize(command) is command_tokens.Recognition.UNDECIDED
+    assert not runtime.is_raw_verification(command)
+
+
+@pytest.mark.parametrize("event", ["PreToolUse", "PostToolUse"])
+def test_long_runner_command_through_pre_and_post_tool_use(target, monkeypatch, event):
+    from brigade import observed_checks
+
+    monkeypatch.setattr(observed_checks, "_capture_clock", lambda: 0.0)
+    budgets = _measure_event_budget(monkeypatch)
+    steps = []
+    lead = "pytest" if event == "PreToolUse" else "true"
+    for count in (11, 22):
+        segments = ["npx --unfamiliar " + "! " * 1360 + "echo"] * count
+        command = " && ".join([lead, *segments])
+        payload = _payload(
+            target, event, session_id=f"runner-{count}", tool_name="Bash", tool_input={"command": command}
+        )
+        started = time.perf_counter()
+        result = runtime.handle_payload(event, payload)
+        elapsed = time.perf_counter() - started
+        if count == 22:
+            assert elapsed < _HOOK_TIME_BACKSTOP_SECONDS
+        budget = _assert_hook_steps(command, budgets)
+        steps.append(budget.steps)
+        assert not budget.stopped
+        assert result is None
+    _assert_hook_scaling(*steps)
+
+
+_STRESS_PREFIXES = {
+    "npx": ("", "npx --unfamiliar "),
+    "uv": ("", "uv run --unfamiliar "),
+    "poetry": ("", "poetry run --unfamiliar "),
+    "make": ("", "make --unfamiliar "),
+    "npm": ("", "npm --unfamiliar run "),
+    "pnpm": ("", "pnpm --unfamiliar run "),
+    "yarn": ("", "yarn --unfamiliar run "),
+    "bun": ("", "bun --unfamiliar run "),
+    "assignments": ("npx --unfamiliar ", "FLAG=demo "),
+    "control": ("npx --unfamiliar ", "! "),
+    "ruff": ("npx --unfamiliar ", "ruff format "),
+    "env": ("npx --unfamiliar ", "env -S '' "),
+    "heredoc": ("echo ", r'<<"a\"b" '),
+}
+
+
+def _recognition_stress(shape, size, final="echo"):
+    prefix, unit = _STRESS_PREFIXES[shape]
+    if shape == "heredoc":
+        final = ""
+    count = (size - len(prefix) - len(final)) // len(unit)
+    return (prefix + unit * count + final).ljust(size)
+
+
+@pytest.mark.parametrize("shape", _STRESS_PREFIXES)
+def test_recognizer_visits_each_position_once_per_shell_depth(shape, monkeypatch):
+    from collections import Counter
+
+    from brigade.claude_hooks import command_tokens
+
+    calls = Counter()
+    scan = runtime._scan_position
+
+    def counted(tokens, *, depth):
+        calls[tokens.position, depth] += 1
+        return scan(tokens, depth=depth)
+
+    monkeypatch.setattr(runtime, "_scan_position", counted)
+    for size in (300, 1000, 4000, 16000, 65535):
+        calls.clear()
+        budget = command_tokens.RecognitionBudget()
+        result = runtime._recognize(_recognition_stress(shape, size), budget)
+        assert result is command_tokens.Recognition.NO
+        assert 0 < budget.steps <= 36 * size
+        assert calls and max(calls.values()) == 1
+        assert len(calls) <= 5 * size
+
+
+@pytest.mark.parametrize("shape", ["npx", "assignments", "control", "ruff", "env"])
+def test_recognizer_reaches_later_segment(shape):
+    from brigade.claude_hooks import command_tokens
+
+    command = _recognition_stress(shape, 15000) + " && pytest -q"
+    assert runtime._recognize(command) is command_tokens.Recognition.YES
+
+
+def test_recognizer_shell_lexer_matches_shlex():
+    from itertools import product
+
+    words = ("a", "é", "''", "'a b'", '"a b"', '"a\\b"', "\\&", "';'")
+    for first, divider, second in product(words, ("", " ", "&&", "\n", ";>"), words):
+        command = first + divider + second
+        assert runtime._shell_tokens(command) == list(runtime._shell_lexer(command))
+
+
+def test_recognizer_windows_env_lexer_matches_shlex(monkeypatch):
+    from itertools import product
+
+    from brigade.claude_hooks import command_tokens
+
+    monkeypatch.setattr(command_tokens, "os", SimpleNamespace(name="nt"))
+    words = ("a", "é", "''", "'a b'", '"a b"', r'"a\b"', r"\&", "';'")
+    for first, divider, second in product(words, ("", " ", "&&", "\n", ";>"), words):
+        command = first + divider + second
+        try:
+            expected = shlex.split(command, posix=False)
+        except ValueError:
+            with pytest.raises(ValueError):
+                command_tokens._split_env_words(command)
+        else:
+            assert command_tokens._split_env_words(command) == expected
+
+
+@pytest.mark.parametrize("mode", ["strict", "observe", "off"])
+@pytest.mark.parametrize("limit", ["length", "work"])
+def test_undecided_recognition_has_no_permission_decision(target, monkeypatch, mode, limit):
+    from brigade.claude_hooks import command_tokens
+
+    monkeypatch.setattr(runtime.work_mode, "resolve_mode", lambda _target: mode)
+    if limit == "length":
+        command = "pytest " + "a" * 70_000
+        assert len(command) > 65536
+    else:
+        command = "echo done"
+        monkeypatch.setattr(command_tokens, "MAX_RECOGNITION_STEPS", 1)
+    assert runtime._recognize(command) is runtime.Recognition.UNDECIDED
+    assert not runtime.is_raw_verification(command)
+    result = runtime.handle_payload(
+        "PreToolUse", _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": command})
+    )
+    assert result is None
+
+
+def test_recognizer_finds_verifier_after_long_control_prefix():
+    command = "npx --unfamiliar " + "! " * 1500 + "arg pytest"
+    assert runtime.is_raw_verification(command)
+
+
+def test_parenthesized_reader_preserves_quoted_nested_substitution():
+    nested = 'printf "%s" "$(echo "$(pytest -q)")"'
+    command = "(" + nested + ") && true"
+    assert runtime._read_parenthesized(command, 1) == (nested, len(nested) + 1)
+    assert runtime.is_raw_verification(command)
+
+
+def _recognition_compat_commands():
+    import random
+
+    rng = random.Random(2851)
+    commands = [
+        "pytest -q",
+        "echo done",
+        "python -I -m unittest",
+        "ruff format --check",
+        "ruff format src/",
+        "make -j 4 check",
+        "npm run test:unit",
+        "command -p pytest",
+        "command -v pytest",
+        "env -u FLAG echo done",
+        "env -S 'env -S \"pytest -q\"'",
+        "check",
+        "test:unit",
+        'echo "$(printf "%s" "$(pytest)")"',
+        "true && pytest",
+    ]
+    runners = [
+        "npx --prefix ./src",
+        "npx --future ./src",
+        "uv run --no-sync",
+        "uv run --future ./src",
+        "poetry run -q",
+        "poetry run --future ./src",
+        "make --future ./src",
+        "npm --future ./src run",
+        "pnpm --silent run",
+        "yarn --future ./src run",
+        "bun --silent run",
+    ]
+    wrappers = [
+        lambda text: "bash -lc " + shlex.quote(text),
+        lambda text: "env -S " + shlex.quote(text),
+        lambda text: "env --split-string=" + shlex.quote(text),
+        lambda text: "FLAG=demo MODE=demo " + text,
+        lambda text: "! ! " + text,
+        lambda text: "cd ./src && " + text,
+        lambda text: rng.choice(runners) + " " + text,
+    ]
+    for _ in range(4096):
+        command = rng.choice(commands)
+        for _ in range(rng.randrange(1, 4)):
+            command = rng.choice(wrappers)(command)
+        yield command
+
+
+def _recognition_compat_digest(classify, first_verifier, *, deep_shells=False):
+    from hashlib import sha256
+
+    digest = sha256()
+    for index, command in enumerate(_recognition_compat_commands()):
+        row = [classify(command), first_verifier(command)]
+        if deep_shells and index == 1235:
+            # The one deliberate difference is a verifier inside shell
+            # text that the former nesting cutoff did not visit.
+            assert row[0] is True
+            row[0] = False
+        digest.update(json.dumps(row).encode("ascii") + b"\n")
+    return digest.hexdigest()
+
+
+def test_recognizer_seeded_comparison_with_main():
+    # Digest of 4,096 pairs from main at 41780bb5579c. The comparison
+    # includes classification and the command chosen for the replacement.
+    expected = {
+        "nt": "d5326ad3e19c6f5628346c74ad3c0f9574a605d0f30e9cab60339dab99cb7816",
+        "posix": "3f01860a9cb3764363fa5c0e7a0e7322070243f22b3d83cd134423e96911ae78",
+    }
+    digest = _recognition_compat_digest(runtime.is_raw_verification, runtime._first_verifier_command, deep_shells=True)
+    assert digest == expected[os.name]
+
+
+def _bounded_hook_commands(divisor):
+    repeated = {shape: _recognition_stress(shape, 60_000 // divisor) for shape in _STRESS_PREFIXES}
+    padding = "x" * (2048 // divisor)
+    command = f"echo {padding}"
+    verification = f"pytest {padding}"
+    for _ in range(5):
+        command = shlex.join(["bash", "-lc", command])
+        verification = shlex.join(["bash", "-lc", verification])
+    return {
+        **{shape: (command, False) for shape, command in repeated.items()},
+        "dollar-spans": ("echo " + "$(true)" * (500 // divisor), False),
+        "backtick-spans": ("echo " + "`true` " * (700 // divisor), False),
+        "long-spans": ("echo " + "$(true)" * (8000 // divisor), False),
+        "nested-substitutions": (f"echo $(echo $(echo $(echo $(echo {padding}))))", False),
+        "nested-shell": (command, False),
+        "nested-verification": (verification, True),
+        "heredoc-body": ("cat <<EOF\n" + "x" * (59_980 // divisor) + "\nEOF\n", False),
+        "git-message": ("git commit -m '" + "x" * (59_980 // divisor) + "'", False),
+        "and-chain": (("true && " * (8124 // divisor)) + "true", False),
+        "semicolon-chain": (("true; " * (10832 // divisor)) + "true", False),
+        "pipe-chain": (("true | " * (9284 // divisor)) + "true", False),
+        "stdin-limit": ("echo " + "x" * (261_995 // divisor), True),
+        **{f"cd-{n}": (("cd a && " * (n // divisor)) + "pytest", True) for n in (200, 400, 1000, 8000)},
+    }
+
+
+_BOUNDED_HOOK_COMMANDS = _bounded_hook_commands(1)
+_SHORT_HOOK_COMMANDS = _bounded_hook_commands(2)
+_HOOK_TIME_BACKSTOP_SECONDS = 9
+
+
+def _hook_commands_at_both_sizes(shape):
+    return _SHORT_HOOK_COMMANDS[shape], _BOUNDED_HOOK_COMMANDS[shape]
+
+
+def _assert_hook_steps(command, budgets, *, shape=None):
+    assert len(budgets) == 1
+    budget = budgets.pop()
+    # Five fixed shell layers rescan their payloads while unquoting them.
+    per_character = 100 if shape in {"nested-shell", "nested-verification"} else 40
+    ceiling = 65_536 + per_character * len(command)
+    assert 0 < budget.steps <= ceiling, (budget.steps, ceiling, budget.phase_steps)
+    return budget
+
+
+def _assert_hook_scaling(short_steps, full_steps):
+    # Allow 12.5% above doubling for token and path boundaries. Repeating a
+    # full suffix scan would approach 4x, even with the fixed setup costs.
+    assert 4 * full_steps <= 9 * short_steps, (short_steps, full_steps)
+
+
+def _measure_event_budget(monkeypatch):
+    from brigade.claude_hooks import command_tokens
+
+    budgets = []
+    initialize = command_tokens.RecognitionBudget.__init__
+
+    def record(budget):
+        initialize(budget)
+        budgets.append(budget)
+
+    monkeypatch.setattr(command_tokens.RecognitionBudget, "__init__", record)
+    return budgets
+
+
+@pytest.mark.parametrize("shape", _BOUNDED_HOOK_COMMANDS)
+@pytest.mark.parametrize("event", ["PreToolUse", "PostToolUse", "PostToolUseFailure"])
+def test_claude_bash_event_work_bound(target, monkeypatch, shape, event):
+    from brigade import observed_checks
+
+    monkeypatch.setattr(observed_checks, "_capture_clock", lambda: 0.0)
+    budgets = _measure_event_budget(monkeypatch)
+    steps = []
+    for index, (command, _) in enumerate(_hook_commands_at_both_sizes(shape)):
+        payload = _payload(
+            target, event, session_id=f"event-{index}", tool_name="Bash", tool_input={"command": command}
+        )
+        started = time.perf_counter()
+        result = runtime.handle_payload(event, payload)
+        elapsed = time.perf_counter() - started
+        if index == 1:
+            assert elapsed < _HOOK_TIME_BACKSTOP_SECONDS
+        steps.append(_assert_hook_steps(command, budgets, shape=shape).steps)
+        if event == "PreToolUse":
+            assert result is None
+    _assert_hook_scaling(*steps)
+
+
+def test_strict_pretooluse_allows_long_git_add_path_list(target, monkeypatch):
+    from brigade.claude_hooks import command_tokens
+
+    assert runtime.work_mode.is_strict(target)
+    paths = [f"src/example/features/feature_{index:04d}/fixtures/configuration_example.json" for index in range(600)]
+    command = shlex.join(["git", "add", "--", *paths])
+    assert 30_000 <= len(command) < command_tokens.MAX_COMMAND_CHARS
+    budgets = _measure_event_budget(monkeypatch)
+    event = "PreToolUse"
+    payload = _payload(target, event, tool_name="Bash", tool_input={"command": command})
+    assert runtime.handle_payload(event, payload) is None
+    assert "classification" not in _assert_hook_steps(command, budgets).stopped
+
+
+@pytest.mark.parametrize("form", ["copy", "list", "islice", "iterate", "slice"])
+def test_token_views_cannot_copy_or_iterate_around_the_meter(monkeypatch, form):
+    from itertools import islice
+
+    from brigade.claude_hooks import command_tokens
+
+    budget = command_tokens.RecognitionBudget()
+    view = command_tokens.TokenView(["word"] * 64, budget)
+    tail = view.drop(1)
+    assert view.position[0] is tail.position[0]
+    assert not hasattr(tail, "_tokens")
+    monkeypatch.setattr(command_tokens, "MAX_RECOGNITION_STEPS", budget.steps + 2)
+    if form == "copy":
+        assert not hasattr(tail, "copy")
+    elif form == "slice":
+        with pytest.raises(ValueError):
+            _ = tail[:10]
+    else:
+        with pytest.raises(command_tokens.RecognitionLimit):
+            if form == "list":
+                list(tail)
+            elif form == "islice":
+                list(islice(tail, 7))
+            else:
+                next(iter(tail))
+
+
+def test_incomplete_attribution_keeps_write_evidence(target):
+    command = "cd a && " * 500 + "true"
+    event = "PostToolUse"
+    runtime.handle_payload(event, _payload(target, event, tool_name="Bash", tool_input={"command": command}))
+    state = runtime.read_session_state(target, "session-1")
+    assert state and state["write_observed"] and state["last_verification_write_at"]
+
+
+@pytest.mark.parametrize("mode", ["strict", "observe", "off"])
+@pytest.mark.parametrize("command", ["echo " + "x" * 70_000, "echo a\x00b"], ids=["long", "unreadable"])
+def test_claude_unclassified_capture(target, monkeypatch, mode, command):
+    from brigade import observed_checks
+
+    monkeypatch.setattr(runtime.work_mode, "resolve_mode", lambda _target: mode)
+    event = "PostToolUse"
+    result = runtime.handle_payload(event, _payload(target, event, tool_name="Bash", tool_input={"command": command}))
+    assert result is None
+    (record,) = observed_checks.read_checks(target)[0]
+    assert (record.tool, record.status, record.exit_code) == ("unclassified", "unknown", None)
+
+
+@pytest.mark.parametrize(
+    "event, interrupted, scenario",
+    [
+        ("PostToolUse", False, "exhausted"),
+        ("PostToolUseFailure", False, "exhausted"),
+        ("PostToolUseFailure", True, "exhausted"),
+        ("PostToolUseFailure", False, "wrote"),
+        ("PostToolUseFailure", True, "wrote"),
+        ("PostToolUse", False, "attribution-error"),
+        ("PostToolUseFailure", False, "attribution-error"),
+        ("PostToolUse", False, "recognition-error"),
+        ("PostToolUseFailure", False, "recognition-error"),
+        ("PostToolUse", False, "write-detection-error"),
+        ("PostToolUseFailure", False, "write-detection-error"),
+        ("PostToolUse", False, "fingerprint-error"),
+        ("PostToolUseFailure", False, "fingerprint-error"),
+        ("PostToolUseFailure", False, "no-write"),
+        ("PostToolUse", False, "no-command"),
+    ],
+)
+def test_stop_distinguishes_own_bash_write_from_later_foreign_write(
+    tmp_path, monkeypatch, event, interrupted, scenario
+):
+    target = _git_wired_claude(tmp_path)
+    (target / "earlier.py").write_text("value = 0\n")
+    subprocess.run(["git", "add", "earlier.py"], cwd=target, check=True, capture_output=True)
+    subprocess.run(["git", "commit", "-m", "fixture"], cwd=target, check=True, capture_output=True)
+    session = "own-write"
+    monkeypatch.setattr(runtime, "_run_brief", lambda _target: "brief")
+    runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session))
+
+    def edit(name, session_id):
+        path = target / name
+        path.write_text("value = 1\n")
+        runtime.handle_payload(
+            "PostToolUse",
+            _payload(
+                target, "PostToolUse", session_id=session_id, tool_name="Write", tool_input={"file_path": str(path)}
+            ),
+        )
+
+    edit("earlier.py", session)
+    tree = localio.tree_fingerprint(target)
+    assert tree is not None
+    before = _write_session_receipt(target, session, tree_fingerprint=tree)
+    wrote = scenario not in {"no-write", "no-command"}
+    if scenario != "no-command":
+        command = "touch own.py; " if wrote else "touch missing-dir/own.py; "
+        if scenario == "exhausted":
+            command += "cd a && " * 500
+        command += "false" if event == "PostToolUseFailure" else "true"
+        pre = _payload(target, "PreToolUse", session_id=session, tool_name="Bash", tool_input={"command": command})
+        assert runtime.handle_payload("PreToolUse", pre) is None
+        if wrote:
+            (target / "own.py").write_text("value = 2\n")
+        with monkeypatch.context() as patch:
+            if scenario.endswith("-error"):
+
+                def unavailable(*_args, **_kwargs):
+                    raise RuntimeError("fixture attribution error")
+
+                module, name = {
+                    "attribution-error": (runtime.write_attribution, "bash_scopes"),
+                    "recognition-error": (runtime, "_recognize"),
+                    "write-detection-error": (runtime.write_attribution, "touches_worktree"),
+                    "fingerprint-error": (runtime, "repo_worktree_fingerprint"),
+                }[scenario]
+                patch.setattr(module, name, unavailable)
+            runtime.handle_payload(event, {**pre, "hook_event_name": event, "is_interrupt": interrupted})
+    state = runtime.read_session_state(target, session)
+    assert state and state["write_observed"]
+    stamp = state["last_write_at"]
+    assert (stamp > before["last_write_at"]) is wrote
+    assert stamp == state["last_attributed_write_at"] == state["last_verification_write_at"]
+    assert "pending_bash_fingerprint" not in state and "pending_bash_started_at" not in state
+
+    edit("other.py", "other-session")
+    assert runtime._foreign_write_since(target, session, datetime.fromisoformat(stamp))
+    result = runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session, stop_hook_active=False))
+    assert result
+    assert (result.get("decision") == "block") is wrote
+    if not wrote:
+        from brigade.work_cmd.verify_gate import StopGate
+
+        assert runtime._shared_tree_block_is_foreign(target, session, state, StopGate(target))
+
+
+@pytest.mark.parametrize("event", ["PostToolUse", "PostToolUseFailure"])
+@pytest.mark.parametrize("integrity_error", [False, True])
+def test_bash_post_surfaces_state_errors(target, monkeypatch, event, integrity_error):
+    command = {"tool_name": "Bash", "tool_input": {"command": "touch own.py"}}
+    assert runtime.handle_payload("PreToolUse", _payload(target, "PreToolUse", **command)) is None
+    error_type = runtime.anchored_io.SessionIntegrityError if integrity_error else RuntimeError
+    (target / "own.py").touch()
+
+    def broken(*_args, **_kwargs):
+        raise error_type("fixture state error")
+
+    if integrity_error:
+        monkeypatch.setattr(runtime.write_attribution, "bash_scopes", broken)
+    else:
+        monkeypatch.setattr(runtime, "_write_session_state_preserving_latch", broken)
+    with pytest.raises(error_type, match="fixture state error"):
+        runtime.handle_payload(event, _payload(target, event, **command))
+
+
+def _mock_command_path_error(monkeypatch, winerror):
+    original = Path.lstat
+
+    def missing(path):
+        if path.name == "unreadable.py":
+            if winerror is None:
+                raise PermissionError(errno.EACCES, "fixture path access error")
+            error = FileNotFoundError(errno.ENOENT, "fixture Windows path error")
+            error.winerror = winerror
+            raise error
+        return original(path)
+
+    monkeypatch.setattr(Path, "lstat", missing)
+
+
+@pytest.mark.parametrize("kind", ["component", "whole-path", "valid-component"])
+def test_windows_command_path_limits_precede_filesystem_probe(tmp_path, monkeypatch, kind):
+    monkeypatch.setattr(command_tokens, "_WINDOWS", True)
+    paths = []
+
+    def missing(path):
+        paths.append(path)
+        raise FileNotFoundError(errno.ENOENT, "fixture missing path")
+
+    monkeypatch.setattr(Path, "lstat", missing)
+    raw = {
+        "component": "🌱" * 128,
+        "whole-path": "/".join(["d" * 200] * 164),
+        "valid-component": "🌱" * 127 + "x",
+    }[kind]
+    with command_tokens.command_event():
+        if kind == "valid-component":
+            assert command_tokens.resolve_command_path(raw, tmp_path) == tmp_path / raw
+            assert paths == [tmp_path / raw]
+        else:
+            with pytest.raises(command_tokens.UnreadableCommand):
+                command_tokens.resolve_command_path(raw, tmp_path)
+            assert paths == []
+
+
+@pytest.mark.parametrize("mode", ["strict", "observe", "off"])
+@pytest.mark.parametrize(
+    "case",
+    ["surrogate", "null", "long-component", "windows-missing-component", "path-io", "attribution", "known-verifier"],
+)
+def test_bash_pretooluse_unreadable_command_has_no_permission_decision(target, monkeypatch, mode, case):
+    monkeypatch.setattr(runtime.work_mode, "resolve_mode", lambda _target: mode)
+    long_component = "echo " + shlex.quote(str(target / ("x" * 300)))
+    commands = {
+        "surrogate": "pytest /\ud800",
+        "null": "echo a\x00b",
+        "long-component": long_component,
+        "windows-missing-component": long_component,
+        "path-io": "echo ./unreadable.py",
+        "attribution": "echo done",
+        "known-verifier": "pytest -q",
+    }
+    if case == "windows-missing-component":
+        monkeypatch.setattr(command_tokens, "_WINDOWS", True)
+    if case == "path-io":
+        _mock_command_path_error(monkeypatch, winerror=None)
+    if case in {"attribution", "known-verifier"}:
+
+        def unavailable(*_args, **_kwargs):
+            raise RuntimeError("fixture attribution error")
+
+        monkeypatch.setattr(runtime.write_attribution, "bash_scopes", unavailable)
+    event = "PreToolUse"
+    result = runtime.handle_payload(
+        event, _payload(target, event, tool_name="Bash", tool_input={"command": commands[case]})
+    )
+    assert result is None
+    state = runtime.read_session_state(target, "session-1")
+    assert state is None or not state.get("write_observed")
+
+
+def test_bash_hook_transport_allows_unreadable_verifier(target, capsys):
+    event = "PreToolUse"
+    payload = _payload(target, event, tool_name="Bash", tool_input={"command": "pytest /\ud800"})
+    assert runtime.hook_run(event=event, package=runtime.PACKAGE_REF, stdin_text=json.dumps(payload)) == 0
+    assert json.loads(capsys.readouterr().out) == {}

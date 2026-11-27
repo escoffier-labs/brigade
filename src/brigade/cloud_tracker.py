@@ -7,15 +7,16 @@ import json
 import re
 import subprocess
 import time
-from dataclasses import dataclass
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, ContextManager
 from uuid import uuid4
 
 from . import localio
-from . import claude_cloud_routine
+from . import claude_cloud_routine, cloud_observation
 from .claude_cloud_identity import normalize_claude_cloud_identity
+from .cloud_observation import ProviderObservation as ProviderObservation
 from .inbox_lock import held_file_lock
 
 REGISTRY_SCHEMA = "brigade.run.cloud.registry.v1"
@@ -28,11 +29,13 @@ DEFAULT_TERMINAL_MAX_AGE_HOURS = 168
 PRESERVED_RETENTION_REASONS = ("active", "ambiguous", "orphaned", "needs-investigation")
 
 DEFAULT_STALE_READY_HOURS = 6
+MISSING_INVENTORY_HOURS = 6
 CLOUD_BRANCH_PREFIXES = ("codex/", "cursor/", "grokbot/", "claude/")
 # The work brief's GitHub observation shares this budget across its reads and
 # fits inside the brief's own section deadline.
 BRIEF_GITHUB_BUDGET_SECONDS = 4.0
-TRACKER_PROVIDERS = frozenset({"codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud"})
+TRACKER_PROVIDERS = frozenset({"codex-cloud", "cursor-cloud", "claude-cloud"})
+_REGISTRY_PROVIDERS = TRACKER_PROVIDERS | {"grokbot-cloud"}
 
 READY_STATES = frozenset({"ready", "completed", "succeeded", "applied"})
 FAILED_STATES = frozenset({"failed", "errored", "error", "cancelled", "canceled", "expired"})
@@ -49,16 +52,6 @@ CLASSIFICATIONS = (
     "orphaned",
     "needs-investigation",
 )
-
-
-@dataclass(frozen=True)
-class ProviderObservation:
-    """Bounded, sanitized health and inventory evidence for one provider."""
-
-    configured: bool
-    reachable: bool
-    reason: str | None
-    tasks: dict[str, dict[str, Any]]
 
 
 def _root(target: Path) -> Path:
@@ -343,8 +336,11 @@ def register(
     issue: str | None = None,
     session_url: str | None = None,
     observed_status: str | None = None,
+    launch_tag: str | None = None,
+    launch_lease_id: str | None = None,
+    launch_repo: str | None = None,
 ) -> dict[str, Any]:
-    if provider not in TRACKER_PROVIDERS:
+    if provider not in _REGISTRY_PROVIDERS:
         raise ValueError("provider must be one of: codex-cloud, cursor-cloud, grokbot-cloud, claude-cloud")
     if not label.strip():
         raise ValueError("label must not be empty")
@@ -368,9 +364,11 @@ def register(
         )
         task_id = binding["task_id"]
         source = "adopt-session"
-    if source == "dispatch" and not task_id:
+    if launch_tag is not None and (provider != "codex-cloud" or source != "dispatch" or task_id is not None):
+        raise ValueError("Codex Cloud launch intents require an unassigned dispatch")
+    if source == "dispatch" and not task_id and launch_tag is None:
         raise ValueError("dispatch registration requires task_id")
-    entry = {
+    entry: dict[str, Any] = {
         "id": _new_id(),
         "provider": provider,
         "task_id": task_id,
@@ -390,6 +388,14 @@ def register(
                 entry[key] = value
     if isinstance(lease_holder, str) and lease_holder:
         entry["lease_holder"] = lease_holder
+    if launch_tag is not None:
+        entry.update(
+            launch_tag=launch_tag,
+            launch_state="needs-reconcile",
+            launch_lease_id=launch_lease_id,
+            launch_requires_lease=launch_lease_id is not None,
+            launch_repo=launch_repo,
+        )
     if binding is not None:
         entry.update(binding)
         digest = hashlib.sha256(f"claude-cloud\0{entry['session_id']}".encode()).hexdigest()[:24]
@@ -403,7 +409,8 @@ def register(
                 matches = [
                     row
                     for row in registry["entries"]
-                    if row.get("provider") == provider and row.get("task_id") == task_id
+                    if row.get("provider") == provider
+                    and (row.get("task_id") == task_id or row.get("launch_candidate_id") == task_id)
                 ]
                 if len(matches) > 1:
                     raise ValueError("Codex Cloud task not uniquely registered")
@@ -548,9 +555,12 @@ def _classify_entry(
     provider = str(entry.get("provider") or "")
     task_id = entry.get("task_id")
     branch = entry.get("branch") if isinstance(entry.get("branch"), str) else None
+    launch_state = entry.get("launch_state") if provider == "codex-cloud" else None
+    if launch_state in ("needs-reconcile", "not-launched"):
+        branch = None
     observation = provider_observations.get(provider) if provider_observations else None
     provider_info = observation.tasks.get(str(task_id)) if observation and task_id else None
-    if provider_info is None:
+    if observation is None:
         provider_info = provider_tasks.get(str(task_id)) if task_id else None
     provider_state = None
     ready_at = None
@@ -593,10 +603,11 @@ def _classify_entry(
     if not branch_scope_known:
         branch_exists = False
     branch_observation_known = branch_scope_known and (
-        not (provider == "claude-cloud" and entry.get("repo"))
-        or branch_exists
+        branch_exists
         or github.get("branches_complete") is True
+        or ("branches_complete" not in github and not (provider == "claude-cloud" and entry.get("repo")))
     )
+    artifact_absent = branch_observation_known and not branch_exists and github.get("prs_complete") is not False
     raw_expected = entry.get("expected_artifact")
     expected = raw_expected if isinstance(raw_expected, dict) else {}
     expects_branch = expected.get("kind") in {"branch", "draft-pr"}
@@ -620,6 +631,7 @@ def _classify_entry(
                 "configured": observation.configured,
                 "reachable": observation.reachable,
                 "reason": observation.reason,
+                "complete": observation.complete,
             }
         )
 
@@ -638,8 +650,9 @@ def _classify_entry(
         classification = "orphaned"
     elif provider_state in READY_STATES or provider_state == "finished":
         # Ready / finished without a merge: landable, stale, or needs investigation.
-        if expects_branch and not branch_exists and not open_pr:
-            classification = "needs-investigation"
+        if expects_branch and not (branch_exists or open_pr):
+            if artifact_absent:
+                classification = "needs-investigation"
         else:
             ready_mark = ready_at or _parse_time(entry.get("dispatched_at"))
             age_hours = _hours_since(ready_mark, now)
@@ -647,12 +660,20 @@ def _classify_entry(
                 classification = "stale"
             else:
                 classification = "ready-to-land"
-    elif provider_state in PENDING_STATES or provider_state is None:
-        classification = "pending"
-    elif provider_state in FAILED_STATES:
-        classification = "needs-investigation" if expects_branch and not branch_exists else "pending"
-    else:
-        classification = "pending"
+    elif provider_state in FAILED_STATES and expects_branch:
+        # A local queue failure needs attention even while GitHub is unavailable.
+        if artifact_absent or entry.get("source") == "grokbot-queue":
+            classification = "needs-investigation"
+
+    seen = isinstance(provider_info, dict)
+    complete_github = github.get("branches_complete") is True and github.get("prs_complete") is True
+    if (
+        entry.get("missing_confirmed") is True
+        and complete_github
+        and artifact_absent
+        and not (seen or open_pr or merged)
+    ):
+        classification = "needs-investigation"
 
     if claude_lifecycle is not None:
         classification = "needs-investigation"
@@ -675,6 +696,7 @@ def _classify_entry(
         "branch": branch,
         "classification": classification,
         "provider_state": provider_state,
+        "last_seen_at": entry.get("last_seen_at"),
         "prompt_hash": entry.get("prompt_hash"),
         "session_id": entry.get("session_id"),
         "dispatched_at": entry.get("dispatched_at"),
@@ -683,9 +705,17 @@ def _classify_entry(
         "pr": prs[0] if prs else None,
         "pr_url": entry.get("pr_url"),
     }
+    if entry.get("missing_since") and not seen:
+        row["missing_since"] = entry["missing_since"]
     if entry.get("landing_state"):
         for key in ("landing_state", "landing_commit", "landing_branch"):
             row[key] = entry.get(key)
+    if launch_state:
+        row["launch_state"] = launch_state
+        row["launch_tag"] = entry.get("launch_tag")
+        if launch_state == "needs-reconcile":
+            row["classification"] = "needs-investigation"
+            row["launch_candidate_id"] = entry.get("launch_candidate_id")
     if claude_lifecycle is not None:
         row["provider_lifecycle"] = claude_lifecycle
         row["artifact_state"] = "landed" if merged else "pr-open" if routine_row and open_pr else "unobserved"
@@ -846,20 +876,13 @@ def _provider_for_branch(branch: str) -> str:
 def _grokbot_rows(
     target: Path, *, github: dict[str, Any], now: datetime, stale_ready_hours: int
 ) -> list[dict[str, Any]]:
-    """Project queue jobs into tracker rows without reading private envelopes."""
-    try:
-        from . import grokbot_jobs
+    """Project retained local queue jobs into tracker rows."""
+    from . import grokbot_jobs
 
+    try:
         queue_rows = grokbot_jobs.tracker_rows(target)
     except Exception:  # noqa: BLE001 - tracker remains available when queue storage is unavailable
-        from . import grokbot_jobs
-
-        if grokbot_jobs.hub_authority(target):
-            return [_grokbot_hub_unavailable_row()]
         return []
-
-    if any(isinstance(job, dict) and job.get("degraded") for job in queue_rows):
-        return [_grokbot_hub_unavailable_row()]
 
     rows: list[dict[str, Any]] = []
     for job in queue_rows:
@@ -891,7 +914,7 @@ def _grokbot_rows(
                 "label": job.get("label"),
                 "branch": branch,
                 "dispatched_at": job.get("queued_at"),
-                "source": "grokbot-hub" if grokbot_jobs.hub_authority(target) else "grokbot-queue",
+                "source": "grokbot-queue",
                 "expected_artifact": artifact,
             },
             provider_tasks={job_id: {"state": job.get("state"), "ready_at": job.get("updated_at")}},
@@ -909,27 +932,13 @@ def _grokbot_rows(
             "state": job.get("state"),
             "classification": classification_row["classification"],
             "artifact_refs": refs,
-            "source": "grokbot-hub" if grokbot_jobs.hub_authority(target) else "grokbot-queue",
+            "source": "grokbot-queue",
         }
         for key in ("created_at", "updated_at", "queued_at", "claimed_at"):
             if isinstance(job.get(key), str):
                 row[key] = job[key]
         rows.append(row)
     return rows
-
-
-def _grokbot_hub_unavailable_row() -> dict[str, Any]:
-    return {
-        "id": "grokbot:hub-unavailable",
-        "provider": "grokbot-cloud",
-        "job_id": "grokbot-hub-unavailable",
-        "label": "Grok Bot hub unavailable",
-        "state": "unavailable",
-        "classification": "needs-investigation",
-        "degraded": True,
-        "artifact_refs": {"kind": "report"},
-        "source": "grokbot-hub",
-    }
 
 
 def _grokbot_artifact_refs(
@@ -975,7 +984,7 @@ def status_payload(
     cursor_wired: bool = False,
     provider_observations: dict[str, ProviderObservation] | None = None,
 ) -> dict[str, Any]:
-    from . import grokbot_jobs
+    from . import codex_cloud_land, grokbot_jobs
 
     observed = now or datetime.now(timezone.utc)
     if observed.tzinfo is None:
@@ -997,10 +1006,10 @@ def status_payload(
             provider_observations=provider_observations,
         )
         for entry in registry["entries"]
-        if entry.get("provider") in TRACKER_PROVIDERS
+        if entry.get("provider") in _REGISTRY_PROVIDERS
     ]
+    codex_cloud_land.add_landing_commands(target, entries, registry["entries"])
     grokbot_rows = _grokbot_rows(target, github=github, now=observed, stale_ready_hours=stale_ready_hours)
-    grokbot_degraded = any(row.get("degraded") for row in grokbot_rows)
     entries.extend(grokbot_rows)
     known_queue_branches = {
         refs["branch"]
@@ -1028,13 +1037,17 @@ def status_payload(
             "authority": claude_cloud_routine.OBSERVATION_REASON,
             "detail": claude_cloud_routine.SOURCE_DETAIL,
         },
-        "grokbot-cloud": {
-            "wired": True,
-            "authority": "hub" if grokbot_jobs.hub_authority(target) else "local-queue",
-            **({"degraded": True, "detail": "hub unavailable"} if grokbot_degraded else {}),
-        },
         "github": {"wired": True, "authority": "ground-truth"},
     }
+    if not grokbot_jobs.hub_authority(target):
+        sources["grokbot-cloud"] = {"wired": True, "authority": "local-queue"}
+    if "complete" in github:
+        sources["github"].update(
+            complete=github["complete"],
+            branches_complete=github.get("branches_complete", False),
+            prs_complete=github.get("prs_complete", False),
+            reason=github.get("reason"),
+        )
     if provider_observations:
         for provider, observation in provider_observations.items():
             source = sources.get(provider)
@@ -1046,6 +1059,7 @@ def status_payload(
                     "configured": observation.configured,
                     "reachable": observation.reachable,
                     "reason": observation.reason,
+                    "complete": observation.complete,
                 }
             )
             if provider == "claude-cloud":
@@ -1087,6 +1101,51 @@ def status_payload(
     }
 
 
+def _record_inventory(
+    target: Path,
+    observations: dict[str, ProviderObservation],
+    observed: datetime,
+    reconciled_codex_tasks: frozenset[str],
+) -> None:
+    """Persist sightings and confirmed absences in one registry transaction."""
+    timestamp = _now_iso(observed)
+    with registry_lock(target):
+        registry = load_registry(target)
+        changed = False
+        for entry in registry["entries"]:
+            observation = observations.get(entry.get("provider"))
+            task_id = entry.get("task_id")
+            if observation is None or not task_id or entry.get("provider") not in {"codex-cloud", "cursor-cloud"}:
+                continue
+            previous = _parse_time(entry.get("inventory_observed_at"))
+            dispatched = _parse_time(entry.get("dispatched_at"))
+            if task_id in observation.tasks:
+                entry["last_seen_at"] = timestamp
+                entry.pop("missing_since", None)
+                entry.pop("missing_confirmed", None)
+            elif previous is None and dispatched is not None and dispatched > observed:
+                continue
+            elif previous is not None and previous > observed:
+                # Restart the clock baseline without counting this sample as an absence.
+                if not entry.get("missing_confirmed"):
+                    entry.pop("missing_since", None)
+            elif entry["provider"] == "codex-cloud" and task_id in reconciled_codex_tasks:
+                continue
+            elif (
+                observation.configured and observation.reachable and observation.complete and observation.reason is None
+            ):
+                missing_since = _parse_time(entry.get("missing_since")) or observed
+                entry["missing_since"] = _now_iso(missing_since)
+                if (observed - missing_since).total_seconds() >= MISSING_INVENTORY_HOURS * 3600:
+                    entry["missing_confirmed"] = True
+            elif entry.get("missing_since") and not entry.get("missing_confirmed"):
+                entry.pop("missing_since", None)
+            entry["inventory_observed_at"] = timestamp
+            changed = True
+        if changed:
+            save_registry(target, registry)
+
+
 def sync_payload(
     target: Path,
     *,
@@ -1096,6 +1155,7 @@ def sync_payload(
     cursor_wired: bool = False,
     provider_observations: dict[str, ProviderObservation] | None = None,
     hub_leases: list[dict[str, Any]] | None = None,
+    reconciled_codex_tasks: frozenset[str] = frozenset(),
 ) -> dict[str, Any]:
     """Reconcile registry observations with hub leases without secrets.
 
@@ -1110,6 +1170,8 @@ def sync_payload(
     observed = now or datetime.now(timezone.utc)
     if observed.tzinfo is None:
         observed = observed.replace(tzinfo=timezone.utc)
+    if provider_observations:
+        _record_inventory(target, provider_observations, observed, reconciled_codex_tasks)
     status = status_payload(
         target,
         now=observed,
@@ -1176,6 +1238,7 @@ def sync_payload(
             except Exception as exc:  # noqa: BLE001 - sync must stay bounded
                 needs_you.append({"id": row.get("id"), "detail": f"hub lease release failed: {type(exc).__name__}"})
 
+    needs_investigation = [row for row in status["entries"] if row.get("classification") == "needs-investigation"]
     return {
         "schema": SYNC_SCHEMA,
         "action": "reconcile",
@@ -1193,10 +1256,13 @@ def sync_payload(
             for row in status.get("entries", [])
             if row.get("landing_state") in {"prepared", "branch-pushed"}
         ],
+        "ready_landings": [row for row in status["entries"] if "next_command" in row],
         "active": active[:100],
         "renewed": renewed[:100],
         "released": released[:100],
         "needs_you": needs_you[:10],
+        "needs_investigation": needs_investigation,
+        "classification_counts": status["counts"],
         "counts": {
             "active": len(active),
             "renewed": len(renewed),
@@ -1215,6 +1281,7 @@ def stale_entries_for_brief(target: Path, *, now: datetime | None = None) -> dic
             target,
             codex_max_items=codex_cloud.MAX_LIST_LIMIT,
             github_budget_seconds=BRIEF_GITHUB_BUDGET_SECONDS,
+            cursor_budget_seconds=cloud_observation.BRIEF_CURSOR_BUDGET_SECONDS,
         )
         payload = status_payload(
             target,
@@ -1487,32 +1554,44 @@ def _observe_missing_codex_tasks(
     )
 
 
-def _codex_cloud_observation(target: Path, *, codex_max_items: int | None = None) -> ProviderObservation:
+def _codex_tasks(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    return {row["id"]: {"state": row.get("state"), "ready_at": None} for row in rows if isinstance(row.get("id"), str)}
+
+
+def _codex_cloud_observation(
+    target: Path,
+    *,
+    codex_max_items: int | None = None,
+    deadline: float | None = None,
+    publish: Callable[[ProviderObservation], None] | None = None,
+) -> ProviderObservation:
     from . import cloud_codex_probes, codex_cloud
 
-    # A bounded read takes one page, because cursor pages are slow on the provider
-    # side, and shares one deadline between that page and the status probes.
-    deadline = None if codex_max_items is None else cloud_codex_probes.brief_deadline()
+    if deadline is None:
+        budget = (
+            cloud_observation.CODEX_BUDGET_SECONDS
+            if codex_max_items is None
+            else cloud_codex_probes.BRIEF_CODEX_BUDGET_SECONDS
+        )
+        deadline = time.monotonic() + budget
+
+    def report(rows: list[dict[str, Any]], complete: bool) -> None:
+        if publish is not None:
+            publish(ProviderObservation(True, True, None, _codex_tasks(rows), complete))
+
     try:
         inventory = codex_cloud.list_tasks(
             cwd=target,
-            max_items=codex_cloud.DEFAULT_MAX_ITEMS if codex_max_items is None else codex_max_items,
-            max_pages=codex_cloud.MAX_LIST_PAGES if codex_max_items is None else 1,
-            command_timeout=codex_cloud.DEFAULT_LIST_TIMEOUT
-            if deadline is None
-            else cloud_codex_probes.BRIEF_CODEX_BUDGET_SECONDS,
+            max_items=codex_max_items,
+            max_pages=None if codex_max_items is None else 1,
+            deadline=deadline,
+            on_page=report if publish is not None else None,
         )
+        tasks = _codex_tasks(inventory.tasks)
     except Exception:  # noqa: BLE001 - observation must stay bounded
         return ProviderObservation(True, False, "transport-failure", {})
-    tasks = {
-        row["id"]: {"state": row.get("state"), "ready_at": None}
-        for row in inventory.tasks
-        if isinstance(row.get("id"), str)
-    }
-    if codex_max_items is not None:
-        _observe_missing_codex_tasks(target, tasks, bounded=True, deadline=deadline)
-    elif not tasks:
-        _observe_missing_codex_tasks(target, tasks)
+    if codex_max_items is not None or not tasks:
+        _observe_missing_codex_tasks(target, tasks, bounded=codex_max_items is not None, deadline=deadline)
     if not inventory.ok:
         reason = inventory.reason or "provider-error"
         if reason in {"provider-missing", "provider-unavailable"}:
@@ -1522,7 +1601,7 @@ def _codex_cloud_observation(target: Path, *, codex_max_items: int | None = None
         if reason == "auth-failure":
             return ProviderObservation(True, False, reason, tasks)
         return ProviderObservation(True, True, reason, tasks)
-    return ProviderObservation(True, True, None, tasks)
+    return ProviderObservation(True, True, None, tasks, inventory.complete)
 
 
 def observe_codex_cloud_tasks(target: Path) -> dict[str, Any]:
@@ -1530,20 +1609,19 @@ def observe_codex_cloud_tasks(target: Path) -> dict[str, Any]:
     return _codex_cloud_observation(target).tasks
 
 
-def observe_github(target: Path, *, budget_seconds: float | None = None) -> dict[str, Any]:
-    """Ground truth for cloud-shaped branches and PRs via gh.
-
-    ``budget_seconds`` bounds the whole observation rather than each read.
-    Three sequential GitHub reads at the 30 s per-call timeout could otherwise
-    hold a work brief for 90 s before it printed anything.
-    """
-    deadline = None if budget_seconds is None else time.monotonic() + max(0.0, budget_seconds)
+def observe_github(
+    target: Path, *, budget_seconds: float | None = None, publish: Callable[[dict[str, Any]], None] | None = None
+) -> dict[str, Any]:
+    """Read GitHub branches and PRs within one shared observation budget."""
+    budget = cloud_observation.GITHUB_BUDGET_SECONDS if budget_seconds is None else budget_seconds
+    deadline = time.monotonic() + max(0.0, budget)
 
     def read(command: list[str]) -> tuple[int, str, str]:
-        remaining = 30.0 if deadline is None else min(30.0, deadline - time.monotonic())
+        remaining = deadline - time.monotonic()
         if remaining <= 0:
             return 1, "", "github observation budget exhausted"
-        return _run_text(command, cwd=target, timeout=remaining)
+        result = _run_text(command, cwd=target, timeout=remaining)
+        return result if time.monotonic() < deadline else (1, "", "github observation budget exhausted")
 
     repo = None
     code, stdout, _ = read(["gh", "repo", "view", "--json", "nameWithOwner"])
@@ -1561,74 +1639,53 @@ def observe_github(target: Path, *, budget_seconds: float | None = None) -> dict
     ]
     explicit_branches = {entry.get("branch") for entry in explicit if isinstance(entry.get("branch"), str)}
     explicit_prs = {entry.get("pr_url") for entry in explicit if isinstance(entry.get("pr_url"), str)}
-    branches: list[dict[str, str]] = []
+    branches: list[dict[str, Any]] = []
     branches_complete = False
-    code, stdout, _ = read(["gh", "api", "repos/{owner}/{repo}/branches?per_page=100"])
-    if code == 0 and stdout.strip():
-        try:
-            data = json.loads(stdout)
-        except json.JSONDecodeError:
-            data = None
-        if isinstance(data, list):
-            branches_complete = len(data) < 100 and all(
-                isinstance(item, dict) and isinstance(item.get("name"), str) for item in data
-            )
-            for item in data[:100]:
-                if isinstance(item, dict) and isinstance(item.get("name"), str):
-                    name = item["name"]
-                    if name.startswith(CLOUD_BRANCH_PREFIXES) or name in explicit_branches:
-                        branches.append({"name": name})
-    # Preserve legacy offline discovery without treating local refs as current
-    # remote existence evidence for explicitly repository-bound sessions.
-    if not branches and not branches_complete:
+
+    def snapshot(
+        branch_rows: list[dict[str, Any]], branch_coverage: bool, pr_rows: list[dict[str, Any]], pr_coverage: bool
+    ) -> dict[str, Any]:
+        return {
+            "branches": [
+                row
+                for row in branch_rows
+                if row["name"].startswith(CLOUD_BRANCH_PREFIXES) or row["name"] in explicit_branches
+            ],
+            "prs": [
+                row
+                for row in pr_rows
+                if row["head"].startswith(CLOUD_BRANCH_PREFIXES)
+                or row["head"] in explicit_branches
+                or row["url"] in explicit_prs
+            ],
+            "repo": repo,
+            "branches_complete": branch_coverage,
+            "prs_complete": pr_coverage,
+            "complete": branch_coverage and pr_coverage,
+        }
+
+    def report_branches(rows: list[dict[str, Any]], complete: bool) -> None:
+        if publish is not None:
+            publish(snapshot(rows, complete, [], False))
+
+    def report_prs(rows: list[dict[str, Any]], complete: bool) -> None:
+        if publish is not None:
+            publish(snapshot(branches, branches_complete, rows, complete))
+
+    branches, branches_complete = cloud_observation.github_pages(
+        read, "repos/{owner}/{repo}/branches?per_page=100", cloud_observation.github_branch, report_branches
+    )
+    prs, prs_complete = cloud_observation.github_pull_requests(read, report_prs)
+    result = snapshot(branches, branches_complete, prs, prs_complete)
+    # Local refs still help older rows offline, but cannot prove remote existence for bound sessions.
+    if not result["branches"] and not branches_complete:
         code, stdout, _ = read(["git", "branch", "-a", "--format=%(refname:short)"])
         if code == 0:
             for line in stdout.splitlines():
                 name = line.strip().removeprefix("origin/")
                 if name.startswith(CLOUD_BRANCH_PREFIXES) and name not in explicit_branches:
-                    branches.append({"name": name})
-
-    prs: list[dict[str, Any]] = []
-    code, stdout, _ = read(
-        [
-            "gh",
-            "pr",
-            "list",
-            "--state",
-            "all",
-            "--json",
-            "number,state,headRefName,url,isDraft,headRefOid",
-            "--limit",
-            "100",
-        ]
-    )
-    if code == 0 and stdout.strip():
-        try:
-            data = json.loads(stdout)
-        except json.JSONDecodeError:
-            data = []
-        if isinstance(data, list):
-            for item in data:
-                if not isinstance(item, dict):
-                    continue
-                head = item.get("headRefName")
-                url = item.get("url")
-                if isinstance(head, str) and (
-                    head.startswith(CLOUD_BRANCH_PREFIXES)
-                    or head in explicit_branches
-                    or (isinstance(url, str) and url in explicit_prs)
-                ):
-                    prs.append(
-                        {
-                            "head": head,
-                            "state": item.get("state"),
-                            "number": item.get("number"),
-                            "url": item.get("url"),
-                            "isDraft": item.get("isDraft"),
-                            "headRefOid": item.get("headRefOid"),
-                        }
-                    )
-    return {"branches": branches, "prs": prs, "repo": repo, "branches_complete": branches_complete}
+                    result["branches"].append({"name": name})
+    return result
 
 
 def cursor_cloud_wired() -> bool:
@@ -1653,30 +1710,9 @@ def _cursor_api_key() -> str | None:
     return None
 
 
-def _provider_error_observation(error: BaseException) -> ProviderObservation:
-    reason = getattr(error, "reason", None)
-    if reason == "auth-failure":
-        return ProviderObservation(True, False, "auth-failure", {})
-    if reason == "transport-failure" or isinstance(error, (OSError, TimeoutError)):
-        return ProviderObservation(True, False, "transport-failure", {})
-    return ProviderObservation(True, True, "provider-error", {})
+def _cursor_tasks(agents: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    from . import cursor_cloud
 
-
-def _cursor_cloud_observation(target: Path) -> ProviderObservation:
-    """Fetch sanitized Cursor Cloud inventory when an API key is present.
-
-    Provider API failures are bounded: the tracker stays available and no
-    existing registry entries are erased or admitted.
-    """
-    api_key = _cursor_api_key()
-    if not api_key:
-        return ProviderObservation(False, False, "unconfigured", {})
-    try:
-        from . import cursor_cloud
-
-        agents = cursor_cloud.list_agents(api_key, max_pages=2, max_items=100, include_usage=True)
-    except Exception as exc:  # noqa: BLE001 - observation must stay bounded
-        return _provider_error_observation(exc)
     tasks: dict[str, Any] = {}
     for agent in agents:
         if not isinstance(agent, dict):
@@ -1701,7 +1737,47 @@ def _cursor_cloud_observation(target: Path) -> ProviderObservation:
         if usage:
             row["usage"] = usage
         tasks[agent_id] = row
-    return ProviderObservation(True, True, None, tasks)
+    return tasks
+
+
+def _cursor_cloud_observation(
+    target: Path, *, deadline: float | None = None, publish: Callable[[ProviderObservation], None] | None = None
+) -> ProviderObservation:
+    """Fetch sanitized Cursor Cloud inventory when an API key is present.
+
+    Provider API failures are bounded: the tracker stays available and no
+    existing registry entries are erased or admitted.
+    """
+    api_key = _cursor_api_key()
+    if not api_key:
+        return ProviderObservation(False, False, "unconfigured", {})
+    from . import cursor_cloud
+
+    def report(rows: list[dict[str, Any]], complete: bool) -> None:
+        if publish is not None:
+            publish(ProviderObservation(True, True, None, _cursor_tasks(rows), complete))
+
+    try:
+        if deadline is None:
+            deadline = time.monotonic() + cloud_observation.CURSOR_BUDGET_SECONDS
+        agents = cursor_cloud.list_agents(
+            api_key,
+            max_pages=None,
+            max_items=None,
+            include_usage=True,
+            inventory_deadline=deadline,
+            priority_agent_ids=frozenset(
+                task_id
+                for entry in load_registry(target)["entries"]
+                if entry.get("provider") == "cursor-cloud" and isinstance(task_id := entry.get("task_id"), str)
+            ),
+            on_page=report if publish is not None else None,
+        )
+    except Exception as exc:  # noqa: BLE001 - observation must stay bounded
+        return cloud_observation.provider_error_observation(exc)
+    tasks = _cursor_tasks(agents)
+    reason = getattr(agents, "reason", None)
+    return ProviderObservation(True, bool(tasks) or reason is None, reason, tasks, getattr(agents, "complete", False))
 
 
 def observe_cursor_cloud_tasks(target: Path) -> dict[str, Any]:
@@ -1709,34 +1785,19 @@ def observe_cursor_cloud_tasks(target: Path) -> dict[str, Any]:
     return _cursor_cloud_observation(target).tasks
 
 
-def _grokbot_cloud_observation() -> ProviderObservation:
-    from . import fleet_client_grokbot
-
-    try:
-        decision = fleet_client_grokbot.whoami()
-    except Exception:  # noqa: BLE001 - provider health must stay bounded
-        return ProviderObservation(True, False, "transport-failure", {})
-    if decision.granted:
-        return ProviderObservation(True, True, None, {})
-    if decision.reason == "no-hub":
-        return ProviderObservation(False, False, "unconfigured", {})
-    if decision.reason == "no-identity":
-        return ProviderObservation(True, False, "actor-not-enrolled", {})
-    if decision.reason == "auth-failed":
-        return ProviderObservation(True, False, "auth-failure", {})
-    if decision.reason == "hub-unavailable":
-        return ProviderObservation(True, False, "transport-failure", {})
-    return ProviderObservation(True, True, decision.reason, {})
-
-
-def observe_provider(provider: str, target: Path, *, codex_max_items: int | None = None) -> ProviderObservation:
+def observe_provider(
+    provider: str,
+    target: Path,
+    *,
+    codex_max_items: int | None = None,
+    deadline: float | None = None,
+    publish: Callable[[ProviderObservation], None] | None = None,
+) -> ProviderObservation:
     """Observe exactly one provider without exposing credentials or bodies."""
     if provider == "codex-cloud":
-        return _codex_cloud_observation(target, codex_max_items=codex_max_items)
+        return _codex_cloud_observation(target, codex_max_items=codex_max_items, deadline=deadline, publish=publish)
     if provider == "cursor-cloud":
-        return _cursor_cloud_observation(target)
-    if provider == "grokbot-cloud":
-        return _grokbot_cloud_observation()
+        return _cursor_cloud_observation(target, deadline=deadline, publish=publish)
     if provider == "claude-cloud":
         # No provider wire exists in Brigade. The conductor launches and reads
         # routine runs, and reports what it saw through register or adopt.
@@ -1749,20 +1810,45 @@ def observe_provider_details(
     *,
     codex_max_items: int | None = None,
     github_budget_seconds: float | None = None,
+    cursor_budget_seconds: float | None = None,
     **_kwargs: Any,
 ) -> tuple[dict[str, ProviderObservation], dict[str, Any]]:
-    """Return per-provider health so failed empty inventories stay visible."""
-    observations: dict[str, ProviderObservation] = {}
-    for provider in TRACKER_PROVIDERS:
-        try:
-            if provider == "codex-cloud" and codex_max_items is not None:
-                observations[provider] = observe_provider(provider, target, codex_max_items=codex_max_items)
-            else:
-                observations[provider] = observe_provider(provider, target)
-        except Exception:  # noqa: BLE001 - observation must stay bounded
-            observations[provider] = ProviderObservation(True, False, "transport-failure", {})
-    github = observe_github(target, budget_seconds=github_budget_seconds)
-    return observations, github
+    """Start independently timed provider reads before collecting any result."""
+    from .cloud_codex_probes import BRIEF_CODEX_BUDGET_SECONDS
+
+    codex = cloud_observation.start_observation(
+        "codex",
+        cloud_observation.CODEX_BUDGET_SECONDS if codex_max_items is None else BRIEF_CODEX_BUDGET_SECONDS,
+        lambda deadline, publish: observe_provider(
+            "codex-cloud", target, codex_max_items=codex_max_items, deadline=deadline, publish=publish
+        ),
+        lambda reason, progress: cloud_observation.provider_failure(reason, progress, True),
+    )
+    cursor = cloud_observation.start_observation(
+        "cursor",
+        cloud_observation.CURSOR_BUDGET_SECONDS if cursor_budget_seconds is None else cursor_budget_seconds,
+        lambda deadline, publish: observe_provider("cursor-cloud", target, deadline=deadline, publish=publish),
+        lambda reason, progress: cloud_observation.provider_failure(reason, progress, cursor_cloud_wired()),
+    )
+    github = cloud_observation.start_observation(
+        "github",
+        cloud_observation.GITHUB_BUDGET_SECONDS if github_budget_seconds is None else github_budget_seconds,
+        lambda deadline, publish: observe_github(target, budget_seconds=deadline - time.monotonic(), publish=publish),
+        lambda reason, progress: {
+            "branches": [],
+            "prs": [],
+            "branches_complete": False,
+            "prs_complete": False,
+            **(progress or {}),
+            "complete": False,
+            "reason": reason,
+        },
+    )
+    return {
+        "codex-cloud": codex(),
+        "cursor-cloud": cursor(),
+        "claude-cloud": observe_provider("claude-cloud", target),
+    }, github()
 
 
 def _legacy_provider_tasks(observations: dict[str, ProviderObservation]) -> dict[str, Any]:
@@ -1777,11 +1863,15 @@ def observe_providers(
     *,
     codex_max_items: int | None = None,
     github_budget_seconds: float | None = None,
+    cursor_budget_seconds: float | None = None,
     **_kwargs: Any,
 ) -> tuple[dict[str, Any], dict[str, Any], bool]:
     """Compatibility wrapper for callers that only accept a flattened inventory."""
     observations, github = observe_provider_details(
-        target, codex_max_items=codex_max_items, github_budget_seconds=github_budget_seconds
+        target,
+        codex_max_items=codex_max_items,
+        github_budget_seconds=github_budget_seconds,
+        cursor_budget_seconds=cursor_budget_seconds,
     )
     return _legacy_provider_tasks(observations), github, observations["cursor-cloud"].configured
 

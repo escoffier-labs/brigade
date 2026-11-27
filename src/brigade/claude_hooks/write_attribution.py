@@ -3,9 +3,17 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
-from ..wiring import resolve_wired_target
+from .anchored_io import SessionIntegrityError
+from .command_tokens import (
+    EVENT_BUDGET,
+    MAX_COMMAND_CHARS,
+    MAX_OBSERVED_ROOTS,
+    RecognitionLimit,
+    UnreadableCommand,
+    event_wired_target as resolve_wired_target,
+)
 
 
 def _rt() -> Any:
@@ -136,9 +144,22 @@ def bash_scopes(command: object, cwd: Path, *, depth: int = 0) -> dict[Path, boo
     Observation roots keep fingerprint detection for scripts and subagents.
     Unresolved write operands conservatively retain their command cwd.
     """
-    rt = _rt()
-    if not isinstance(command, str) or "\x00" in command or not command.strip():
+    if not isinstance(command, str):
         return {}
+    budget = _rt().EVENT_BUDGET.get()
+    if budget is None:
+        return _scan_bash_scopes(command, cwd, depth=depth)
+    key = command, cwd, depth
+    if key not in budget.scopes:
+        budget.scopes[key] = _scan_bash_scopes(command, cwd, depth=depth)
+    return budget.scopes[key]
+
+
+def _scan_bash_scopes(command: str, cwd: Path, *, depth: int) -> dict[Path, bool]:
+    rt = _rt()
+    if not command.strip():
+        return {}
+    rt.charge_event(len(command))
     try:
         tokens = rt._shell_path_tokens(rt._strip_heredoc_bodies(command))
     except ValueError:
@@ -148,6 +169,8 @@ def bash_scopes(command: object, cwd: Path, *, depth: int = 0) -> dict[Path, boo
     def add(path: Path, confident: bool = False) -> None:
         target = resolve_wired_target(str(path))
         if target is not None:
+            if EVENT_BUDGET.get() is not None and len(scopes) >= MAX_OBSERVED_ROOTS and target not in scopes:
+                raise RecognitionLimit
             scopes[target] = scopes.get(target, False) or confident
 
     def destination(raw: str, effective: Path) -> None:
@@ -176,9 +199,7 @@ def bash_scopes(command: object, cwd: Path, *, depth: int = 0) -> dict[Path, boo
             segments[-1].append(token)
     effective = cwd
     for index, segment in enumerate(segments):
-        stripped = rt._strip_command_prefixes(segment)
-        while stripped and stripped[0] in _SHELL_KEYWORDS:
-            stripped = rt._strip_command_prefixes(stripped[1:])
+        stripped = rt._strip_command_prefixes(segment, keywords=_SHELL_KEYWORDS)
         if not stripped:
             continue
         add(effective)
@@ -222,23 +243,98 @@ def bash_scopes(command: object, cwd: Path, *, depth: int = 0) -> dict[Path, boo
 
 
 def touches_worktree(target: Path, command: object, *, cwd: object = None) -> bool:
-    effective = Path(cwd) if isinstance(cwd, str) and cwd else target
+    effective = (
+        _rt()._resolve_command_path(cwd, Path.cwd(), expand_vars=False) if isinstance(cwd, str) and cwd else target
+    )
     return bash_scopes(command, effective).get(target.resolve(), False)
+
+
+def mark_analysis_failure(event: str, exc: Exception) -> None:
+    budget = EVENT_BUDGET.get()
+    if (
+        budget is None
+        or isinstance(exc, SessionIntegrityError)
+        or (event == "PreToolUse" and not isinstance(exc, (RecognitionLimit, UnreadableCommand)))
+    ):
+        raise exc
+    budget.attribution_incomplete = True
+    budget.unreadable |= not isinstance(exc, RecognitionLimit)
+
+
+def post_bash_write(
+    event: str,
+    target: Path,
+    payload: dict[str, Any],
+    state: dict[str, Any],
+    session_id: str,
+    fingerprint: Callable[[Path], str | None],
+) -> tuple[bool, str | None, bool, bool, str | None]:
+    """Detect writes without catching errors from subsequent state updates."""
+    rt = _rt()
+    budget = EVENT_BUDGET.get()
+    if budget is not None and budget.attribution_incomplete:
+        return True, None, False, False, None
+    command = rt._as_tool_input(payload.get("tool_input")).get("command")
+    try:
+        wrote = touches_worktree(target, command, cwd=payload.get("cwd"))
+        routed = rt._is_routed_verify(command)
+        brigade_command = routed or rt._is_brigade_run(command)
+        capture = rt._parse_capture_flag(command) if routed and event == "PostToolUse" else None
+        # A failed write-capable command can exit before it changes any file.
+        if (not wrote and not brigade_command) or (wrote and event == "PostToolUseFailure"):
+            wrote = rt._bash_write_detected(
+                target,
+                state.get("pending_bash_fingerprint"),
+                session_id=session_id,
+                started_at=state.get("pending_bash_started_at"),
+                fingerprint=fingerprint,
+            )
+        handoff = wrote and rt._bash_write_targets_handoffs(target, command)
+        updated_fingerprint = fingerprint(target) if wrote else None
+        return wrote, capture, handoff, brigade_command and not wrote, updated_fingerprint
+    except Exception as exc:  # noqa: BLE001 - only attribution, never state updates
+        mark_analysis_failure(event, exc)
+        return True, None, False, False, None
+
+
+def _linked_pending_roots(primary: Path, payload: dict[str, Any]) -> dict[Path, bool]:
+    """Recover pre-event destinations if the post-event scan cannot finish."""
+    rt = _rt()
+    session = payload.get("session_id")
+    if not isinstance(session, str) or not session:
+        return {}
+    state = rt.read_session_state(primary, session)
+    roots = state.get("session_repos") if state else None
+    if not isinstance(roots, list):
+        return {}
+    return dict.fromkeys((Path(root) for root in roots[:MAX_OBSERVED_ROOTS] if isinstance(root, str) and root), False)
 
 
 def handle_event(event: str, payload: dict[str, Any], *, pin: Path | None) -> dict[str, Any] | None:
     rt = _rt()
-    primary = rt.effective_hook_target(payload, pin=pin)
-    if (
-        primary is None
-        or event not in {"PreToolUse", "PostToolUse", "PostToolUseFailure"}
-        or payload.get("tool_name") != "Bash"
-    ):
+    budget = EVENT_BUDGET.get()
+    if budget is None:
         return rt._handle_event(event, payload, pin=pin)
     command = rt._as_tool_input(payload.get("tool_input")).get("command")
     raw_cwd = payload.get("cwd")
-    cwd = Path(raw_cwd) if isinstance(raw_cwd, str) and raw_cwd else primary
-    scopes = bash_scopes(command, cwd)
+    try:
+        if budget.attribution_incomplete or (isinstance(command, str) and len(command) > MAX_COMMAND_CHARS):
+            raise RecognitionLimit
+        primary = rt.effective_hook_target(payload, pin=pin)
+        if primary is None:
+            return None
+        cwd = (
+            rt._resolve_command_path(raw_cwd, Path.cwd(), expand_vars=False)
+            if isinstance(raw_cwd, str) and raw_cwd
+            else primary
+        )
+        scopes = bash_scopes(command, cwd)
+    except Exception as exc:  # noqa: BLE001 - target discovery and attribution only
+        mark_analysis_failure(event, exc)
+        primary = rt._bash_fallback_target(payload, pin)
+        if primary is None:
+            return None
+        scopes = _linked_pending_roots(primary, payload) if event != "PreToolUse" else {}
     targets = [primary, *scopes]
     result = None
     for target in dict.fromkeys(targets):
@@ -251,7 +347,9 @@ def handle_event(event: str, payload: dict[str, Any], *, pin: Path | None) -> di
             state = rt.read_session_state(target, str(payload.get("session_id") or ""))
             if not state or not state.get("pending_bash_fingerprint"):
                 continue
-        current = rt._handle_event(event, payload, pin=pin, target_override=target)
+        budget.target = target
+        with budget.in_phase("followup"):
+            current = rt._handle_event(event, payload, pin=pin, target_override=target)
         if current is not None:
             result = current
             if current.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":

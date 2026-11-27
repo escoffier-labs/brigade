@@ -92,12 +92,10 @@ def test_uncertain_cd_keeps_the_handled_root(repos, template: str) -> None:
     assert observed_verifiers.governing_modes(command, str(start), start) == [(start, "strict")]
 
 
-def test_post_failure_follows_the_verification_target(repos) -> None:
+def test_raw_failure_does_not_offer_receipt_retry_guidance(repos) -> None:
     command = f"cd {_sh(repos['enforced'])} && pytest -q"
-    result = _bash("PostToolUseFailure", repos["yolo"], command)
-    assert result is not None and "brigade work verify run" in result["hookSpecificOutput"]["additionalContext"]
-    command = f"cd {_sh(repos['yolo'])} && pytest -q"
-    assert _bash("PostToolUseFailure", repos["enforced"], command) is None
+    assert _bash("PostToolUseFailure", repos["yolo"], command) is None
+    assert _bash("PostToolUseFailure", repos["enforced"], "pytest -q") is None
 
 
 @pytest.mark.parametrize(
@@ -189,6 +187,6 @@ def test_observation_recognizes_wrapped_checks(command, first):
 
 
 @pytest.mark.parametrize("wrapper", ["uv run ", "poetry run ", "npx "])
-def test_observation_bounds_recursive_wrappers(wrapper):
+def test_observation_recognizes_deep_runner_chains(wrapper):
     assert observed_verifiers.is_raw_verification(wrapper + "pytest")
-    assert not observed_verifiers.is_raw_verification(wrapper * 1000 + "pytest")
+    assert observed_verifiers.is_raw_verification(wrapper * 1000 + "pytest")

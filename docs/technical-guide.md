@@ -884,7 +884,7 @@ The `cli` values are adapters for installed command-line tools:
 `codex`, `claude`, `opencode`, `antigravity`, `pi`, `cursor`, `aider`, `goose`,
 `continue`, `copilot`, `qwen`, `kimi`, `adal`, `openhands`, `grok`, `amp`, `crush`,
 `oracle`, and `ollama:<model>`. BrigadeStack shells out to those tools and keeps no provider keys.
-A `codex-cloud:<env-id>` seat is different: it submits the task to Codex Cloud with `codex cloud exec`, polls `codex cloud status` until the task reaches a terminal state (bounded by the seat timeout), and returns the final status plus the unified diff as the worker text. The diff is never applied to the local tree. Land it deliberately with `codex cloud apply <task-id>`; the task id is recorded on the worker result. When a fleet hub is configured, BrigadeStack admits the task before `exec`, using the hub's `codex` provider policy and a prompt-hash lease label; uncertain submits or provider state retain the lease for later inspection. Local tracking remains `codex-cloud`, and its bounded `codex cloud list --json` observation stores only task id, state, and environment id. `codex cloud list --json` omits environment ids; copy the id from the Codex Cloud workspace UI, not from task JSON. Prefer a local setup surface over putting that id in a roster:
+A `codex-cloud:<env-id>` seat is different: it submits the task to Codex Cloud with `codex cloud exec`, polls `codex cloud status` until the task reaches a terminal state (bounded by the seat timeout), and returns the final status plus the unified diff as the worker text. The diff is never applied to the local tree. When a fleet hub is configured, BrigadeStack admits the task before `exec`, using the hub's `codex` provider policy and a prompt-hash lease label; uncertain submits or provider state retain the lease for later inspection. Local tracking remains `codex-cloud`, and its bounded `codex cloud list --json` observation stores only task id, state, and environment id. `codex cloud list --json` omits environment ids; copy the id from the Codex Cloud workspace UI, not from task JSON. Prefer a local setup surface over putting that id in a roster:
 
 ```bash
 export CODEX_CLOUD_ENV='<env-id>'
@@ -893,7 +893,79 @@ brigade run cloud doctor --provider codex-cloud --target . --json
 brigade run cloud canary --provider codex-cloud --target . --json
 ```
 
+To collect a finished, registered task, run the following from the repository
+checkout that has the registry and authenticated Codex and GitHub tools. The
+polling worker can already have exited.
+
+```bash
+brigade run cloud land --provider codex-cloud --task-id task_example
+```
+
+Landing fetches the pinned diff, applies it in an isolated worktree, and opens
+a pull request for review. Add `--issue 123` to reference an issue and
+`--closes` to request closing it on merge. A retry reuses the recorded landing
+branch and keeps the issue reference or close-on-merge request. Regular `cloud status` and
+`cloud sync` print the landing command for finished Codex tasks awaiting
+collection. In JSON it is the row's `next_command`, under `entries` for
+status and `ready_landings` for sync.
+
+For detached Codex Cloud tasks, install the opt-in Care entry on the launching
+host, with `--target` set to the workspace that stores the task registry:
+
+```bash
+brigade care install --target . --entry codex-cloud-sync
+brigade care status --target . --entry codex-cloud-sync
+```
+
+The scheduler runs `brigade run cloud sync --codex-leases-only` every two
+minutes. It needs the host's fleet credentials and an authenticated `codex` on
+the scheduler's PATH. The command checks bound leases owned by that host and
+tracked in that workspace. A confirmed active task resets its lease to six
+hours, and a terminal state releases it. Failed or inconclusive status probes
+leave the expiry as it was. If the host stops syncing, the lease expires by its
+last deadline. An expired lease cannot be renewed. Attached workers also renew
+and release their own leases while polling. See [scheduler support](scheduled-care.md).
+
 `--env-var` stores only the variable name in `.brigade/cloud/codex.json`. `--env-id` stores the id locally (mode 0600) and is the fallback when an env var is not available. Seat the worker as `cli = "codex-cloud:configured"` or `cli = "codex-cloud:$CODEX_CLOUD_ENV"`. Literal `codex-cloud:<env-id>` still works. Allow the seat with a `"codex-cloud:*"` entry in `limits.allow_models`. Model pins are rejected because the cloud environment decides the model. `brigade run cloud doctor` and `brigade run cloud canary` accept `--selector` (`configured`, `$VAR`, or a literal id) and fail closed with a safe `reason` when the `codex` CLI is missing, unauthenticated, or returns unsupported list JSON; an empty inventory may pass. When the inventory is non-empty, canary reports `environment_seen` as `true`, `false`, or `unknown` by comparing sanitized task `environment_id` values against the resolved selector; an empty inventory leaves `environment_seen` at `unknown` and does not prove the execution selector is valid. Resolved environments are recorded on tracker rows and worker results as `environment_id` for literal seats or `environment_fingerprint` for configured/`$VAR` selectors. Read-only `brigade run` dispatch blocks `codex-cloud` unless the seat sets `cloud_safe_mode = true` after explicit review. `brigade run cloud canary` lists tasks only; it never calls `codex cloud exec` or `codex cloud apply`. Cloud config discovery stops at the git repo root or the operator home directory, whichever comes first while walking parents.
+
+Before either the roster or `brigade run cloud launch --provider codex-cloud`
+submits a task, BrigadeStack writes a `needs-reconcile` intent to the workspace
+registry. It stores a prompt hash and puts a unique bracketed tag at the start
+of the provider prompt, with a request to preserve the tag in the task title.
+If the registry write fails, submission stops. A process launch failure marks
+the row `not-launched`. An ambiguous submit, a rejected bind, or a failed
+registry update leaves the intent in `needs-reconcile`.
+
+Run `brigade run cloud sync --target .` to retry pending intents. Sync retries
+the bind for a recorded task ID or searches the observed Codex CLI pages for
+one exact tag in the title. A successful bind records the task as `tracked`.
+A complete inventory with no tag match after five minutes marks the intent
+`not-launched`. Sync still scans those intents for title matches for 24 hours
+after dispatch. A late task ID or unique tag match can reopen the intent and
+request a replacement for a released or expired lease. Manual registration
+also reuses a matched intent. Title matching depends on the provider retaining
+the tag. `brigade run cloud status` shows the launch state and tag.
+
+Regular sync and status read Codex Cloud, Cursor Cloud, and GitHub in
+parallel, each with its own deadline. Their JSON `sources` report `complete`
+when the reader reaches the final page and returns before its deadline.
+GitHub reports separate coverage for branches and open pull requests, and
+checks the first page of closed pull requests for merge evidence. Partial
+pages can supply positive sightings.
+
+Regular sync records `last_seen_at` in the registry whenever a tracked task
+appears in its provider's inventory. A complete inventory starts a missing
+window when it omits the task. After six hours (`MISSING_INVENTORY_HOURS`),
+another complete inventory that still omits it classifies the task as
+`needs-investigation` when complete GitHub branch and open-PR inventories
+show no live artifact and there is no observed merge. A partial or unavailable
+provider inventory interrupts an unconfirmed window. A later sighting,
+including in a partial inventory, clears the missing state. Status displays
+the saved evidence and any current sightings without writing to the registry.
+
+Scheduled `--codex-leases-only` sync stays within its existing bound-lease
+maintenance budget. Use regular sync for provider inventory scans and
+replacement lease admissions.
 
 The local adapters use explicit non-interactive execution modes. Writable Antigravity runs pass `--add-dir <cwd> --dangerously-skip-permissions`; read-only runs pass `--sandbox` without either write flag. When `agy --help` lists `--mode plan`, read-only runs add `--mode plan` and `--add-dir <cwd>`, because plan mode is what blocks file writes. A headless run that exits 0 after `jetski: no output produced` fails with agy's reason in the detail. Writable Kimi runs pass `--yolo`; read-only runs pass `--plan`. Cursor write runs use `cursor-agent -p --output-format text -f`. Direct read-only Cursor runs use `--trust --mode plan`, which keeps the workspace read-only but has model-specific output limits: Composer 2.5 findings go to Cursor's plan artifact instead of assistant stdout, so BrigadeStack rejects that combination before spawning the process. Grok 4.5 has also returned exit 0 with empty assistant text in this mode. BrigadeStack preserves the process stdout, stderr, and exit code, then reports the ACP alternative.
 
@@ -2665,8 +2737,10 @@ would integrate with hub proposals and require explicit review.
 
 In observe mode, Claude Code records raw checks from `PostToolUse` and
 `PostToolUseFailure` in private per-user state. Capture is best effort and
-cannot change the hook result. Install the updated managed hooks with
-`brigade work hooks install` to capture `PostModelSwitch` events.
+cannot change the hook result. When command classification cannot finish,
+supported hooks record an `unclassified` marker in every work mode. Install the
+updated managed hooks with `brigade work hooks install` to capture
+`PostModelSwitch` events.
 
 Verify receipts include `agent_identity` with harness, model, their sources,
 and agent type. The explicit `BRIGADE_CONTEXT_MODEL` takes precedence over the

@@ -44,7 +44,7 @@ for the `auto_apply` policy field, the switch and rollback.
 
 ## The default loop
 
-This is the setup the rest of this page assumes, and it is one command. `brigade init` with the Claude harness (the default) writes the project-scope Claude Code work-loop hooks to `.claude/settings.json`, so verify routing and the Stop gate work from the first session. It also turns on extras and installs the care schedule, so scoring keeps running without anyone remembering to capture, rank or reconcile.
+This is the setup the rest of this page assumes, and it is one command. `brigade init` with the Claude harness (the default) writes the project-scope Claude Code work-loop hooks to `.claude/settings.json`. The strict Stop gate checks receipts after code changes. Agents can run checks directly and use `brigade work verify run` to capture receipts from the first session. It also turns on extras and installs the care schedule, so scoring keeps running without anyone remembering to capture, rank or reconcile.
 
 ```bash
 brigade init --target . --depth repo --harnesses claude   # hooks, extras on, care schedule installed
@@ -63,7 +63,7 @@ To check that the loop ran, run `brigade care status --target .` and look for a 
 
 ```mermaid
 flowchart TD
-    A[Claude Code session with hooks] -->|verify routed| B["verify run --capture auto"]
+    A[Claude Code session with hooks] -->|agent runs verify| B["verify run --capture auto"]
     A -->|manifest subject changed| C["verify run --manifest --capture auto"]
     B --> D[Receipt and ledger rows]
     C --> D
@@ -202,7 +202,7 @@ The soak needs two things inside seven days: one real attested promotion, and on
 
 ## Workflow
 
-The default loop runs only the hook-routed verify commands, `outcome rank` and `outcome reconcile --report --proposals`. The other commands below are manual. Run them to score outside a hook-enabled session, to inspect a result, or to apply a decision.
+The default loop uses receipts from explicit verify commands, `outcome rank`, and `outcome reconcile --report --proposals`. The other commands below are manual. Run them to score outside a hook-enabled session, to inspect a result, or to apply a decision.
 
 ```bash
 # scoreable evidence: a git-tracked manifest under verify/manifests/ authors subject_binding

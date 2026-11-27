@@ -22,6 +22,14 @@ from typing import Any
 
 from . import dirfd, guard, localio, work_mode
 from .agent_identity import MODEL_SOURCES, AgentIdentity, map_identity
+from .claude_hooks.command_tokens import (
+    MAX_COMMAND_CHARS,
+    RecognitionLimit,
+    TokenView,
+    charge_event,
+    command_event,
+    split_posix,
+)
 from .claude_hooks import observed_verifiers
 from .claude_hooks.envelope import redact_paths
 from .guard.types import ScanOptions
@@ -166,10 +174,14 @@ _TOOL_TARGETS = {
     ),
 }
 _SAFE_TARGET = re.compile(r"[A-Za-z0-9._:/-]{1,32}\Z")
-_TOOL_LABELS = _BARE_TOOLS | frozenset(
-    name + (":" if name in {"npm", "pnpm", "yarn", "bun"} else " ") + target
-    for name, targets in _TOOL_TARGETS.items()
-    for target in targets
+_TOOL_LABELS = (
+    _BARE_TOOLS
+    | {"unclassified"}
+    | frozenset(
+        name + (":" if name in {"npm", "pnpm", "yarn", "bun"} else " ") + target
+        for name, targets in _TOOL_TARGETS.items()
+        for target in targets
+    )
 )
 
 
@@ -179,54 +191,65 @@ def _tool_label(name: str, target: str | None, separator: str = " ") -> str:
     return name
 
 
-def _normalize_tokens(tokens: list[str]) -> str:
+def _normalize_tokens(tokens: TokenView) -> str:
     rt = _rt()
-    tokens = rt._strip_env(tokens)
-    while tokens and tokens[0] in observed_verifiers.SHELL_CONTROL_PREFIXES:
-        tokens = rt._strip_env(tokens[1:])
-    if not tokens:
-        return "other"
-    name = Path(tokens[0]).name
-    module = rt._python_module_invocation(tokens)
-    if module:
-        return _normalize_tokens([module[0], *module[1]])
-    if name in {"uv", "poetry", "npm", "pnpm", "yarn", "bun"}:
-        tail, ambiguous = observed_verifiers.strip_runner_global_options(name, tokens[1:])
-        if ambiguous:
-            return "other"
-        if name in {"uv", "poetry"}:
-            if tail[:1] != ["run"]:
-                return "other"
-            tail, ambiguous = observed_verifiers.strip_runner_run_options(name, tail[1:])
-            return "other" if ambiguous else _normalize_tokens(tail)
-        script = observed_verifiers.package_runner_script(tail)
-        if name in {"pnpm", "yarn", "bun"} and tail and tail[0] in _TOOL_TARGETS[name]:
-            script = tail[0]
-        return _tool_label(name, script, ":")
-    if name == "npx":
-        tail, ambiguous = observed_verifiers.strip_npx_options(tokens[1:])
-        return "other" if ambiguous else _normalize_tokens(tail)
-    for suffix in ("scripts/verify", "scripts/verify-focused"):
-        if tokens[0].replace("\\", "/").endswith(suffix):
-            return suffix
-    if name == "make":
-        tail, ambiguous = observed_verifiers.strip_make_global_options(tokens[1:])
-        return _tool_label("make", tail[0] if tail and not ambiguous else None)
-    if name in {"go", "cargo", "ruff"} and len(tokens) > 1:
-        return _tool_label(name, tokens[1])
-    return name if name in _BARE_TOOLS else "other"
+    while tokens:
+        tokens = rt._strip_env(tokens)
+        if not tokens:
+            break
+        head = tokens[0]
+        if head in observed_verifiers.SHELL_CONTROL_PREFIXES:
+            tokens = tokens.drop(1)
+            continue
+        name = Path(head).name
+        module = rt._python_module_invocation(tokens)
+        if module:
+            tokens = module[1].prepend([module[0]])
+            continue
+        if name in {"uv", "poetry", "npm", "pnpm", "yarn", "bun"}:
+            tail, ambiguous = observed_verifiers.strip_runner_global_options(name, tokens.drop(1))
+            if ambiguous:
+                break
+            if name in {"uv", "poetry"}:
+                if not tail or tail[0] != "run":
+                    break
+                tokens, ambiguous = observed_verifiers.strip_runner_run_options(name, tail.drop(1))
+                if ambiguous:
+                    break
+                continue
+            script = observed_verifiers.package_runner_script(tail)
+            if name in {"pnpm", "yarn", "bun"} and tail and tail[0] in _TOOL_TARGETS[name]:
+                script = tail[0]
+            return _tool_label(name, script, ":")
+        if name == "npx":
+            tokens, ambiguous = observed_verifiers.strip_npx_options(tokens.drop(1))
+            if ambiguous:
+                break
+            continue
+        normalized = head.replace("\\", "/")
+        for suffix in ("scripts/verify", "scripts/verify-focused"):
+            if normalized.endswith(suffix):
+                return suffix
+        if name == "make":
+            tail, ambiguous = observed_verifiers.strip_make_global_options(tokens.drop(1))
+            return _tool_label("make", tail[0] if tail and not ambiguous else None)
+        if name in {"go", "cargo", "ruff"} and len(tokens) > 1:
+            return _tool_label(name, tokens[1])
+        return name if name in _BARE_TOOLS else "other"
+    return "other"
 
 
 def normalize_tool(command: str) -> str:
-    if not isinstance(command, str):
+    if not isinstance(command, str) or len(command) > MAX_COMMAND_CHARS:
         return "other"
     rt = _rt()
-    try:
-        segment = rt._shell_tokens(observed_verifiers.first_verifier_command(command))
-        label = _normalize_tokens(segment)
-        return label if label in _TOOL_LABELS else "other"
-    except (ValueError, RecursionError):
-        return "other"
+    with command_event() as budget:
+        try:
+            segment = rt._shell_tokens(observed_verifiers.first_verifier_command(command))
+            label = _normalize_tokens(TokenView(segment, budget))
+            return label if label in _TOOL_LABELS else "other"
+        except (ValueError, RecognitionLimit):
+            return "other"
 
 
 _KIND_BY_TOOL = {
@@ -255,6 +278,8 @@ _KIND_BY_TOOL = {
 
 
 def check_kind(tool: str) -> str:
+    if tool == "unclassified":
+        return tool
     if tool.startswith("ruff "):
         return "lint"
     runner, _, script = tool.partition(":")
@@ -272,8 +297,9 @@ def _command_secrets(command: str) -> str:
     Invalid shell syntax loses the entire command through a conservative regex
     fallback. Markers never depend on the secret's contents or length.
     """
+    charge_event(len(command))
     try:
-        tokens = shlex.split(command)
+        tokens = split_posix(command)
     except ValueError:
         return re.sub(r"[\s\S]+", lambda _: REDACTED, command)
     hide_next = False
@@ -500,6 +526,7 @@ def build_check(
     exit_code: int | None = None,
     duration_ms: int | None = None,
     fingerprint_tree: bool = True,
+    unclassified: bool = False,
 ) -> ObservedCheck:
     check_capture_deadline()
     tree = localio.tree_fingerprint(target) if fingerprint_tree else None
@@ -512,11 +539,13 @@ def build_check(
         model_source=identity.model_source,
         session_fingerprint=_session_digest(target, session_fingerprint),
         tree_fingerprint=tree,
-        tool=normalize_tool(command),
-        command_digest=command_digest(command, target),
-        status=status if status in STATUSES else "unknown",
-        exit_code=exit_code,
-        duration_ms=duration_ms if type(duration_ms) is int and 0 <= duration_ms <= 86400000 else None,
+        tool="unclassified" if unclassified else normalize_tool(command),
+        command_digest=DIGEST_UNAVAILABLE if unclassified else command_digest(command, target),
+        status=status if not unclassified and status in STATUSES else "unknown",
+        exit_code=None if unclassified else exit_code,
+        duration_ms=(
+            duration_ms if not unclassified and type(duration_ms) is int and 0 <= duration_ms <= 86400000 else None
+        ),
     )
 
 

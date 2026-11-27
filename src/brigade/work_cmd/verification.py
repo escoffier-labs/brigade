@@ -241,7 +241,7 @@ def _verify_parse_command(command: str, target: Path) -> tuple[list[str] | None,
         env[key] = value
     if not argv:
         return None, env, "command contains only environment assignments"
-    executable = Path(argv[0]).name
+    executable = constants.normalize_policy_executable(argv[0])
     if executable in constants.SCANNER_HIGH_RISK_COMMANDS:
         return None, env, _high_risk_command_message(executable)
     if any(_verification_shell_meta_re().search(part) for part in argv):
@@ -279,7 +279,7 @@ def _verify_parse_argv(argv: list[str], target: Path) -> tuple[list[str] | None,
         return None, {}, "empty command"
     if any("\x00" in arg for arg in argv):
         return None, {}, "verification command contains NUL characters"
-    executable = Path(argv[0]).name
+    executable = constants.normalize_policy_executable(argv[0])
     if executable in constants.SCANNER_HIGH_RISK_COMMANDS:
         return None, {}, _high_risk_command_message(executable)
     if _verify_token_is_path(argv[0]):

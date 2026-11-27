@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 import json
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -258,7 +259,7 @@ def _review_stamp_completed_tasks(target: Path, run_id: str) -> list[str]:
 
 def _review_run_one(target: Path, reviewer: dict[str, Any]) -> dict[str, Any]:
     reviewer_id = str(reviewer.get("id") or "reviewer")
-    command = str(reviewer.get("command") or "")
+    command = reviewer.get("command") or ""
     argv, blocker = config_mod._review_argv(command)
     output_path = config_mod._review_output_path(target, reviewer)
     findings_path = config_mod._review_findings_path(target, reviewer)
@@ -278,7 +279,7 @@ def _review_run_one(target: Path, reviewer: dict[str, Any]) -> dict[str, Any]:
         "path": str(run_dir),
         "target": str(target),
         "cwd": str(cwd),
-        "command_label": command,
+        "command_label": shlex.join(command) if isinstance(command, list) else command,
         "argv": argv or [],
         "started_at": started.isoformat(),
         "timeout": reviewer.get("timeout"),
@@ -336,6 +337,7 @@ def _review_run_one(target: Path, reviewer: dict[str, Any]) -> dict[str, Any]:
             argv,
             cwd=cwd,
             check=False,
+            shell=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
@@ -404,13 +406,14 @@ def _review_plan_payload(target: Path) -> dict[str, Any]:
     reviewers, errors = config_mod._load_review_config(target)
     planned: list[dict[str, Any]] = []
     for reviewer in reviewers:
-        argv, blocker = config_mod._review_argv(str(reviewer.get("command") or ""))
+        command = reviewer.get("command")
+        argv, blocker = config_mod._review_argv(command or "")
         planned.append(
             {
                 "id": reviewer.get("id"),
                 "name": reviewer.get("name"),
                 "enabled": reviewer.get("enabled", True),
-                "command": reviewer.get("command"),
+                "command": shlex.join(command) if isinstance(command, list) else command,
                 "argv": argv or [],
                 "blocker": blocker,
                 "cwd": str(config_mod._review_cwd(target, reviewer)),

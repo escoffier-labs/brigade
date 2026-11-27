@@ -1,0 +1,1 @@
+- Document how Codex Cloud workers reach the cloud-agent connector: HTTP network secrets that the environment proxy substitutes, a task started by hand from the Codex app, and the urllib User-Agent block. The capability table links the observed round trip.

@@ -266,3 +266,68 @@ def test_overview_routing_links_select_the_role_without_fragments(tmp_path):
             assert_selection(page, link["data-routing-role"])
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize(
+    ("state", "expected_worker", "expected_reviewer"),
+    [("active", "seat-alpha", "seat-beta"), ("staged", "seat-beta", None)],
+)
+def test_approved_models_display_preserves_dispatch_projection(
+    tmp_path, monkeypatch, state, expected_worker, expected_reviewer
+):
+    from brigade import fleet_hub_preference, fleet_live_routing, fleet_policy_migration, run_preference
+
+    monkeypatch.setattr(fleet_policy_migration, "is_activated", lambda conn: state == "active")
+    conn = fleet_hub.init_db(tmp_path / "fixture.db")
+    try:
+        _seed(conn)
+        conn.execute(
+            "INSERT INTO run_preference (id,impl,updated_at) VALUES (1,'seat-beta','fixture') "
+            "ON CONFLICT(id) DO UPDATE SET impl='seat-beta'"
+        )
+        activation = policy.Activation(state, "fixture")
+        view = roster.load_view(conn, deck.DeckConfig(), activation=activation)
+        before = fleet_hub_preference.get_run_preference(conn)
+        routing = fleet_live_routing.project(view)
+        expected_roles = dict.fromkeys(run_preference.ROLE_FIELDS) | {
+            "impl": expected_worker,
+            "review": expected_reviewer,
+        }
+        assert {role: before[role] for role in run_preference.ROLE_FIELDS} == expected_roles
+        assert {role.key: role.seat for role in routing.roles} == expected_roles
+
+        # render_overview takes the frozen Routing and no connection, so it cannot write dispatch state;
+        # the two assertions above pin what dispatch reads.
+        page = fleet_live_routing.render_overview(routing, NOW)
+    finally:
+        conn.close()
+
+    markup = Markup(page)
+    section = next(i for i, (_, attrs) in enumerate(markup.tags) if attrs.get("aria-labelledby") == "approved-models")
+    assert "Approved models (display only)" in markup.text[section]
+    assert "Dispatch uses the assignment above." in markup.text[section]
+    lanes = markup.descendants(section, "span")
+    models = markup.descendants(section, "strong")
+    assert [markup.text[i] for i in lanes] == [
+        "Worker",
+        "Reviewer",
+        "Orchestrator",
+        "Researcher and Scout",
+        "Security reviewer",
+        "Second opinion",
+        "Writing",
+    ]
+    assert [markup.text[i] for i in models] == [
+        "GPT 6.2 Sol (medium), GPT 6 Luna, DeepSeek V4.1 Flash (opencode Go), Claude Sonnet 5.5 (Claude builds)",
+        "DeepSeek V4.1 Flash (opencode Go) and Gemini 4 Hydrogen (first pass), Claude Opus 5.5 (final)",
+        "Claude Opus 5.5",
+        "DeepSeek V4.1 Flash (opencode Go) first",
+        "GPT Daybreak Blue",
+        "GPT 6.2 Astra and Claude Fable 5.2, low or medium effort, sign-off required",
+        "Gemini 4 Neon (via agy)",
+    ]
+    codes = markup.descendants(section, "code")
+    rendered_ids = [markup.text[i] for i in codes]
+    assert rendered_ids == [ids for _, _, ids in fleet_live_routing._APPROVED_MODELS]
+    assert rendered_ids[0] == "gpt-6.2-sol, gpt-6-luna, opencode-go/deepseek-v4.1-flash, claude-sonnet-5-5"
+    assert not markup.descendants(section, "a")

@@ -1,0 +1,1 @@
+- Record Codex Cloud launch intents before submission and recover ambiguous launches with `brigade run cloud sync`.

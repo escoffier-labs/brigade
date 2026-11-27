@@ -52,10 +52,14 @@ class Repo:
             raise GitError(f"not a commit: {ref}")
         return sha
 
-    def show(self, commit: str, path: str) -> bytes | None:
-        """Bytes of ``path`` at ``commit``, or None when the path is absent."""
+    def show(self, commit: str, path: str, *, strict: bool = False) -> bytes | None:
+        """Read a blob. In strict mode only an absent path returns None."""
         completed = self._run("cat-file", "blob", f"{commit}:{path}", check=False)
-        return completed.stdout if completed.returncode == 0 else None
+        if completed.returncode == 0:
+            return completed.stdout
+        if strict and self._run("ls-tree", "--full-tree", commit, "--", path).stdout:
+            raise GitError(f"unreadable path: {path}")
+        return None
 
     def snapshot(self, commit: str, directory: str) -> dict[str, bytes]:
         """Every file under ``directory`` at ``commit``, keyed by path relative to it."""

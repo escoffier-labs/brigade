@@ -7,10 +7,14 @@ import json
 import os
 import stat
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .removed_commands import REMOVED_IN
+
+if TYPE_CHECKING:
+    from .. import cloud_tracker
 
 _PROMPT_FILE_MAX_BYTES = 64 * 1024
 _LAUNCH_LABEL_MAX = 120
@@ -36,6 +40,9 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     )
     p_sync.add_argument("--target", type=Path, default=Path("."))
     p_sync.add_argument("--json", action="store_true", help="Emit the sync JSON contract.")
+    p_sync.add_argument(
+        "--codex-leases-only", action="store_true", help="Renew or release only this workspace's Codex Cloud leases."
+    )
 
     p_launch = cloud_sub.add_parser(
         "launch",
@@ -75,7 +82,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     p_land.add_argument("--target", type=Path, default=Path("."))
     p_land.add_argument("--provider", required=True, choices=("codex-cloud",))
     p_land.add_argument("--task-id", required=True)
-    p_land.add_argument("--issue", required=True, type=int)
+    p_land.add_argument("--issue", type=int, help="Reference this issue in the pull request.")
     p_land.add_argument("--closes", action="store_true", help="Use Closes #N instead of Refs #N in the PR body.")
     p_land.add_argument("--json", action="store_true")
 
@@ -501,14 +508,21 @@ def dispatch(args) -> int:
                 from .. import codex_cloud
 
                 codex_cloud.require_hub_lease_storage()
-                entry = next(
-                    (
-                        row
-                        for row in cloud_tracker.load_registry(target)["entries"]
-                        if row.get("provider") == "codex-cloud" and row.get("task_id") == args.task_id
-                    ),
-                    None,
+                entry = codex_cloud.recover_registered_launch(
+                    target,
+                    task_id=args.task_id,
+                    repo=args.repo,
                 )
+                recovered = entry is not None
+                if not recovered:
+                    entry = next(
+                        (
+                            row
+                            for row in cloud_tracker.load_registry(target)["entries"]
+                            if row.get("provider") == "codex-cloud" and row.get("task_id") == args.task_id
+                        ),
+                        None,
+                    )
             if entry is None:
                 entry = cloud_tracker.register(
                     target,
@@ -532,16 +546,19 @@ def dispatch(args) -> int:
                     ),
                 )
             if args.provider == "codex-cloud":
-                from .. import codex_cloud
-
-                codex_cloud.acquire_registered_task_lease(
-                    target,
-                    task_id=str(entry["task_id"]),
-                    label=str(entry["label"]),
-                    prompt_hash=entry.get("prompt_hash"),
-                    repo=args.repo or codex_cloud._repo_from_cwd(target),
-                )
-                entry = {key: value for key, value in entry.items() if key != "lease_holder"}
+                if not recovered:
+                    entry = (
+                        codex_cloud.acquire_registered_task_lease(
+                            target,
+                            task_id=args.task_id,
+                            label=str(entry["label"]),
+                            prompt_hash=entry.get("prompt_hash"),
+                            repo=args.repo or codex_cloud._repo_from_cwd(target),
+                            check_launch_title=False,
+                        )
+                        or entry
+                    )
+                entry = {key: value for key, value in entry.items() if key not in {"lease_holder", "launch_lease_id"}}
         except (ValueError, OSError, RuntimeError) as exc:
             print(f"error: {exc}", file=sys.stderr)
             return 2
@@ -579,9 +596,25 @@ def dispatch(args) -> int:
         return 0
 
     if command == "sync":
-        from .. import fleet_client
+        from .. import codex_cloud, fleet_client
 
+        if args.codex_leases_only:
+            # Scheduled maintenance has a fixed budget and only touches bound leases.
+            sync_result = codex_cloud.sync_leases(target)
+            if args.json:
+                print(json.dumps(sync_result, sort_keys=True))
+            else:
+                print("Codex Cloud leases " + " ".join(f"{name}={value}" for name, value in sync_result.items()))
+            return int(bool(sync_result["errors"]))
+
+        inventory_started = datetime.now(timezone.utc)
         observations, github = cloud_tracker.observe_provider_details(target)
+        launch_intents = codex_cloud.reconcile_launches(target)
+        reconciled_codex_tasks = frozenset(
+            row["task_id"]
+            for row in launch_intents
+            if row["state"] == "tracked" and isinstance(row.get("task_id"), str)
+        )
         provider_tasks = cloud_tracker._legacy_provider_tasks(observations)  # noqa: SLF001 - compatibility projection
         cursor_wired = observations["cursor-cloud"].configured
         hub_leases: list[dict[str, Any]] = []
@@ -595,12 +628,16 @@ def dispatch(args) -> int:
             pass
         payload = cloud_tracker.sync_payload(
             target,
+            now=inventory_started,
             provider_tasks=provider_tasks,
             github=github,
             cursor_wired=cursor_wired,
             provider_observations=observations,
             hub_leases=hub_leases,
+            reconciled_codex_tasks=reconciled_codex_tasks,
         )
+        if launch_intents:
+            payload["launch_intents"] = launch_intents
         if args.json:
             print(json.dumps(payload, indent=2, sort_keys=True))
             return 0
@@ -615,8 +652,14 @@ def dispatch(args) -> int:
             print(
                 f"  landing: task={row.get('task_id')} state={row.get('landing_state')} commit={row.get('landing_commit')}"
             )
+        for row in payload.get("ready_landings", []):
+            print(f"  ready to collect: {row['next_command']}")
+        for row in payload.get("needs_investigation", []):
+            print(f"  needs-investigation: task={row.get('task_id')} label={row.get('label')}")
         for row in payload.get("needs_you", []):
             print(f"  needs-you: {row.get('detail')}")
+        for row in launch_intents:
+            print(f"  launch: {row['tag']} {row['state']} ({row['reason']})")
         return 0
 
     if command == "status":
@@ -651,10 +694,14 @@ def dispatch(args) -> int:
             extra = f" url={url}" if url else ""
             if row.get("landing_state"):
                 extra += f" landing={row['landing_state']} commit={row.get('landing_commit')}"
+            if row.get("launch_state"):
+                extra += f" launch={row['launch_state']} tag={row.get('launch_tag')}"
             print(
                 f"  - [{row.get('classification')}] {row.get('label')} "
                 f"provider={row.get('provider')} task={row.get('task_id')} branch={row.get('branch')}{extra}"
             )
+            if row.get("next_command"):
+                print(f"    ready to collect: {row['next_command']}")
         return 0
 
     if command == "sweep":
@@ -959,7 +1006,10 @@ def _dispatch_cloud_ops(args, target: Path) -> int:
         print(f"error: unknown cloud command: {command}", file=sys.stderr)
         return 2
 
-    observation = cloud_tracker.observe_provider(args.provider, target)
+    if args.provider == "grokbot-cloud":
+        observation = _observe_explicit_grokbot()
+    else:
+        observation = cloud_tracker.observe_provider(args.provider, target)
     provider_result: dict[str, Any] = {
         "ok": observation.configured and observation.reachable and observation.reason is None,
         "provider": args.provider,
@@ -1025,6 +1075,21 @@ def _dispatch_cloud_ops(args, target: Path) -> int:
             print(f"task_count: {provider_result['task_count']}")
             print("apply: no")
     return 0 if provider_result["ok"] else 1
+
+
+def _observe_explicit_grokbot() -> cloud_tracker.ProviderObservation:
+    from .. import cloud_tracker, fleet_client_grokbot
+
+    try:
+        decision = fleet_client_grokbot.whoami()
+    except Exception:  # noqa: BLE001 - provider health must stay bounded
+        return cloud_tracker.ProviderObservation(True, False, "transport-failure", {})
+    if decision.granted:
+        return cloud_tracker.ProviderObservation(True, True, None, {})
+    reason = _grokbot_health_reason(decision.reason)
+    configured = reason != "unconfigured"
+    reachable = reason not in {"unconfigured", "actor-not-enrolled", "auth-failure", "transport-failure"}
+    return cloud_tracker.ProviderObservation(configured, reachable, reason, {})
 
 
 def _grokbot_health_reason(reason: str) -> str:

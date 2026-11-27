@@ -16,7 +16,7 @@ if TYPE_CHECKING:
 CSS = """
 .overview-routing{border:1px solid var(--line);border-radius:var(--radius-card);background:transparent}
 .overview-routing header{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;padding:12px 16px;border-bottom:1px solid var(--line)}
-.overview-routing h2{margin:0;font-size:14px;font-weight:600}.overview-routing p{color:var(--muted);font-size:12px;margin:0;padding:8px 16px}
+.overview-routing :is(h2,h3){margin:0;font-size:14px;font-weight:600}.overview-routing p{color:var(--muted);font-size:12px;margin:0;padding:8px 16px}
 .routing-roles{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))}
 .routing-role{display:flex;align-items:baseline;justify-content:space-between;gap:12px;padding:9px 16px;border-top:1px solid var(--line-quiet);min-width:0;overflow-wrap:anywhere;font-size:13px}
 .routing-roles .routing-role:nth-child(-n+2){border-top:0}
@@ -25,8 +25,37 @@ CSS = """
 .routing-role span{font-size:13px;color:var(--muted);flex:0 0 auto}
 .routing-role strong{font-size:13px;color:var(--ink);font-weight:500;text-align:right}
 .overview-routing .investigation{padding:0 16px 8px}
+.routing-approved{border-top:1px solid var(--line)}
+.routing-approved .routing-role div{min-width:0;text-align:right}
+.routing-approved code{display:block;color:var(--muted);font-size:11px;margin-top:3px}
+.routing-approved .routing-role:hover{background:transparent}
 @media(max-width:700px){.routing-roles{grid-template-columns:minmax(0,1fr)}.routing-roles .routing-role:nth-child(odd){border-right:0}.routing-roles .routing-role:nth-child(2){border-top:1px solid var(--line-quiet)}}
+@media(max-width:700px){.routing-approved .routing-role{display:block}.routing-approved .routing-role div,.routing-approved .routing-role strong{text-align:left}}
 """
+
+
+# Maintained by hand for display only. Dispatch does not read this list.
+_APPROVED_MODELS = (
+    (
+        "Worker",
+        "GPT 6.2 Sol (medium), GPT 6 Luna, DeepSeek V4.1 Flash (opencode Go), Claude Sonnet 5.5 (Claude builds)",
+        "gpt-6.2-sol, gpt-6-luna, opencode-go/deepseek-v4.1-flash, claude-sonnet-5-5",
+    ),
+    (
+        "Reviewer",
+        "DeepSeek V4.1 Flash (opencode Go) and Gemini 4 Hydrogen (first pass), Claude Opus 5.5 (final)",
+        "opencode-go/deepseek-v4.1-flash, gemini-4-hydrogen-high, claude-opus-5-5",
+    ),
+    ("Orchestrator", "Claude Opus 5.5", "claude-opus-5-5"),
+    ("Researcher and Scout", "DeepSeek V4.1 Flash (opencode Go) first", "opencode-go/deepseek-v4.1-flash"),
+    ("Security reviewer", "GPT Daybreak Blue", "gpt-daybreak-blue-latest"),
+    (
+        "Second opinion",
+        "GPT 6.2 Astra and Claude Fable 5.2, low or medium effort, sign-off required",
+        "gpt-6.2-astra, claude-fable-5-2",
+    ),
+    ("Writing", "Gemini 4 Neon (via agy)", "gemini-4-neon"),
+)
 
 
 @dataclass(frozen=True)
@@ -166,6 +195,11 @@ def render_overview(routing: Routing, now: datetime) -> str:
         if routing.uncertain or problems
         else ""
     )
+    approved_rows = "".join(
+        f'<div class="routing-role"><span>{escape(lane)}</span>'
+        f"<div><strong>{escape(models)}</strong><code>{escape(model_ids)}</code></div></div>"
+        for lane, models, model_ids in _APPROVED_MODELS
+    )
     return (
         '<section class="overview-routing" id="overview-routing" aria-labelledby="overview-routing-title">'
         '<header><h2 id="overview-routing-title">Live routing</h2>'
@@ -173,5 +207,10 @@ def render_overview(routing: Routing, now: datetime) -> str:
         f'<div class="routing-roles">{rows}</div>'
         '<div data-audience="agent">'
         f"<p>{escape(routing.detail)} Source: {escape(routing.source)} \u00b7 Activation: {escape(routing.activation)}.</p>"
-        "<p>Configured assignment; provider availability and sign-in are unverified.</p></div>" + prompt + "</section>"
+        "<p>Configured assignment; provider availability and sign-in are unverified.</p></div>"
+        f"{prompt}"
+        '<section class="routing-approved" aria-labelledby="approved-models">'
+        '<header><h3 id="approved-models">Approved models (display only)</h3></header>'
+        "<p>Dispatch uses the assignment above.</p>"
+        f'<div class="routing-roles">{approved_rows}</div></section></section>'
     )

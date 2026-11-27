@@ -88,13 +88,21 @@ def _on_event(
         return
     tool_input = payload.get("tool_input")
     command = tool_input.get("command") if isinstance(tool_input, dict) else None
-    if not isinstance(command, str) or len(command) > 65536 or not observed_verifiers.is_raw_verification(command):
+    verdict = rt._recognize(command)
+    budget = rt.EVENT_BUDGET.get()
+    unclassified = verdict is rt.Recognition.UNDECIDED or (budget is not None and budget.unreadable)
+    if not isinstance(command, str) or (verdict is rt.Recognition.NO and not unclassified):
         return
     status, code = claude_status(event, payload)
     duration = payload.get("duration_ms")
     duration = duration if type(duration) is int and duration >= 0 else None
-    for governed, mode in observed_verifiers.governing_modes(command, payload.get("cwd"), target):
-        if mode == "observe":
+    modes = (
+        [(target, work_mode.resolve_mode(target))]
+        if unclassified
+        else observed_verifiers.governing_modes(command, payload.get("cwd"), target)
+    )
+    for governed, mode in modes:
+        if unclassified or mode == "observe":
             # The pin and home policy apply to every destination, as they do for write tracking.
             if governed != target and rt.effective_hook_target({"cwd": str(governed)}, pin=pin) != governed:
                 continue
@@ -112,6 +120,7 @@ def _on_event(
                     identity=identity,
                     fingerprint_tree=False,
                     session_fingerprint=session_id,
+                    unclassified=unclassified,
                 ),
             )
 
@@ -124,17 +133,13 @@ def failure_followup(
     raw_tool_input = payload.get("tool_input")
     tool_input = raw_tool_input if isinstance(raw_tool_input, dict) else {}
     command = tool_input.get("command")
-    if not isinstance(command, str) or len(command) > 65536:
-        return None
     rt = _rt()
-    try:
-        if not (observed_verifiers.is_raw_verification(command) or rt._is_routed_verify(command)):
-            return None
-        modes = observed_verifiers.governing_modes(command, payload.get("cwd"), target)
-        strict = any(mode == work_mode.MODE_STRICT for _, mode in modes) if modes else work_mode.is_strict(target)
-    except Exception:  # Advisory recognition must not interrupt hook handling.
+    if not isinstance(command, str) or len(command) > rt.MAX_COMMAND_CHARS:
         return None
-    if not strict:
+    try:
+        if not rt._is_routed_verify(command) or not work_mode.is_strict(target):
+            return None
+    except Exception:  # Advisory recognition must not interrupt hook handling.
         return None
     from .. import outcome_attribution, outcome_cmd
 

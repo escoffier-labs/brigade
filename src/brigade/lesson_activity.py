@@ -5,13 +5,13 @@ from __future__ import annotations
 import json
 import os
 import re
-import shlex
 import stat
 import time
 import uuid
 from pathlib import Path
 from typing import Any
 
+from .claude_hooks.command_tokens import MAX_COMMAND_CHARS, RecognitionLimit, charge_event, split_posix
 from . import dirfd, guard, lesson_auth, lesson_io as io, localio, receipt_signing
 from .component_paths import cache_root
 from .handoff_ingest_rules import sha256_hex
@@ -142,14 +142,17 @@ def record_event(target: Path, event: str, payload: dict[str, Any], *, now: floa
         metadata: dict[str, Any] = {}
         command = payload.get("tool_input")
         command = command.get("command", command.get("cmd")) if isinstance(command, dict) else command
-        if event in {"PostToolUse", "PostToolUseFailure"} and isinstance(command, str):
+        if (
+            event in {"PostToolUse", "PostToolUseFailure"}
+            and isinstance(command, str)
+            and len(command) <= MAX_COMMAND_CHARS
+        ):
             try:
-                lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
-                lexer.whitespace_split = True
-                argv = list(lexer)
+                charge_event(2 * len(command))
+                argv = split_posix(command, punctuation="();<>|&", comments=True)
                 if any(token in {";", "&&", "||", "|", "&", ">", "<", "(", ")"} for token in argv):
                     argv = []
-            except ValueError:
+            except (ValueError, RecognitionLimit):
                 argv = []
             if argv[:4] == ["brigade", "work", "verify", "run"]:
                 metadata["verify_command"] = True
