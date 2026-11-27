@@ -42,6 +42,8 @@ _PLAN_CHARS = 16 * 1024
 _PLAN_TOKENS = 1024
 _WRAPPER_DEPTH = 8
 _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_CHECK_ENV_NAMES = {"PY"}  # The required verify scripts document PY as their toolchain selector.
+_READ_ONLY_OPTIONS = {"--version", "--help", "-h", "--collect-only", "--co"}
 _ARGV_VERDICTS = {"not_the_required_check", "no_selector", "no_tests_passed"}
 _TreeEntries = dict[str, tuple[bytes, bytes]]
 
@@ -486,19 +488,35 @@ _WRAPPER_VALUES = {
     "timeout": {"-k", "--kill-after", "-s", "--signal"},
     "stdbuf": {"-i", "--input", "-o", "--output", "-e", "--error"},
 }
-_OPAQUE_LAUNCHERS = constants.SCANNER_HIGH_RISK_COMMANDS | constants._POLICY_LAUNCHERS | {"eval", "make"}
+_OPAQUE_LAUNCHERS = constants.SCANNER_HIGH_RISK_COMMANDS | constants._POLICY_LAUNCHERS | {"eval", "just", "make", "tox"}
 _INTERPRETERS = {"node", "ruby", "perl", "php"}
+_PYTHON_LAUNCHER = re.compile(r"python[0-9.]*|py")
+_PYTHON_VALUE_OPTIONS = {"-W", "-X", "--check-hash-based-pycs"}
+_SHELL_LAUNCHERS = {"bash", "sh", "dash", "zsh", "ksh", "fish"}
+_SHELL_COMMAND = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
+_FIRST_SCRIPT_WORD = re.compile(r"""^\s*(?:exec\s+)?(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))""")
+_SCRIPT_SUFFIXES = {"py", "sh", "bash", "rb", "js", "pl", "exe", "bat", "cmd"}
+_PYTEST_ALIAS = re.compile(r"^py\.test(?=$|\.(?:exe|cmd|bat)$)")
 _DURATION = re.compile(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)[smhd]?")
 
 
-def _unwrap(argv: tuple[str, ...], launcher: str) -> tuple[str, ...] | None:
+def _check_env_allowed(names: Sequence[str], *, windows: bool) -> bool:
+    return all((name.upper() if windows else name) in _CHECK_ENV_NAMES for name in names)
+
+
+def _unwrap(argv: tuple[str, ...], launcher: str, *, windows: bool) -> tuple[tuple[str, ...], bool] | None:
     index = 1
+    changes_env = False
     values = _WRAPPER_VALUES.get(launcher, set())
     while index < len(argv):
         arg = argv[index]
         if arg == "--":
             index += 1
             break
+        if launcher == "env":
+            changes_env |= (
+                arg in {"-", "-i", "--ignore-environment"} or arg[:2] == "-u" or (arg.partition("=")[0] == "--unset")
+            )
         if arg in _WRAPPER_FLAGS[launcher] or (launcher == "nice" and re.fullmatch(r"-[0-9]+", arg)):
             index += 1
         elif arg in values:
@@ -515,12 +533,15 @@ def _unwrap(argv: tuple[str, ...], launcher: str) -> tuple[str, ...] | None:
         if index >= len(argv) or not _DURATION.fullmatch(argv[index]):
             return None
         index += 1
+    env_start = index
     if launcher == "env":
         while index < len(argv) and _ENV_ASSIGNMENT.match(argv[index]):
             index += 1
     elif index < len(argv) and _ENV_ASSIGNMENT.match(argv[index]):
         return None
-    return argv[index:]
+    names = [arg.partition("=")[0] for arg in argv[env_start:index]]
+    transparent = (not changes_env or bool(names)) and _check_env_allowed(names, windows=windows)
+    return argv[index:], transparent
 
 
 def _without_assignments(argv: Sequence[str]) -> tuple[str, ...]:
@@ -533,20 +554,31 @@ def _generic_launcher(name: str) -> bool:
         name in _OPAQUE_LAUNCHERS
         or name in _WRAPPER_FLAGS
         or name in _INTERPRETERS
-        or re.fullmatch(r"python[0-9.]*|py", name) is not None
+        or _PYTHON_LAUNCHER.fullmatch(name) is not None
     )
 
 
 def _launcher_target(launcher: str, args: Sequence[str]) -> str:
     if launcher in _WRAPPER_FLAGS:
-        unwrapped = _unwrap((launcher, *args), launcher)
-        if unwrapped:
-            return unwrapped[0]
+        unwrapped = _unwrap((launcher, *args), launcher, windows=False)
+        if unwrapped is not None and unwrapped[0]:
+            return unwrapped[0][0]
     subcommands = constants._POLICY_LAUNCHER_SUBCOMMANDS.get(launcher, set())
     if launcher == "npm":
         subcommands = subcommands | {"run"}
+    python = _PYTHON_LAUNCHER.fullmatch(launcher) is not None
     values = iter(args)
     for arg in values:
+        if python:
+            if arg in _PYTHON_VALUE_OPTIONS:
+                next(values, None)
+                continue
+            if arg.startswith("-c") or arg == "-":
+                return ""
+            if arg.startswith("-m") and len(arg) > 2:
+                return arg[2:]
+        if launcher in _SHELL_LAUNCHERS and _SHELL_COMMAND.fullmatch(arg):
+            return ""
         if arg in {"-m", "--"}:
             return next(values, "")
         if arg and not arg.startswith("-") and not _ENV_ASSIGNMENT.match(arg):
@@ -556,56 +588,91 @@ def _launcher_target(launcher: str, args: Sequence[str]) -> str:
     return ""
 
 
-def _mentions_check(args: Sequence[str], names: set[str], *, windows: bool) -> bool:
-    terms = "|".join(re.escape(name) for name in sorted(names) if name)
-    if not terms:
+def _script_suffix(name: str) -> tuple[str, bool]:
+    stem, _, suffix = name.rpartition(".")
+    return (stem, True) if suffix.casefold() in _SCRIPT_SUFFIXES else (name, False)
+
+
+def _mentions_check(launcher: str, args: Sequence[str], name: str, *, windows: bool) -> bool:
+    if not name:
         return False
-    script_suffix = r"(?:\.(?:py|sh|bash|rb|js|pl|exe|bat|cmd))?"
-    mention = re.compile(rf"(?<![\w.-])(?:{terms}){script_suffix}(?![\w.-])", re.IGNORECASE if windows else 0)
-    return any(mention.search(arg) for arg in args)
+    terms = (name, "py.test") if name == "pytest" else (name,)
+    alternatives = "|".join(re.escape(term) for term in terms)
+    flags = re.IGNORECASE if windows else 0
+    script_suffix = "|".join(sorted(_SCRIPT_SUFFIXES))
+    mention = re.compile(rf"(?<![\w.-])(?:{alternatives})(?:\.(?:{script_suffix}))?(?![\w.-])", flags)
+    if any(mention.search(arg) for arg in args):
+        return True
+
+    target = _launcher_target(launcher, args)
+    if not target and launcher in _SHELL_LAUNCHERS:
+        source = next(
+            (value for option, value in zip(args, args[1:], strict=False) if _SHELL_COMMAND.fullmatch(option)), ""
+        )
+        if first := _FIRST_SCRIPT_WORD.match(source):
+            target = next(word for word in first.groups() if word is not None)
+    path = target.replace("\\", "/")
+    script = path.rsplit("/", 1)[-1]
+    stem, is_script = _script_suffix(script)
+    if not is_script or (script.startswith("test_") and "tests" in path.split("/")[:-1]):
+        return False
+    segments = "|".join(re.escape(_script_suffix(term)[0]) for term in terms)
+    return re.search(rf"(?:^|[-_])(?:{segments})(?:$|[-_])", stem, flags) is not None
+
+
+def _runner_alias(program: str) -> str:
+    directory, separator, name = program.rpartition("/")
+    return directory + separator + _PYTEST_ALIAS.sub("pytest", name)
 
 
 def _required_identity(
-    argv: Sequence[str], prefix: Sequence[str], *, windows: bool
+    argv: Sequence[str], prefix: Sequence[str], *, windows: bool, env_names: Sequence[str] = ()
 ) -> tuple[str, ...] | Literal["ambiguous"] | None:
     """Return canonical argv for a match, or ambiguous evidence of a possible match."""
     if not prefix:
         return None
+    transparent_env = _check_env_allowed(env_names, windows=windows)
     if _ENV_ASSIGNMENT.match(prefix[0]):
-        return tuple(argv) if tuple(argv[: len(prefix)]) == tuple(prefix) else None
+        if tuple(argv[: len(prefix)]) != tuple(prefix):
+            return None
+        return tuple(argv) if transparent_env else "ambiguous"
 
     normalize = partial(constants.normalize_policy_executable, windows=windows)
-    explicit_extension = windows and bool(ntpath.splitext(prefix[0])[1])
-    policy_program = normalize(prefix[0], keep_extension=explicit_extension)
-    policy_launcher = normalize(prefix[0]).rsplit("/", 1)[-1]
+    policy_spelling = _runner_alias(normalize(prefix[0], keep_extension=True))
+    explicit_extension = windows and bool(ntpath.splitext(policy_spelling)[1])
+    policy_program = policy_spelling if explicit_extension else _runner_alias(normalize(prefix[0]))
+    policy_launcher = _runner_alias(normalize(prefix[0])).rsplit("/", 1)[-1]
     policy_bare = "/" not in prefix[0].replace("\\", "/") and not (windows and ntpath.splitdrive(prefix[0])[0])
     generic_policy = _generic_launcher(policy_launcher)
-    names = {policy_launcher}
-    if generic_policy:
-        target = _launcher_target(policy_launcher, prefix[1:])
-        names.add(target.replace("\\", "/").rsplit("/", 1)[-1])
+    target = _launcher_target(policy_launcher, prefix[1:]) if generic_policy else ""
+    name = _runner_alias(normalize(target)).rsplit("/", 1)[-1] if target else policy_launcher
     args = _without_assignments(argv)
+    leading = [arg.partition("=")[0] for arg in argv[: len(argv) - len(args)]]
+    transparent_env &= _check_env_allowed(leading, windows=windows)
     possible_match = False
     for depth in range(_WRAPPER_DEPTH + 1):
         if not args:
             break
-        program = normalize(args[0], keep_extension=explicit_extension)
+        program = _runner_alias(normalize(args[0], keep_extension=explicit_extension))
         directory, _, basename = program.rpartition("/")
-        launcher = normalize(args[0]).rsplit("/", 1)[-1] if explicit_extension else basename
+        launcher = _runner_alias(normalize(args[0])).rsplit("/", 1)[-1] if explicit_extension else basename
         absolute = program.startswith("/") or (windows and ntpath.splitdrive(program)[1].startswith("/"))
         same_program = program == policy_program or (policy_bare and absolute and basename == policy_program)
+        if same_program and len(args) == 2 and args[1] in _READ_ONLY_OPTIONS:
+            return None
         if same_program and tuple(prefix[1:]) == args[1 : len(prefix)]:
-            return (*prefix, *args[len(prefix) :])
+            return (*prefix, *args[len(prefix) :]) if transparent_env else "ambiguous"
         if launcher in _WRAPPER_FLAGS and (not directory or absolute) and depth < _WRAPPER_DEPTH:
-            unwrapped = _unwrap(args, launcher)
+            unwrapped = _unwrap(args, launcher, windows=windows)
             if unwrapped is not None:
-                if same_program and _mentions_check(args[1:], names, windows=windows):
+                if same_program and _mentions_check(launcher, args[1:], name, windows=windows):
                     possible_match = True
-                args = unwrapped
+                args, wrapper_env_allowed = unwrapped
+                transparent_env &= wrapper_env_allowed
                 continue
-        if same_program and not generic_policy:
+        if same_program and not target:
             return "ambiguous"
-        if _generic_launcher(launcher) and _mentions_check(args[1:], names, windows=windows):
+        if _generic_launcher(launcher) and _mentions_check(launcher, args[1:], name, windows=windows):
             return "ambiguous"
         break
     return "ambiguous" if possible_match else None
@@ -707,14 +774,12 @@ def _classify_receipt(
     canonicalised = False
     for command in receipt["commands"]:
         _remaining(deadline)
-        identity = _required_identity(command["argv"] or (), prefix, windows=os.name == "nt")
+        env = command.get("env") or []
+        identity = _required_identity(command["argv"] or (), prefix, windows=os.name == "nt", env_names=env)
         identities.append(identity)
         if isinstance(identity, tuple):
             argv = list(identity)
             canonicalised |= argv != command["argv"]
-            env = command.get("env") or []
-            if argv != command["argv"]:
-                env = [*env, *(arg.partition("=")[0] for arg in command["argv"] if _ENV_ASSIGNMENT.match(arg))]
             required.append({**command, "argv": argv, "env": env})
         elif identity == "ambiguous":
             ambiguous |= _command_status(receipt, command) != "completed" or _failed_required_check(receipt, [command])

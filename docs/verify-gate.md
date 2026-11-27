@@ -142,14 +142,20 @@ leading `./` as equivalent in the executable spelling. On Windows the
 executable path is case-insensitive. When the policy names an extension,
 the executable must use that extension. A policy without an extension can
 match an `.exe`, `.cmd`, or `.bat` executable. An absolute executable path
-can match by name when the policy names a bare program.
+can match by name when the policy names a bare program. The gate treats
+`py.test` as an alias for `pytest` and still compares their arguments exactly.
 
 A pass must match that identity and meet the existing tree, policy, and
 coverage requirements. The gate can recheck coverage for equivalent
 command spellings using the saved plan and the pushed tree. The gate
-recognizes leading environment assignments
-and up to eight layers of `env`, `command`, `nice`, `nohup`, `time`,
-`timeout`, and `stdbuf` with supported options. A newer matching failure
+recognizes up to eight layers of `env`, `command`, `nice`, `nohup`, `time`,
+`timeout`, and `stdbuf` with supported options. The only environment
+assignment allowed for a pass is `PY`, the toolchain selector documented
+for the required verification scripts. This applies to leading assignments,
+assignments passed to `env`, and names saved in the receipt's command
+environment. Other assignments make a possible required run ambiguous.
+The `env -i` and `env -u` options require at least one assignment from
+the same allowlist to be transparent. A newer matching failure
 takes precedence over an older pass regardless of the policy declaration
 or base recorded in the receipt. A command that failed or timed out, or
 recorded failed or errored tests, counts as a failure. If an older
@@ -168,18 +174,23 @@ verdict when its identity or result is inconclusive and the receipt does
 not already record a required check failure. This includes unsuccessful
 or unfinished invocations that use the required executable with different
 prefix arguments or use an interpreter or launcher whose arguments mention
-the required program, module, or script. A different interpreter target
-with no such mention is unrelated. Only an exact normalized prefix can
-supply passing evidence. A policy with no required command prefix accepts
-any eligible receipt for the tree.
+the required program, module, or script. When the policy identifies a
+module or script, the gate uses that target for mentions. A script name
+can mention it as a whole segment delimited by a hyphen or underscore.
+A different target with no such mention is unrelated. So is an invocation
+of the required executable with just one of `--version`, `--help`, `-h`,
+`--collect-only`, or `--co`. Only an exact normalized prefix can supply
+passing evidence. A policy with no required command prefix accepts any
+eligible receipt for the tree.
 
 When a receipt lists its planned commands, the gate compares the plan with
 recorded commands in order using the same identity rules. A missing or
 conflicting result for a possible required check makes the verdict
 indeterminate. An in-progress receipt whose plan lists only clearly
-unrelated commands leaves an earlier verdict in place. The writer records
-the plan before execution, so it identifies the required check when the
-run includes it. Receipts written before the plan field existed are
+unrelated commands leaves an earlier verdict in place. The writer fixes
+the plan in memory before executing commands and saves it with the receipt.
+That plan identifies the required check when the run includes it. Receipts
+written before the plan field existed are
 evaluated using their recorded commands.
 
 Across seconds the check orders runs by the UTC timestamp in the directory
@@ -321,9 +332,15 @@ Status reports the block version and identifies a customised hook as unverified.
 - A receipt can list up to 64 planned commands, with at most 16,384
   characters and 1,024 parsed arguments per command. A larger plan or
   command makes the result indeterminate when that receipt can affect it.
-- Shells and launchers such as `sudo`, `xargs`, `make`, `npm run`,
-  `uv run`, and `python -m` are not unwrapped. A policy may name any of
-  these directly as part of its required argv prefix.
+- The gate treats tasks launched through `make`, `just`, `tox`, or
+  `npm run` as unrelated unless their arguments mention the required check
+  or the policy names the invocation directly. It does not inspect task
+  definitions. Policies can also name interpreters and other launchers
+  directly in their required argv prefix.
+- A failed run of the required executable with a different argument prefix
+  can make the verdict inconclusive until the required check runs again.
+  The read-only invocations and clearly unrelated interpreter targets
+  described above leave an earlier verdict in place.
 - Verify receipts are local files. The gate checks their shape, the agreement
   between the run name and start time, and the exact tree IDs. It does not
   authenticate receipts. Required CI supplies independent evidence on the
