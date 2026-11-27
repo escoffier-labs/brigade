@@ -1,0 +1,1 @@
+- Describe hub benchmark and deployment conditions by host role and resource allotment.

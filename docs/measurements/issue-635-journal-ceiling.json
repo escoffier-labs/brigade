@@ -6,7 +6,7 @@
   "environment": {
     "directory_fsync_supported": true,
     "filesystem_type": "ext4",
-    "platform": "Linux-6.17.0-1030-oem-x86_64-with-glibc2.39",
+    "platform": "Linux x86_64, glibc 2.39",
     "python_version": "3.12.3 (main, Jun 19 2026, 12:46:00) [GCC 13.3.0]"
   },
   "issue": 635,

@@ -44,11 +44,10 @@ of R1, and the 8B model runs only on `remote` (see [Quality](#quality)).
 
 ### Hosts and isolation
 
-- One non-production machine with an Intel Core Ultra 9 285 (8 performance
-  and 16 efficiency cores), the same CPU model as the hub host. Nothing ran
-  on the hub host and nothing wrote to a live hub.
-- Other jobs kept the machine busy the whole time: load average 120 to 175
-  on 24 cores and CPU pressure (`/proc/pressure/cpu`, some avg60) near 70%.
+- One shared, non-production benchmark workstation. Nothing ran on the hub
+  host and nothing wrote to a live hub.
+- Other jobs kept the machine busy the whole time, with a load average of
+  120 to 175 and CPU pressure (`/proc/pressure/cpu`, some avg60) near 70%.
   To keep that out of the numbers, every embedding server and every
   benchmark client ran in its own systemd user scope with
   `CPUWeight=10000`, pinned with `taskset` to its own core. Latency is wall
@@ -65,8 +64,8 @@ of R1, and the 8B model runs only on `remote` (see [Quality](#quality)).
   blocked nothing. A one-core pin plus a 100% quota is what a one-core
   container gets. Main runs used a performance core. nomic also ran on an
   efficiency core, because the hub's vCPU can land on either.
-- `remote`: the machine's existing Ollama service with its GPU (NVIDIA RTX
-  2000 Ada, 16 GB), over loopback and never restarted. A production hub
+- `remote`: an existing GPU-backed Ollama service on the benchmark host,
+  accessed over loopback and never restarted. A production hub
   would reach the GPU host over the private network and add that round
   trip.
 - The 512 MB cap was given to the embedding server alone. A real `hub-cpu`
