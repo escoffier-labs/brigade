@@ -1,0 +1,1 @@
+- Check for a covering verification receipt when a timed-out Claude hook session stops, block an unverified strict session at most once, and report sessions that subsequently ended unverified.

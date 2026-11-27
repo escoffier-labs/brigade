@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from brigade.claude_hooks import envelope, runtime
+from brigade.claude_hooks import envelope, hook_steps, latch_doctor, runtime
 from brigade.work_cmd import inbox_lock
 from tests import thread_sync
 from tests.test_claude_hooks_user_target import PACKAGE_REF, _payload, _wired_claude
@@ -48,6 +48,95 @@ def _persisted_timeout_count(target: Path, session_id: str) -> int:
         session_state._journal_timeout_count(target, session_id),
         session_state._pending_timeout_count(target, session_id),
     )
+
+
+def _latched_writer(target: Path, session_id: str = "latched-stop") -> dict:
+    now = runtime.localio.utc_now_iso()
+    state = {
+        "session_id": session_id,
+        "session_fingerprint": runtime._session_fingerprint(session_id),
+        "target": str(target),
+        "started_at": now,
+        "last_write_at": now,
+        "write_observed": True,
+        "hook_timeout_count": 2,
+        "hook_latched": True,
+        "hook_latch_announced": True,
+    }
+    runtime.write_session_state(target, session_id, state)
+    return _payload(target, "Stop", session_id=session_id)
+
+
+def test_latched_strict_stop_blocks_once_and_doctor_reports_unverified(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target)
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: False)
+
+    first = runtime._hook_run_body("Stop", payload, pin_target=target)
+    assert first["result"]["decision"] == "block"
+    assert "hooks switched off after two timeouts" in first["result"]["reason"]
+    second = runtime._hook_run_body("Stop", payload, pin_target=target)
+    assert second["result"] is None
+    assert "ended_unverified_after_latch" in runtime.read_session_state(target, "latched-stop")
+    assert "1 ended unverified after latch" in latch_doctor.check(target)[2]
+
+
+def test_latched_stop_with_covering_receipt_passes(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target)
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: True)
+
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"] is None
+    assert "ended_unverified_after_latch" not in runtime.read_session_state(target, "latched-stop")
+
+
+@pytest.mark.parametrize("failure", ["raises", "times_out"])
+def test_latched_receipt_lookup_failure_blocks_only_once(tmp_path: Path, monkeypatch, failure: str) -> None:
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target)
+    if failure == "raises":
+
+        def lookup(*_args, **_kwargs):
+            raise OSError("unreadable")
+
+        monkeypatch.setattr(runtime, "_receipt_since", lookup)
+    else:
+        from brigade.work_cmd import verify_gate
+
+        monkeypatch.setattr(verify_gate.StopGate, "timed_out", property(lambda _self: True))
+
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"]["decision"] == "block"
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"] is None
+
+
+def test_latched_stop_without_write_or_strict_mode_is_silent(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target)
+    state = runtime.read_session_state(target, "latched-stop")
+    state["write_observed"] = False
+    runtime.write_session_state(target, "latched-stop", state)
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"] is None
+
+    state["write_observed"] = True
+    runtime.write_session_state(target, "latched-stop", state)
+    monkeypatch.setattr(runtime.work_mode, "is_strict", lambda _target: False)
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"] is None
+
+
+def test_timeout_step_marker_is_closed_and_missing_is_unknown(tmp_path: Path) -> None:
+    target = _wired_claude(tmp_path)
+    hook_steps.mark(target, "step-session", "Stop", "stop-receipt-gate")
+    assert hook_steps.read(target, "step-session", "Stop") == "stop-receipt-gate"
+    assert hook_steps.read(target, "missing", "Stop") == "unknown"
+    hook_steps.mark(target, "step-session", "Stop", "secret command text")
+    assert hook_steps.read(target, "step-session", "Stop") == "unknown"
+
+    runtime._record_hook_timeout(target, "recorded-step", event="Stop", step="stop-receipt-gate")
+    recorded = runtime.read_session_state(target, "recorded-step")
+    assert recorded["hook_timeout_history"][-1]["event"] == "Stop"
+    assert recorded["hook_timeout_history"][-1]["step"] == "stop-receipt-gate"
+    journal = runtime._state_path(target, "recorded-step").with_suffix(".json.timeouts").read_text()
+    assert " Stop stop-receipt-gate" in journal
 
 
 def test_session_state_helpers_resolve_runtime_primitives_at_call_time(tmp_path: Path, monkeypatch) -> None:

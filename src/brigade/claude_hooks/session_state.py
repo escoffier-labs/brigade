@@ -18,8 +18,21 @@ _TIMEOUT_JOURNAL_MAX_LINES = 16
 _TIMEOUT_JOURNAL_MAX_BYTES = 4096
 _PENDING_MAX_BYTES = 65536
 _ANNOUNCE_TOKEN = b"announced"
+_DETAIL_TOKEN = b"detail"
 _ANNOUNCE_CLAIMED_KEY = "hook_announce_claimed"
 _FOLLOWUP_ABANDON_PENDING_LOG = "timeout follow-up abandoned; pending increment will fold later"
+_HOOK_EVENTS = frozenset(
+    {
+        "PreToolUse",
+        "PostToolUse",
+        "PostToolUseFailure",
+        "Stop",
+        "SessionStart",
+        "UserPromptSubmit",
+        "PreCompact",
+        "SessionEnd",
+    }
+)
 
 
 def _rt() -> Any:
@@ -117,6 +130,8 @@ def _parse_timeout_journal(data: bytes) -> tuple[int, bool, str | None]:
             if first_claim is None:
                 first_claim = parts[1].decode("ascii", "replace") if len(parts) >= 2 else ""
             continue
+        if parts[0] == _DETAIL_TOKEN:
+            continue
         count += 1
         if len(parts) >= 2 and parts[1] == _ANNOUNCE_TOKEN:
             announced = True
@@ -150,12 +165,14 @@ def _append_journal_line(target: Path, session_id: str, payload: bytes) -> bool:
     return _append_sidecar_line(_journal_path(target, session_id), payload, max_bytes=_TIMEOUT_JOURNAL_MAX_BYTES)
 
 
-def _append_timeout_journal(target: Path, session_id: str) -> tuple[int, bool]:
+def _append_timeout_journal(
+    target: Path, session_id: str, event: str = "unknown", step: str = "unknown"
+) -> tuple[int, bool]:
     """Append one timeout occurrence without taking the session-state lock."""
     journal_lines, _already_announced, _first = _read_timeout_journal(target, session_id)
     if journal_lines >= _TIMEOUT_JOURNAL_MAX_LINES:
         return journal_lines, False
-    if not _append_journal_line(target, session_id, f"{localio.utc_now_iso()}\n".encode()):
+    if not _append_journal_line(target, session_id, f"{localio.utc_now_iso()} {event} {step}\n".encode()):
         return journal_lines, False
     return _read_timeout_journal(target, session_id)[0], True
 
@@ -271,6 +288,24 @@ def read_latch_for_state_file(target: Path, state_name: str) -> bool:
     return _is_latched(
         state, _parse_timeout_journal(journal)[0], sum(bool(line.strip()) for line in pending.splitlines())
     )
+
+
+def read_ended_unverified(target: Path, state_name: str) -> bool:
+    """Return whether a latched session used its fail-open second Stop."""
+    state = anchored_io.read_json(target, state_name) or {}
+    return isinstance(state.get("ended_unverified_after_latch"), str)
+
+
+def read_last_timeout_step(target: Path, state_name: str) -> str | None:
+    """Return the last closed-list event/step pair stored for doctor."""
+    state = anchored_io.read_json(target, state_name) or {}
+    history = state.get("hook_timeout_history")
+    if not isinstance(history, list) or not history or not isinstance(history[-1], dict):
+        return None
+    event, step = history[-1].get("event"), history[-1].get("step")
+    if not isinstance(event, str) or not isinstance(step, str):
+        return None
+    return f"{event}/{step}"
 
 
 def _read_hook_latch(target: Path, session_id: str) -> tuple[bool, bool]:
@@ -437,7 +472,18 @@ def _with_announce_claim(state: dict[str, Any], claimed: bool) -> dict[str, Any]
     return returned
 
 
-def _record_hook_timeout(target: Path, session_id: str, *, announce: bool = False) -> dict[str, Any]:
+def _record_hook_timeout(
+    target: Path, session_id: str, *, announce: bool = False, event: str = "unknown", step: str = "unknown"
+) -> dict[str, Any]:
+    from .hook_steps import STEPS
+
+    event = event if event in _HOOK_EVENTS else "unknown"
+    step = step if step in STEPS else "unknown"
+    _append_journal_line(
+        target,
+        session_id,
+        f"detail {localio.utc_now_iso()} {event} {step}\n".encode("ascii", "replace"),
+    )
     state = _rt().read_session_state(target, session_id)
     fallback: dict[str, Any] = dict(state) if isinstance(state, dict) else {"session_id": session_id}
     overflowed = False
@@ -456,6 +502,10 @@ def _record_hook_timeout(target: Path, session_id: str, *, announce: bool = Fals
                 updated["hook_timeout_count"] = next_count
                 updated["hook_timeout_journal_folded"] = journal_lines
                 updated["hook_timeout_pending_folded"] = pending_lines
+                history = updated.get("hook_timeout_history")
+                recent = list(history[-3:]) if isinstance(history, list) else []
+                recent.append({"event": event, "step": step, "at": localio.utc_now_iso()})
+                updated["hook_timeout_history"] = recent[-4:]
                 already_announced = _persisted_announce_claimed(updated)
                 _apply_timeout_latch(updated, next_count)
                 _rt().write_session_state(target, session_id, updated)
@@ -465,7 +515,7 @@ def _record_hook_timeout(target: Path, session_id: str, *, announce: bool = Fals
             return _with_announce_claim(updated, claimed)
         except inbox_lock.InboxLockTimeout as exc:
             last_timeout = exc
-            _, persisted = _append_timeout_journal(target, session_id)
+            _, persisted = _append_timeout_journal(target, session_id, event, step)
             if not persisted:
                 if not overflowed:
                     overflowed = _append_pending_increment(target, session_id)
@@ -515,10 +565,11 @@ def _apply_timeout_followup_inprocess(
     session_id: str,
     detail: str,
     *,
+    step: str = "unknown",
     publish: Callable[[str], None] | None = None,
 ) -> str:
     try:
-        state = _rt()._record_hook_timeout(target, session_id, announce=True)
+        state = _rt()._record_hook_timeout(target, session_id, announce=True, event=event, step=step)
     except anchored_io.SessionIntegrityError:
         raise
     except OSError:
@@ -551,7 +602,9 @@ def _apply_timeout_followup_inprocess(
     return outcome
 
 
-def _bounded_timeout_followup(event: str, log_target: Path, session_id: str, exc: BaseException) -> str:
+def _bounded_timeout_followup(
+    event: str, log_target: Path, session_id: str, exc: BaseException, *, step: str = "unknown"
+) -> str:
     """Record timeout latch/state without blocking past a short budget.
 
     The path was already resolved inside the timed worker. Latch-state
@@ -580,7 +633,9 @@ def _bounded_timeout_followup(event: str, log_target: Path, session_id: str, exc
 
     def followup() -> str:
         try:
-            return _rt()._apply_timeout_followup_inprocess(event, log_target, session_id, detail, publish=publish)
+            return _rt()._apply_timeout_followup_inprocess(
+                event, log_target, session_id, detail, step=step, publish=publish
+            )
         except anchored_io.SessionIntegrityError:
             publish("integrity_refused")
             return "integrity_refused"
