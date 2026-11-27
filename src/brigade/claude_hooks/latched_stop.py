@@ -41,9 +41,10 @@ def _receipt_look(target: Path, session_id: str, state: dict[str, Any], deadline
         # Enumerate receipts before asking the gate for policy/tree work. An
         # empty receipt set therefore never launches git just to find no match.
         covered = rt._receipt_since(target, threshold, session_fingerprint=fingerprint, gate=gate)
-        if time.monotonic() >= deadline or gate.timed_out:
+        # Reading the gate's timeout flag loads policy, so only a covering result asks for it.
+        if not covered or time.monotonic() >= deadline or gate.timed_out:
             return False, gate
-        return covered, gate
+        return True, gate
 
     try:
         return rt._run_best_effort_bounded(lookup, timeout=max(deadline - time.monotonic(), 0.0), default=(False, None))
