@@ -247,6 +247,17 @@ def normalize_policy_executable(argv0: str) -> str:
     return stem if dot + suffix in _POLICY_EXECUTABLE_SUFFIXES else name
 
 
+def policy_blocked_name(argv: list[str]) -> str | None:
+    """Return the first listed name among the executable and non-option arguments."""
+    for index, argument in enumerate(argv):
+        if index > 0 and argument.startswith("-"):
+            continue
+        name = normalize_policy_executable(argument)
+        if name in SCANNER_HIGH_RISK_COMMANDS:
+            return name
+    return None
+
+
 SCANNER_SHELL_META_RE = re.compile(r"[;&|`<>]|\$\(")
 
 

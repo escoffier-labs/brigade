@@ -1,10 +1,10 @@
 from __future__ import annotations
 
+import shlex
 import sys
 
 import pytest
 
-from brigade import work_cmd
 from brigade.repos_cmd import fleet
 from brigade.work_cmd import config, constants, verification
 
@@ -13,8 +13,69 @@ from brigade.work_cmd import config, constants, verification
 def policy_name(monkeypatch):
     name = "policy-tool"
     monkeypatch.setattr(constants, "SCANNER_HIGH_RISK_COMMANDS", {name})
-    monkeypatch.setattr(work_cmd, "SCANNER_HIGH_RISK_COMMANDS", {name})
     return name
+
+
+@pytest.fixture(params=["scanner", "review", "verify-command", "verify-argv", "fleet-command", "fleet-argv"])
+def policy_entry(request, tmp_path):
+    entry = request.param
+
+    def parse(argv):
+        command = shlex.join(argv)
+        if entry == "scanner":
+            return config._scanner_argv(command)
+        if entry == "review":
+            return config._review_argv(argv)
+        if entry == "verify-command":
+            result, _, reason = verification._verify_parse_command(command, tmp_path)
+            return result, reason
+        if entry == "verify-argv":
+            result, _, reason = verification._verify_parse_argv(argv, tmp_path)
+            return result, reason
+        raw = {"command": command} if entry == "fleet-command" else {"argv": argv}
+        return fleet._health_command_from_raw(raw, "demo", 1)
+
+    kind = "verification" if entry.startswith("verify-") else "scanner"
+    return parse, kind
+
+
+def test_policy_checks_arguments(policy_entry, monkeypatch):
+    argv = ["brigade", "--format", "sample", "report"]
+    observed = []
+
+    def check_policy(parts):
+        observed.append(parts)
+        return "policy-tool"
+
+    monkeypatch.setattr(constants, "policy_blocked_name", check_policy, raising=False)
+    parse, kind = policy_entry
+    result, reason = parse(argv)
+
+    assert observed == [argv]
+    assert result is None
+    assert reason is not None
+    assert f"high-risk {kind} command: policy-tool" in reason
+
+
+@pytest.mark.parametrize("spelling", ["policy-tool", "/tools/POLICY-TOOL", r"C:\tools\Policy-Tool.EXE"])
+def test_policy_matches_argument_names(spelling, policy_name):
+    assert constants.policy_blocked_name(["report-tool", "--format", "sample", spelling]) == policy_name
+
+
+def test_policy_accepts_unlisted_arguments(policy_entry, policy_name, monkeypatch):
+    monkeypatch.setattr(config.shutil, "which", lambda executable, *, path=None: executable)
+    parse, _ = policy_entry
+    result, reason = parse(["brigade", "report", "sample", f"--name=/tools/{policy_name}"])
+
+    assert result is not None
+    assert reason is None
+
+
+def test_fleet_requires_a_health_command():
+    result, reason = fleet._health_command_from_raw({"argv": []}, "demo", 1)
+
+    assert result is None
+    assert reason == "repo demo: health command health-1: command or argv is required"
 
 
 @pytest.mark.parametrize(
@@ -43,22 +104,9 @@ def policy_name(monkeypatch):
         "policy-tool.exe::$DATA",
     ],
 )
-@pytest.mark.parametrize("entry", ["scanner", "review", "verify-command", "verify-argv", "fleet-command", "fleet-argv"])
-def test_policy_matches_normalized_names(spelling, entry, policy_name, tmp_path):
-    command = f"'{spelling}'"
-    if entry == "scanner":
-        result, reason = config._scanner_argv(command)
-    elif entry == "review":
-        result, reason = config._review_argv([spelling])
-    elif entry == "verify-command":
-        result, _, reason = verification._verify_parse_command(command, tmp_path)
-    elif entry == "verify-argv":
-        result, _, reason = verification._verify_parse_argv([spelling], tmp_path)
-    else:
-        raw = {"command": command} if entry == "fleet-command" else {"argv": [spelling]}
-        result, reason = fleet._health_command_from_raw(raw, "demo", 1)
-
-    kind = "verification" if entry.startswith("verify-") else "scanner"
+def test_policy_matches_normalized_names(spelling, policy_entry, policy_name):
+    parse, kind = policy_entry
+    result, reason = parse([spelling])
     assert result is None
     assert reason is not None
     assert f"high-risk {kind} command: {policy_name}" in reason
