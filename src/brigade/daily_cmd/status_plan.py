@@ -218,7 +218,7 @@ def _daily_center_status_payload(target: Path, *, work_status: dict[str, Any] | 
         "notifications": notifications,
         "tool_catalog": {},
         "release_readiness": None,
-        "cloud_tracker": cloud_tracker.health(target),
+        "legacy_cloud_rows": cloud_tracker.legacy_cloud_rows(target),
     }
 
 
@@ -359,7 +359,7 @@ def status_payload(target: Path) -> dict[str, Any]:
         "open_daily_action_count": (center.get("action_queue") or {}).get("open_count", 0)
         if isinstance(center.get("action_queue"), dict)
         else 0,
-        "grokbot_cloud": center.get("cloud_tracker") if isinstance(center.get("cloud_tracker"), dict) else {},
+        "legacy_cloud_rows": center.get("legacy_cloud_rows", []),
         "top_readiness_blocker": readiness.get("blockers", [None])[0] if readiness.get("blockers") else None,
         "pending_handoff_draft_count": (handoffs.get("counts") or {}).get("pending", 0)
         if isinstance(handoffs.get("counts"), dict)

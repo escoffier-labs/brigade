@@ -159,44 +159,6 @@ def authority_marker_present(target: Path) -> bool:
     return isinstance(payload, dict) and payload.get("schema") == AUTHORITY_SCHEMA
 
 
-def tracker_rows(target: Path) -> list[dict[str, Any]]:
-    """Return bounded fields from the retained local queue.
-
-    This deliberately differs from the queue CLI projection. The tracker needs
-    completion artifact references to reconcile draft PRs, but it never needs
-    the private envelope, lease holder, or verification commands.
-    """
-    if hub_authority(target):
-        return []
-    root = Path(target).expanduser() / ".brigade" / "cloud" / "grokbot"
-    if not root.exists():
-        return []
-    with _storage_paths(target) as storage:
-        local_rows: list[dict[str, Any]] = []
-        for name in _list_names(storage.jobs, prefix="grokbot-", suffix=".json"):
-            record = _read_json_file(storage.jobs, name)
-            if record is None:
-                raise GrokbotJobError("corrupt-storage")
-            valid = _validate_record(record)
-            spec = valid["spec"]
-            assert isinstance(spec, dict)
-            local_row: dict[str, Any] = {
-                "job_id": valid["job_id"],
-                "label": spec["label"],
-                "task_hash": valid["task_hash"],
-                "state": valid["state"],
-                "created_at": valid["created_at"],
-                "updated_at": valid["updated_at"],
-                "queued_at": valid["queued_at"],
-                "artifact": spec["artifact"],
-            }
-            for key in ("claimed_at", "result_artifact"):
-                if key in valid:
-                    local_row[key] = valid[key]
-            local_rows.append(local_row)
-        return local_rows
-
-
 @contextmanager
 def _storage_paths(target: Path) -> Iterator[_Storage]:
     """Open queue directories once so POSIX operations stay below verified fds."""

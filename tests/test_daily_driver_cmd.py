@@ -124,18 +124,26 @@ def test_daily_status_keeps_work_counts_when_optional_snapshot_times_out(tmp_pat
     assert "timed out" in center["detail"]
 
 
-def test_daily_status_does_not_project_retired_queue_rows(tmp_path, capsys, monkeypatch):
+def test_daily_status_displays_stored_cloud_rows(tmp_path, capsys, monkeypatch):
     from brigade import cloud_tracker
 
-    monkeypatch.setattr(cloud_tracker, "observe_github", lambda target, **_kwargs: {"branches": [], "prs": []})
+    monkeypatch.setattr(cloud_tracker, "observe_github", lambda target: {"branches": [], "prs": []})
     _seed_ready_repo(tmp_path, capsys)
     legacy_queue = tmp_path / ".brigade/cloud/grokbot/jobs"
     legacy_queue.mkdir(parents=True)
     (legacy_queue / "retired.json").write_text("{}", encoding="utf-8")
+    legacy = {
+        "id": "cloud-legacy",
+        "task_id": "legacy-task",
+        "provider": "grokbot-cloud",
+        "label": "legacy task",
+    }
+    cloud_tracker.save_registry(tmp_path, {**cloud_tracker.empty_registry(), "entries": [legacy]})
 
     assert daily_cmd.status(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["grokbot_cloud"]["job_count"] == 0, payload["status_section_checks"]
+    assert payload["legacy_cloud_rows"] == [{**legacy, "classification": "pending"}]
+    assert "grokbot_cloud" not in payload
 
 
 def test_daily_status_timeout_degrades_slow_candidate_section(tmp_path, capsys, monkeypatch):

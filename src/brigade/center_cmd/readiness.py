@@ -139,18 +139,6 @@ def _readiness_findings(target: Path, status_data: dict[str, Any]) -> list[dict[
                 "brigade center reviews",
             )
         )
-    cloud = _cloud_tracker if isinstance(_cloud_tracker := status_data.get("cloud_tracker"), dict) else {}
-    if int(cloud.get("issue_count") or 0) > 0:
-        top = _top_issue if isinstance(_top_issue := cloud.get("top_issue"), dict) else {}
-        findings.append(
-            _readiness_finding(
-                "cloud_tracker",
-                str(top.get("name") or "grokbot_queue_attention"),
-                "warning",
-                _readiness_safe_text(target, str(top.get("detail") or "Grok Bot queue needs attention")),
-                "brigade run cloud status --json",
-            )
-        )
     release = (
         _release_readiness if isinstance(_release_readiness := status_data.get("release_readiness"), dict) else None
     )

@@ -631,20 +631,47 @@ def test_provider_normalization_contract_accepts_active_cloud_providers(tmp_path
         assert entry["provider"] == provider
 
 
-def test_legacy_grokbot_provider_row_still_loads_and_displays(tmp_path: Path):
+def test_legacy_grokbot_provider_row_reconciles_merged_pull_request(tmp_path: Path, monkeypatch):
+    branch = "grokbot/legacy-task"
     legacy = {
         "id": "cloud-legacy",
         "provider": "grokbot-cloud",
         "task_id": "legacy-task",
         "label": "legacy task",
-        "source": "grokbot-queue",
+        "branch": branch,
         "dispatched_at": _iso(NOW),
     }
     cloud_tracker.save_registry(tmp_path, {**cloud_tracker.empty_registry(), "entries": [legacy]})
 
+    def read(command, **kwargs):
+        if command[1:3] == ["repo", "view"]:
+            return 0, '{"nameWithOwner": "owner/repo"}', ""
+        endpoint = command[-1]
+        if endpoint.endswith("/branches?per_page=100"):
+            return 0, json.dumps([{"name": branch}, {"name": "grokbot/untracked"}]), ""
+        if endpoint.endswith("/pulls?state=open&per_page=100"):
+            return 0, "[]", ""
+        if endpoint.endswith("/pulls?state=closed&per_page=100"):
+            return 0, json.dumps([{"head": {"ref": branch}, "number": 1, "state": "closed", "merged_at": "date"}]), ""
+        raise AssertionError(command)
+
+    monkeypatch.setattr(cloud_tracker, "_run_text", read)
     assert cloud_tracker.load_registry(tmp_path)["entries"] == [legacy]
-    payload = cloud_tracker.status_payload(tmp_path, now=NOW, github={"branches": [], "prs": []})
-    assert [(row["id"], row["provider"]) for row in payload["entries"]] == [("cloud-legacy", "grokbot-cloud")]
+    github = cloud_tracker.observe_github(tmp_path)
+    (row,) = cloud_tracker.status_payload(tmp_path, now=NOW, github=github)["entries"]
+    assert (row["id"], row["provider"], row["classification"]) == ("cloud-legacy", "grokbot-cloud", "landed")
+    (activity,) = cloud_tracker.center_activity_records(
+        tmp_path, now=NOW, provider_tasks={}, github=github, cursor_wired=False
+    )
+    assert activity["state"] == "succeeded"
+
+
+@pytest.mark.parametrize("command", ["register", "adopt"])
+def test_cloud_registration_commands_reject_legacy_provider(command, capsys):
+    with pytest.raises(SystemExit) as rejected:
+        cli.main(["run", "cloud", command, "--provider", "grokbot-cloud", "--label", "legacy"])
+    assert rejected.value.code == 2
+    assert "invalid choice: 'grokbot-cloud'" in capsys.readouterr().err
 
 
 def test_new_grokbot_provider_row_is_rejected(tmp_path: Path):

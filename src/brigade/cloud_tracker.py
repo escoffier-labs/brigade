@@ -36,6 +36,7 @@ CLOUD_BRANCH_PREFIXES = ("codex/", "cursor/", "claude/")
 BRIEF_GITHUB_BUDGET_SECONDS = 4.0
 TRACKER_PROVIDERS = frozenset({"codex-cloud", "cursor-cloud", "claude-cloud"})
 # Legacy provider names remain readable so historical registry rows still render.
+_LEGACY_READ_BRANCH_PREFIXES = ("grokbot/",)
 _LEGACY_READ_PROVIDERS = frozenset({"grokbot-cloud"})
 _READABLE_PROVIDERS = TRACKER_PROVIDERS | _LEGACY_READ_PROVIDERS
 
@@ -1527,20 +1528,19 @@ def observe_github(
     explicit_prs = {entry.get("pr_url") for entry in explicit if isinstance(entry.get("pr_url"), str)}
     branches: list[dict[str, Any]] = []
     branches_complete = False
+    read_prefixes = CLOUD_BRANCH_PREFIXES + _LEGACY_READ_BRANCH_PREFIXES
 
     def snapshot(
         branch_rows: list[dict[str, Any]], branch_coverage: bool, pr_rows: list[dict[str, Any]], pr_coverage: bool
     ) -> dict[str, Any]:
         return {
             "branches": [
-                row
-                for row in branch_rows
-                if row["name"].startswith(CLOUD_BRANCH_PREFIXES) or row["name"] in explicit_branches
+                row for row in branch_rows if row["name"].startswith(read_prefixes) or row["name"] in explicit_branches
             ],
             "prs": [
                 row
                 for row in pr_rows
-                if row["head"].startswith(CLOUD_BRANCH_PREFIXES)
+                if row["head"].startswith(read_prefixes)
                 or row["head"] in explicit_branches
                 or row["url"] in explicit_prs
             ],
@@ -1569,7 +1569,7 @@ def observe_github(
         if code == 0:
             for line in stdout.splitlines():
                 name = line.strip().removeprefix("origin/")
-                if name.startswith(CLOUD_BRANCH_PREFIXES) and name not in explicit_branches:
+                if name.startswith(read_prefixes) and name not in explicit_branches:
                     result["branches"].append({"name": name})
     return result
 
@@ -1844,35 +1844,17 @@ def center_activity_records(
     return records
 
 
-def health(
-    target: Path,
-    *,
-    now: datetime | None = None,
-    github: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Return a bounded local queue health summary for operator consumers."""
-    snapshot = github if isinstance(github, dict) else observe_github(target)
-    payload = status_payload(target, now=now, provider_tasks={}, github=snapshot)
-    entries = [row for row in payload.get("entries", []) if row.get("provider") in _LEGACY_READ_PROVIDERS]
-    classifications = {name: sum(1 for row in entries if row.get("classification") == name) for name in CLASSIFICATIONS}
-    attention = classifications["stale"] + classifications["needs-investigation"] + classifications["orphaned"]
-    top = next(
-        (row for row in entries if row.get("classification") in {"stale", "needs-investigation", "orphaned"}), None
-    )
-    return {
-        "job_count": len(entries),
-        "classification_counts": classifications,
-        "issue_count": attention,
-        "top_issue": (
-            {
-                "name": "grokbot_queue_attention",
-                "detail": f"{top.get('label') or top.get('job_id')}: {top.get('classification')}",
-                "job_id": top.get("job_id"),
-            }
-            if isinstance(top, dict)
-            else None
-        ),
-    }
+def legacy_cloud_rows(target: Path) -> list[dict[str, Any]]:
+    """Show historical registry tasks in status views without a queue health check."""
+    if not any(entry.get("provider") in _LEGACY_READ_PROVIDERS for entry in load_registry(target)["entries"]):
+        return []
+    payload = status_payload(target, github=observe_github(target))
+    fields = ("id", "task_id", "provider", "label", "classification")
+    return [
+        {field: row.get(field) for field in fields}
+        for row in payload["entries"]
+        if row.get("provider") in _LEGACY_READ_PROVIDERS
+    ]
 
 
 def set_stale_ready_hours(target: Path, hours: int) -> dict[str, Any]:
