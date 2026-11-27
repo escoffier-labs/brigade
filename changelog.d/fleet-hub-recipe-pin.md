@@ -1,0 +1,1 @@
+- The Fleet Hub container recipe now pins Brigade v0.32.1 (`088da09`), so a default image build installs the current stable CLI and hub.

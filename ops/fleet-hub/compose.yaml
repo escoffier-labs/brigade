@@ -43,10 +43,10 @@ services:
       # The Python hub plus the brigade-hub binary, both from BRIGADE_REF.
       target: dogfood
       args:
-        BRIGADE_REF: ${BRIGADE_REF:-a7746b6da2eec257890674de30635ca5036a2115}
+        BRIGADE_REF: ${BRIGADE_REF:-088da09cb0561c62e5121156b07dfdffe6807f9c}
         # SHA-256 of the source tree at BRIGADE_REF.
-        BRIGADE_SHA256: ${BRIGADE_SHA256:-886090adadf2ad00870d9c535f820ec468655573851da56fd09159ede242d2b2}
-        BRIGADE_VERSION: ${BRIGADE_VERSION:-0.31.0}
+        BRIGADE_SHA256: ${BRIGADE_SHA256:-9058eab940c46c9f9cae349be1bd852b3738e7862daa6c4aa18fc62817714d28}
+        BRIGADE_VERSION: ${BRIGADE_VERSION:-0.32.1}
     image: ${BRIGADE_HUB_IMAGE:-localhost/brigade-fleet-hub:dogfood}
     network_mode: "service:netns"
     depends_on:

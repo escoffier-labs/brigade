@@ -12,6 +12,16 @@ import subprocess
 import sys
 from typing import NamedTuple
 
+# Derived paths produced by outcome_ledger.rollback_derived_files.
+ROLLBACK_DERIVED_PATHS = frozenset({"src/brigade/templates/template-profile-snapshot.json"})
+LEDGER_PATH = "outcome-ledger/skills.json"
+LEDGER_SKILL_PREFIX = "src/brigade/templates/skills/"
+# Bot user ID of the brigadestack-ledger-writer GitHub App (App ID 5941791).
+LEDGER_WRITER_BOT_ID = 361688843
+# The ledger writer restore rule below relies on the required ledger-recompute job in ci-gate,
+# which re-derives the ledger from trusted main and checks every restored file and derived
+# snapshot byte for byte. Keep that job required while this rule exists.
+
 PROTECTED_PATTERNS = (
     ".content-guard-baseline.json",
     ".github/actions/*",
@@ -68,7 +78,7 @@ PROTECTED_PATTERNS = (
     "src/brigade/templates/components/manifest-v1.json",
     "src/brigade/templates/shipped-file-history.json",
     "src/brigade/templates/stations/managed-snapshot.json",
-    "src/brigade/templates/template-profile-snapshot.json",
+    *ROLLBACK_DERIVED_PATHS,
     "tests/_coverage_sidecar_guard.py",
     "tests/fleet_hub_container_smoke.py",
     "tests/fixtures/retired-engine-names-allowlist.json",
@@ -120,7 +130,9 @@ def read_event(repo: str, number: int) -> PullEvent:
     if (
         object_field(repository, "full_name") != repo
         or object_field(object_field(base, "repo"), "full_name") != repo
+        or type(object_field(event, "number")) is not int
         or object_field(event, "number") != number
+        or type(object_field(pull, "number")) is not int
         or object_field(pull, "number") != number
         or object_field(pull, "state") != "open"
         or not isinstance(default_branch, str)
@@ -177,7 +189,17 @@ def paginated_entries(endpoint: str) -> list[object]:
     return [entry for page in pages for entry in page]
 
 
-def read_pull_snapshot(endpoint: str, base_ref: str, event: PullEvent | None = None) -> tuple[str, str, int]:
+def is_plain_path(path: str) -> bool:
+    """True for a repository-relative path with no empty, current or parent components."""
+    return "\\" not in path and all(part not in ("", ".", "..") for part in path.split("/"))
+
+
+def is_ledger_writer(actor: object) -> bool:
+    actor_id = object_field(actor, "id")
+    return type(actor_id) is int and actor_id == LEDGER_WRITER_BOT_ID and object_field(actor, "type") == "Bot"
+
+
+def read_pull_details(endpoint: str, base_ref: str, event: PullEvent | None) -> tuple[tuple[str, str, int], bool]:
     pull = gh_api(endpoint)
     if not isinstance(pull, dict) or type(pull.get("changed_files")) is not int:
         raise ValueError("Invalid pull request response.")
@@ -191,43 +213,67 @@ def read_pull_snapshot(endpoint: str, base_ref: str, event: PullEvent | None = N
         raise ValueError("Invalid pull request base commit.")
     if event is not None and (
         head_sha != event.head
+        or type(pull.get("number")) is not int
         or pull.get("number") != event.number
         or pull.get("state") != "open"
         or object_field(base.get("repo"), "full_name") != event.repo
     ):
         raise ValueError("Live pull request does not match the event.")
-    return head_sha, base_sha, pull["changed_files"]
+    scheduled_restore = (
+        event is not None
+        and os.environ.get("GITHUB_EVENT_NAME") == "pull_request_target"
+        and event.action in ("opened", "synchronize", "reopened")
+        and is_ledger_writer(event.sender)
+        and is_ledger_writer(pull.get("user"))
+        and head.get("ref") == "ledger/auto"
+        and object_field(head.get("repo"), "full_name") == event.repo
+        and event.base == event.default_branch
+    )
+    return (head_sha, base_sha, pull["changed_files"]), scheduled_restore
+
+
+def read_pull_snapshot(endpoint: str, base_ref: str, event: PullEvent | None = None) -> tuple[str, str, int]:
+    snapshot, _ = read_pull_details(endpoint, base_ref, event)
+    return snapshot
 
 
 def read_pull_files(
     endpoint: str, base_ref: str, event: PullEvent | None = None
-) -> tuple[list[str], tuple[str, str, int]]:
-    snapshot = read_pull_snapshot(endpoint, base_ref, event)
+) -> tuple[list[str], tuple[str, str, int], bool]:
+    snapshot, scheduled_restore = read_pull_details(endpoint, base_ref, event)
     files = paginated_entries(f"{endpoint}/files")
     # A base advance before the first read is normal. Any movement during the check fails closed.
-    if snapshot != read_pull_snapshot(endpoint, base_ref, event):
+    latest_snapshot, latest_scheduled_restore = read_pull_details(endpoint, base_ref, event)
+    if snapshot != latest_snapshot:
         raise ValueError("Pull request changed while listing files.")
+    scheduled_restore = scheduled_restore and latest_scheduled_restore
     _, _, changed_files = snapshot
     # GitHub caps the file list at 3,000 entries even with pagination.
     if len(files) != changed_files:
         raise ValueError("Incomplete changed-file list.")
 
     paths = []
+    filenames: set[str] = set()
     for entry in files:
         if not isinstance(entry, dict) or not isinstance(entry.get("filename"), str) or not entry["filename"]:
             raise ValueError("Invalid changed-file entry.")
-        paths.append(entry["filename"])
-        if entry.get("status") == "renamed" or "previous_filename" in entry:
+        filename, status = entry["filename"], entry.get("status")
+        scheduled_restore = (
+            scheduled_restore and filename not in filenames and status in ("added", "removed", "modified", "renamed")
+        )
+        filenames.add(filename)
+        paths.append(filename)
+        if status == "renamed" or "previous_filename" in entry:
             previous = entry.get("previous_filename")
             if not isinstance(previous, str) or not previous:
                 raise ValueError("Missing previous filename.")
             paths.append(previous)
 
-    return paths, snapshot
+    return paths, snapshot, scheduled_restore
 
 
 def read_pull_request(repo: str, number: int, base_ref: str) -> tuple[list[str], str]:
-    paths, snapshot = read_pull_files(f"repos/{repo}/pulls/{number}", base_ref)
+    paths, snapshot, _ = read_pull_files(f"repos/{repo}/pulls/{number}", base_ref)
     return paths, snapshot[0]
 
 
@@ -459,7 +505,7 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     try:
-        paths, snapshot = read_pull_files(endpoint, event.base, event)
+        paths, snapshot, scheduled_restore = read_pull_files(endpoint, event.base, event)
     except (OSError, ValueError, subprocess.SubprocessError):
         print("Could not read a complete changed-file list for the pull request head.", file=sys.stderr)
         return 2
@@ -473,6 +519,19 @@ def main(argv: list[str] | None = None) -> int:
     for path in matches:
         # Keep each untrusted path on one line so it cannot emit workflow commands.
         print(f"  {json.dumps(path)}")
+    if (
+        scheduled_restore
+        and LEDGER_PATH in paths
+        and ROLLBACK_DERIVED_PATHS.issuperset(matches)
+        and all(
+            is_plain_path(path)
+            and (path == LEDGER_PATH or path in ROLLBACK_DERIVED_PATHS or path.startswith(LEDGER_SKILL_PREFIX))
+            for path in paths
+        )
+    ):
+        print("Scheduled ledger writer restore changes the ledger and only restore files.")
+        return 0
+
     try:
         if has_approval(event):
             if snapshot != read_pull_snapshot(endpoint, event.base, event):

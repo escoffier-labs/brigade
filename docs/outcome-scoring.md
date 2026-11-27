@@ -188,6 +188,8 @@ Install the App on this repository only. Store the numeric App ID in the reposit
 
 Leave `LEDGER_APP_ID` unset to use the built-in token for publishing. That path requires **Allow GitHub Actions to create and approve pull requests** in the repository's Actions settings. The workflow token handles CI run lookup, including attest runs and jobs, and dispatches `ci.yml` on either path. Once the variable is set, a failure to mint the installation token fails the publish job.
 
+The repository ruleset **Ledger branches: writer App only** limits creating, updating and deleting `ledger/**` branches to the ledger writer App. To return to the built-in token, unset `LEDGER_APP_ID` and also remove that ruleset, or the publish job cannot push its branches.
+
 `brigade outcome ledger` shows the ledger on main, including its trials, approved versions and open approval pull requests. Use `brigade outcome ledger --plan` with current local main history and GitHub CLI access to preview the scheduled decision. Both commands are read-only. The work brief summarizes its committed ledger locally and links to the GitHub approval search when a fingerprint awaits its owner.
 
 ### Soak runbook
