@@ -55,3 +55,21 @@ Test files that mention the marker as data must use a real comment if they
 intend a whole-file exemption.
 
 `--no-allow-comments` disables both honoring and the ignored-marker warning.
+
+## Public docs and benchmarks
+
+`tests/test_public_host_details.py` scans tracked files under `docs/`,
+`benchmarks/`, and any `bench` directory below `engines/` for host
+details that should not be public. It reports five rule ids:
+`tailnet-ipv4`, `tailnet-hostname`, `cpu-model`, `kernel-build`, and
+`ram-size`.
+
+Both line-scoped and file-scoped inline allow comments apply, so a
+reviewed exception can sit on the matched line or cover the whole file.
+Each finding needs a comment naming its own rule id; a comment for a
+different rule does not clear it. The module also accepts entries in its
+`EXACT_VALUE_ALLOW_LIST` constant, which holds reviewed exact strings
+only, never address ranges or model-number ranges.
+
+Core counts and memory-use figures are out of scope: the only RAM
+signal is the installed size that the `ram-size` rule matches.

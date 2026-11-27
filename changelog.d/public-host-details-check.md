@@ -1,0 +1,1 @@
+- Check public documentation and benchmark files for host and network details.
