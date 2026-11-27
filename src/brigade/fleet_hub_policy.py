@@ -542,6 +542,7 @@ def _effective_expanded(document: Mapping[str, Any], consumer: str | None, repo:
             "telemetry_ttl_seconds": routing.get("telemetry_ttl_seconds"),
             "reservation_ttl_seconds": routing.get("reservation_ttl_seconds"),
             "quota_reserve_percent": routing.get("quota_reserve_percent"),
+            "agent_session_weight": routing.get("agent_session_weight", fleet_policy.DEFAULT_AGENT_SESSION_WEIGHT),
             "workload_requirements": workload_requirements,
             "pools": {
                 s_name: document.get("routing", {}).get("quota_pools", {}).get(s_def.get("quota_pool"))

@@ -50,6 +50,7 @@ def _save(
     bindings: dict[str, str] | None = None,
     repo_machines: list[str] | None = None,
     repo_record: dict | None = None,
+    agent_session_weight: float | None = None,
 ) -> None:
     document = _document()
     for machine, environment_id in (BOUND if bindings is None else bindings).items():
@@ -58,6 +59,8 @@ def _save(
         document["repositories"][REPO] = {"eligible_machines": repo_machines}
     if repo_record is not None:
         document["repositories"][REPO] = repo_record
+    if agent_session_weight is not None:
+        document["routing"]["agent_session_weight"] = agent_session_weight
     current = fleet_hub_policy.current_policy(conn)
     fleet_hub_policy.save_policy(
         conn, document, expected_version=current["revision"], actor="operator", reason="placement"
@@ -80,7 +83,7 @@ def _report(
     )
 
 
-def _session(conn, node: str, session_id: str) -> None:
+def _session(conn, node: str, session_id: str, **fields) -> None:
     fleet_hub_sessions.handle_session(
         conn,
         {
@@ -94,6 +97,7 @@ def _session(conn, node: str, session_id: str) -> None:
             "branch": "main",
             "dirty_paths": [],
             "dirty_truncated": False,
+            **fields,
         },
         caller_node=node,
     )
@@ -162,7 +166,14 @@ def test_origin_under_threshold_stays_local(fleet):
     assert chosen["machine"] == "worker-linux-1" and "node_id" not in chosen
     assert chosen["environment_id"] == ENV[NODE_LINUX] and chosen["project_id"] == PROJECT[NODE_LINUX]
     assert chosen["effective_load"] == 0.1
-    assert chosen["load_inputs"] == {"cpu": 0.1, "sessions": 0, "memory": None, "concurrency": 1}
+    assert chosen["load_inputs"] == {
+        "cpu": 0.1,
+        "sessions": 0,
+        "memory": None,
+        "concurrency": 1,
+        "agent_sessions": 0,
+        "agent_session_weight": 0.0,
+    }
     assert chosen["telemetry_observed_at"] and chosen["inventory_observed_at"]
     assert result["policy_version"] == fleet_hub_policy.current_policy(fleet)["revision"]
     assert result["policy_digest"].startswith("sha256:")
@@ -196,6 +207,69 @@ def test_session_floor_alone_can_push_a_machine_over_the_threshold(fleet):
     _session(fleet, NODE_CLOUD, "live-session-two")
     cloud = next(row for row in _place(fleet)["candidates"] if row["machine"] == "worker-cloud-1")
     assert cloud["effective_load"] == 0.5 and cloud["eligible"] is True
+
+
+def test_omitted_agent_session_weight_preserves_legacy_load(fleet):
+    _session(fleet, NODE_LINUX, "standalone")
+    omitted = _place(fleet)
+    busy = next(row for row in omitted["candidates"] if row["machine"] == "worker-linux-1")
+    assert busy["effective_load"] == 1.0
+    assert busy["load_inputs"]["agent_sessions"] == 1
+    assert omitted["recommended"]["machine"] == "worker-linux-2"
+
+
+def test_explicit_zero_agent_session_weight_matches_omitted_weight(fleet, monkeypatch):
+    _session(fleet, NODE_LINUX, "standalone")
+    omitted = _place(fleet)
+
+    _save(fleet, agent_session_weight=0.0)
+    current = fleet_hub_policy.current_policy(fleet)
+    routing = current["document"]["routing"]
+    assert "agent_session_weight" not in routing
+    omitted["policy_version"] = current["revision"]
+    assert _place(fleet) == omitted
+
+    # The save path omits zero. Supply it at the placement boundary to also
+    # exercise a document that still carries the explicit value.
+    routing["agent_session_weight"] = 0.0
+    monkeypatch.setattr(fleet_hub_policy, "current_policy", lambda _conn: current)
+    assert _place(fleet) == omitted
+
+
+def test_weighted_reports_shed_to_an_idle_node(fleet):
+    _save(fleet, agent_session_weight=0.5)
+    _session(fleet, NODE_LINUX, "standalone-one")
+    chosen = _place(fleet)["recommended"]
+    assert chosen["effective_load"] == 0.5
+    assert chosen["load_inputs"]["sessions"] == 1
+    _session(fleet, NODE_LINUX, "standalone-two")
+    _session(fleet, NODE_LINUX, "expired")
+    _session(fleet, NODE_LINUX, "ended")
+    fleet.execute("UPDATE interactive_sessions SET expires_at = ? WHERE session_id = 'expired'", (_now().timestamp(),))
+    fleet.execute("UPDATE interactive_sessions SET state = 'ended' WHERE session_id = 'ended'")
+    fleet.commit()
+    result = _place(fleet)
+    busy = next(row for row in result["candidates"] if row["machine"] == "worker-linux-1")
+    assert busy["effective_load"] == 1.0
+    assert busy["load_inputs"]["agent_sessions"] == 2
+    assert busy["load_inputs"]["agent_session_weight"] == 0.5
+    assert result["recommended"]["machine"] == "worker-linux-2"
+    assert result["recommended"]["load_inputs"]["agent_sessions"] == 0
+
+
+def test_linked_provider_report_counts_once_at_full_weight(fleet):
+    _save(fleet, agent_session_weight=0.5)
+    _session(fleet, NODE_CLOUD, "provider")
+    _session(
+        fleet,
+        NODE_CLOUD,
+        "t3-thread",
+        harness="t3",
+        provider_link={"harness": "claude", "session_id": "provider"},
+    )
+    cloud = next(row for row in _place(fleet)["candidates"] if row["machine"] == "worker-cloud-1")
+    assert cloud["effective_load"] == 0.5
+    assert cloud["load_inputs"]["agent_sessions"] == 0
 
 
 def test_effective_load_is_the_max_of_cpu_and_session_ratio(fleet):
@@ -293,7 +367,9 @@ def test_output_carries_only_the_selected_machines_ids(fleet):
     assert ENV[NODE_LINUX] in text and PROJECT[NODE_LINUX] in text
     for node in (NODE_LINUX_2, NODE_CLOUD):
         assert ENV[node] not in text and PROJECT[node] not in text
-    assert all(set(row) == {"machine", "eligible", "effective_load", "reasons"} for row in result["candidates"])
+    assert all(
+        set(row) == {"machine", "eligible", "effective_load", "reasons", "load_inputs"} for row in result["candidates"]
+    )
     peer = _place(fleet, caller=CONTROLLER)
     peer_text = json.dumps(peer)
     assert ENV[NODE_LINUX_2] not in peer_text and ENV[NODE_CLOUD] not in peer_text
@@ -536,6 +612,19 @@ def test_unreadable_sessions_fail_closed_with_a_named_reason(fleet, monkeypatch,
     assert result["candidates"]
     for row in result["candidates"]:
         assert "sessions-unknown" in row["reasons"] and row["eligible"] is False and row["effective_load"] is None
+
+
+def test_unreadable_standalone_count_fails_closed_at_positive_weight(fleet, monkeypatch):
+    _save(fleet, agent_session_weight=0.5)
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("session count failed")
+
+    monkeypatch.setattr(fleet_hub_placement, "count_standalone_by_node", broken)
+    result = _place(fleet)
+    assert result["status"] == "none"
+    assert result["candidates"]
+    assert all("sessions-unknown" in row["reasons"] and not row["eligible"] for row in result["candidates"])
 
 
 def test_several_projects_for_one_repo_choose_deterministically_and_say_so(fleet):

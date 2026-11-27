@@ -315,6 +315,7 @@ def databases(directory: Path):
             "work-links-owner": ["DROP INDEX work_links_adapter", "DROP INDEX work_links_owner"],
             "work-import-owner": ["DROP INDEX work_import_keys_adapter", "DROP INDEX work_import_keys_owner"],
             "messages-sealed": ["DROP INDEX fleet_messages_sealed_acked"],
+            "sessions-provider": ["DROP INDEX interactive_sessions_active_observer"],
             "questions-late": ["DROP TRIGGER fleet_questions_reply"],
         }
         for sql in cleanup.get(name, []):

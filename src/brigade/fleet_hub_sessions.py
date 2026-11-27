@@ -124,22 +124,33 @@ def _casefold(value: object) -> str:
     return str(value).casefold() if value is not None else ""
 
 
-# Prefer the hook's dirty-path snapshot to the observer's checkout-only row.
 # The native resume identity is exact. Same-checkout sessions without a link
 # remain separate, including standalone sessions running beside a T3 thread.
-_VISIBLE_SESSION = """
+_PROVIDER_MATCH = """
+    observer.node_id = provider.node_id
+    AND CAST(json_extract(observer.provider_link_json, '$.harness') AS TEXT) = provider.harness
+    AND CAST(json_extract(observer.provider_link_json, '$.session_id') AS TEXT) = provider.session_id
+    AND provider.checkout_path = observer.checkout_path
+"""
+
+# Prefer the hook's dirty-path snapshot to the observer's checkout-only row.
+_VISIBLE_SESSION = f"""
 AND NOT (
-    interactive_sessions.harness = 't3' AND provider_link_json IS NOT NULL
-    AND interactive_sessions.state = 'active' AND interactive_sessions.expires_at > ?
+    observer.harness = 't3' AND provider_link_json IS NOT NULL
+    AND observer.state = 'active' AND observer.expires_at > ?
     AND EXISTS (
         SELECT 1 FROM interactive_sessions AS provider
-        WHERE provider.node_id = interactive_sessions.node_id
-        AND provider.harness = json_extract(interactive_sessions.provider_link_json, '$.harness')
-        AND provider.session_id = json_extract(interactive_sessions.provider_link_json, '$.session_id')
-        AND provider.checkout_path = interactive_sessions.checkout_path
+        WHERE {_PROVIDER_MATCH}
         AND provider.state = 'active' AND provider.expires_at > ?
     )
 )
+"""
+
+_LIVE_SESSION = """
+    state = 'active' AND expires_at > ?
+    AND NOT (coalesce(json_extract(cloud_context_json, '$.version'), 0) = 2
+    AND coalesce(json_extract(cloud_context_json, '$.reported_state'), '')
+    IN ('completed', 'failed', 'cancelled'))
 """
 
 
@@ -208,7 +219,7 @@ def list_sessions(
         params.append(text_filter.casefold())
     params.append(limit)
     rows = conn.execute(
-        f"SELECT {_SESSION_COLUMNS} FROM interactive_sessions "
+        f"SELECT {_SESSION_COLUMNS} FROM interactive_sessions AS observer "
         "WHERE (? = 1 OR (state = 'active' AND expires_at > ?)) "
         + _VISIBLE_SESSION
         + node_filter
@@ -220,6 +231,8 @@ def list_sessions(
     return [_session_payload(row, now=now) for row in rows]
 
 
+# GROUP BY +node_id keeps SQLite from scanning a node-ordered index to avoid
+# sorting. The expiry index seeks to live rows before grouping them.
 def count_live_by_node(conn: sqlite3.Connection, *, now_epoch: float) -> dict[str, int]:
     """Live sessions per node with no row limit, for capacity views.
 
@@ -227,12 +240,28 @@ def count_live_by_node(conn: sqlite3.Connection, *, now_epoch: float) -> dict[st
     v2 cloud report. The Activity list itself stops at ``LIST_ACTIVE_LIMIT``.
     """
     rows = conn.execute(
-        "SELECT node_id, COUNT(*) FROM interactive_sessions "
-        "WHERE state = 'active' AND expires_at > ? "
-        "AND NOT (coalesce(json_extract(cloud_context_json, '$.version'), 0) = 2 "
-        "AND coalesce(json_extract(cloud_context_json, '$.reported_state'), '') "
-        "IN ('completed', 'failed', 'cancelled')) " + _VISIBLE_SESSION + "GROUP BY node_id",
+        f"SELECT node_id, COUNT(*) FROM interactive_sessions AS observer "
+        f"WHERE {_LIVE_SESSION} {_VISIBLE_SESSION} GROUP BY +node_id",
         (now_epoch, now_epoch, now_epoch),
+    ).fetchall()
+    return {str(node_id): int(count) for node_id, count in rows}
+
+
+def count_standalone_by_node(conn: sqlite3.Connection, *, now_epoch: float) -> dict[str, int]:
+    """Count live agent reports that have no live T3 thread representing them."""
+    rows = conn.execute(
+        f"""
+        SELECT node_id, COUNT(*) FROM interactive_sessions AS provider
+        WHERE {_LIVE_SESSION} AND harness != 't3'
+        AND NOT EXISTS (
+            SELECT 1 FROM interactive_sessions AS observer
+            WHERE observer.harness = 't3' AND observer.provider_link_json IS NOT NULL
+            AND observer.state = 'active' AND observer.expires_at > ?
+            AND {_PROVIDER_MATCH}
+        )
+        GROUP BY +node_id
+        """,
+        (now_epoch, now_epoch),
     ).fetchall()
     return {str(node_id): int(count) for node_id, count in rows}
 

@@ -17,12 +17,13 @@ from __future__ import annotations
 import sqlite3
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from sys import float_info
 from typing import Any, Iterator, Mapping
 
 from . import fleet_hub_policy, fleet_hub_routing, fleet_node_projects, fleet_policy, fleet_t3_health
 from .fleet_hub import FleetHubError
 from .fleet_hub_claims import ClaimFenceError
-from .fleet_hub_sessions import count_live_by_node
+from .fleet_hub_sessions import count_live_by_node, count_standalone_by_node
 
 PLACEMENT_SCHEMA = "brigade.fleet_placement.v1"
 DEFAULT_THRESHOLD = 0.70
@@ -219,12 +220,19 @@ def _place(
     if not usable:
         return denied("repo-not-placeable")
     repo_machines = list(((document.get("repositories") or {}).get(policy_repo) or {}).get("eligible_machines") or [])
+    weight = routing.get("agent_session_weight", fleet_policy.DEFAULT_AGENT_SESSION_WEIGHT)
     live: dict[str, int] | None
     try:
         live = count_live_by_node(conn, now_epoch=now.timestamp())
     except Exception:
         # Fail closed: unreadable sessions must never read as zero sessions.
         live = None
+    try:
+        standalone = count_standalone_by_node(conn, now_epoch=now.timestamp()) if live is not None else {}
+    except Exception:
+        standalone = {}
+        if weight:
+            live = None
     # Only nodes whose T3 observer reported recently have a trustworthy count. Expired presence rows
     # read as zero sessions, so a stale node is unknown, and so is one with no health row (every host
     # runs the observer after rollout; the reason differs). None means the health read failed: all unknown.
@@ -256,16 +264,20 @@ def _place(
         # A node with no health row at all is its own reason, so an operator can tell a node that has
         # not posted health yet (rollout order) from one that is failing or stale.
         sessions = None
+        agent_sessions = standalone.get(node, 0)
         if live is None:
             reasons.append(fleet_t3_health.SESSIONS_UNKNOWN)
         elif (unknown := fleet_t3_health.sessions_unknown_reason(health, node)) is not None:
             reasons.append(unknown)
         else:
             sessions = int(live.get(node, 0))
-        # Hub-counted sessions are a floor under the node-reported CPU load, and node memory is a third
-        # input. A missing memory reading leaves the max to the other two and is only reported
-        # (``memory-unknown``, added in the candidate rows), so an old node never becomes unplaceable.
+        # Keep sessions as the total live count. At positive weight, replace
+        # the standalone share of the legacy floor with its weighted share.
         session_ratio = None if sessions is None else (sessions / capacity if capacity > 0 else 1.0)
+        if sessions is not None and capacity > 0 and weight:
+            session_ratio = min(
+                float_info.max, (sessions - agent_sessions) / capacity + weight * (agent_sessions / capacity)
+            )
         memory = None if memory_readings is None else memory_readings.get(node)
         fresh = expiry is not None and now < expiry
         effective = None
@@ -273,7 +285,14 @@ def _place(
             effective = max(float(cpu), session_ratio, 0.0 if memory is None else memory)
         loads[name] = {
             "effective_load": None if effective is None else round(effective, 4),
-            "load_inputs": {"cpu": cpu, "sessions": sessions, "memory": memory, "concurrency": capacity},
+            "load_inputs": {
+                "cpu": cpu,
+                "sessions": sessions,
+                "memory": memory,
+                "concurrency": capacity,
+                "agent_sessions": agent_sessions,
+                "agent_session_weight": weight,
+            },
             "telemetry_observed_at": None if telemetry is None else telemetry.get("observed_at"),
             "telemetry_expires_at": expiry,
         }
@@ -322,6 +341,10 @@ def _place(
                     "eligible": row["eligible"],
                     "effective_load": (loads.get(name) or {}).get("effective_load"),
                     "reasons": reasons,
+                    "load_inputs": {
+                        "agent_sessions": (loads.get(name) or {}).get("load_inputs", {}).get("agent_sessions", 0),
+                        "agent_session_weight": weight,
+                    },
                 }
             )
         return result
