@@ -215,7 +215,7 @@ Conventions:
 - Why: Docker never restarts an unhealthy container. Until S10 the watchdog
   timer restarts the hub after 3 failed `/health` checks, or after 3 checks
   that find only loopback in its namespace. The backup timer runs the planned
-  `fleet backup` hourly into the 0700 directory on the home volume.
+  `fleet backup` hourly into the 0700 backup directory.
 - Command:
 
   ```bash
