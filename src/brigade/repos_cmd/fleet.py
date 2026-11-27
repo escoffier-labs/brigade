@@ -81,14 +81,9 @@ def _health_command_from_raw(raw: object, repo_id: str, index: int) -> tuple[con
         raw_argv = raw.get("argv")
         if isinstance(raw_argv, list) and all(isinstance(part, str) and part.strip() for part in raw_argv):
             argv = [str(part) for part in raw_argv]
-            executable = work_cmd.normalize_policy_executable(argv[0])
-            if executable in work_cmd.SCANNER_HIGH_RISK_COMMANDS:
-                return None, f"repo {repo_id}: health command {label}: high-risk scanner command: {executable}"
-            if any(work_cmd.SCANNER_SHELL_META_RE.search(part) for part in argv):
-                return (
-                    None,
-                    f"repo {repo_id}: health command {label}: high-risk scanner command contains shell metacharacters",
-                )
+            blocker = work_cmd.config._scanner_argv_blocker(argv)
+            if blocker is not None:
+                return None, f"repo {repo_id}: health command {label}: {blocker}"
             if Path(argv[0]).name != "brigade" and "/" not in argv[0] and shutil.which(argv[0]) is None:
                 return None, f"repo {repo_id}: health command {label}: scanner command is not resolvable: {argv[0]}"
         else:

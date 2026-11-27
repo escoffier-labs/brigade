@@ -848,8 +848,8 @@ def _scanner_command_ok(command: str) -> bool:
 
 
 def _scanner_argv_blocker(parts: list[str]) -> str | None:
-    executable = constants.normalize_policy_executable(parts[0])
-    if executable in constants.SCANNER_HIGH_RISK_COMMANDS:
+    executable = constants.policy_blocked_name(parts)
+    if executable is not None:
         return f"high-risk scanner command: {executable}"
     if any(constants.SCANNER_SHELL_META_RE.search(part) for part in parts):
         return "high-risk scanner command contains shell metacharacters"
