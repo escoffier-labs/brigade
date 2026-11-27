@@ -150,12 +150,13 @@ def _peel_passthrough_engine_args(argv: list[str]) -> tuple[list[str], list[str]
 
 def main(argv=None) -> int:
     raw_argv = list(sys.argv[1:] if argv is None else argv)
-    if raw_argv == ["work", "verify", "push-gate", "run"]:
-        # Git starts this leaf on every warn-mode push. Keep it local and
+    push_gate_run = ["work", "verify", "push-gate", "run"]
+    if raw_argv in (push_gate_run, [*push_gate_run, "--hook-v2"]):
+        # Git starts this leaf on every gated push. Keep it local and
         # avoid building the work command tree or checking for CLI updates.
         from ..work_cmd.push_gate_hook import run
 
-        return run()
+        return run(hook_v2=len(raw_argv) > len(push_gate_run))
 
     from .removed_commands import compatibility
 

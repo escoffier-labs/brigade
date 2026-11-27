@@ -404,25 +404,43 @@ def test_stop_policy_git_timeout_is_bounded(repo, monkeypatch, head_available):
     _commit(repo)
     stop, _ = _start(repo, monkeypatch)
     real_run = subprocess.run
-    timeouts = []
+    head = _git(repo, "rev-parse", "HEAD")
+    entry = _git(repo, "ls-tree", "HEAD", "--", DECLARATION).split()
+    fallback_commands = [
+        ("rev-parse", "--verify", "--quiet", "HEAD^{commit}"),
+        ("ls-tree", "--full-tree", "-l", "-z", head, "--", DECLARATION),
+        ("cat-file", "blob", entry[2]),
+    ]
+    fallback_results = {
+        args: real_run(["git", *args], cwd=repo, capture_output=True, check=True) for args in fallback_commands
+    }
+    clock = None
+    timeouts: list[tuple[str, float]] = []
     monkeypatch.setattr(verify_gate, "STOP_POLICY_BUDGET_SECONDS", 0.4)
     monkeypatch.setattr(verify_gate, "_HEAD_FALLBACK_BUDGET_SECONDS", 0.3)
+    # Verify budget sharing independently of Windows Git startup time.
+    monkeypatch.setattr(verify_manifest_git, "monotonic", lambda: time.monotonic() if clock is None else clock)
 
     def slow_git(args, **kwargs):
-        policy_probe = args[:2] == ["git", "remote"] or (
-            not head_available and args[:4] == ["git", "rev-parse", "--verify", "--quiet"]
-        )
-        if not policy_probe:
-            return real_run(args, **kwargs)
-        timeout = kwargs["timeout"]
-        timeouts.append(timeout)
-        time.sleep(min(timeout, 0.4))
-        raise subprocess.TimeoutExpired(args, timeout)
+        nonlocal clock
+        if args[0] == "git":
+            command = tuple(args[1:])
+            if command == ("remote",) or (not head_available and command == fallback_commands[0]):
+                timeout = kwargs["timeout"]
+                timeouts.append((command[0], timeout))
+                clock = (time.monotonic() if clock is None else clock) + timeout
+                raise subprocess.TimeoutExpired(args, timeout)
+            if command in fallback_results:
+                timeouts.append((command[0], kwargs["timeout"]))
+                return fallback_results[command]
+        return real_run(args, **kwargs)
 
     monkeypatch.setattr(verify_manifest_git.subprocess, "run", slow_git)
     result = runtime.handle_payload("Stop", stop)
 
-    assert timeouts and max(timeouts) <= 0.4
+    assert [name for name, _ in timeouts[:2]] == ["remote", "rev-parse"]
+    assert 0 < timeouts[0][1] < timeouts[1][1] <= 0.4
+    assert all(0 < timeout <= 0.4 for _, timeout in timeouts)
     if head_available:
         assert result["decision"] == "block"
         assert "Git base was unresolved" in result["reason"]
