@@ -227,6 +227,7 @@ def commit(
     hub: dict[str, Any] | None = None,
     undoes: str | None = None,
     applied: bool = False,
+    metadata: dict[str, Any] | None = None,
 ) -> Decision:
     from .memory_cmd import _config_or_default
 
@@ -262,7 +263,12 @@ def commit(
                 handle.write(change.before)
                 handle.flush()
                 os.fsync(handle.fileno())
-    payload = {**asdict(decision), "status": "pending", "before_absent": [c.before is None for c in changes]}
+    payload = {
+        **(metadata or {}),
+        **asdict(decision),
+        "status": "pending",
+        "before_absent": [c.before is None for c in changes],
+    }
     store.write_json(directory / "decision.json", payload)
     store.fsync_dir(directory / "before")
     store.fsync_dir(directory)
@@ -278,6 +284,7 @@ def commit(
                     expected_before=kernel.content_digest(c.before),
                     desired_after=kernel.content_digest(c.after),
                     staged_bytes=c.after,
+                    mode=c.mode,
                 )
                 for c in changes
             ]

@@ -1,0 +1,1 @@
+- Let the content policy file verified unknown-origin card drafts that pass the ingest checks, with rollback data saved before publication. Worker drafts still go to the review inbox.

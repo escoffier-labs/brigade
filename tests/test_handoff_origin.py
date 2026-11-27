@@ -1,4 +1,4 @@
-"""Only tooling-authenticated origins may enter automatic filing."""
+"""Verify handoff origin and filing dispositions."""
 
 import os
 import sys
@@ -43,18 +43,20 @@ def stamp(target: Path, path: Path, kind: str = "interactive", touched: bool | N
 @pytest.mark.parametrize("action", ["no-card", "create-card"])
 @pytest.mark.parametrize("kind", ["interactive", "worker", "cron", "subagent", "unknown"])
 @pytest.mark.parametrize("touched", [False, True, None])
-def test_filing_requires_known_clean_interactive_origin(tmp_path, action, kind, touched):
+def test_filing_disposition_by_origin_and_action(tmp_path, action, kind, touched):
     path = handoff(tmp_path, action=action)
     stamp(tmp_path, path, kind, touched)
     stats = ingest.IngestStats()
     assert (
         ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=stats, promote_cards=True, route_documents=True) == 0
     )
-    allowed = kind == "interactive" and touched is False
+    interactive = kind == "interactive" and touched is False
+    allowed = interactive or (kind == "unknown" and action == "create-card")
     assert stats.inboxed == (0 if allowed else 1)
     assert stats.promoted + stats.routed == (1 if allowed else 0)
     if not allowed:
-        assert "origin-review-required" in stats.actions[0]
+        reason = "action-not-auto-handled" if kind == "unknown" else "origin-review-required"
+        assert reason in stats.actions[0]
 
 
 def test_missing_stamp_and_forged_body_cannot_authorize_filing(tmp_path):

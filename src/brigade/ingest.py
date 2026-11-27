@@ -283,6 +283,8 @@ def ingest_into(
     exists but cannot be loaded. The fleet driver maps those statuses through
     `skip_reason` so a broken config is not reported as a missing inbox.
     """
+    from . import ingest_content_policy
+
     inbox_dir = owner / "memory" / "handoff-inbox"
     try:
         handoff_dirs = _resolve_inbox_paths(source)
@@ -311,8 +313,7 @@ def ingest_into(
             stats.skipped += 1
             stats.actions.append(_summary("skip", path.name, _TRACKED_SKIP_CODE))
         for path in handoffs:
-            # One unreadable or unarchivable handoff is recorded and skipped;
-            # it must not abort the rest of the batch.
+            # A failure on one handoff must leave the rest of the batch runnable.
             try:
                 # One read. The digest, the parse and every delivered copy
                 # come from these bytes, so the digest names what was handled.
@@ -339,47 +340,58 @@ def ingest_into(
                     stats.inboxed += 1
                     stats.actions.append(_summary("inbox", path.name, "handoff-too-large"))
                     continue
-                sidecar = handoff_origin.stamp_path(source, path)
+                except (handoff_origin.LinkedHandoffError, ChangedHandoffError):
+                    raise
+                except Exception:
+                    _record_pending_review(stats, path, inbox_dir, "handoff-unreadable", dry_run=dry_run)
+                    continue
+                sidecar = None
                 sha = hashlib.sha256(snapshot).hexdigest()
-                origin = handoff_origin.verify_handoff(source, path, snapshot)
-                trusted_origin = origin is not None and origin.allows_automatic_filing
+                try:
+                    sidecar = handoff_origin.stamp_path(source, path)
+                    origin = handoff_origin.verify_handoff(source, path, snapshot)
+                except Exception:
+                    origin = None
+                content_policy = origin is not None and origin.session_kind == "unknown"
+                filing_eligible = origin is not None and (origin.allows_automatic_filing or content_policy)
                 if origin is not None:
                     sidecar = origin.stamp.sidecar
 
                 def claim_origin(verified: handoff_origin.VerifiedOrigin | None = origin) -> bool:
-                    nonlocal trusted_origin
+                    nonlocal filing_eligible
                     assert verified is not None
-                    trusted_origin = verified.stamp.claim()
-                    return trusted_origin
+                    try:
+                        filing_eligible = verified.stamp.claim()
+                    except Exception:
+                        filing_eligible = False
+                    return filing_eligible
 
-                # Bad bytes or malformed structure belong to this handoff
-                # only. Guard and invariant failures further on stay fatal.
                 try:
                     sections = parse(path, snapshot)
                 except UnicodeDecodeError:
-                    _record_failure(stats, path, "invalid-encoding")
+                    _record_pending_review(stats, path, inbox_dir, "invalid-encoding", dry_run=dry_run)
                     continue
-                except ValueError:
-                    _record_failure(stats, path, "invalid-content")
+                except Exception:
+                    _record_pending_review(stats, path, inbox_dir, "invalid-content", dry_run=dry_run)
                     continue
-                if trusted_origin and not dry_run:
+                if filing_eligible and not dry_run:
                     if _is_tracked(path, _git_tracked_files(path.parent)):
                         raise TrackedHandoffError("handoff became tracked before origin claim")
                     if sha in stats.seen_digests:
-                        assert origin is not None
-                        trusted_origin = claim_origin()
-                if trusted_origin and sha in stats.seen_digests:
+                        claim_origin()
+                if filing_eligible and sha in stats.seen_digests:
                     if not dry_run:
                         _archive(path, processed_dir, sha)
+                        assert sidecar is not None
                         handoff_origin.remove_stamp(sidecar)
                     stats.skipped += 1
                     stats.actions.append(_summary("skip", path.name, "duplicate-content"))
                     continue
-                if not trusted_origin:
-                    outcome = Outcome(
-                        "inboxed",
-                        code="origin-review-required",
-                        reason="missing, unverifiable or untrusted origin requires review",
+                if not filing_eligible:
+                    outcome = Outcome("inboxed", code="origin-review-required")
+                elif content_policy:
+                    outcome = ingest_content_policy.decide(
+                        sections, snapshot, owner=owner, promote_cards=promote_cards, card_ids=card_ids
                     )
                 else:
                     outcome = decide(
@@ -390,12 +402,9 @@ def ingest_into(
                         card_ids=card_ids,
                         routing=routing,
                     )
-                # A busy card lock has made no canonical writes. Claim its
-                # origin only after acquiring the lock, so it remains retryable.
-                if trusted_origin and outcome.kind not in {"promoted", "reinforced"} and not dry_run:
-                    assert origin is not None
+                # Keep a card's claim inside its publication lock.
+                if filing_eligible and outcome.kind not in {"promoted", "reinforced"} and not dry_run:
                     if not claim_origin():
-                        trusted_origin = False
                         outcome = Outcome("inboxed", code="origin-review-required")
                 action = _execute(
                     outcome,
@@ -409,13 +418,14 @@ def ingest_into(
                     pending=pending,
                     card_ids=card_ids,
                     promote_cards=promote_cards,
-                    route_documents=route_documents,
+                    route_documents=route_documents and not content_policy,
                     routing=routing,
                     claim_origin=claim_origin
-                    if trusted_origin and outcome.kind in {"promoted", "reinforced"}
+                    if filing_eligible and outcome.kind in {"promoted", "reinforced"}
                     else None,
+                    policy_origin=origin if content_policy else None,
                 )
-                if not dry_run and action.kind in _HANDLED_KINDS:
+                if not dry_run and sidecar is not None and action.kind in _HANDLED_KINDS:
                     handoff_origin.remove_stamp(sidecar)
             except TrackedHandoffError:
                 action = Action("skipped", _summary("skip", path.name, _TRACKED_SKIP_CODE))
@@ -436,7 +446,7 @@ def ingest_into(
             # Only content that was published, appended or archived counts as
             # handled. A retryable skip leaves the handoff pending, so a later
             # identical copy must not be archived as its duplicate.
-            if trusted_origin and action.kind in _HANDLED_KINDS:
+            if filing_eligible and action.kind in _HANDLED_KINDS:
                 stats.seen_digests.add(sha)
             stats.processed += 1
             stats.actions.append(action.summary)
@@ -661,6 +671,8 @@ def decide(
                     reason=f"update-card {EXPECTED_SHA_SECTION} does not match the current card",
                 )
         sig = scan_untrusted(content)
+        if not isinstance(sig.flagged, bool):
+            raise ValueError("missing card injection scan result")
         if sig.flagged:
             return Outcome(
                 "inboxed",
@@ -909,6 +921,25 @@ def _write_card_descriptor_bound(
         os.close(parent)
 
 
+def _check_card_state(data: bytes | None, expected_sha: str) -> str | None:
+    """Check the exact bytes that publication would replace."""
+    text = None if data is None else data.decode("utf-8", errors="replace")
+    if text is not None and _identity_migration_fields(text):
+        raise OSError("governed destination requires review")
+    if expected_sha and (data is None or sha256_hex(data) != expected_sha):
+        raise StaleCardError("expected card SHA256 no longer matches the card")
+    return text
+
+
+def _build_promoted_card(sections: dict[str, str], existing: str | None) -> str:
+    from .card_identity import valid_card_id
+
+    content = ensure_fingerprint_frontmatter(sections.get("suggested card content", "").strip() + "\n")
+    meta, _ = _frontmatter(existing or "")
+    existing_id = valid_card_id(meta.get("id")) or valid_card_id(meta.get("card_id"))
+    return ensure_card_id_frontmatter(content, preserve_id=existing_id)
+
+
 def _publish_promoted_card(
     dest: Path,
     target: Path,
@@ -926,33 +957,17 @@ def _publish_promoted_card(
     """
     from contextlib import nullcontext
 
-    from .card_identity import valid_card_id
     from .inbox_lock import held_file_lock
 
     def parent_fence(path: Path) -> None:
         if any(parent.is_symlink() for parent in (path.parent, *path.parents)):
             raise OSError("publication parent is symlinked")
 
-    def check_state(data: bytes | None) -> str | None:
-        """Decode the exact bytes, refuse a governed card or a stale SHA, return the text."""
-        text = None if data is None else data.decode("utf-8", errors="replace")
-        if text is not None and _identity_migration_fields(text):
-            raise OSError("governed destination requires review")
-        # decide() compared the SHA without the lock. Hash the exact bytes read here, the
-        # same bytes the boundary probe compares, so a card edited since then is never
-        # replaced by a stale handoff.
-        if expected_sha and (data is None or sha256_hex(data) != expected_sha):
-            raise StaleCardError("expected card SHA256 no longer matches the card")
-        return text
-
     built = ""
 
     def build_content(raw: str | None) -> str:
         nonlocal built
-        content = ensure_fingerprint_frontmatter(sections.get("suggested card content", "").strip() + "\n")
-        existing, _ = _frontmatter(raw or "")
-        existing_id = valid_card_id(existing.get("id")) or valid_card_id(existing.get("card_id"))
-        built = ensure_card_id_frontmatter(content, preserve_id=existing_id)
+        built = _build_promoted_card(sections, raw)
         return built
 
     lock_path = target / ".brigade/memory/proposals/proposal.lock"
@@ -967,11 +982,13 @@ def _publish_promoted_card(
             parent_fence(dest)
             if dest.is_symlink() or (dest.exists() and not dest.is_file()):
                 raise OSError("publication must be a regular file")
-            build_content(check_state(dest.read_bytes() if dest.exists() else None))
+            build_content(_check_card_state(dest.read_bytes() if dest.exists() else None, expected_sha))
         else:
             if claim_origin is not None and not claim_origin():
                 raise handoff_origin.OriginClaimRefused("origin claim unavailable")
-            _write_card_descriptor_bound(dest, target, check_state, build_content)
+            _write_card_descriptor_bound(
+                dest, target, lambda data: _check_card_state(data, expected_sha), build_content
+            )
     if card_ids is not None:
         # `built` is the text written, or in a dry run the text the same builder would
         # write, so an update-card that omits an id keeps the destination's id in both.
@@ -1160,6 +1177,7 @@ def _execute(
     routing: instruction_overflow.RouteContext | None = None,
     claim_origin: Callable[[], bool] | None = None,
     pending: list[ingest_near_duplicate.Pending] | None = None,
+    policy_origin: handoff_origin.VerifiedOrigin | None = None,
 ) -> Action:
     from .inbox_lock import InboxLockTimeout
     from .memory_evidence_log import log_match
@@ -1169,6 +1187,27 @@ def _execute(
     # Re-check before destination writes as well as at the final archive boundary.
     if not dry_run and _is_tracked(handoff_path, _git_tracked_files(handoff_path.parent)):
         raise TrackedHandoffError(f"refusing to ingest git-tracked handoff {handoff_path}")
+
+    if policy_origin is not None and outcome.kind in {"promoted", "reinforced"}:
+        from .ingest_content_policy import file_card
+
+        assert card_ids is not None and claim_origin is not None
+        refusal = file_card(
+            outcome,
+            target,
+            sections,
+            handoff_path,
+            policy_origin,
+            claim_origin=claim_origin,
+            card_ids=card_ids,
+            dry_run=dry_run,
+        )
+        if refusal is None:
+            if not dry_run:
+                log_match(target, outcome.match, _archive(handoff_path, processed_dir, snapshot_sha))
+            verb = "promote" if outcome.kind == "promoted" else "reinforce"
+            return Action(outcome.kind, _summary(verb, name, outcome.code))
+        outcome = Outcome("inboxed", code=refusal)
 
     if outcome.kind == "promoted":
         dest = outcome.dest
@@ -1892,6 +1931,16 @@ def _match_meta(outcome: Outcome, target: Path) -> str:
     if getattr(match, "opposite_polarity", False):
         meta += " polarity=opposite"
     return meta
+
+
+def _record_pending_review(stats: IngestStats, path: Path, inbox_dir: Path, code: str, *, dry_run: bool) -> None:
+    from .ingest_content_policy import note_pending
+
+    if not dry_run:
+        note_pending(inbox_dir, path, code)
+    stats.processed += 1
+    stats.inboxed += 1
+    _record_failure(stats, path, "io-error" if code == "handoff-unreadable" else code)
 
 
 def _record_failure(stats: IngestStats, path: Path, code: str) -> None:
