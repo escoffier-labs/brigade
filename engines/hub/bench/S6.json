@@ -4,7 +4,7 @@
     "binary_sha256": "cbd0a8f69fa9715ec136a31e50168171f90d5dd1c14f8b65d8160252d9d22272",
     "notes": "Histogram and exact-key session end fix present. Inclusive body budget and control-key compatibility fixes not yet present."
   },
-  "machine": "Intel Core Ultra 9 285, 24 cores, Linux 6.17.0, Python 3.12.3, ext4",
+  "machine": "Shared benchmark workstation, Python 3.12.3, ext4",
   "qualification": "Shared host. Every attempt remains in local S6a client reports. Lower and failed observations are retained.",
   "comparisons": [
     {
