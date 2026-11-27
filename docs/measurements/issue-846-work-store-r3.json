@@ -78,7 +78,7 @@
     "directory_fsync_supported": true,
     "dolt_on_path": false,
     "filesystem_type": "ext4",
-    "platform": "Linux-6.18.35-x86_64-with-glibc2.39",
+    "platform": "Linux x86_64, glibc 2.39",
     "python_version": "3.14.4 (main, May  1 2026, 05:51:55) [GCC 13.3.0]",
     "sqlite_version": "3.45.1"
   },
