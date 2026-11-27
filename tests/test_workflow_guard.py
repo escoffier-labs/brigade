@@ -8,6 +8,7 @@ import subprocess
 
 import pytest
 
+from brigade.outcome_ledger import ROLLBACK_DERIVED_PATHS
 from scripts import workflow_guard
 from tests.test_publish_workflow import _load_workflow_yaml
 
@@ -119,6 +120,7 @@ def fake_gh(monkeypatch):
         history=None,
         history_after=None,
         live_repo="example/project",
+        pull_identity=None,
         delete=(0, "HTTP/2.0 204 No Content"),
     ):
         pull = f"repos/example/project/pulls/{number}"
@@ -177,6 +179,7 @@ def fake_gh(monkeypatch):
                     "state": "open",
                     "base": {"ref": next(live_bases), "sha": next(live_base_shas), "repo": {"full_name": live_repo}},
                     "labels": [{"name": label} for label in labels],
+                    **(pull_identity or {}),
                 }
             return subprocess.CompletedProcess(args, 0, stdout=json.dumps(payload))
 
@@ -184,6 +187,142 @@ def fake_gh(monkeypatch):
         return calls
 
     return install
+
+
+LEDGER = "outcome-ledger/skills.json"
+SKILL = "src/brigade/templates/skills/example/SKILL.md"
+SNAPSHOT = "src/brigade/templates/template-profile-snapshot.json"
+
+
+@pytest.fixture
+def scheduled_restore(fake_gh, monkeypatch, pull_request_event):
+    monkeypatch.setenv("GITHUB_EVENT_NAME", "pull_request_target")
+    monkeypatch.setattr(workflow_guard, "LEDGER_WRITER_BOT_ID", 123)
+
+    def install(
+        *,
+        paths=(LEDGER, SKILL, SNAPSHOT),
+        author=123,
+        sender=123,
+        head_repo="example/project",
+        head_ref="ledger/auto",
+        action="opened",
+        fail=False,
+        changed_files=None,
+        status="modified",
+    ):
+        pull_request_event(action=action, sender={"id": sender, "type": "Bot"}, label=None)
+        fake_gh(
+            [[{"filename": path, "status": status} for path in paths]],
+            pull_identity={
+                "user": {"id": author, "type": "Bot"},
+                "head": {"sha": HEAD, "ref": head_ref, "repo": {"full_name": head_repo}},
+            },
+            fail=fail,
+            changed_files=changed_files,
+        )
+
+    return install
+
+
+@pytest.mark.parametrize("action", ["opened", "synchronize", "reopened"])
+def test_scheduled_ledger_restore_passes_without_a_label(scheduled_restore, action):
+    scheduled_restore(action=action)
+    assert workflow_guard.main(CLI_ARGS) == 0
+
+
+@pytest.mark.parametrize(
+    ("details", "result"),
+    [
+        ({"author": 1}, 1),
+        ({"sender": 1}, 1),
+        ({"head_repo": "example/fork"}, 1),
+        ({"head_ref": "ledger/other"}, 1),
+        ({"paths": (SNAPSHOT,)}, 1),
+        ({"paths": (SKILL, SNAPSHOT)}, 1),
+        ({"paths": (LEDGER, SKILL, SNAPSHOT, "scripts/workflow_guard.py")}, 1),
+        ({"paths": (LEDGER, SKILL, SNAPSHOT, "README.md")}, 1),
+        ({"action": "edited"}, 1),
+        ({"author": "123"}, 1),
+        ({"sender": None}, 1),
+        ({"head_repo": None}, 1),
+        ({"status": None}, 1),
+        ({"paths": (LEDGER, SNAPSHOT, SNAPSHOT)}, 1),
+        ({"status": "copied"}, 1),
+        ({"paths": (LEDGER, SNAPSHOT, "src/brigade/templates/skills/../../../scripts/workflow_guard.py")}, 1),
+        ({"paths": (LEDGER, SNAPSHOT, "src/brigade/templates/skills/./example/SKILL.md")}, 1),
+        ({"paths": (LEDGER, SNAPSHOT, "src/brigade/templates/skills//example/SKILL.md")}, 1),
+        ({"paths": (LEDGER, SNAPSHOT, "src/brigade/templates/skills/example\\SKILL.md")}, 1),
+        ({"changed_files": 4}, 2),
+        ({"fail": True}, 2),
+    ],
+)
+def test_workflow_guard_checks_scheduled_ledger_restore_requirements(scheduled_restore, details, result):
+    scheduled_restore(**details)
+    assert workflow_guard.main(CLI_ARGS) == result
+
+
+def test_scheduled_ledger_restore_requires_the_default_branch_base(scheduled_restore, pull_request_event, fake_gh):
+    scheduled_restore()
+    pull_request_event(action="opened", sender={"id": 123, "type": "Bot"}, label=None, base="release/0.32")
+    fake_gh(
+        [[{"filename": path, "status": "modified"} for path in (LEDGER, SKILL, SNAPSHOT)]],
+        bases=("release/0.32", "release/0.32", "release/0.32"),
+        pull_identity={
+            "user": {"id": 123, "type": "Bot"},
+            "head": {"sha": HEAD, "ref": "ledger/auto", "repo": {"full_name": "example/project"}},
+        },
+    )
+    assert workflow_guard.main(CLI_ARGS) == 1
+
+
+def test_scheduled_ledger_restore_checks_both_sides_of_a_rename(scheduled_restore, pull_request_event, fake_gh):
+    scheduled_restore()
+    fake_gh(
+        [
+            [
+                {"filename": LEDGER, "status": "modified"},
+                {"filename": SNAPSHOT, "status": "modified"},
+                {"filename": SKILL, "status": "renamed", "previous_filename": "scripts/workflow_guard.py"},
+            ]
+        ],
+        pull_identity={
+            "user": {"id": 123, "type": "Bot"},
+            "head": {"sha": HEAD, "ref": "ledger/auto", "repo": {"full_name": "example/project"}},
+        },
+    )
+    assert workflow_guard.main(CLI_ARGS) == 1
+
+
+@pytest.mark.parametrize(
+    ("path", "plain"),
+    [
+        (SKILL, True),
+        ("src/brigade/templates/skills/../x", False),
+        ("./src/brigade/templates/skills/x", False),
+        ("src/brigade/templates/skills//x", False),
+        ("/src/brigade/templates/skills/x", False),
+        ("src/brigade/templates/skills/x\\y", False),
+    ],
+)
+def test_scheduled_ledger_restore_paths_must_be_plain(path, plain):
+    assert workflow_guard.is_plain_path(path) is plain
+
+
+def test_scheduled_ledger_restore_uses_the_ledger_derived_paths():
+    assert workflow_guard.ROLLBACK_DERIVED_PATHS == set(ROLLBACK_DERIVED_PATHS)
+
+
+def test_workflow_guard_requires_a_readable_scheduled_restore_event(scheduled_restore, monkeypatch, tmp_path):
+    scheduled_restore()
+    monkeypatch.setenv("GITHUB_EVENT_PATH", str(tmp_path / "missing.json"))
+    assert workflow_guard.main(CLI_ARGS) == 2
+
+
+def test_skill_files_follow_the_standard_path_rule(scheduled_restore, capsys):
+    scheduled_restore(paths=(SKILL,))
+    assert workflow_guard.main(CLI_ARGS) == 0
+    assert "No protected CI files changed." in capsys.readouterr().out
 
 
 def approval_status(
