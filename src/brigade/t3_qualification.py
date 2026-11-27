@@ -20,7 +20,6 @@ from . import (
     agents,
     inbox_lock,
     localio,
-    native_child_journal,
     native_t3_capacity,
     native_t3_enrollment,
     native_t3_lifecycle,
@@ -539,7 +538,7 @@ def finish_t3(folder: Path) -> None:
 
 
 def abort_t3(folder: Path, error: str) -> None:
-    """Retain the failure and close out only when every task is closed."""
+    """Retain the failure, acknowledge safe results, and leave closing the run to the operator."""
     try:
         localio.write_json_exclusive(folder / "failure.json", {"error": error})
     except FileExistsError:
@@ -547,93 +546,27 @@ def abort_t3(folder: Path, error: str) -> None:
     context = evidence.read(folder / "expected.json")
     workspace = Path(context["workspace"])
     run_id = context["run_ids"]["t3"]
-    parent_thread = context["parent_thread"]
-    status_command = shlex.join((*CLI, "t3", "status", run_id, "--target", str(workspace)))
-    finalize_command = shlex.join((*CLI, "t3", "finalize", run_id, "--target", str(workspace)))
     try:
-        report = native_t3_lifecycle.status(workspace=workspace, run_id=run_id)
+        tasks = native_t3_lifecycle.status(workspace=workspace, run_id=run_id)["tasks"]
         run_dir = native_t3_capacity.runs_root(workspace) / run_id
         results = {result.handle.spec.task_id: result for result in run_tasks.read_tasks(run_dir)}
     except QUALIFICATION_ERRORS:
-        print(status_command)
-        print(finalize_command)
-        return
-    # Finalize runs only once every task is terminal, acknowledged and unheld.
-    pending = False
-    for task in report["tasks"]:
-        task_id = task["task_id"]
-        held_reason = task["held_reason"]
-        if held_reason is not None:
-            pending = True
-            if held_reason == native_child_journal.ABANDONED:
-                print(f"Task {task_id} is abandoned ({held_reason}); this run cannot be finalized by this tool.")
-            else:
-                # An acknowledgement always refuses while the hold is unresolved.
-                print(_hold_resolve_guidance(workspace, run_id, task_id))
-            continue
-        if not task["terminal"]:
-            pending = True
-            if task["correlated"]:
-                print(
-                    shlex.join(
-                        (
-                            *CLI,
-                            "t3",
-                            "cancel",
-                            run_id,
-                            task_id,
-                            "--parent-thread",
-                            parent_thread,
-                            "--target",
-                            str(workspace),
-                        )
-                    )
-                )
-            elif task["attempt"] is not None:
-                # Cancel refuses before a native correlation exists; record or abandon the attempt.
-                print(_hold_resolve_guidance(workspace, run_id, task_id))
-            else:
-                print(status_command)
-            continue
-        if task["acked"]:
-            continue
-        # read_tasks can lag a row that status already reports, so tolerate a missing one.
-        result = results.get(task_id)
+        tasks = ()
+        results = {}
+    for task in tasks:
+        result = results.get(task["task_id"])
         result_id = result.result_id if result is not None else None
-        if result_id is None:
-            pending = True
-            print(status_command)
+        if result_id is None or not task["terminal"] or task["acked"] or task["held_reason"] is not None:
             continue
-        command = (*CLI, "t3", "ack", run_id, task_id, "--result-id", result_id, "--target", str(workspace))
         try:
-            native_t3_lifecycle.ack(workspace=workspace, run_id=run_id, task_id=task_id, result_id=result_id)
-        except QUALIFICATION_ERRORS as exc:
-            pending = True
-            if getattr(exc, "code", None) == "task-held":
-                print(_hold_resolve_guidance(workspace, run_id, task_id))
-            else:
-                print(shlex.join(command))
-    if pending:
-        return
-    try:
-        closed = native_t3_lifecycle.status(workspace=workspace, run_id=run_id)
-    except QUALIFICATION_ERRORS:
-        print(status_command)
-        print(finalize_command)
-        return
-    if not all(task["terminal"] and task["acked"] and task["held_reason"] is None for task in closed["tasks"]):
-        return
-    try:
-        native_t3_lifecycle.finalize(workspace=workspace, run_id=run_id)
-    except QUALIFICATION_ERRORS:
-        print(finalize_command)
-
-
-def _hold_resolve_guidance(workspace: Path, run_id: str, task_id: str) -> str:
-    return (
-        f"Resolve the hold on {task_id} before acknowledging it: "
-        + shlex.join((*CLI, "t3", "hold-resolve", run_id, task_id, "--target", str(workspace)))
-        + " with --native-json or --abandon."
+            native_t3_lifecycle.ack(workspace=workspace, run_id=run_id, task_id=task["task_id"], result_id=result_id)
+        except QUALIFICATION_ERRORS:
+            continue
+    print(shlex.join((*CLI, "t3", "status", run_id, "--target", str(workspace))))
+    finalize = shlex.join((*CLI, "t3", "finalize", run_id, "--target", str(workspace)))
+    print(
+        f"Close this run with `{finalize}` once status shows no live or held tasks, "
+        "or run it now to close the run as failed."
     )
 
 

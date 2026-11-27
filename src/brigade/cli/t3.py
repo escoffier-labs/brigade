@@ -103,7 +103,8 @@ def register(sub: argparse._SubParsersAction) -> None:
         "finalize",
         help=(
             "Explicitly close the run after acknowledgement. A completed status means each turn ended, "
-            "not that each task was done."
+            "not that each task was done. `abort-t3` never finalizes: close an aborted run with this "
+            "command once status shows no live or held tasks."
         ),
     )
     p_finalize.add_argument("run_id", help="Run identity reported by `brigade t3 open`.")
