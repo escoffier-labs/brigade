@@ -184,8 +184,18 @@ def test_unresolved_write_destination_retains_cwd_gate(worktrees, command):
 
 
 @pytest.mark.parametrize("redirect", ["2>&1", ">&2", "2>/dev/null", "> {outside}"])
-def test_readonly_command_keeps_worktree_gate_disarmed(worktrees, tmp_path, redirect):
+def test_readonly_command_keeps_worktree_gate_disarmed(worktrees, tmp_path, monkeypatch, redirect):
     first, _ = worktrees
+    original_lstat = Path.lstat
+
+    def reject_shell_syntax_as_path(path):
+        if "2>" in path.parts:
+            error = OSError("fixture invalid Windows path name")
+            error.winerror = 123
+            raise error
+        return original_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", reject_shell_syntax_as_path)
     redirect = redirect.format(outside=shlex.quote(str(tmp_path / "outside.log")))
     fields = {"tool_name": "Bash", "tool_input": {"command": f"echo result {redirect}"}}
     event(first, "PreToolUse", **fields)
