@@ -15,9 +15,9 @@ still goes through ``route``, which re-checks every gate.
 from __future__ import annotations
 
 import sqlite3
-from sys import float_info
 from contextlib import contextmanager
 from datetime import datetime, timedelta
+from sys import float_info
 from typing import Any, Iterator, Mapping
 
 from . import fleet_hub_policy, fleet_hub_routing, fleet_node_projects, fleet_policy, fleet_t3_health
@@ -229,7 +229,7 @@ def _place(
         live = None
     try:
         standalone = count_standalone_by_node(conn, now_epoch=now.timestamp()) if live is not None else {}
-    except sqlite3.Error:
+    except Exception:
         standalone = {}
         if weight:
             live = None
@@ -271,13 +271,13 @@ def _place(
             reasons.append(unknown)
         else:
             sessions = int(live.get(node, 0))
-        # The legacy floor already used every visible presence row. Preserve it
-        # at zero weight and replace the standalone contribution when opted in.
-        if sessions is not None and weight:
-            sessions -= agent_sessions
+        # Keep sessions as the total live count. At positive weight, replace
+        # the standalone share of the legacy floor with its weighted share.
         session_ratio = None if sessions is None else (sessions / capacity if capacity > 0 else 1.0)
-        if session_ratio is not None and capacity > 0 and weight:
-            session_ratio = min(float_info.max, session_ratio + weight * (agent_sessions / capacity))
+        if sessions is not None and capacity > 0 and weight:
+            session_ratio = min(
+                float_info.max, (sessions - agent_sessions) / capacity + weight * (agent_sessions / capacity)
+            )
         memory = None if memory_readings is None else memory_readings.get(node)
         fresh = expiry is not None and now < expiry
         effective = None

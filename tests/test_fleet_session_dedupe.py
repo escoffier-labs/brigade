@@ -184,13 +184,43 @@ def test_current_version_database_adds_provider_link_without_losing_rows(tmp_pat
     path = tmp_path / "hub.db"
     conn = fleet_hub.init_db(path)
     fleet_hub_sessions.handle_session(conn, body("claude", "native-session"), caller_node=NODE)
+    conn.execute("DROP INDEX interactive_sessions_active_observer")
     conn.execute("ALTER TABLE interactive_sessions DROP COLUMN provider_link_json")
     conn.commit()
     conn.close()
     conn = fleet_hub.init_db(path)
     assert [r["session_id"] for r in fleet_hub_sessions.list_sessions(conn)] == ["native-session"]
     assert "provider_link_json" in {r[1] for r in conn.execute("PRAGMA table_info(interactive_sessions)")}
+    assert conn.execute("PRAGMA user_version").fetchone() == (fleet_hub.SCHEMA_VERSION,)
+    assert "interactive_sessions_active_observer" in {
+        row[1] for row in conn.execute("PRAGMA index_list(interactive_sessions)")
+    }
     conn.close()
+
+
+@pytest.mark.parametrize(
+    ("counter", "link_index"),
+    [
+        (fleet_hub_sessions.count_live_by_node, "interactive_sessions_active_provider"),
+        (fleet_hub_sessions.count_standalone_by_node, "interactive_sessions_active_observer"),
+    ],
+)
+def test_live_count_seeks_expiry_and_exact_provider_link(tmp_path, counter, link_index):
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    try:
+        statements = []
+        conn.set_trace_callback(statements.append)
+        counter(conn, now_epoch=NOW)
+        conn.set_trace_callback(None)
+        assert len(statements) == 1
+        plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + statements[0])]
+        assert any("SEARCH " in step and "interactive_sessions_active_expiry (expires_at>?)" in step for step in plan)
+        assert any(
+            "SEARCH " in step and link_index in step and "checkout_path=? AND expires_at>?" in step for step in plan
+        )
+        assert not any(step.startswith("SCAN ") for step in plan)
+    finally:
+        conn.close()
 
 
 @pytest.mark.parametrize(

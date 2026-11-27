@@ -128,8 +128,8 @@ def _casefold(value: object) -> str:
 # remain separate, including standalone sessions running beside a T3 thread.
 _PROVIDER_MATCH = """
     observer.node_id = provider.node_id
-    AND provider.harness = json_extract(observer.provider_link_json, '$.harness')
-    AND provider.session_id = json_extract(observer.provider_link_json, '$.session_id')
+    AND CAST(json_extract(observer.provider_link_json, '$.harness') AS TEXT) = provider.harness
+    AND CAST(json_extract(observer.provider_link_json, '$.session_id') AS TEXT) = provider.session_id
     AND provider.checkout_path = observer.checkout_path
 """
 
@@ -231,6 +231,8 @@ def list_sessions(
     return [_session_payload(row, now=now) for row in rows]
 
 
+# GROUP BY +node_id keeps SQLite from scanning a node-ordered index to avoid
+# sorting. The expiry index seeks to live rows before grouping them.
 def count_live_by_node(conn: sqlite3.Connection, *, now_epoch: float) -> dict[str, int]:
     """Live sessions per node with no row limit, for capacity views.
 
@@ -239,7 +241,7 @@ def count_live_by_node(conn: sqlite3.Connection, *, now_epoch: float) -> dict[st
     """
     rows = conn.execute(
         f"SELECT node_id, COUNT(*) FROM interactive_sessions AS observer "
-        f"WHERE {_LIVE_SESSION} {_VISIBLE_SESSION} GROUP BY node_id",
+        f"WHERE {_LIVE_SESSION} {_VISIBLE_SESSION} GROUP BY +node_id",
         (now_epoch, now_epoch, now_epoch),
     ).fetchall()
     return {str(node_id): int(count) for node_id, count in rows}
@@ -257,7 +259,7 @@ def count_standalone_by_node(conn: sqlite3.Connection, *, now_epoch: float) -> d
             AND observer.state = 'active' AND observer.expires_at > ?
             AND {_PROVIDER_MATCH}
         )
-        GROUP BY node_id
+        GROUP BY +node_id
         """,
         (now_epoch, now_epoch),
     ).fetchall()

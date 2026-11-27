@@ -779,7 +779,9 @@ def parse_routing(raw: Any) -> dict[str, Any]:
         ),
         "routing",
     )
-    weight = body.get("agent_session_weight", DEFAULT_AGENT_SESSION_WEIGHT)
+    weight = body.get("agent_session_weight")
+    if weight is None:
+        weight = DEFAULT_AGENT_SESSION_WEIGHT
     try:
         if type(weight) not in (int, float) or weight < 0 or not math.isfinite(weight):
             raise ValueError

@@ -209,13 +209,9 @@ def test_session_floor_alone_can_push_a_machine_over_the_threshold(fleet):
     assert cloud["effective_load"] == 0.5 and cloud["eligible"] is True
 
 
-def test_zero_agent_session_weight_preserves_legacy_load(fleet):
+def test_omitted_agent_session_weight_preserves_legacy_load(fleet):
     _session(fleet, NODE_LINUX, "standalone")
     omitted = _place(fleet)
-    _save(fleet, agent_session_weight=0.0)
-    explicit_zero = _place(fleet)
-    explicit_zero["policy_version"] = omitted["policy_version"]
-    assert explicit_zero == omitted
     busy = next(row for row in omitted["candidates"] if row["machine"] == "worker-linux-1")
     assert busy["effective_load"] == 1.0
     assert busy["load_inputs"]["agent_sessions"] == 1
@@ -225,7 +221,9 @@ def test_zero_agent_session_weight_preserves_legacy_load(fleet):
 def test_weighted_reports_shed_to_an_idle_node(fleet):
     _save(fleet, agent_session_weight=0.5)
     _session(fleet, NODE_LINUX, "standalone-one")
-    assert _place(fleet)["recommended"]["effective_load"] == 0.5
+    chosen = _place(fleet)["recommended"]
+    assert chosen["effective_load"] == 0.5
+    assert chosen["load_inputs"]["sessions"] == 1
     _session(fleet, NODE_LINUX, "standalone-two")
     _session(fleet, NODE_LINUX, "expired")
     _session(fleet, NODE_LINUX, "ended")
@@ -596,6 +594,19 @@ def test_unreadable_sessions_fail_closed_with_a_named_reason(fleet, monkeypatch,
     assert result["candidates"]
     for row in result["candidates"]:
         assert "sessions-unknown" in row["reasons"] and row["eligible"] is False and row["effective_load"] is None
+
+
+def test_unreadable_standalone_count_fails_closed_at_positive_weight(fleet, monkeypatch):
+    _save(fleet, agent_session_weight=0.5)
+
+    def broken(*_args, **_kwargs):
+        raise RuntimeError("session count failed")
+
+    monkeypatch.setattr(fleet_hub_placement, "count_standalone_by_node", broken)
+    result = _place(fleet)
+    assert result["status"] == "none"
+    assert result["candidates"]
+    assert all("sessions-unknown" in row["reasons"] and not row["eligible"] for row in result["candidates"])
 
 
 def test_several_projects_for_one_repo_choose_deterministically_and_say_so(fleet):

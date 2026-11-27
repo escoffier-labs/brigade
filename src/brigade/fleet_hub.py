@@ -115,6 +115,7 @@ from . import (
 )
 from .fleet_execution_context import serialize_context
 from .fleet_hub_event_bounds import oversized_event_field
+from .fleet_hub_session_indexes import SESSION_INDEXES
 from .fleet_hub_server import BoundedThreadingHTTPServer as BoundedThreadingHTTPServer
 from .fleet_hub_startup import _is_loopback_address as _is_loopback_address, _load_token as _load_token
 from .fleet_hub_status import (
@@ -296,6 +297,7 @@ _ADDITIVE_COLUMNS = (
 )
 _ADDITIVE_INDEXES = (
     ("claims_owner_expiry", "CREATE INDEX IF NOT EXISTS claims_owner_expiry ON claims (owner_node, expires_at)"),
+    *SESSION_INDEXES,
 )
 
 
@@ -622,8 +624,6 @@ def _apply_schema(
     if _claims_table_needs_migration(_claims_columns(conn)):
         _migrate_claims_table(conn)
     fleet_hub_claims.migrate_schema(conn)
-    for _name, ddl in _ADDITIVE_INDEXES:
-        conn.execute(ddl)
     conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
     conn.execute("CREATE INDEX IF NOT EXISTS events_received_at ON events (received_at)")
     # v29 -> v30: Grokbot runs span nodes. Seek their first event without
@@ -668,6 +668,8 @@ def _apply_schema(
 
     # v23 -> v24: nullable versioned cloud context on existing session rows.
     fleet_hub_sessions.init_schema(conn)
+    for _name, ddl in _ADDITIVE_INDEXES:
+        conn.execute(ddl)
     # v14 -> v15: versioned model roster, permanent retirements, admission audit.
     from . import fleet_hub_model_roster
 

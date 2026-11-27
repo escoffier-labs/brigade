@@ -659,18 +659,19 @@ def test_memory_retrieval_fixture_pin_rejects_invalid_values(value):
         fleet_policy.parse_memory({"retrieval_eval": value})
 
 
-@pytest.mark.parametrize("weight", [-0.5, "0.5", True, None])
+@pytest.mark.parametrize("weight", [-0.5, "0.5", True])
 def test_routing_rejects_invalid_agent_session_weight(weight):
     with pytest.raises(fleet_policy.FleetPolicyError, match=r"routing\.agent_session_weight"):
         fleet_policy.parse_routing({"agent_session_weight": weight})
 
 
-def test_routing_default_agent_session_weight_stays_off_wire():
+@pytest.mark.parametrize("weight", [0, None])
+def test_routing_default_agent_session_weight_stays_off_wire(weight):
     assert fleet_policy.parse_routing({})["agent_session_weight"] == 0.0
     document = {"schema": fleet_policy.POLICY_SCHEMA}
     legacy = fleet_policy.parse_document(document)
-    explicit_zero = fleet_policy.parse_document({**document, "routing": {"agent_session_weight": 0}})
-    assert legacy == explicit_zero
+    explicit_default = fleet_policy.parse_document({**document, "routing": {"agent_session_weight": weight}})
+    assert legacy == explicit_default
     assert "agent_session_weight" not in legacy["routing"]
     weighted = fleet_policy.parse_document({**document, "routing": {"agent_session_weight": 0.5}})
     assert weighted["routing"]["agent_session_weight"] == 0.5

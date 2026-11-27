@@ -231,6 +231,15 @@ def test_resolve_policy_uses_the_saved_document(conn):
     assert resolved["sources"]["roles.impl"]["layer"] == "fleet-defaults"
 
 
+@pytest.mark.parametrize("weight", [0.0, 0.5])
+def test_effective_policy_includes_agent_session_weight(weight):
+    raw = _document()
+    raw["routing"] = {"agent_session_weight": weight}
+    document = fleet_policy.parse_document(raw)
+    summary = fleet_hub_policy._effective_expanded(document, "consumer-one", "repo/public")
+    assert summary["routing"]["agent_session_weight"] == weight
+
+
 def test_session_receipt_records_the_loaded_version_and_owner(conn):
     fleet_hub_policy.save_policy(conn, _document(), expected_version=1, actor="operator", reason="first")
     current = fleet_hub_policy.current_policy(conn)
