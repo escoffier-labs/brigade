@@ -68,6 +68,7 @@ def test_measure_runs_environment_metadata(tmp_path):
     environment = report["environment"]
     assert environment["python_version"] == sys.version
     assert isinstance(environment["platform"], str) and environment["platform"]
+    assert environment["platform"] == f"{platform.system()} {platform.machine()}"
     assert platform.release() not in environment["platform"]
     assert isinstance(environment["filesystem_type"], str) and environment["filesystem_type"]
     assert isinstance(environment["directory_fsync_supported"], bool)
