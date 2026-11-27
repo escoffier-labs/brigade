@@ -220,16 +220,34 @@ def _claim_timeout_announce(target: Path, session_id: str) -> bool:
     return first_claim == claim_id
 
 
+def _stop_claim_prefix(task_epoch: object) -> bytes:
+    epoch = task_epoch if isinstance(task_epoch, str) and task_epoch else "legacy"
+    return f"stop-block {localio.stable_hash(epoch)[:16]} ".encode("ascii")
+
+
+def has_latched_stop_claim(target: Path, session_id: str, task_epoch: object) -> bool:
+    """Return whether this task epoch already holds a latched Stop claim in the journal."""
+    prefix = _stop_claim_prefix(task_epoch)
+    try:
+        data = _read_sidecar_bytes(_journal_path(target, session_id), _TIMEOUT_JOURNAL_MAX_BYTES)
+    except (OSError, ValueError):
+        return False
+    return any(line.startswith(prefix) for line in data.splitlines())
+
+
 def claim_latched_stop(target: Path, session_id: str, task_epoch: object) -> bool:
     """Elect one latched Stop blocker per task epoch in the append-only journal."""
-    epoch = task_epoch if isinstance(task_epoch, str) and task_epoch else "legacy"
-    token = localio.stable_hash(epoch)[:16]
+    prefix = _stop_claim_prefix(task_epoch)
     data = _read_sidecar_bytes(_journal_path(target, session_id), _TIMEOUT_JOURNAL_MAX_BYTES)
-    prefix = f"stop-block {token} ".encode("ascii")
     if any(line.startswith(prefix) for line in data.splitlines()):
         return False
     claim_id = f"{os.getpid()}-{threading.get_ident()}-{time.monotonic_ns()}"
-    if not _append_journal_line(target, session_id, prefix + claim_id.encode("ascii") + b"\n"):
+    line = prefix + claim_id.encode("ascii") + b"\n"
+    # A write that would cross the cap is invisible to the capped read-back.
+    # Never leave the session unable to finish: refuse the claim instead.
+    if len(data) + len(line) > _TIMEOUT_JOURNAL_MAX_BYTES:
+        return False
+    if not _append_journal_line(target, session_id, line):
         return False
     data = _read_sidecar_bytes(_journal_path(target, session_id), _TIMEOUT_JOURNAL_MAX_BYTES)
     claims = [line for line in data.splitlines() if line.startswith(prefix)]
@@ -296,35 +314,6 @@ def _is_latched(state: dict[str, Any], journal_lines: int, pending_lines: int) -
     return state.get("hook_latched") is True or bool(
         _effective_timeout_count(state, journal_lines, pending_lines) >= _rt().HOOK_TIMEOUT_LATCH_AFTER
     )
-
-
-def read_latch_for_state_file(target: Path, state_name: str) -> bool:
-    """Read the latch by its state basename, including when only sidecars exist."""
-    state = anchored_io.read_json(target, state_name) or {}
-    path = _rt()._sessions_root(anchored_io.requested_target(target)) / state_name
-    journal = _read_sidecar_bytes(_timeouts_path(path), _TIMEOUT_JOURNAL_MAX_BYTES)
-    pending = _read_sidecar_bytes(_pending_path(path), _PENDING_MAX_BYTES)
-    return _is_latched(
-        state, _parse_timeout_journal(journal)[0], sum(bool(line.strip()) for line in pending.splitlines())
-    )
-
-
-def read_ended_unverified(target: Path, state_name: str) -> bool:
-    """Return whether a latched session used its fail-open second Stop."""
-    state = anchored_io.read_json(target, state_name) or {}
-    return isinstance(state.get("ended_unverified_after_latch"), str)
-
-
-def read_last_timeout_step(target: Path, state_name: str) -> str | None:
-    """Return the last closed-list event/step pair stored for doctor."""
-    state = anchored_io.read_json(target, state_name) or {}
-    history = state.get("hook_timeout_history")
-    if not isinstance(history, list) or not history or not isinstance(history[-1], dict):
-        return None
-    event, step = history[-1].get("event"), history[-1].get("step")
-    if not isinstance(event, str) or not isinstance(step, str):
-        return None
-    return f"{event}/{step}"
 
 
 def read_latch_summary(target: Path, state_name: str) -> tuple[bool, bool, str | None]:
