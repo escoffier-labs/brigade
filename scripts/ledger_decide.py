@@ -25,9 +25,9 @@ PLAN_FILE = "plan.json"
 CANDIDATE_TITLE = "chore(outcome): update the CI outcome ledger"
 BRANCH_CONFIG = (
     "-c",
-    "user.name=github-actions[bot]",
+    "user.name=brigadestack-ledger-writer[bot]",
     "-c",
-    "user.email=41898282+github-actions[bot]@users.noreply.github.com",
+    "user.email=361688843+brigadestack-ledger-writer[bot]@users.noreply.github.com",
     "-c",
     "commit.gpgSign=false",
 )

@@ -1,0 +1,1 @@
+- Scheduled ledger restore pull requests from the ledger writer App pass the workflow guard without a label when they change the outcome ledger and only the restore's derived files.
