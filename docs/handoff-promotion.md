@@ -141,8 +141,9 @@ for the disposition table, safe skips and undo behavior.
 
 Ingest requires verified origin metadata for automatic filing. A clean
 interactive session can file cards or route documents when enabled. An
-unknown-origin draft can file a card when promotion is enabled and the
-draft passes the deterministic content policy. Worker, cron, and subagent
+interactive origin with unknown tool status requires review. An unknown-origin
+draft can file a card when promotion is enabled, its recorded tool status is
+false or unknown, and the draft passes the deterministic content policy. Worker, cron, and subagent
 drafts go to `memory/handoff-inbox/` for human review.
 
 Automatic filing works on Windows with an owner-only signing key.
@@ -218,11 +219,12 @@ for card filing. A `create-card` draft needs a free destination name. An
 `update-card` draft needs an `Expected card SHA256` that matches the current
 card. Ingest repeats the destination check under the publication lock.
 
-Both content scans cover the full draft, including the title, summary, durable
-facts, evidence, and suggested card content. The final card must fit the
+Both content scans cover the whole draft and evaluate each section separately.
+Drafts use LF or CRLF line endings. The final card must fit the
 workspace's `max_card_bytes` limit, which defaults to 12,000 bytes. Ingest
 writes `trust: agent-unreviewed` and an `auto_filed` date, replacing any trust,
-authorship, or pinning metadata from the draft. The card enters the memory
+authorship, or pinning metadata from the draft. It computes the card fingerprint
+from the filed content. The card enters the memory
 review queue and follows the usual lifecycle policy.
 
 Document actions and drafts that fail a check go to the review inbox with a
@@ -233,7 +235,9 @@ existing rules.
 
 Before filing, ingest saves the card's previous bytes or records that the card
 was absent. The journal records `decision: content-policy` and preserves the
-draft's origin metadata as recorded.
+draft's origin metadata as recorded. A transient publication failure after the
+claim leaves the draft in review. A busy publication lock leaves the draft
+pending for the next ingest run.
 
 ### Threat model
 

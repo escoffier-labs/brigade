@@ -7,7 +7,6 @@ from datetime import date, datetime, timezone
 import hashlib
 import os
 from pathlib import Path
-from stat import S_IMODE
 
 from . import dirfd, handoff_origin, handoff_worktrees, ingest, memory_cmd, memory_content_scan
 from . import memory_care_journal as journal
@@ -16,7 +15,7 @@ from .handoff_ingest_rules import CARDS_RELATIVE, EXPECTED_SHA_SECTION, SHA256_R
 from .inbox_lock import InboxLockTimeout, held_file_lock
 from .memory_inbox_io import read
 
-_REPLACED_METADATA = frozenset({"trust", "author", "author_type", "pinned", "archive", "auto_filed"})
+_REPLACED_METADATA = frozenset({"trust", "author", "author_type", "pinned", "archive", "auto_filed", "fingerprint"})
 
 
 def _destination_refusal(sections: dict[str, str], before: bytes | None, *, publishing: bool = False) -> str | None:
@@ -37,7 +36,7 @@ def _destination_refusal(sections: dict[str, str], before: bytes | None, *, publ
 
 def _mark_filed(card: str) -> str:
     """Write the filing metadata and retain the rest of the card."""
-    lines = card.replace("\r\n", "\n").split("\n")
+    lines = card.splitlines(keepends=True)
     closing = next(i for i, line in enumerate(lines[1:], 1) if line.strip() == "---")
     kept = [lines[0]]
     dropped_indent = None
@@ -52,14 +51,27 @@ def _mark_filed(card: str) -> str:
         if line.strip() and not line.lstrip().startswith("#"):
             dropped_indent = None
         kept.append(line)
-    text = "\n".join([*kept, *lines[closing:]])
+    text = "".join([*kept, *lines[closing:]])
     return _insert_frontmatter_fields(text, {"trust": "agent-unreviewed", "auto_filed": date.today().isoformat()})
+
+
+def _scan_flagged(text: str) -> bool:
+    verdict, rules = memory_content_scan.scan_verdict([text])
+    if verdict in {memory_content_scan.BLOCKED, memory_content_scan.FLAGGED, memory_content_scan.PRIVATE}:
+        return True
+    injection = ingest.scan_untrusted(text)
+    if verdict != memory_content_scan.CLEAN or rules != () or type(injection.flagged) is not bool:
+        raise ValueError("incomplete content policy scan")
+    return injection.flagged
 
 
 def decide(
     sections: dict[str, str], snapshot: bytes, *, owner: Path, promote_cards: bool, card_ids: ingest.CardIdIndex
 ) -> ingest.Outcome:
     try:
+        text = snapshot.decode("utf-8").replace("\r\n", "\n")
+        if any(char in text for char in "\r\v\f\x1c\x1d\x1e\x85\u2028\u2029"):
+            return ingest.Outcome("inboxed", code="handoff-line-boundary")
         outcome = ingest.decide(sections, owner, promote_cards, route_documents=False, card_ids=card_ids)
         if outcome.kind in {"promoted", "reinforced"} or outcome.match is not None:
             relative = (CARDS_RELATIVE / sections["target card"].strip()).as_posix()
@@ -67,14 +79,8 @@ def decide(
             if refusal:
                 return ingest.Outcome("inboxed", code=refusal)
         if outcome.kind in {"promoted", "reinforced"}:
-            text = snapshot.decode("utf-8")
-            verdict, rules = memory_content_scan.scan_verdict([text])
-            injection = ingest.scan_untrusted(text)
-            if verdict in {memory_content_scan.BLOCKED, memory_content_scan.FLAGGED, memory_content_scan.PRIVATE}:
-                return ingest.Outcome("inboxed", code="handoff-content-signal")
-            if verdict != memory_content_scan.CLEAN or rules != () or type(injection.flagged) is not bool:
-                raise ValueError("incomplete content policy scan")
-            if injection.flagged:
+            section_bodies = ingest.SECTION_RE.split(text)[2::2]
+            if any(_scan_flagged(part) for part in (text, *section_bodies)):
                 return ingest.Outcome("inboxed", code="handoff-content-signal")
             if outcome.kind == "reinforced":
                 return ingest.Outcome("inboxed", code="duplicate-card-content", match=outcome.match)
@@ -110,32 +116,41 @@ def file_card(
         if not dry_run:
             lock.parent.mkdir(parents=True, exist_ok=True)
         with nullcontext() if dry_run else held_file_lock(lock, deadline_seconds=1):
-            before = read(owner, relative, limit=ingest.INSPECTION_CEILING)
-            refusal = _destination_refusal(sections, before, publishing=True)
-            if refusal:
-                return refusal
-            existing_meta = ingest._check_card_state(before, "")
-            built = _mark_filed(ingest._build_promoted_card(sections, existing_meta))
-            after = built.encode("utf-8")
-            if len(after) > memory_cmd._config_or_default(owner).max_card_bytes:
-                return "card-budget-exceeded"
-            if not dry_run:
-                mode = 0o600 if before is None else S_IMODE(dest.stat(follow_symlinks=False).st_mode)
-                if not claim_origin():
-                    return "origin-review-required"
-                journal.commit(
-                    owner,
-                    kind="inbox",
-                    reason=outcome.code,
-                    card_id=None,
-                    changes=[journal.Change(relative, before, after, mode=mode)],
-                    metadata={
-                        "decision": "content-policy",
-                        "origin": {
-                            field: getattr(origin, field) for field in handoff_origin.Origin.__dataclass_fields__
+            with (
+                nullcontext((read(owner, relative, limit=ingest.INSPECTION_CEILING), None))
+                if dry_run
+                else (ingest._held_card_publication(dest, owner, limit=ingest.INSPECTION_CEILING)) as (before, publish)
+            ):
+                refusal = _destination_refusal(sections, before, publishing=True)
+                if refusal:
+                    return refusal
+                existing_meta = ingest._check_card_state(before, "")
+                marked = _mark_filed(sections["suggested card content"].strip() + "\n")
+                built = ingest._build_promoted_card({**sections, "suggested card content": marked}, existing_meta)
+                after = built.encode("utf-8")
+                if len(after) > memory_cmd._config_or_default(owner).max_card_bytes:
+                    return "card-budget-exceeded"
+                if publish is not None:
+                    if not claim_origin():
+                        return "origin-review-required"
+
+                    def write_card(_path: Path, data: bytes, publish: Callable[[bytes, bool], None] = publish) -> None:
+                        publish(data, before is not None)
+
+                    journal.commit(
+                        owner,
+                        kind="inbox",
+                        reason=outcome.code,
+                        card_id=None,
+                        changes=[journal.Change(relative, before, after)],
+                        writer=write_card,
+                        metadata={
+                            "decision": "content-policy",
+                            "origin": {
+                                field: getattr(origin, field) for field in handoff_origin.Origin.__dataclass_fields__
+                            },
                         },
-                    },
-                )
+                    )
     except InboxLockTimeout:
         return "card-publication-busy"
     except Exception:

@@ -228,11 +228,14 @@ def commit(
     undoes: str | None = None,
     applied: bool = False,
     metadata: dict[str, Any] | None = None,
+    writer: Callable[[Path, bytes], None] | None = None,
 ) -> Decision:
     from .memory_cmd import _config_or_default
 
     if not changes or not re.fullmatch("[a-z]+", kind):
         raise JournalConflict("empty changes or invalid kind")
+    if writer is not None and (applied or len(changes) != 1 or changes[0].after is None):
+        raise JournalConflict("a custom writer needs one pending file write")
     config = _config_or_default(target)
     for change in changes:
         safe_path(target, change.path)
@@ -284,7 +287,7 @@ def commit(
                     expected_before=kernel.content_digest(c.before),
                     desired_after=kernel.content_digest(c.after),
                     staged_bytes=c.after,
-                    mode=c.mode,
+                    writer=writer,
                 )
                 for c in changes
             ]

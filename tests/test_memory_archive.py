@@ -64,3 +64,15 @@ def test_archive_rejects_unsafe_paths(tmp_path):
     for rel in ("../outside.md", "/outside.md"):
         with pytest.raises((archive.ArchiveRefused, ValueError)):
             archive.archive_card(tmp_path, rel, reason="ended", config=memory_cmd.MemoryCareConfig())
+
+
+def test_archive_copy_retains_card_mode(tmp_path):
+    import os
+    from stat import S_IMODE
+
+    if os.name == "nt":
+        pytest.skip("POSIX file mode bits")
+    path = setup_card(tmp_path)
+    path.chmod(0o640)
+    archive.archive_card(tmp_path, "memory/cards/old.md", reason="ended", config=memory_cmd.MemoryCareConfig())
+    assert S_IMODE((tmp_path / "memory/archive/cards/old.md").stat().st_mode) == 0o640

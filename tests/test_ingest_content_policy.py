@@ -78,6 +78,7 @@ def test_unknown_origin_card_records_content_policy(tmp_path, monkeypatch):
     (record,) = (tmp_path / journal.JOURNAL_REL).glob("*/decision.json")
     data = json.loads(record.read_text())
     assert data["decision"] == "content-policy"
+    assert data["before_absent"] == [True]
     assert data["origin"] == {field: getattr(original, field) for field in handoff_origin.Origin.__dataclass_fields__}
     assert data["origin"]["session_kind"] == "unknown"
 
@@ -165,7 +166,7 @@ def test_unavailable_scan_goes_to_review(tmp_path, monkeypatch, missing):
         raise RuntimeError("scan unavailable")
 
     monkeypatch.setattr(ingest, "scan_untrusted", scan)
-    assert run_ingest(tmp_path).inboxed == 1
+    assert (stats := run_ingest(tmp_path)).inboxed == stats.failed == 1
     assert review_reason(tmp_path) == "reason: content-policy-error"
     assert not (tmp_path / CARD_PATH).exists()
 
@@ -424,3 +425,137 @@ def test_reviewed_reapply_uses_approved_filing_rules(tmp_path, monkeypatch):
     assert result["retried"] == 1
     assert "A durable fact." in dest.read_text()
     assert "auto_filed:" not in dest.read_text()
+
+
+@pytest.mark.parametrize("boundary", ["\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029"])
+@pytest.mark.parametrize("line", ["topic: policy", "---"])
+def test_draft_line_boundaries_go_to_review(tmp_path, monkeypatch, boundary, line):
+    path = draft(tmp_path, monkeypatch)
+    data = path.read_bytes()
+    head, fence, content = data.partition(b"## Suggested card content")
+    assert fence
+    marker = b"topic: policy"
+    content = content.replace(marker, marker + boundary.encode() + line.encode(), 1)
+    edit_draft(tmp_path, path, head + fence + content)
+    stats = run_ingest(tmp_path)
+    assert stats.inboxed == 1 and stats.failed == 0
+    assert review_reason(tmp_path) == "reason: handoff-line-boundary"
+    assert not (tmp_path / CARD_PATH).exists()
+
+
+@pytest.mark.parametrize("detector", ["memory", "injection"])
+def test_each_scan_evaluates_sections_individually(tmp_path, monkeypatch, detector):
+    from brigade import memory_content_scan, untrusted
+
+    draft(tmp_path, monkeypatch)
+
+    def section_flag(text):
+        return "A recorded observation." in text and "A recorded fact." not in text
+
+    if detector == "memory":
+
+        def verdict(texts):
+            if any(section_flag(text) for text in texts):
+                return memory_content_scan.FLAGGED, ("test-rule",)
+            return memory_content_scan.CLEAN, ()
+
+        monkeypatch.setattr(memory_content_scan, "scan_verdict", verdict)
+    else:
+
+        def signal(text):
+            return untrusted.InjectionSignal(section_flag(text), 0, [])
+
+        monkeypatch.setattr(ingest, "scan_untrusted", signal)
+    assert run_ingest(tmp_path).inboxed == 1
+    assert review_reason(tmp_path) == "reason: handoff-content-signal"
+
+
+def test_busy_publication_stays_pending(tmp_path, monkeypatch):
+    from brigade import ingest_content_policy
+    from brigade.inbox_lock import InboxLockTimeout
+
+    path = draft(tmp_path, monkeypatch)
+
+    def busy(*args, **kwargs):
+        raise InboxLockTimeout("busy")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ingest_content_policy, "held_file_lock", busy)
+        stats = run_ingest(tmp_path)
+    assert stats.skipped == 1 and stats.inboxed == stats.failed == 0
+    assert path.exists()
+    assert not memory_inbox_drain.pending(tmp_path)
+    assert run_ingest(tmp_path).promoted == 1
+
+
+def test_policy_hold_precedes_custom_disposition():
+    assert (
+        memory_inbox_drain.classify("card-name-occupied", "A fact.", {"card-name-occupied": ("expire", False)})
+        == "hold"
+    )
+
+
+def test_policy_refusal_reports_successful_ingest(tmp_path, monkeypatch, capsys):
+    draft(tmp_path, monkeypatch)
+    current_card(tmp_path)
+    assert ingest.run(tmp_path, promote_cards=True) == 0
+    text = capsys.readouterr().out
+    assert "Inboxed 1  Skipped 0  Failed 0" in text
+    assert "Status ok" in text
+
+
+def test_filed_fingerprint_is_computed(tmp_path, monkeypatch):
+    from brigade.card_fingerprint import content_fingerprint
+
+    path = draft(tmp_path, monkeypatch)
+    edit_draft(tmp_path, path, path.read_bytes().replace(b"tags: [test]", b"tags: [test]\nfingerprint: test-value"))
+    assert run_ingest(tmp_path).promoted == 1
+    card = (tmp_path / CARD_PATH).read_text()
+    assert f"fingerprint: {content_fingerprint(card)}" in card
+    assert "test-value" not in card
+
+
+@pytest.mark.parametrize("change", ["parent", "card"])
+def test_policy_checks_publication_revision(tmp_path, monkeypatch, change):
+    path = draft(tmp_path, monkeypatch)
+    dest = current_card(tmp_path)
+    before = dest.read_bytes()
+    set_update(tmp_path, path, hashlib.sha256(before).hexdigest())
+    check = ingest._assert_parent_unchanged
+
+    def check_parent(parent, parent_path):
+        if change == "parent":
+            parent_path = parent_path.with_name("other-cards")
+            parent_path.mkdir()
+            (parent_path / dest.name).write_bytes(before)
+        else:
+            dest.write_bytes(before.replace(b"brown", b"orange"))
+        check(parent, parent_path)
+
+    monkeypatch.setattr(ingest, "_assert_parent_unchanged", check_parent)
+    stats = run_ingest(tmp_path)
+    assert stats.inboxed == stats.failed == 1
+    assert review_reason(tmp_path) == "reason: content-policy-error"
+    assert dest.read_bytes() == (before if change == "parent" else before.replace(b"brown", b"orange"))
+    if change == "parent":
+        assert (dest.parent.with_name("other-cards") / dest.name).read_bytes() == before
+
+
+def test_crlf_draft_is_filed(tmp_path, monkeypatch):
+    path = draft(tmp_path, monkeypatch)
+    edit_draft(tmp_path, path, path.read_bytes().replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
+    assert run_ingest(tmp_path).promoted == 1
+    assert "trust: agent-unreviewed" in (tmp_path / CARD_PATH).read_text()
+
+
+def test_matching_update_retains_card_mode(tmp_path, monkeypatch):
+    from stat import S_IMODE
+
+    if os.name == "nt":
+        pytest.skip("POSIX file mode bits")
+    path = draft(tmp_path, monkeypatch)
+    dest = current_card(tmp_path)
+    dest.chmod(0o640)
+    set_update(tmp_path, path, hashlib.sha256(dest.read_bytes()).hexdigest())
+    assert run_ingest(tmp_path).promoted == 1
+    assert S_IMODE(dest.stat().st_mode) == 0o640

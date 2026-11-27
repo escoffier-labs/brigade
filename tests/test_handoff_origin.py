@@ -51,11 +51,12 @@ def test_filing_disposition_by_origin_and_action(tmp_path, action, kind, touched
         ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=stats, promote_cards=True, route_documents=True) == 0
     )
     interactive = kind == "interactive" and touched is False
-    allowed = interactive or (kind == "unknown" and action == "create-card")
+    content_policy = kind == "unknown" and touched is not True
+    allowed = interactive or (content_policy and action == "create-card")
     assert stats.inboxed == (0 if allowed else 1)
     assert stats.promoted + stats.routed == (1 if allowed else 0)
     if not allowed:
-        reason = "action-not-auto-handled" if kind == "unknown" else "origin-review-required"
+        reason = "action-not-auto-handled" if content_policy else "origin-review-required"
         assert reason in stats.actions[0]
 
 

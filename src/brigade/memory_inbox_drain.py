@@ -67,6 +67,7 @@ HOLD_CODES = frozenset(
         "card-frontmatter-invalid",
         "card-fence-error",
         "unknown-sections",
+        "handoff-line-boundary",
         "card-name-occupied",
         "expected-sha-required",
         "card-budget-exceeded",
@@ -118,6 +119,7 @@ NEEDS_EVIDENCE_PROOF: dict[str, bool] = {
     "document-injection-signal": False,
     "document-routed-to-card": False,
     "empty-document-content": False,
+    "handoff-line-boundary": False,
     "card-name-occupied": False,
     "expected-sha-required": False,
     "card-budget-exceeded": False,
@@ -184,6 +186,8 @@ def classify(code: str | None, text: str, table: dict[str, tuple[str, bool]] | N
         return "resolve"
     if code in RETRY_CODES:
         return "retry"
+    if code in HOLD_CODES:
+        return "hold"
     if table and code in table:
         return table[code][0]
     return "expire" if code in EXPIRE_CODES else "hold"

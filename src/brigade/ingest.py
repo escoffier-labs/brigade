@@ -24,7 +24,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Callable, Dict, List, NamedTuple
+from typing import Callable, Dict, Iterator, List, NamedTuple
 
 from . import dirfd, handoff_case_probe, handoff_worktrees, ingest_index, instruction_overflow, ingest_near_duplicate
 from .card_fingerprint import (
@@ -352,7 +352,9 @@ def ingest_into(
                     origin = handoff_origin.verify_handoff(source, path, snapshot)
                 except Exception:
                     origin = None
-                content_policy = origin is not None and origin.session_kind == "unknown"
+                content_policy = (
+                    origin is not None and origin.session_kind == "unknown" and origin.untrusted_tools is not True
+                )
                 filing_eligible = origin is not None and (origin.allows_automatic_filing or content_policy)
                 if origin is not None:
                     sidecar = origin.stamp.sidecar
@@ -450,6 +452,7 @@ def ingest_into(
                 stats.seen_digests.add(sha)
             stats.processed += 1
             stats.actions.append(action.summary)
+            stats.failed += action.failed
             if action.kind == "promoted":
                 stats.promoted += 1
             elif action.kind == "reinforced":
@@ -819,9 +822,10 @@ class Action:
     kind: str
     summary: str
     destination: str | None = None
+    failed: bool = False
 
 
-def _read_card_child(parent: int, name: str) -> tuple[bytes, int] | None:
+def _read_card_child(parent: int, name: str, *, limit: int | None = None) -> tuple[bytes, int] | None:
     """Exact bytes and mode of a card read relative to a held parent, or None when absent."""
     flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
     if dirfd.posix_available():
@@ -839,7 +843,10 @@ def _read_card_child(parent: int, name: str) -> tuple[bytes, int] | None:
             os.set_blocking(descriptor, True)
         with os.fdopen(descriptor, "rb") as handle:
             descriptor = -1
-            return handle.read(), metadata.st_mode
+            data = handle.read() if limit is None else handle.read(limit + 1)
+            if limit is not None and len(data) > limit:
+                raise OSError("publication exceeds inspection limit")
+            return data, metadata.st_mode
     finally:
         if descriptor != -1:
             os.close(descriptor)
@@ -868,55 +875,64 @@ def _assert_parent_unchanged(parent: int, parent_path: Path) -> None:
         raise OSError("publication parent changed")
 
 
+@contextmanager
+def _held_card_publication(
+    dest: Path, target: Path, *, limit: int | None = None
+) -> Iterator[tuple[bytes | None, Callable[[bytes, bool], None]]]:
+    """Read and publish the same card revision through a held directory."""
+    if not dirfd.available():
+        raise OSError("no-follow descriptor operations are unavailable; refusing a path-based publish")
+    parent_path = target.resolve() / dest.parent.relative_to(target)
+    name = dest.name
+
+    def read_child(parent: int) -> tuple[bytes, int] | None:
+        if limit is None:
+            return _read_card_child(parent, name)
+        return _read_card_child(parent, name, limit=limit)
+
+    parent = dirfd.open_directory_chain(parent_path, create=True)
+    try:
+        found = read_child(parent)
+        data, mode = found if found is not None else (None, None)
+
+        def publish(content: bytes, replace: bool) -> None:
+            staged = f".{name}.{uuid.uuid4().hex[:12]}.tmp"
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+            if dirfd.posix_available():
+                flags = dirfd.file_flags(flags)
+            try:
+                descriptor = dirfd.open_child_file(parent, staged, flags, 0o600)
+                with os.fdopen(descriptor, "wb") as handle:
+                    if mode is not None and hasattr(os, "fchmod"):
+                        os.fchmod(handle.fileno(), stat.S_IMODE(mode))
+                    handle.write(content)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                _assert_parent_unchanged(parent, parent_path)
+                again = read_child(parent)
+                if (again[0] if again is not None else None) != data:
+                    raise OSError("publication revision changed")
+                dirfd.replace_children(parent, staged, name, replace=replace)
+                dirfd.fsync_directory(parent)
+            finally:
+                try:
+                    dirfd.unlink_child(parent, staged)
+                except OSError:
+                    pass
+
+        yield data, publish
+    finally:
+        os.close(parent)
+
+
 def _write_card_descriptor_bound(
     dest: Path,
     target: Path,
     check_state: Callable[[bytes | None], str | None],
     build_content: Callable[[str | None], str],
 ) -> None:
-    """Inspect and replace a card through one held parent directory, on POSIX and Windows.
-
-    The parent is opened once without following links. The leaf is read, the staged copy
-    is written and the staged copy is renamed over the leaf, all relative to that held
-    handle. If no descriptor-relative backend exists this raises and nothing is written.
-    """
-    if not dirfd.available():
-        raise OSError("no-follow descriptor operations are unavailable; refusing a path-based publish")
-    root = target.resolve()
-    parent_path = root / dest.parent.relative_to(target)
-    name = dest.name
-    parent = dirfd.open_directory_chain(parent_path, create=True)
-    staged: str | None = None
-    try:
-        found = _read_card_child(parent, name)
-        data, mode = found if found is not None else (None, None)
-        content = build_content(check_state(data)).encode("utf-8")
-        staged = f".{name}.{uuid.uuid4().hex[:12]}.tmp"
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-        if dirfd.posix_available():
-            flags = dirfd.file_flags(flags)
-        descriptor = dirfd.open_child_file(parent, staged, flags, 0o600)
-        with os.fdopen(descriptor, "wb") as handle:
-            if mode is not None and hasattr(os, "fchmod"):
-                os.fchmod(handle.fileno(), stat.S_IMODE(mode))
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        # Publication boundary: same directory, and the leaf is still the revision checked.
-        _assert_parent_unchanged(parent, parent_path)
-        again = _read_card_child(parent, name)
-        if (again[0] if again is not None else None) != data:
-            raise OSError("publication revision changed")
-        dirfd.replace_children(parent, staged, name)
-        staged = None
-        dirfd.fsync_directory(parent)
-    finally:
-        try:
-            if staged is not None:
-                dirfd.unlink_child(parent, staged)
-        except OSError:
-            pass
-        os.close(parent)
+    with _held_card_publication(dest, target) as (data, publish):
+        publish(build_content(check_state(data)).encode("utf-8"), True)
 
 
 def _check_card_state(data: bytes | None, expected_sha: str) -> str | None:
@@ -1199,6 +1215,8 @@ def _execute(
             card_ids=card_ids,
             dry_run=dry_run,
         )
+        if refusal == "card-publication-busy":
+            return Action("skipped", _summary("skip", name, refusal))
         if refusal is None:
             if not dry_run:
                 _archive(handoff_path, processed_dir, snapshot_sha)
@@ -1480,7 +1498,7 @@ def _execute(
                 assert outcome.match is not None
                 pending.append(ingest_near_duplicate.Pending(content, dest, outcome.match.path, outcome.code))
         # Both inboxed and skipped are now archived; classify them uniformly.
-        return Action("inboxed", summary)
+        return Action("inboxed", summary, failed=outcome.code == "content-policy-error")
 
     return Action("skipped", _summary("skip", name, outcome.code))
 
@@ -1957,7 +1975,7 @@ def _report(stats: IngestStats, dry_run: bool) -> None:
         f"Inboxed {stats.inboxed}  Skipped {stats.skipped}  Failed {stats.failed}"
     )
     if stats.failed:
-        print(f"{tag}PARTIAL: {stats.failed} handoff(s) failed and were left in place; the rest were ingested")
+        print(f"{tag}PARTIAL: {stats.failed} handoff(s) encountered processing errors")
     elif stats.processed == 0:
         print(f"{tag}NO_UPDATES")
     print(f"{tag}Status {stats.status}")
