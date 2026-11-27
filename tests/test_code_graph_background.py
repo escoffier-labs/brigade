@@ -412,6 +412,8 @@ def test_verify_existing_graph_sync_policy(
     def run_engine(argv, *args, **kwargs):
         if isinstance(argv, list) and argv[:1] == ["engine"]:
             calls.append(argv[3])
+            if argv[3] == "digest":
+                return subprocess.CompletedProcess(argv, 2, stdout="", stderr="unrecognized subcommand")
             if argv[3] == "diff" and platform == "win32":
                 for flag in ("--before", "--after"):
                     with closing(sqlite3.connect(argv[argv.index(flag) + 1])) as snapshot:
@@ -426,8 +428,9 @@ def test_verify_existing_graph_sync_policy(
     receipt = json.loads(capsys.readouterr().out)["code_graph_delta"]
 
     assert receipt["status"] == "ok"
+    assert "delta_source" not in receipt
     if platform == "linux":
-        assert calls == ["sync", "sync", "diff"]
+        assert calls == ["sync", "digest", "sync", "diff"]
         assert not launches
         assert not receipt["stale_graph_used"]
     else:
