@@ -136,30 +136,59 @@ A directory without a receipt provides no verification evidence. Changes in the 
 identity have no effect. The declaration comes from the merge base of the
 pushed tip and the fetched default branch.
 
-A newer failure takes precedence over an older pass if the run's command
-starts with the current required command prefix, regardless of the policy
-declaration or base recorded in the receipt. A command that failed or timed
-out, or recorded failed or errored tests, counts as a failure. If an older
+The gate compares the recorded command with the current required argv
+prefix. A pass requires the recorded command to start with that exact
+prefix, including the executable spelling on Windows, and to meet the tree,
+policy, and coverage requirements. A run through a wrapper such as `env`
+or `timeout`, with an environment variable set in front, or under another
+spelling of the program does not count as a pass. This includes assignments
+recorded separately from argv and alternate names such as `py.test`.
+
+The gate recognizes up to eight layers of `env`, `command`, `nice`,
+`nohup`, `time`, `timeout`, and `stdbuf` with supported options.
+Recognized wrappers, environment prefixes, and alternate spellings make
+the invocation ambiguous. A failed, timed-out, or unfinished ambiguous
+run makes the verdict indeterminate. A completed ambiguous run leaves an
+earlier pass in place. When such an invocation affects the verdict, the
+gate names the wrapper, variable, or executable spelling and prints the
+plain policy command to run again.
+
+A newer matching failure
+takes precedence over an older pass regardless of the policy declaration
+or base recorded in the receipt. A command that failed or timed out, or
+recorded failed or errored tests, counts as a failure. If an older
 receipt has only a failed or timed-out overall status and includes the
 required command, the gate treats the required command as failed. A failed
 run that started on the pushed tree still counts if the tree changed during
 the run. Rerun the required check on the pushed tree to clear the failure.
 
 A failed or timed-out run of the required check counts even when it
-collected no tests or omitted a test selector. A run of the required check
-that completed without meeting the current eligibility rules, or was
+collected no tests or omitted a test selector. A run with the exact declared
+prefix that completed without meeting the current eligibility rules, or was
 explicitly rejected, also takes precedence over an older pass. A terminal
 run whose recorded commands are all unrelated leaves an earlier verdict in
-place. A newer run with an inconclusive status, such as a running, busy, or
-interrupted run, or a rejected command whose identity was never recorded,
-gives an indeterminate verdict unless it already records a required check
-failure. A policy with no required command prefix accepts any eligible
-receipt for the tree.
+place. A newer possible run of the required check gives an indeterminate
+verdict when its identity or result is inconclusive and the receipt does
+not already record a required check failure. This includes unsuccessful
+or unfinished invocations that use the required executable with different
+prefix arguments or use an interpreter or launcher whose arguments mention
+the required program, module, or script. When the policy identifies a
+module or script, the gate uses that target for mentions. A script name
+can mention it as a whole segment delimited by a hyphen or underscore.
+A different target with no such mention is unrelated. So is an invocation
+of the required executable with just one of `--version`, `--help`, `-h`,
+`--collect-only`, or `--co`. A policy with no required command prefix
+accepts any eligible receipt for the tree.
 
 When a receipt lists its planned commands, the gate compares the plan with
-recorded commands in order. A missing or conflicting result for a possible
-required check makes the verdict indeterminate. Receipts written before
-the plan field existed are evaluated using their recorded commands.
+recorded commands in order using the same identity rules. A missing or
+conflicting result for a possible required check makes the verdict
+indeterminate. An in-progress receipt whose plan lists only clearly
+unrelated commands leaves an earlier verdict in place. The writer fixes
+the plan in memory before executing commands and saves it with the receipt.
+That plan identifies the required check when the run includes it. Receipts
+written before the plan field existed are
+evaluated using their recorded commands.
 
 Across seconds the check orders runs by the UTC timestamp in the directory
 name. The name must have the writer's timestamp and suffix format. For a
@@ -180,12 +209,12 @@ pass is present. The check reports ignored malformed entries once per push.
 
 | Result | Meaning |
 | --- | --- |
-| `ok` | An eligible receipt matches the tree and no newer run supersedes it. |
+| `ok` | An eligible receipt matches the tree and required check, if declared, with no newer governing run. |
 | `missing_receipt` | There is no matching local receipt. |
 | `rejected` | A newer run failed the required check, or the scan found matching receipts but none were eligible. |
 | `not_applicable` | Neither the base nor the fetched default branch tip declares a required check. Text output is silent for this result. |
 | `base_predates_policy` | Update the branch from the default branch to pick up the declaration. |
-| `indeterminate` | The check could not reach a verdict, for example because the base is unresolved, the declaration is malformed, or a limit was reached. |
+| `indeterminate` | The check could not reach a verdict, for example because a possible required run has an unconfirmed result, the base is unresolved, or a limit was reached. |
 
 If the scan limit leaves the verdict indeterminate, set `verify_runs_keep`
 in `.brigade/config.json` to at most 128 and check the configured archive.
@@ -275,6 +304,21 @@ either is missing, then run `brigade work verify push-gate status`. For an
 evaluation error before Brigade can read the policy, use the printed
 `brigade work verify push-check` command to diagnose the pushed commit.
 
+### Upgrade the block in a customised hook
+
+The effective pre-push hook must start with a Bash interpreter line. Run
+`brigade work verify push-gate install --block-only --dry-run` to preview
+a unified diff. Remove `--dry-run` to replace the block atomically. The
+upgrade preserves the surrounding bytes, line endings, file mode, and Git
+configuration. It saves a timestamped backup beside the hook and prints a
+Bash command to restore it. If the hook has no block, pass
+`--confirm-insert` to insert it immediately after its single
+`STDIN_REFS="$(cat)"` line. An upgrade requires exactly one gate invocation
+inside the markers. If the hook invokes the gate outside the block, the
+installer reports its line number. Move the invocation inside the markers or
+remove it before trying again.
+Status reports the block version and identifies a customised hook as unverified.
+
 ### Known limits
 
 - Git's `git push --no-verify` skips every pre-push hook, including this gate.
@@ -284,6 +328,18 @@ evaluation error before Brigade can read the policy, use the printed
 - When Git cannot read the clone's configuration, the gate does not run and
   reports the error. Fix the configuration and check with
   `brigade work verify push-gate status`.
+- A receipt can list up to 64 planned commands, with at most 16,384
+  characters and 1,024 parsed arguments per command. A larger plan or
+  command makes the result indeterminate when that receipt can affect it.
+- The gate treats tasks launched through `make`, `just`, `tox`, or
+  `npm run` as unrelated unless their arguments mention the required check
+  or the policy names the invocation directly. It does not inspect task
+  definitions. Policies can also name interpreters and other launchers
+  directly in their required argv prefix.
+- A failed run of the required executable with a different argument prefix
+  can make the verdict inconclusive until the required check runs again.
+  The read-only invocations and clearly unrelated interpreter targets
+  described above leave an earlier verdict in place.
 - Verify receipts are local files. The gate checks their shape, the agreement
   between the run name and start time, and the exact tree IDs. It does not
   authenticate receipts. Required CI supplies independent evidence on the

@@ -1,0 +1,3 @@
+- Require the recorded argv to start with the literal policy prefix for a passing push receipt. Treat recognized wrappers, environment prefixes, and alternate executable spellings as ambiguous and give the plain command to rerun.
+- Bound planned-command parsing and report an inconclusive verdict when a possible required check fails or does not finish.
+- Add a block-only push gate install option with a diff preview and backup for customised hooks. Refuse duplicate gate invocations outside the marked block.

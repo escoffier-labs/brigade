@@ -110,7 +110,7 @@ def run(*, hook_v2: bool = False) -> int:
                 push_gate_display.diagnostic(f"{advisory} Run: {command}")
             else:
                 lines = [label]
-                if refused or code == verify_push._MASKED_PASS:
+                if refused or code in {verify_push._MASKED_PASS, verify_push._AMBIGUOUS_INVOCATION}:
                     lines.append(item["reason"])
                 if refused and remedy.startswith("brigade work verify run "):
                     lines.append(f"Verify commit {tip} in this worktree, then retry the push.")

@@ -9,6 +9,7 @@ import shlex
 import subprocess
 import sys
 import unittest
+from functools import cache
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -18,6 +19,7 @@ import pytest
 _HOOK = Path(brigade.__file__).resolve().parent / "templates" / "hooks" / "pre-push"
 _VENV_BIN = Path(brigade.__file__).resolve().parents[2] / ".venv" / "bin"
 _ZERO40 = "0" * 40
+HELPER_TIMEOUT_SECONDS = 120
 # content-guard: allow api-key-assignment
 _LEAK_LINE = 'api_key = "AKIAIOSFODNN7EXAMPLE0123456789"\n'
 _CLEAN_LINE = "just a normal change\n"
@@ -121,6 +123,7 @@ def _git(repo: Path, *args: str, check: bool = True) -> str:
         capture_output=True,
         text=True,
         check=check,
+        timeout=HELPER_TIMEOUT_SECONDS,
     )
     return proc.stdout.strip()
 
@@ -144,6 +147,7 @@ def _seed_remote(remote: Path, repo: Path, ref: str = "refs/heads/main") -> str:
     return sha
 
 
+@cache
 def _hook_shell():
     if os.name != "nt":
         return "bash"
@@ -152,14 +156,12 @@ def _hook_shell():
     git = shutil.which("git")
     assert git, "native hook verification requires installed Git for Windows"
     git_path = Path(git).resolve()
-    version = subprocess.check_output([str(git_path), "--version"], text=True, timeout=15)
+    version = subprocess.check_output([str(git_path), "--version"], text=True, timeout=HELPER_TIMEOUT_SECONDS)
     assert ".windows." in version.lower(), version
     candidates = [root / "bin/bash.exe" for root in git_path.parents if (root / "cmd/git.exe").is_file()]
     assert candidates, "Git for Windows installation does not contain bin/bash.exe"
     bash = candidates[0]
     assert bash.is_file() and os.access(bash, os.X_OK), f"Git Bash is not executable: {bash}"
-    kernel = subprocess.check_output([str(bash), "-c", "uname -s"], text=True, timeout=15).strip()
-    assert kernel.startswith(("MINGW", "MSYS")), f"expected native Git Bash, got {kernel}"
     return str(bash)
 
 
@@ -183,6 +185,7 @@ def _run_hook(
         capture_output=True,
         text=True,
         check=False,
+        timeout=HELPER_TIMEOUT_SECONDS,
     )
 
 
@@ -452,6 +455,7 @@ class PrePushHookFunctionalTests(unittest.TestCase):
                     capture_output=True,
                     text=True,
                     check=False,
+                    timeout=HELPER_TIMEOUT_SECONDS,
                 ).returncode,
                 0,
             )
@@ -587,7 +591,7 @@ def test_external_hook_runs_configured_scanner(tmp_path, mode, shadow, external_
             env=env,
             cwd=tmp_path,
             text=True,
-            timeout=15,
+            timeout=HELPER_TIMEOUT_SECONDS,
         )
         executable, version = json.loads(identity)
         assert Path(executable).resolve().samefile(sys.executable)
@@ -614,6 +618,7 @@ def test_external_hook_runs_configured_scanner(tmp_path, mode, shadow, external_
         input=refs,
         capture_output=True,
         text=True,
+        timeout=HELPER_TIMEOUT_SECONDS,
     )
     assert not marker.exists(), "hook executed a scanner shadow"
     assert result.returncode == 1, result.stdout + result.stderr

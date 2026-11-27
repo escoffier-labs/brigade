@@ -4,14 +4,16 @@ from __future__ import annotations
 
 import io
 import json
+import ntpath
 import os
+import posixpath
 import re
 import shlex
 import stat
 import subprocess
 import sys
-from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import cache, cached_property, partial
 from itertools import groupby, zip_longest
@@ -19,11 +21,11 @@ from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
 from time import monotonic
-from typing import Any
+from typing import Any, Literal
 
 from .. import config, localio, verify_manifest_git
 from ..verify_command import split_verify_command
-from . import push_gate_display, verify_gate
+from . import constants, push_gate_display, verify_gate
 from .verify_push_input import INPUT_BYTES, branch_updates
 
 _BUDGET_SECONDS = 2.0
@@ -36,7 +38,14 @@ _UNFINISHED = {"running", "busy", "canceled"}
 _EARLIEST = datetime.min.replace(tzinfo=UTC)
 _MASKED_PASS = "newer_required_failure"
 _UNCONFIRMED_PLAN = "planned_command_unconfirmed"
+_AMBIGUOUS_INVOCATION = "required_check_invocation"
+_PLAN_COMMANDS = 64
+_PLAN_CHARS = 16 * 1024
+_PLAN_TOKENS = 1024
+_WRAPPER_DEPTH = 8
 _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+_ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_READ_ONLY_OPTIONS = {"--version", "--help", "-h", "--collect-only", "--co"}
 
 
 @dataclass(frozen=True)
@@ -51,6 +60,34 @@ class _Verdict:
         return {"ref": ref, "status": self.status, "reason": self.reason, "remedy": self.remedy}
 
 
+@dataclass
+class _Invocation:
+    variables: set[str] = field(default_factory=set)
+    wrapper: str = ""
+    spelling: str = ""
+
+    def include(self, other: _Invocation) -> None:
+        self.variables.update(other.variables)
+        self.wrapper = self.wrapper or other.wrapper
+        self.spelling = self.spelling or other.spelling
+
+    def message(self) -> str | None:
+        if self.variables:
+            return _env_prefix_message(tuple(sorted(self.variables)))
+        if self.wrapper:
+            name = push_gate_display.terminal_text(self.wrapper)
+            return (
+                f"A run of the required check through {name} does not count. Run the required check again as declared."
+            )
+        if self.spelling:
+            name = push_gate_display.terminal_text(self.spelling)
+            return (
+                f"A run of the required check under the spelling {name} does not count. "
+                "Run the required check again as declared."
+            )
+        return None
+
+
 @dataclass(frozen=True)
 class _Candidate:
     receipt: dict[str, Any]
@@ -60,6 +97,7 @@ class _Candidate:
     failed: bool
     reason: str
     uncertain: bool = False
+    invocation_notice: str | None = None
 
 
 class _Indeterminate(Exception):
@@ -129,6 +167,9 @@ def _valid_command(command: object) -> bool:
         return False
     if status is not None and not isinstance(status, str):
         return False
+    env = command.get("env")
+    if env is not None and (not isinstance(env, list) or not all(isinstance(name, str) for name in env)):
+        return False
     return outcomes is None or (
         isinstance(outcomes, dict)
         and all(
@@ -152,6 +193,9 @@ def _valid_receipt(data: object) -> bool:
             or not all(isinstance(command, str) and command.strip() for command in planned)
         ):
             return False
+    inherited = data.get("inherited_test_env")
+    if inherited is not None and not isinstance(inherited, dict):
+        return False
     stamp = data.get("gating")
     if stamp is not None and not isinstance(stamp, dict):
         return False
@@ -300,6 +344,7 @@ class _Receipts:
         _remaining(self.deadline)
         if not valid:
             return self._entry_problem(name, "is malformed", receipt=True)
+        # Keep the saved evaluator inputs and omit unrelated receipt data.
         return {
             **{
                 key: data[key]
@@ -307,7 +352,8 @@ class _Receipts:
                 if key in data
             },
             "commands": [
-                {key: record.get(key) for key in ("argv", "status", "test_outcomes")} for record in data["commands"]
+                {key: record[key] for key in ("argv", "status", "test_outcomes", "env") if key in record}
+                for record in data["commands"]
             ],
         }
 
@@ -354,14 +400,10 @@ def _remedy(target: Path, policy: verify_gate._GatePolicy, receipt: dict[str, An
     stamp = receipt.get("gating")
     plan = stamp.get("plan") if isinstance(stamp, dict) else None
     argv = plan.get("run_argv") if isinstance(plan, dict) else None
-    prefix = list(policy.argv_prefix)
-    if (
-        isinstance(argv, list)
-        and argv[: len(prefix)] == prefix
-        and len(argv) > len(prefix)
-        and all(isinstance(arg, str) and arg for arg in argv)
-    ):
-        return render(argv)
+    if isinstance(argv, list) and all(isinstance(arg, str) and arg for arg in argv):
+        prefix = policy.argv_prefix
+        if len(argv) > len(prefix) and tuple(argv[: len(prefix)]) == prefix:
+            return render(argv) + (" --no-reuse" if fresh else "")
     command = render(verify_gate._suggested_argv(policy))
     if fresh:
         command += " --no-reuse"
@@ -374,8 +416,21 @@ def _tree_verdict(
     target: Path, policy: verify_gate._GatePolicy, tree: str, receipts: _Receipts, deadline: float
 ) -> _Verdict:
     prefix = list(policy.argv_prefix)
-    rejection: tuple[tuple[bool, datetime], dict[str, Any], str] | None = None
+
+    rejection: tuple[tuple[bool, datetime], _Candidate] | None = None
     failure: _Verdict | None = None
+
+    def invocation_rejection() -> _Verdict | None:
+        if rejection is None or rejection[1].invocation_notice is None:
+            return None
+        candidate = rejection[1]
+        return _Verdict(
+            "rejected",
+            candidate.invocation_notice,
+            _remedy(target, policy, candidate.receipt, fresh=True),
+            _AMBIGUOUS_INVOCATION,
+        )
+
     try:
         for group in receipts.matching(tree):
             candidates = (_classify_receipt(policy, prefix, tree, receipt, deadline) for receipt in group)
@@ -384,6 +439,12 @@ def _tree_verdict(
                 if not prefix and candidate.receipt["status"] in _UNFINISHED:
                     continue
                 if candidate.uncertain:
+                    if candidate.invocation_notice:
+                        raise _Indeterminate(
+                            candidate.invocation_notice,
+                            _AMBIGUOUS_INVOCATION,
+                            remedy=_remedy(target, policy, candidate.receipt, fresh=True),
+                        )
                     if candidate.reason == _UNCONFIRMED_PLAN:
                         raise _Indeterminate(
                             "The planned commands and recorded results do not establish "
@@ -395,7 +456,7 @@ def _tree_verdict(
                 if candidate.eligible:
                     if failure is None:
                         return _Verdict("ok")
-                    return replace(
+                    return invocation_rejection() or replace(
                         failure,
                         reason=f"{failure.reason} An earlier run had passed.",
                         reason_code=_MASKED_PASS,
@@ -410,28 +471,266 @@ def _tree_verdict(
                             candidate.reason,
                             "The most recent run of the required check",
                         )
-                    rank = (candidate.ran_required, candidate.started_at or _EARLIEST)
+                    rank = (
+                        candidate.ran_required or bool(candidate.invocation_notice),
+                        candidate.started_at or _EARLIEST,
+                    )
                     if rejection is None or rank > rejection[0]:
-                        rejection = rank, candidate.receipt, candidate.reason
+                        rejection = rank, candidate
     except _Indeterminate:
         if failure is None:
             raise
 
     if failure is not None:
-        return failure
+        return invocation_rejection() or failure
     _remaining(deadline)
     if rejection is None:
         return _Verdict(
             "missing_receipt", "No local verification receipt matches this tree.", _remedy(target, policy, {})
         )
-    (ran_required, _), receipt, reason = rejection
-    run_label = "The most recent run of the required check" if ran_required else "The last run"
-    return _rejected(target, policy, receipt, reason, run_label)
+    _, candidate = rejection
+    if notice := invocation_rejection():
+        return notice
+    run_label = "The most recent run of the required check" if candidate.ran_required else "The last run"
+    return _rejected(target, policy, candidate.receipt, candidate.reason, run_label)
+
+
+def _env_prefix_message(names: tuple[str, ...]) -> str:
+    shown = ", ".join(push_gate_display.terminal_text(name) for name in names[:4])
+    if len(names) > 4:
+        shown += f" and {len(names) - 4} more"
+    return (
+        f"A run with {shown} set in front of the required check does not count. "
+        "Run the required check again without the environment prefix."
+    )
+
+
+# Only options with a known command boundary are parsed. For example,
+# env's --split-string parses a command and env -C changes its working directory.
+# Combined short options are deliberately opaque.
+_WRAPPER_FLAGS = {
+    "env": {"-", "-i", "--ignore-environment", "-v", "--debug"},
+    "command": {"-p"},
+    "nice": set(),
+    "nohup": set(),
+    "time": {"-p", "--portability", "-a", "--append", "-v", "--verbose", "-q", "--quiet"},
+    "timeout": {"--foreground", "--preserve-status", "-v", "--verbose"},
+    "stdbuf": set(),
+}
+_WRAPPER_VALUES = {
+    "env": {"-u", "--unset"},
+    "nice": {"-n", "--adjustment"},
+    "time": {"-f", "--format", "-o", "--output"},
+    "timeout": {"-k", "--kill-after", "-s", "--signal"},
+    "stdbuf": {"-i", "--input", "-o", "--output", "-e", "--error"},
+}
+_OPAQUE_LAUNCHERS = constants.SCANNER_HIGH_RISK_COMMANDS | constants._POLICY_LAUNCHERS | {"eval", "just", "make", "tox"}
+_INTERPRETERS = {"node", "ruby", "perl", "php"}
+_PYTHON_LAUNCHER = re.compile(r"python[0-9.]*|py")
+_PYTHON_VALUE_OPTIONS = {"-W", "-X", "--check-hash-based-pycs"}
+_SHELL_LAUNCHERS = {"bash", "sh", "dash", "zsh", "ksh", "fish"}
+_SHELL_COMMAND = re.compile(r"-[A-Za-z]*c[A-Za-z]*")
+_FIRST_SCRIPT_WORD = re.compile(r"""^\s*(?:exec\s+)?(?:"([^"]+)"|'([^']+)'|([^\s;&|]+))""")
+_SCRIPT_SUFFIXES = {"py", "sh", "bash", "rb", "js", "pl", "exe", "bat", "cmd"}
+_PYTEST_ALIAS = re.compile(r"^py\.test(?=$|\.(?:exe|cmd|bat)$)")
+_DURATION = re.compile(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)[smhd]?")
+
+
+def _unwrap(argv: tuple[str, ...], launcher: str) -> tuple[tuple[str, ...], list[str]] | None:
+    index = 1
+    values = _WRAPPER_VALUES.get(launcher, set())
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--":
+            index += 1
+            break
+        if arg in _WRAPPER_FLAGS[launcher] or (launcher == "nice" and re.fullmatch(r"-[0-9]+", arg)):
+            index += 1
+        elif arg in values:
+            index += 2
+        elif (arg.startswith("--") and arg.partition("=")[0] in values and "=" in arg) or (
+            len(arg) > 2 and arg[:2] in values
+        ):
+            index += 1
+        elif arg.startswith("-"):
+            return None
+        else:
+            break
+    if launcher == "timeout":
+        if index >= len(argv) or not _DURATION.fullmatch(argv[index]):
+            return None
+        index += 1
+    env_start = index
+    if launcher == "env":
+        while index < len(argv) and _ENV_ASSIGNMENT.match(argv[index]):
+            index += 1
+    elif index < len(argv) and _ENV_ASSIGNMENT.match(argv[index]):
+        return None
+    names = [arg.partition("=")[0] for arg in argv[env_start:index]]
+    return argv[index:], names
+
+
+def _without_assignments(argv: Sequence[str]) -> tuple[str, ...]:
+    start = next((i for i, arg in enumerate(argv) if not _ENV_ASSIGNMENT.match(arg)), len(argv))
+    return tuple(argv[start:])
+
+
+def _generic_launcher(name: str) -> bool:
+    return (
+        name in _OPAQUE_LAUNCHERS
+        or name in _WRAPPER_FLAGS
+        or name in _INTERPRETERS
+        or _PYTHON_LAUNCHER.fullmatch(name) is not None
+    )
+
+
+def _launcher_target(launcher: str, args: Sequence[str]) -> str:
+    if launcher in _WRAPPER_FLAGS:
+        unwrapped = _unwrap((launcher, *args), launcher)
+        if unwrapped is not None and unwrapped[0]:
+            return unwrapped[0][0]
+    subcommands = constants._POLICY_LAUNCHER_SUBCOMMANDS.get(launcher, set())
+    if launcher == "npm":
+        subcommands = subcommands | {"run"}
+    python = _PYTHON_LAUNCHER.fullmatch(launcher) is not None
+    values = iter(args)
+    for arg in values:
+        if python:
+            if arg in _PYTHON_VALUE_OPTIONS:
+                next(values, None)
+                continue
+            if arg.startswith("-c") or arg == "-":
+                return ""
+            if arg.startswith("-m") and len(arg) > 2:
+                return arg[2:]
+        if launcher in _SHELL_LAUNCHERS and _SHELL_COMMAND.fullmatch(arg):
+            return ""
+        if arg in {"-m", "--"}:
+            return next(values, "")
+        if arg and not arg.startswith("-") and not _ENV_ASSIGNMENT.match(arg):
+            if arg in subcommands:
+                continue
+            return arg
+    return ""
+
+
+def _script_suffix(name: str) -> tuple[str, bool]:
+    stem, _, suffix = name.rpartition(".")
+    return (stem, True) if suffix.casefold() in _SCRIPT_SUFFIXES else (name, False)
+
+
+def _mentions_check(launcher: str, args: Sequence[str], name: str, *, windows: bool) -> bool:
+    if not name:
+        return False
+    terms = (name, "py.test") if name == "pytest" else (name,)
+    alternatives = "|".join(re.escape(term) for term in terms)
+    flags = re.IGNORECASE if windows else 0
+    script_suffix = "|".join(sorted(_SCRIPT_SUFFIXES))
+    mention = re.compile(rf"(?<![\w.-])(?:{alternatives})(?:\.(?:{script_suffix}))?(?![\w.-])", flags)
+    if any(mention.search(arg) for arg in args):
+        return True
+
+    target = _launcher_target(launcher, args)
+    if not target and launcher in _SHELL_LAUNCHERS:
+        source = next(
+            (value for option, value in zip(args, args[1:], strict=False) if _SHELL_COMMAND.fullmatch(option)), ""
+        )
+        if first := _FIRST_SCRIPT_WORD.match(source):
+            target = next(word for word in first.groups() if word is not None)
+    path = target.replace("\\", "/")
+    script = path.rsplit("/", 1)[-1]
+    stem, is_script = _script_suffix(script)
+    if not is_script or (script.startswith("test_") and "tests" in path.split("/")[:-1]):
+        return False
+    segments = "|".join(re.escape(_script_suffix(term)[0]) for term in terms)
+    return re.search(rf"(?:^|[-_])(?:{segments})(?:$|[-_])", stem, flags) is not None
+
+
+def _runner_alias(program: str) -> str:
+    directory, separator, name = program.rpartition("/")
+    return directory + separator + _PYTEST_ALIAS.sub("pytest", name)
+
+
+def _program_spelling(executable: str, *, windows: bool) -> str:
+    return constants.normalize_policy_executable(executable, windows=True) if windows else executable
+
+
+def _required_identity(
+    argv: Sequence[str],
+    prefix: Sequence[str],
+    *,
+    windows: bool,
+    env_names: Sequence[str] = (),
+    invocation: _Invocation | None = None,
+) -> tuple[str, ...] | Literal["ambiguous"] | None:
+    """Recognize an exact invocation or possible evidence of the required check."""
+    if not prefix or not argv:
+        return None
+    args = _without_assignments(argv)
+    names = [*env_names, *(arg.partition("=")[0] for arg in argv[: len(argv) - len(args)])]
+    original = tuple(argv)
+    exact = original[: len(prefix)] == tuple(prefix)
+
+    normalize = partial(_program_spelling, windows=windows)
+    basename = ntpath.basename if windows else posixpath.basename
+    outer_wrapper = args[0] if args and basename(normalize(args[0])) in _WRAPPER_FLAGS else ""
+
+    def ambiguous(*, spelling: str = "") -> Literal["ambiguous"]:
+        if invocation is not None:
+            invocation.variables.update(name for name in names if _ENV_NAME.fullmatch(name))
+            invocation.wrapper = invocation.wrapper or outer_wrapper
+            invocation.spelling = invocation.spelling or spelling
+        return "ambiguous"
+
+    if exact:
+        if len(original) == 2 and original[1] in _READ_ONLY_OPTIONS:
+            return None
+        if outer_wrapper:
+            if basename(normalize(outer_wrapper)) == "env" and (unwrapped := _unwrap(args, "env")) is not None:
+                names.extend(unwrapped[1])
+            return ambiguous()
+        return ambiguous() if names else original
+    if _ENV_ASSIGNMENT.match(prefix[0]):
+        return None
+
+    policy_program = normalize(prefix[0])
+    policy_basename = _runner_alias(basename(policy_program))
+    policy_launcher = policy_basename
+    target = _launcher_target(policy_launcher, prefix[1:]) if _generic_launcher(policy_launcher) else ""
+    name = _runner_alias(basename(normalize(target))) if target else policy_launcher
+    possible_match = False
+    for depth in range(_WRAPPER_DEPTH + 1):
+        if not args:
+            break
+        program = normalize(args[0])
+        launcher = basename(program)
+        same_program = program == policy_program
+        if same_program and len(args) == 2 and args[1] in _READ_ONLY_OPTIONS:
+            return None
+        if same_program and tuple(prefix[1:]) == args[1 : len(prefix)]:
+            return ambiguous(spelling=args[0] if args[0] != prefix[0] else "")
+        if not same_program and _runner_alias(basename(program)) == policy_basename:
+            return ambiguous(spelling=args[0])
+        if program == launcher and launcher in _WRAPPER_FLAGS and depth < _WRAPPER_DEPTH:
+            unwrapped = _unwrap(args, launcher)
+            if unwrapped is not None:
+                possible_match |= same_program and _mentions_check(launcher, args[1:], name, windows=windows)
+                args, wrapper_names = unwrapped
+                names.extend(wrapper_names)
+                continue
+        if same_program and not target:
+            return ambiguous(spelling=args[0] if args[0] != prefix[0] else "")
+        if _generic_launcher(launcher) and _mentions_check(launcher, args[1:], name, windows=windows):
+            return ambiguous()
+        break
+    return ambiguous() if possible_match else None
 
 
 def _planned_argvs(command: str) -> set[tuple[str, ...]]:
     # The writer preserves raw --command text but uses POSIX shlex.join for
     # argv lists on every platform. The receipt does not identify the form.
+    if len(command) > _PLAN_CHARS or "\x00" in command:
+        return set()
     parsers = (shlex.split, split_verify_command) if os.name == "nt" else (shlex.split,)
     alternatives: set[tuple[str, ...]] = set()
     for parse in parsers:
@@ -439,63 +738,109 @@ def _planned_argvs(command: str) -> set[tuple[str, ...]]:
             argv = parse(command)
         except ValueError:
             continue
-        if not argv or not argv[0] or "\x00" in command:
-            continue
-        alternatives.add(tuple(argv))
-        # Raw commands may start with environment assignments removed from
-        # recorded argv. Pre-parsed argv lists do not strip these tokens.
-        start = next((index for index, arg in enumerate(argv) if not _ENV_ASSIGNMENT.match(arg)), len(argv))
-        if start < len(argv):
-            alternatives.add(tuple(argv[start:]))
+        if len(argv) > _PLAN_TOKENS:
+            return set()
+        if argv and argv[0]:
+            alternatives.add(tuple(argv))
     return alternatives
 
 
 def _required_plan_unconfirmed(
-    planned: list[str], commands: list[dict[str, Any]], prefix: list[str], deadline: float
+    planned: list[str],
+    commands: list[dict[str, Any]],
+    identities: list[tuple[tuple[str, ...] | Literal["ambiguous"] | None, _Invocation]],
+    prefix: list[str],
+    deadline: float,
+    invocation: _Invocation,
 ) -> bool:
-    required = tuple(prefix)
-    for command, record in zip_longest(planned, commands):
+    if len(planned) > _PLAN_COMMANDS:
+        return True
+    for command, record, recorded in zip_longest(planned, commands, identities):
         _remaining(deadline)
-        recorded = tuple(record["argv"] or ()) if record is not None else ()
+        recorded_identity, recorded_invocation = recorded if recorded is not None else (None, _Invocation())
         if command is None:
-            if recorded[: len(required)] == required:
+            if recorded_identity is not None:
+                invocation.include(recorded_invocation)
                 return True
             continue
         possible = _planned_argvs(command)
         if not possible:
             return True
-        if recorded[: len(required)] == required:
-            if recorded not in possible:
+        planned_invocation = _Invocation()
+        planned_identities = {
+            _required_identity(argv, prefix, windows=os.name == "nt", invocation=planned_invocation)
+            for argv in possible
+        }
+        if isinstance(recorded_identity, tuple):
+            if recorded_identity not in planned_identities:
+                invocation.include(planned_invocation)
                 return True
-        elif any(argv[: len(required)] == required for argv in possible):
+        elif any(isinstance(identity, tuple) for identity in planned_identities):
+            invocation.include(recorded_invocation)
             return True
+        elif "ambiguous" in planned_identities or recorded_identity == "ambiguous":
+            if record is None or not any(
+                _without_assignments(record.get("argv") or ()) == _without_assignments(argv) for argv in possible
+            ):
+                invocation.include(planned_invocation)
+                invocation.include(recorded_invocation)
+                return True
     return False
 
 
 def _classify_receipt(
-    policy: verify_gate._GatePolicy, prefix: list[str], tree: str, receipt: dict[str, Any], deadline: float
+    policy: verify_gate._GatePolicy,
+    prefix: list[str],
+    tree: str,
+    receipt: dict[str, Any],
+    deadline: float,
 ) -> _Candidate:
     eligible, reason = verify_gate.evaluate_receipt(policy, receipt, tree, deadline=deadline)
     if reason == "policy_timeout":
         raise _Indeterminate(_TIMEOUT, "check_timeout")
-    required = [
-        command
-        for command in receipt["commands"]
-        if prefix and isinstance(command["argv"], list) and command["argv"][: len(prefix)] == prefix
-    ]
+    identities = []
+    required = []
+    ambiguous = False
+    excluded = _Invocation()
+    inconclusive = _Invocation()
+    prefixed_coverage = False
+    for command in receipt["commands"]:
+        _remaining(deadline)
+        argv = command.get("argv") or ()
+        env_names = command.get("env") or ()
+        invocation = _Invocation()
+        identity = _required_identity(argv, prefix, windows=os.name == "nt", env_names=env_names, invocation=invocation)
+        identities.append((identity, invocation))
+        if isinstance(identity, tuple):
+            required.append(command)
+        elif identity == "ambiguous":
+            excluded.include(invocation)
+            # A saved coverage verdict may include a command whose inline
+            # assignments the writer moved out of argv. Do not use that stamp.
+            prefixed_coverage |= bool(policy.needs_plan_coverage and env_names and argv[: len(prefix)] == prefix)
+            if _command_status(receipt, command) != "completed" or _failed_required_check(receipt, [command]):
+                ambiguous = True
+                inconclusive.include(invocation)
     statuses = {_command_status(receipt, command) for command in required}
     failed = _failed_required_check(receipt, required)
+    plan_invocation = _Invocation()
     plan_unconfirmed = (
         bool(prefix)
         and "planned_commands" in receipt
-        and _required_plan_unconfirmed(receipt["planned_commands"], receipt["commands"], prefix, deadline)
+        and _required_plan_unconfirmed(
+            receipt["planned_commands"], receipt["commands"], identities, prefix, deadline, plan_invocation
+        )
     )
     uncertain = plan_unconfirmed or (
         bool(prefix)
         and not failed
         and (
-            receipt["status"] not in {"completed", "failed", "rejected", "timed_out"}
-            or any(command["argv"] is None for command in receipt["commands"])
+            ambiguous
+            or (
+                "planned_commands" not in receipt
+                and receipt["status"] not in {"completed", "failed", "rejected", "timed_out"}
+            )
+            or any(command.get("argv") is None for command in receipt["commands"])
             or bool(statuses - {"completed", "rejected"})
         )
     )
@@ -503,18 +848,31 @@ def _classify_receipt(
         eligible, reason = False, _UNCONFIRMED_PLAN
     elif "timed_out" in statuses:
         eligible, reason = False, "required_check_timed_out"
-    elif eligible and (failed or uncertain or "rejected" in statuses):
-        eligible, reason = False, "not_completed"
-    elif eligible and prefix:
+    elif failed or uncertain or "rejected" in statuses:
+        if eligible:
+            eligible, reason = False, "not_completed"
+    elif prefix and eligible:
         eligible, reason = verify_gate._required_check_verdict(receipt, policy)
+        if eligible and (
+            prefixed_coverage
+            or not any(
+                (not policy.needs_arguments or len(command["argv"]) > len(prefix))
+                and (not policy.needs_passed_tests or verify_gate._tests_passed(command))
+                for command in required
+            )
+        ):
+            eligible, reason = False, "not_the_required_check"
+    inconclusive.include(plan_invocation)
+    notice = inconclusive.message() if uncertain else excluded.message() if not required or prefixed_coverage else None
     return _Candidate(
         receipt,
         _receipt_started_at(receipt),
         bool(required),
-        eligible,
-        failed or (bool(required) and not eligible and not uncertain),
+        eligible and not uncertain and not failed,
+        failed or (bool(required) and not eligible and not uncertain and not prefixed_coverage),
         reason,
         uncertain,
+        notice,
     )
 
 
@@ -570,17 +928,21 @@ def _rejected(
     )
 
 
-def _check(
-    target: Path, updates: list[tuple[str, str]], ref: str | None, deadline: float, *, details: bool = False
-) -> list[dict[str, Any]]:
+def _offline_git_env() -> dict[str, str]:
     # Object reads in partial clones must stay offline even on Git versions
     # that do not recognize GIT_NO_LAZY_FETCH.
-    git_env = {
+    return {
         **verify_manifest_git.trusted_git_env(),
         "GIT_NO_LAZY_FETCH": "1",
         "GIT_ALLOW_PROTOCOL": "",
         "GIT_NO_REPLACE_OBJECTS": "1",
     }
+
+
+def _check(
+    target: Path, updates: list[tuple[str, str]], ref: str | None, deadline: float, *, details: bool = False
+) -> list[dict[str, Any]]:
+    git_env = _offline_git_env()
     git = partial(verify_manifest_git._git, deadline=deadline, git_env=git_env)
     try:
         root = git(target, "rev-parse", "--show-toplevel")

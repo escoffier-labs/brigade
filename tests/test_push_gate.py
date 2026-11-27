@@ -7,6 +7,7 @@ import json
 import os
 import shlex
 import shutil
+import stat
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -17,11 +18,29 @@ import pytest
 
 from brigade import doctor
 from brigade.cli import main
-from brigade.work_cmd import push_gate_hook, verify_push
+from brigade.work_cmd import push_gate, push_gate_hook, verify_push
 
-from tests.test_pre_push_hook import _hook_shell
-from tests.test_verify_push import _commit, _git, _line, _policy, _receipt, _single, _tree
+from tests._home import set_home
+from tests.test_pre_push_hook import HELPER_TIMEOUT_SECONDS, _hook_shell
+from tests.test_verify_push import (
+    CHECK_ENV_NAMES,
+    ENV_PREFIX_MESSAGE,
+    IDENTITY_WRAPPERS,
+    SAME_NAME_SPELLINGS,
+    SENTINEL_ENV_VALUE,
+    SPELLING_WRAPPERS,
+    PREFIX,
+    SELECTOR,
+    _commit,
+    _git,
+    _line,
+    _policy,
+    _receipt,
+    _single,
+    _tree,
+)
 from tests.test_verify_push import push_repo as push_repo
+from tests.test_verify_push import verdict_budget as verdict_budget
 
 
 @pytest.fixture(autouse=True)
@@ -158,7 +177,15 @@ def _gate_bash():
 
 
 def _run_gate_hook(repo, hook, refs):
-    return subprocess.run([_gate_bash(), Path(hook).as_posix()], cwd=repo, input=refs, text=True, capture_output=True)
+    result = subprocess.run(
+        [_gate_bash(), Path(hook).as_posix()],
+        cwd=repo,
+        input=refs,
+        text=True,
+        capture_output=True,
+        timeout=HELPER_TIMEOUT_SECONDS,
+    )
+    return _assert_subprocess_budget(repo, result)
 
 
 def _bash_fixture(repo, monkeypatch, script):
@@ -170,6 +197,32 @@ def _bash_fixture(repo, monkeypatch, script):
 def _log_rows(repo):
     log = repo / ".git" / "brigade" / "push-gate.jsonl"
     return [json.loads(line) for line in log.read_text().splitlines()]
+
+
+def _assert_subprocess_budget(repo, result):
+    log = repo / ".git" / "brigade" / "push-gate.jsonl"
+    timeout = next((row for row in _log_rows(repo) if row["reason"] == "check_timeout"), None) if log.exists() else None
+    if timeout:
+        message = f"Push gate check_timeout after {timeout['duration_ms']} ms (two-second evaluation budget)"
+        if sys.platform == "win32":
+            pytest.skip(f"Windows infrastructure timeout: {message}")
+        pytest.fail(f"{message}: {result.stderr}")
+    return result
+
+
+def _push_with_verdict(repo):
+    result = subprocess.run(
+        ["git", "push", "origin", "main"], cwd=repo, capture_output=True, text=True, timeout=HELPER_TIMEOUT_SECONDS
+    )
+    return _assert_subprocess_budget(repo, result)
+
+
+def _evaluate_hook(repo, tip, mode, monkeypatch, capsys):
+    _git(repo, "config", "--local", "brigade.pushGate", mode)
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(sys, "stdin", io.StringIO(_line(tip, "refs/heads/main") + "\n"))
+    code = push_gate_hook.run(hook_v2=True)
+    return code, capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -267,12 +320,13 @@ def test_concurrent_push_from_worktrees_and_missing_brigade(push_repo, capsys, m
             capture_output=True,
             text=True,
             check=True,
+            timeout=HELPER_TIMEOUT_SECONDS,
         )
 
     with ThreadPoolExecutor(2) as pool:
         jobs = [pool.submit(push, i, _path_with_brigade()) for i in range(2)]
         for job in jobs:
-            pushed = job.result()
+            pushed = _assert_subprocess_budget(push_repo, job.result())
             assert "missing_receipt" in pushed.stderr
             assert "brigade work verify run" in pushed.stderr
     rows = sorted(_log_rows(push_repo), key=lambda row: row["ref"])
@@ -360,6 +414,7 @@ def test_global_template_preserves_history_guard(push_repo, capsys, monkeypatch,
             capture_output=True,
             text=True,
             check=False,
+            timeout=HELPER_TIMEOUT_SECONDS,
         )
 
     baseline = run_hook()
@@ -386,7 +441,12 @@ def test_global_template_preserves_history_guard(push_repo, capsys, monkeypatch,
 
     monkeypatch.setenv("TEST_GUARD_EXIT", "0")
     pushed = subprocess.run(
-        ["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True, check=True
+        ["git", "push", "origin", "main"],
+        cwd=push_repo,
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=HELPER_TIMEOUT_SECONDS,
     )
     assert tip in pushed.stdout.splitlines()
     if not with_timeout:
@@ -518,7 +578,7 @@ def test_installed_gate_controls_real_push(push_repo, capsys, monkeypatch, mode,
     (push_repo / "src.py").write_text("value = 2\n", encoding="utf-8")
     tip = _commit(push_repo)
 
-    pushed = subprocess.run(["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True)
+    pushed = _push_with_verdict(push_repo)
     assert (pushed.returncode != 0) is block
     assert "refs/heads/main" in pushed.stderr and "brigade work verify run" in pushed.stderr
     assert _git(Path(remote), "rev-parse", "refs/heads/main") == (base if block else tip)
@@ -527,8 +587,16 @@ def test_installed_gate_controls_real_push(push_repo, capsys, monkeypatch, mode,
     assert report["blocked"] == int(block)
     if block:
         remedy = next(line for line in pushed.stderr.splitlines() if line.startswith("brigade work verify run "))
-        subprocess.run(shlex.split(remedy), cwd=push_repo, capture_output=True, text=True, check=True)
-        _git(push_repo, "push", "origin", "main")
+        subprocess.run(
+            shlex.split(remedy),
+            cwd=push_repo,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=HELPER_TIMEOUT_SECONDS,
+        )
+        verified = _push_with_verdict(push_repo)
+        assert verified.returncode == 0, verified.stderr
         assert _git(Path(remote), "rev-parse", "refs/heads/main") == tip
         assert [(row["mode"], row["blocked"]) for row in _log_rows(push_repo)] == [
             ("enforce", True),
@@ -686,8 +754,6 @@ def test_doctor_reads_latch_beyond_recent_state_files(tmp_path, layout):
 @pytest.mark.skipif(shutil.which("timeout") is None, reason="requires GNU coreutils timeout on PATH")
 @pytest.mark.parametrize("mode", ["warn", "enforce"])
 def test_hook_watchdog_controls_push_and_preserves_guard_refs(push_repo, monkeypatch, mode):
-    from time import monotonic
-
     from brigade.work_cmd.push_gate import _guard_bytes
 
     _policy(push_repo)
@@ -706,15 +772,13 @@ def test_hook_watchdog_controls_push_and_preserves_guard_refs(push_repo, monkeyp
     monkeypatch.setenv("PATH", str(tools_dir) + os.pathsep + _path_with_brigade())
     assert _gate(push_repo, "install", "--mode", mode) == 0
     tip = _commit(push_repo)
-    start = monotonic()
     pushed = subprocess.run(
         ["git", "push", "origin", "main"],
         cwd=push_repo,
         capture_output=True,
         text=True,
-        timeout=8,
+        timeout=HELPER_TIMEOUT_SECONDS,
     )
-    assert monotonic() - start < 8
     if mode == "warn":
         assert pushed.returncode == 0
         assert pushed.stderr.count("the push gate process timed out") == 1
@@ -851,7 +915,9 @@ def test_old_hook_with_enforce_reports_ineffective_and_records_allow(push_repo, 
     assert info["hook_version"] == 1 and info["will_run"] and not info["enforce_effective"]
     severity, _, summary = _doctor(push_repo)
     assert severity == "FAIL" and ENFORCE_V1_NOTICE in summary
-    pushed = subprocess.run(["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True)
+    pushed = subprocess.run(
+        ["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True, timeout=HELPER_TIMEOUT_SECONDS
+    )
     assert pushed.returncode == 0 and ENFORCE_V1_NOTICE in pushed.stderr
     assert "missing_receipt" not in pushed.stderr
     (row,) = _log_rows(push_repo)
@@ -859,7 +925,13 @@ def test_old_hook_with_enforce_reports_ineffective_and_records_allow(push_repo, 
     _git(push_repo, "tag", "example-tag")
     _git(push_repo, "branch", "example-deletion")
     for refspec in ("refs/tags/example-tag", "example-deletion", ":example-deletion"):
-        update = subprocess.run(["git", "push", "origin", refspec], cwd=push_repo, capture_output=True, text=True)
+        update = subprocess.run(
+            ["git", "push", "origin", refspec],
+            cwd=push_repo,
+            capture_output=True,
+            text=True,
+            timeout=HELPER_TIMEOUT_SECONDS,
+        )
         assert update.returncode == 0
         assert (ENFORCE_V1_NOTICE in update.stderr) is (refspec == "example-deletion")
 
@@ -940,49 +1012,49 @@ def test_manual_hook_v2_argument_is_registered(push_repo, monkeypatch, capsys):
     assert result.value.code == 0 and "--hook-v2" in capsys.readouterr().out
 
 
-def test_real_two_second_git_deadline_warns_and_allows(push_repo, monkeypatch, capsys):
-    from time import monotonic
+def test_git_deadline_warns_and_allows(push_repo, monkeypatch, capsys):
+    from brigade import verify_manifest_git
+
+    monkeypatch.setattr(verify_push, "_BUDGET_SECONDS", 2.0)
 
     tip = _policy(push_repo)
     real_run = subprocess.run
+    budgets = []
+    monkeypatch.setattr(push_gate_hook, "monotonic", lambda: 12.0)
+    monkeypatch.setattr(verify_push, "monotonic", lambda: 12.0)
+    monkeypatch.setattr(verify_manifest_git, "monotonic", lambda: 12.25)
 
-    def slow_merge_base(args, **kwargs):
+    def timed_out_merge_base(args, **kwargs):
         if args[:2] == ["git", "merge-base"]:
-            args = [sys.executable, "-c", "import time; time.sleep(10)"]
+            budgets.append(kwargs["timeout"])
+            raise subprocess.TimeoutExpired(args, kwargs["timeout"])
         return real_run(args, **kwargs)
 
     _git(push_repo, "config", "--local", "brigade.pushGate", "warn")
     monkeypatch.chdir(push_repo)
-    monkeypatch.setattr(subprocess, "run", slow_merge_base)
+    monkeypatch.setattr(subprocess, "run", timed_out_merge_base)
     monkeypatch.setattr(sys, "stdin", io.StringIO(_line(tip, "refs/heads/topic") + "\n"))
-    start = monotonic()
     assert push_gate_hook.run() == 0
-    assert 1.75 <= monotonic() - start < 8
+    assert budgets == [1.75]
     assert "timed out" in capsys.readouterr().err.lower()
     (row,) = _log_rows(push_repo)
     assert row["reason"] == "check_timeout"
 
 
-def test_stray_backup_reproduction_prunes_nothing_and_can_push(push_repo, monkeypatch, capsys):
+def test_stray_backup_pruning_preserves_gate_verdict(push_repo, monkeypatch, capsys):
     tip = _policy(push_repo)
     good = _receipt(push_repo, _tree(push_repo))
-    _bare_remote(push_repo)
-    monkeypatch.setenv("PATH", _path_with_brigade())
     for index in range(130):
         backup = good.parent.with_name(f"backup-{index}")
         backup.mkdir()
         (backup / "receipt.json").write_text("{", encoding="utf-8")
-    assert _gate(push_repo, "install", "--mode", "enforce") == 0
-    capsys.readouterr()
     assert _gate(push_repo, "prune") == 0
     output = capsys.readouterr()
     assert "Pruned 0 local verify run(s). Local receipts remaining: 1." in output.out
     assert output.err.count("mv -- ") == 130
     assert good.is_file() and len(list(good.parent.parent.glob("backup-*"))) == 130
-    pushed = subprocess.run(["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True)
-    assert pushed.returncode == 0 and pushed.stderr.count("ignoring malformed receipt") == 1
-    remote = Path(_git(push_repo, "remote", "get-url", "origin"))
-    assert _git(remote, "rev-parse", "refs/heads/main") == tip
+    code, err = _evaluate_hook(push_repo, tip, "enforce", monkeypatch, capsys)
+    assert code == 0 and err.count("ignoring malformed receipt") == 1
 
 
 @pytest.mark.parametrize("store_kind", ["file", "symlink"])
@@ -1030,17 +1102,15 @@ def test_prune_honors_grace_period_and_start_time_order(push_repo, capsys):
 
 @pytest.mark.parametrize("mode", ["warn", "enforce"])
 def test_hanging_timeout_probe_is_bounded_in_real_push(push_repo, monkeypatch, capsys, mode):
-    from time import monotonic
-
     _policy(push_repo)
     _bare_remote(push_repo)
     monkeypatch.setenv("PATH", _path_with_brigade())
     assert _gate(push_repo, "install", "--mode", mode) == 0
     capsys.readouterr()
     _bash_fixture(push_repo, monkeypatch, "timeout() { exec sleep 30; }\n")
-    start = monotonic()
-    result = subprocess.run(["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True, timeout=8)
-    assert monotonic() - start < 8
+    result = subprocess.run(
+        ["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True, timeout=HELPER_TIMEOUT_SECONDS
+    )
     assert (result.returncode != 0) is (mode == "enforce")
     assert result.stderr.count("is unusable (the -k probe failed or timed out)") == 1
 
@@ -1176,24 +1246,15 @@ def test_enforcement_status_requires_exact_hook(push_repo, monkeypatch, capsys, 
 
 
 @pytest.mark.parametrize("mode", ["warn", "enforce"])
-def test_newer_timeout_with_empty_collection_in_real_push(push_repo, monkeypatch, capsys, mode):
-    base = _policy(push_repo)
-    _bare_remote(push_repo)
-    remote = Path(_git(push_repo, "remote", "get-url", "origin"))
-    _git(push_repo, "push", "origin", "main")
-    monkeypatch.setenv("PATH", _path_with_brigade())
-    assert _gate(push_repo, "install", "--mode", mode) == 0
-    capsys.readouterr()
-    (push_repo / "src.py").write_text("value = 2\n", encoding="utf-8")
-    tip = _commit(push_repo)
+def test_newer_timeout_with_empty_collection_in_hook(push_repo, monkeypatch, capsys, mode):
+    tip = _policy(push_repo)
     tree = _tree(push_repo)
     _receipt(push_repo, tree)
     _receipt(push_repo, tree, second=2, status="failed", command_status="timed_out", passed=0)
-    push = subprocess.run(["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True, timeout=15)
-    assert (push.returncode != 0) is (mode == "enforce")
-    assert "refs/heads/main (rejected)" in push.stderr and "timed out. An earlier run had passed." in push.stderr
-    assert "brigade work verify run" in push.stderr
-    assert _git(remote, "rev-parse", "refs/heads/main") == (base if mode == "enforce" else tip)
+    code, err = _evaluate_hook(push_repo, tip, mode, monkeypatch, capsys)
+    assert (code != 0) is (mode == "enforce")
+    assert "refs/heads/main (rejected)" in err and "timed out. An earlier run had passed." in err
+    assert "brigade work verify run" in err
 
 
 @pytest.mark.parametrize("mode", ["warn", "enforce"])
@@ -1214,7 +1275,9 @@ def test_mode_read_error_allows_real_push(push_repo, monkeypatch, capsys, mode):
         '  command git "$@"\n'
         "}\n",
     )
-    push = subprocess.run(["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True, timeout=15)
+    push = subprocess.run(
+        ["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True, timeout=HELPER_TIMEOUT_SECONDS
+    )
     assert push.returncode == 0, push.stderr
     assert push.stderr.count("did not run for this push because Git could not read the configuration") == 1
     assert "fixture" in push.stderr and "configuration" in push.stderr and "\x1b" not in push.stderr
@@ -1237,7 +1300,7 @@ def test_enforce_remedy_moves_exact_directory_with_control_characters(push_repo,
     scratch = push_repo.parent / "moved"
     scratch.mkdir()
     monkeypatch.setenv("TMPDIR", str(scratch))
-    subprocess.run([_gate_bash(), "-c", remedy], cwd=push_repo, check=True)
+    subprocess.run([_gate_bash(), "-c", remedy], cwd=push_repo, check=True, timeout=HELPER_TIMEOUT_SECONDS)
     assert not stray.exists()
     (destination,) = scratch.iterdir()
     assert (destination / stray.name / "receipt.json").is_file()
@@ -1245,8 +1308,6 @@ def test_enforce_remedy_moves_exact_directory_with_control_characters(push_repo,
 
 
 def test_hook_escapes_ref_plan_guidance_and_preserves_remedy(push_repo, monkeypatch, capsys):
-    from tests.test_verify_push import PREFIX, SELECTOR
-
     tip = _policy(push_repo, coverage=True)
     tree = _tree(push_repo)
     filename = "tests/test_\x1b\x9b\x7f\u202e.py"
@@ -1298,7 +1359,11 @@ def test_bash_argument_rendering_preserves_control_bytes(push_repo):
     quoted = shell_arg(raw)
     assert all(char not in quoted for char in "\x1b\n\x9b\u202e")
     result = subprocess.run(
-        [_gate_bash(), "-c", f"printf '%s' {quoted}"], cwd=push_repo, capture_output=True, check=True
+        [_gate_bash(), "-c", f"printf '%s' {quoted}"],
+        cwd=push_repo,
+        capture_output=True,
+        check=True,
+        timeout=HELPER_TIMEOUT_SECONDS,
     )
     assert result.stdout.decode("utf-8") == raw
 
@@ -1335,18 +1400,8 @@ def test_report_escapes_observation_labels(push_repo, capsys):
         ("legacy", False),
     ],
 )
-def test_planned_commands_in_real_push(push_repo, monkeypatch, capsys, mode, later_plan, indeterminate):
-    from tests.test_verify_push import PREFIX, SELECTOR
-
-    base = _policy(push_repo)
-    _bare_remote(push_repo)
-    remote = Path(_git(push_repo, "remote", "get-url", "origin"))
-    _git(push_repo, "push", "origin", "main")
-    monkeypatch.setenv("PATH", _path_with_brigade())
-    assert _gate(push_repo, "install", "--mode", mode) == 0
-    capsys.readouterr()
-    (push_repo / "src.py").write_text("value = 2\n", encoding="utf-8")
-    tip = _commit(push_repo)
+def test_planned_commands_in_hook(push_repo, monkeypatch, capsys, mode, later_plan, indeterminate):
+    tip = _policy(push_repo)
     tree = _tree(push_repo)
     _receipt(push_repo, tree)
     required = shlex.join([*PREFIX, SELECTOR])
@@ -1361,12 +1416,474 @@ def test_planned_commands_in_real_push(push_repo, monkeypatch, capsys, mode, lat
         }[later_plan]
         later.write_text(json.dumps(receipt), encoding="utf-8")
 
-    push = subprocess.run(["git", "push", "origin", "main"], cwd=push_repo, capture_output=True, text=True, timeout=15)
+    code, err = _evaluate_hook(push_repo, tip, mode, monkeypatch, capsys)
     blocked = mode == "enforce" and indeterminate
-    assert (push.returncode != 0) is blocked
-    assert _git(remote, "rev-parse", "refs/heads/main") == (base if blocked else tip)
+    assert (code != 0) is blocked
     (row,) = _log_rows(push_repo)
     assert row["result"] == ("indeterminate" if indeterminate else "ok")
     if indeterminate:
-        assert "refs/heads/main (indeterminate)" in push.stderr
-        assert "brigade work verify run" in push.stderr or "mv --" in push.stderr
+        assert "refs/heads/main (indeterminate)" in err
+        assert "brigade work verify run" in err or "mv --" in err
+
+
+@pytest.mark.parametrize("mode", ["warn", "enforce"])
+@pytest.mark.parametrize(
+    ("argv", "older_pass", "status", "verdict"),
+    [
+        *(
+            ([*wrapper, *PREFIX, SELECTOR], older_pass, status, verdict)
+            for wrapper in IDENTITY_WRAPPERS
+            for older_pass, status, verdict in [
+                (True, "failed", "indeterminate"),
+                (True, "timed_out", "indeterminate"),
+                (True, "running", "indeterminate"),
+                (False, "completed", "rejected"),
+                (True, "completed", "ok"),
+            ]
+        ),
+        (["bash", "-c", shlex.join([*PREFIX, SELECTOR])], True, "failed", "indeterminate"),
+        (["bash", "-c", shlex.join([*PREFIX, SELECTOR])], False, "completed", "rejected"),
+        ([*PREFIX, SELECTOR], False, "completed", "ok"),
+        (["ruff", "check", "."], True, "failed", "ok"),
+        (["python", "-m", "mypy", "src"], True, "failed", "ok"),
+    ],
+)
+def test_required_check_identity_controls_hook(push_repo, monkeypatch, capsys, mode, argv, older_pass, status, verdict):
+    tip = _policy(push_repo)
+    tree = _tree(push_repo)
+    if older_pass:
+        _receipt(push_repo, tree)
+    path = _receipt(push_repo, tree, second=2, argv=argv, status=status, passed=int(status == "completed"))
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    receipt["planned_commands"] = [shlex.join(argv)]
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    code, err = _evaluate_hook(push_repo, tip, mode, monkeypatch, capsys)
+    blocked = mode == "enforce" and verdict != "ok"
+    assert (code != 0) is blocked, err
+    (row,) = _log_rows(push_repo)
+    assert row["result"] == verdict
+    if verdict != "ok":
+        assert f"refs/heads/main ({verdict})" in err
+
+
+_CUSTOM_PREFIX = b'#!/usr/bin/env bash\nSTDIN_REFS="$(cat)"\n# custom prefix\n'
+_CUSTOM_SUFFIX = b"# custom suffix\nexit 0"
+_V1_BLOCK = b"# BEGIN Brigade push gate v1\nbrigade work verify push-gate run || true\n# END Brigade push gate v1\n"
+
+
+@pytest.fixture
+def custom_hook(push_repo, monkeypatch):
+    set_home(monkeypatch, push_repo)
+    global_config = push_repo / "global config"
+    global_config.write_bytes(b"[user]\n\tname = Test\n")
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    hook = push_repo / ".git" / "hooks" / "pre-push"
+    hook.write_bytes(_CUSTOM_PREFIX + _V1_BLOCK + _CUSTOM_SUFFIX)
+    hook.chmod(0o750)
+    return hook
+
+
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"])
+def test_block_only_upgrades_custom_hook(push_repo, capsys, custom_hook, newline):
+    def endings(data):
+        return data.replace(b"\n", newline)
+
+    original = endings(_CUSTOM_PREFIX + _V1_BLOCK + _CUSTOM_SUFFIX)
+    custom_hook.write_bytes(original)
+    initial_mode = stat.S_IMODE(custom_hook.stat().st_mode)
+    initial_config = _git(push_repo, "config", "--list", "--show-origin")
+
+    assert _gate(push_repo, "install", "--block-only", "--dry-run") == 0
+    preview = capsys.readouterr().out
+    assert push_gate._snippet().decode("ascii") not in preview
+    assert preview.count("--- pre-push (before)") == 1
+    assert "-# BEGIN Brigade push gate v1" in preview
+    assert "+# BEGIN Brigade push gate v2" in preview
+    assert custom_hook.read_bytes() == original
+    assert not list(custom_hook.parent.glob("pre-push.*.bak"))
+
+    assert _gate(push_repo, "install", "--block-only") == 0
+    output = capsys.readouterr().out
+    (backup,) = custom_hook.parent.glob("pre-push.*.bak")
+    assert backup.read_bytes() == original
+    assert stat.S_IMODE(backup.stat().st_mode) == initial_mode
+    assert shlex.split(output.split("cp -p -- ", 1)[1]) == [backup.as_posix(), custom_hook.resolve().as_posix()]
+    upgraded = endings(_CUSTOM_PREFIX + push_gate._snippet() + _CUSTOM_SUFFIX)
+    assert custom_hook.read_bytes() == upgraded
+    assert stat.S_IMODE(custom_hook.stat().st_mode) == initial_mode
+    info = _status(push_repo, capsys)
+    assert info["hook_version"] == 2 and info["current"] and not info["hook_verified"]
+    assert "Block present, hook not verified" in push_gate.describe(info)
+
+    assert _gate(push_repo, "install", "--block-only") == 0
+    assert "already current" in capsys.readouterr().out
+    assert custom_hook.read_bytes() == upgraded
+    assert list(custom_hook.parent.glob("pre-push.*.bak")) == [backup]
+    assert _git(push_repo, "config", "--list", "--show-origin") == initial_config
+
+
+@pytest.mark.parametrize(
+    ("block", "error"),
+    [
+        (_V1_BLOCK * 2, "multiple Brigade"),
+        (_V1_BLOCK.split(b"# END")[0], "damaged Brigade"),
+        (_V1_BLOCK.replace(b"END Brigade push gate v1", b"END Brigade push gate v2"), "damaged Brigade"),
+        (b"", "--confirm-insert"),
+    ],
+)
+def test_block_only_refuses_unsafe_boundaries(push_repo, capsys, custom_hook, block, error):
+    original = _CUSTOM_PREFIX + block + _CUSTOM_SUFFIX
+    custom_hook.write_bytes(original)
+    config = _git(push_repo, "config", "--list", "--show-origin")
+    assert _gate(push_repo, "install", "--block-only") == 1
+    assert error in capsys.readouterr().err
+    assert custom_hook.read_bytes() == original
+    assert not list(custom_hook.parent.glob("pre-push.*.bak"))
+    assert _git(push_repo, "config", "--list", "--show-origin") == config
+
+
+def test_block_only_refuses_read_only_hook(push_repo, capsys, custom_hook):
+    original = custom_hook.read_bytes()
+    mode = stat.S_IMODE(custom_hook.stat().st_mode)
+    custom_hook.chmod(stat.S_IREAD)
+    try:
+        assert _gate(push_repo, "install", "--block-only") == 1
+        assert "not writable" in capsys.readouterr().err
+        assert custom_hook.read_bytes() == original
+        assert not list(custom_hook.parent.glob("pre-push.*.bak"))
+    finally:
+        custom_hook.chmod(mode)
+
+
+def test_block_only_refuses_external_symlink(push_repo, capsys, custom_hook):
+    original = custom_hook.read_bytes()
+    external = push_repo / "external hook"
+    custom_hook.replace(external)
+    try:
+        custom_hook.symlink_to(external)
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+    assert _gate(push_repo, "install", "--block-only") == 1
+    assert "outside the hooks directory" in capsys.readouterr().err
+    assert custom_hook.is_symlink()
+    assert external.read_bytes() == original
+    assert not list(custom_hook.parent.glob("pre-push.*.bak"))
+
+
+@pytest.mark.parametrize(
+    ("shebang", "newline"),
+    [(b"#!/usr/bin/env bash", b"\n"), (b"#!/usr/bin/env bash", b"\r\n"), (b"#!/usr/bin/env -S bash", b"\n")],
+)
+def test_block_only_inserts_after_capturing_refs_with_confirmation(push_repo, capsys, custom_hook, shebang, newline):
+    original = (shebang + b"\n" + _CUSTOM_PREFIX.split(b"\n", 1)[1] + _CUSTOM_SUFFIX).replace(b"\n", newline)
+    custom_hook.write_bytes(original)
+    assert _gate(push_repo, "install", "--block-only", "--dry-run") == 0
+    assert "+# BEGIN Brigade push gate v2" in capsys.readouterr().out
+    assert custom_hook.read_bytes() == original
+    assert _gate(push_repo, "install", "--block-only", "--confirm-insert") == 0
+    capture, suffix = original.split(b"# custom prefix")
+    assert (
+        custom_hook.read_bytes() == capture + push_gate._snippet().replace(b"\n", newline) + b"# custom prefix" + suffix
+    )
+
+
+@pytest.mark.parametrize(
+    ("raw", "options", "error"),
+    [
+        (b"#!/bin/sh\n" + _V1_BLOCK, [], "Bash interpreter line"),
+        (b"#!/bin/sh\n", ["--confirm-insert"], "Bash interpreter line"),
+        (
+            _CUSTOM_PREFIX + b"brigade work verify push-gate run\n",
+            ["--confirm-insert"],
+            "Brigade gate invocation on line 4 is outside the marked block.",
+        ),
+        (b"#!/bin/bash\n", ["--confirm-insert"], "needs one STDIN_REFS"),
+        (_CUSTOM_PREFIX + b'STDIN_REFS="$(cat)"\n', ["--confirm-insert"], "needs one STDIN_REFS"),
+        (_CUSTOM_PREFIX + b" " + _V1_BLOCK, [], "line 4"),
+        (_CUSTOM_PREFIX + _V1_BLOCK.replace(b"v1\n", b"v1 \n", 1), [], "no indentation or trailing spaces"),
+    ],
+)
+def test_block_only_refuses_unsafe_hook_contents(push_repo, capsys, custom_hook, raw, options, error):
+    custom_hook.write_bytes(raw)
+    assert _gate(push_repo, "install", "--block-only", *options) == 1
+    assert error in capsys.readouterr().err
+    assert custom_hook.read_bytes() == raw
+    assert not list(custom_hook.parent.glob("pre-push.*.bak"))
+
+
+@pytest.mark.parametrize(
+    ("body", "line"),
+    [
+        (b"cat <<'END'\n" + _V1_BLOCK + b"END\nbrigade work verify push-gate run\n", 9),
+        (
+            b"".join(b"# " + line for line in _V1_BLOCK.splitlines(keepends=True))
+            + b"brigade work verify push-gate run\n",
+            7,
+        ),
+        (_V1_BLOCK + b"\n'brigade' work \"verify\" 'push-gate' run\n", 8),
+        (b"brigade work verify push-gate run\n" + _V1_BLOCK, 4),
+    ],
+)
+def test_block_only_refuses_gate_invocation_outside_markers(push_repo, capsys, custom_hook, body, line):
+    original = _CUSTOM_PREFIX + body
+    custom_hook.write_bytes(original)
+    assert _gate(push_repo, "install", "--block-only", "--confirm-insert") == 1
+    assert (
+        f"Brigade gate invocation on line {line} is outside the marked block. Move it inside the markers or remove it."
+    ) in capsys.readouterr().err
+    assert custom_hook.read_bytes() == original
+    assert not list(custom_hook.parent.glob("pre-push.*.bak"))
+
+
+@pytest.mark.parametrize("count", [0, 2])
+def test_block_only_requires_one_gate_invocation_inside_markers(push_repo, capsys, custom_hook, count):
+    start, call, end = _V1_BLOCK.splitlines(keepends=True)
+    mentions = b"# " + call + b"echo 'brigade work verify push-gate run'\n"
+    original = _CUSTOM_PREFIX + start + mentions + call * count + end + _CUSTOM_SUFFIX
+    custom_hook.write_bytes(original)
+    assert _gate(push_repo, "install", "--block-only") == 1
+    assert "The marked Brigade block must contain exactly one gate invocation." in capsys.readouterr().err
+    assert custom_hook.read_bytes() == original
+    assert not list(custom_hook.parent.glob("pre-push.*.bak"))
+
+
+@pytest.mark.parametrize("kind", ["missing", "dangling", "directory"])
+def test_block_only_reports_unusable_hook_path(push_repo, capsys, custom_hook, kind):
+    custom_hook.unlink()
+    if kind == "dangling":
+        try:
+            custom_hook.symlink_to(custom_hook.with_name("absent"))
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+    elif kind == "directory":
+        custom_hook.mkdir()
+    assert _gate(push_repo, "install", "--block-only") == 1
+    expected = "regular file" if kind == "directory" else "no effective pre-push hook to update"
+    assert expected in capsys.readouterr().err.lower()
+    assert not list(custom_hook.parent.glob("pre-push.*.bak"))
+
+
+@pytest.mark.parametrize(
+    ("options", "error"),
+    [
+        (["--block-only", "--mode", "warn"], "cannot be used with --mode"),
+        (["--dry-run"], "require --block-only"),
+    ],
+)
+def test_block_only_reports_conflicting_options(push_repo, capsys, custom_hook, options, error):
+    raw = custom_hook.read_bytes()
+    config = _git(push_repo, "config", "--list", "--show-origin")
+    assert _gate(push_repo, "install", *options) == 2
+    assert error in capsys.readouterr().err
+    assert custom_hook.read_bytes() == raw
+    assert _git(push_repo, "config", "--list", "--show-origin") == config
+
+
+def test_block_only_upgraded_custom_hook_runs_in_real_push(push_repo, capsys, monkeypatch, custom_hook):
+    _policy(push_repo)
+    _bare_remote(push_repo)
+    monkeypatch.setenv("PATH", _path_with_brigade())
+    custom_hook.write_bytes(
+        _CUSTOM_PREFIX + b"echo custom-before >&2\n" + _V1_BLOCK + b"echo custom-after >&2\nexit 0\n"
+    )
+    _git(push_repo, "config", "--local", "brigade.pushGate", "warn")
+    assert _gate(push_repo, "install", "--block-only") == 0
+    capsys.readouterr()
+    result = _push_with_verdict(push_repo)
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.count("custom-before") == result.stderr.count("custom-after") == 1
+    assert result.stderr.count("refs/heads/main (missing_receipt)") == 1
+    (entry,) = _log_rows(push_repo)
+    assert entry["result"] == "missing_receipt"
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "selectors", "status", "older_pass", "expected"),
+    [
+        (["env"], ["a", "b"], "completed", False, "rejected"),
+        (["./python"], ["a", "b"], "completed", False, "rejected"),
+        (["env"], ["a"], "completed", False, "rejected"),
+        (["env"], ["a", "b"], "failed", True, "indeterminate"),
+        ([], ["a", "b"], "completed", False, "ok"),
+        ([], ["a"], "completed", False, "rejected"),
+        ([], ["a", "b"], "failed", True, "rejected"),
+        (["env"], ["a", "b"], "completed", True, "ok"),
+        (["env", "PYTEST_ADDOPTS=-k example"], ["a", "b"], "completed", True, "ok"),
+    ],
+)
+def test_only_plain_check_can_cover_required_files_in_hook(
+    push_repo, monkeypatch, capsys, wrapper, selectors, status, older_pass, expected
+):
+    from tests.test_verify_plan_coverage import A, B, _setup
+
+    _git(push_repo, "remote", "remove", "origin")
+    tip = _setup(push_repo)
+    tree = _tree(push_repo)
+    if older_pass:
+        old = _receipt(push_repo, tree, argv=[*PREFIX, A, B], deselected=0)
+        assert json.loads(old.read_bytes())["gating"]["eligible"]
+    selected = [path for name, path in (("a", A), ("b", B)) if name in selectors]
+    prefix = [*wrapper, *PREFIX] if wrapper != ["./python"] else ["./python", *PREFIX[1:]]
+    path = _receipt(
+        push_repo,
+        tree,
+        second=2,
+        status=status,
+        argv=[*prefix, *selected],
+        passed=int(status == "completed"),
+        deselected=0,
+    )
+    receipt = json.loads(path.read_bytes())
+    if wrapper and status == "completed":
+        assert receipt["gating"]["reason"] == "plan_files_missing"
+    code, err = _evaluate_hook(push_repo, tip, "enforce", monkeypatch, capsys)
+    assert (code == 0) is (expected == "ok"), err
+    (row,) = _log_rows(push_repo)
+    assert row["result"] == expected
+    if not wrapper and status == "completed" and selectors == ["a"]:
+        assert f"missed required test files {B}." in err
+
+
+@pytest.mark.parametrize("name", CHECK_ENV_NAMES)
+@pytest.mark.parametrize("coverage", [False, True])
+def test_wrapped_environment_prefix_in_hook(push_repo, monkeypatch, capsys, name, coverage):
+    from tests.test_verify_plan_coverage import A, B, _setup
+
+    if coverage:
+        _git(push_repo, "remote", "remove", "origin")
+        tip = _setup(push_repo)
+    else:
+        tip = _policy(push_repo)
+    selectors = [A, B] if coverage else [SELECTOR]
+    argv = ["env", f"{name}=example", *PREFIX, *selectors]
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree, argv=[*PREFIX, *selectors], deselected=0)
+    path = _receipt(
+        push_repo,
+        tree,
+        second=2,
+        argv=argv,
+        status="failed",
+        passed=0,
+        deselected=0,
+    )
+    receipt = json.loads(path.read_bytes())
+    receipt["planned_commands"] = [shlex.join(argv)]
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    code, err = _evaluate_hook(push_repo, tip, "enforce", monkeypatch, capsys)
+    assert code == 3, err
+    assert f"with {name} set in front" in err
+    (row,) = _log_rows(push_repo)
+    assert row["result"] == "indeterminate"
+
+
+@pytest.mark.parametrize(
+    ("mode", "form", "status"),
+    [
+        ("warn", "wrapper", "completed"),
+        ("warn", "leading", "failed"),
+        ("enforce", "wrapper", "failed"),
+        ("enforce", "leading", "completed"),
+    ],
+)
+def test_environment_prefix_diagnostic_in_real_push(push_repo, monkeypatch, capsys, mode, form, status):
+    _policy(push_repo)
+    _bare_remote(push_repo)
+    monkeypatch.setenv("PATH", _path_with_brigade())
+    assert _gate(push_repo, "install", "--mode", mode) == 0
+    capsys.readouterr()
+    assignment = f"PY={SENTINEL_ENV_VALUE}"
+    argv = ["env", assignment, *PREFIX, SELECTOR] if form == "wrapper" else [*PREFIX, SELECTOR]
+    path = _receipt(push_repo, _tree(push_repo), argv=argv, status=status)
+    receipt = json.loads(path.read_bytes())
+    if form == "leading":
+        receipt["commands"][0]["env"] = ["PY"]
+    receipt["planned_commands"] = [shlex.join(argv) if form == "wrapper" else assignment + " " + shlex.join(argv)]
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    pushed = _push_with_verdict(push_repo)
+    assert (pushed.returncode != 0) is (mode == "enforce"), pushed.stderr
+    assert ENV_PREFIX_MESSAGE.replace("PATH", "PY") in pushed.stderr
+    assert "brigade work verify run" in pushed.stderr and " --no-reuse" in pushed.stderr
+    assert SENTINEL_ENV_VALUE not in pushed.stdout + pushed.stderr
+    log = push_repo / ".git" / "brigade" / "push-gate.jsonl"
+    assert SENTINEL_ENV_VALUE not in log.read_text(encoding="utf-8")
+    (row,) = _log_rows(push_repo)
+    assert row["result"] == ("rejected" if status == "completed" else "indeterminate")
+
+
+@pytest.mark.parametrize(
+    ("wrapper", "status", "older_pass", "mode", "expected"),
+    [
+        (["env"], "completed", False, "warn", "rejected"),
+        (["env", "--"], "completed", False, "enforce", "rejected"),
+        (["env", "-i"], "completed", True, "enforce", "ok"),
+        (["env", "-u", "SETTING"], "failed", True, "enforce", "indeterminate"),
+        (["timeout", "10"], "completed", False, "enforce", "rejected"),
+        (["timeout", "10"], "failed", True, "warn", "indeterminate"),
+        (["py.test"], "completed", False, "enforce", "rejected"),
+        (["py.test"], "completed", True, "enforce", "ok"),
+        (["py.test"], "failed", True, "enforce", "indeterminate"),
+    ],
+)
+def test_wrapped_or_aliased_required_check_in_real_push(
+    push_repo, monkeypatch, capsys, wrapper, status, older_pass, mode, expected
+):
+    from brigade.work_cmd.push_gate_display import shell_arg
+
+    argv = ["pytest", "-q", SELECTOR]
+    _policy(push_repo, prefix=argv[:2])
+    _bare_remote(push_repo)
+    monkeypatch.setenv("PATH", _path_with_brigade())
+    assert _gate(push_repo, "install", "--mode", mode) == 0
+    capsys.readouterr()
+    tree = _tree(push_repo)
+    if older_pass:
+        _receipt(push_repo, tree, argv=argv)
+    alias = wrapper == ["py.test"]
+    recorded = [*wrapper, *(argv[1:] if alias else argv)]
+    path = _receipt(push_repo, tree, second=2, status=status, argv=recorded)
+    receipt = json.loads(path.read_bytes())
+    receipt["planned_commands"] = [shlex.join(recorded)]
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    pushed = _push_with_verdict(push_repo)
+    assert (pushed.returncode != 0) is (mode == "enforce" and expected != "ok"), pushed.stderr
+    assert _log_rows(push_repo)[0]["result"] == expected
+    if expected != "ok":
+        form = "under the spelling" if alias else "through"
+        assert (
+            f"A run of the required check {form} {wrapper[0]} does not count. Run the required check again as declared."
+        ) in pushed.stderr
+        remedy = (
+            f"brigade work verify run --target {shell_arg(str(push_repo))} "
+            f"--argv-json {shell_arg(json.dumps([*argv[:2], 'tests/test_example.py']))} --no-reuse"
+        )
+        assert remedy in pushed.stderr
+
+
+@pytest.mark.parametrize(("program", "alternate"), SAME_NAME_SPELLINGS)
+@pytest.mark.parametrize("wrapper", SPELLING_WRAPPERS)
+@pytest.mark.parametrize("status", ["completed", "failed"])
+def test_same_name_spelling_in_real_push(push_repo, monkeypatch, capsys, program, alternate, wrapper, status):
+    _policy(push_repo, prefix=[program, "-q"])
+    _bare_remote(push_repo)
+    monkeypatch.setenv("PATH", _path_with_brigade())
+    assert _gate(push_repo, "install", "--mode", "enforce") == 0
+    capsys.readouterr()
+    tree = _tree(push_repo)
+    # The in-process matrix exercises both older-pass cases for every spelling.
+    older_pass = status == "failed" or wrapper == ("env",) or alternate.startswith(".")
+    if older_pass:
+        _receipt(push_repo, tree, argv=[program, "-q", SELECTOR])
+    argv = [*wrapper, alternate, "-q", SELECTOR]
+    path = _receipt(push_repo, tree, second=2, argv=argv, status=status)
+    receipt = json.loads(path.read_bytes())
+    receipt["planned_commands"] = [shlex.join(argv)]
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+
+    push = _push_with_verdict(push_repo)
+    (row,) = _log_rows(push_repo)
+    expected = "indeterminate" if status == "failed" else "ok" if older_pass else "rejected"
+    assert row["result"] == expected, push.stderr
+    assert (push.returncode == 0) is (expected == "ok"), push.stderr

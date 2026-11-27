@@ -282,16 +282,39 @@ _POLICY_MAX_EMBEDDED_DEPTH = 4
 _POLICY_MAX_ARGUMENT_LENGTH = 4096
 
 # Use the standard Windows PATHEXT suffixes for consistent policy matching on every host.
-_POLICY_EXECUTABLE_SUFFIXES = {".com", ".exe", ".bat", ".cmd", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".msc"}
+_WINDOWS_EXECUTABLE_SUFFIXES = {".exe", ".bat", ".cmd"}
+_POLICY_EXECUTABLE_SUFFIXES = _WINDOWS_EXECUTABLE_SUFFIXES | {
+    ".com",
+    ".vbs",
+    ".vbe",
+    ".js",
+    ".jse",
+    ".wsf",
+    ".wsh",
+    ".msc",
+}
 
 
-def normalize_policy_executable(argv0: str) -> str:
-    basename = PurePosixPath(argv0.replace("\\", "/")).name
-    _, basename = ntpath.splitdrive(basename)
-    # Reduce platform-equivalent spellings of a name to one policy name.
-    name = basename.partition(":")[0].rstrip(". ").casefold()
-    stem, dot, suffix = name.rpartition(".")
-    return stem if dot + suffix in _POLICY_EXECUTABLE_SUFFIXES else name
+def normalize_policy_executable(argv0: str, *, windows: bool | None = None, keep_extension: bool = False) -> str:
+    """Normalize a policy name, retaining its directory when a platform is specified."""
+    spelling = argv0.replace("\\", "/")
+    directory, separator, basename = spelling.rpartition("/")
+    if windows is None:
+        directory = separator = ""
+        _, basename = ntpath.splitdrive(PurePosixPath(spelling).name)
+        basename = basename.partition(":")[0].rstrip(". ").casefold()
+        suffixes = _POLICY_EXECUTABLE_SUFFIXES
+    elif windows:
+        directory = directory.casefold()
+        basename = basename.casefold()
+        suffixes = set() if keep_extension else _WINDOWS_EXECUTABLE_SUFFIXES
+    else:
+        suffixes = set()
+
+    stem, dot, suffix = basename.rpartition(".")
+    if dot + suffix in suffixes:
+        basename = stem
+    return (directory + separator + basename).removeprefix("./")
 
 
 def _policy_launcher_values(argument: str) -> Iterator[str]:
