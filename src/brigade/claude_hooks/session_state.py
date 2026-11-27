@@ -19,6 +19,7 @@ _TIMEOUT_JOURNAL_MAX_BYTES = 4096
 _PENDING_MAX_BYTES = 65536
 _ANNOUNCE_TOKEN = b"announced"
 _DETAIL_TOKEN = b"detail"
+_STOP_BLOCK_TOKEN = b"stop-block"
 _ANNOUNCE_CLAIMED_KEY = "hook_announce_claimed"
 _FOLLOWUP_ABANDON_PENDING_LOG = "timeout follow-up abandoned; pending increment will fold later"
 _HOOK_EVENTS = frozenset(
@@ -132,6 +133,8 @@ def _parse_timeout_journal(data: bytes) -> tuple[int, bool, str | None]:
             continue
         if parts[0] == _DETAIL_TOKEN:
             continue
+        if parts[0] == _STOP_BLOCK_TOKEN:
+            continue
         count += 1
         if len(parts) >= 2 and parts[1] == _ANNOUNCE_TOKEN:
             announced = True
@@ -215,6 +218,22 @@ def _claim_timeout_announce(target: Path, session_id: str) -> bool:
         return False
     _count, _announced, first_claim = _read_timeout_journal(target, session_id)
     return first_claim == claim_id
+
+
+def claim_latched_stop(target: Path, session_id: str, task_epoch: object) -> bool:
+    """Elect one latched Stop blocker per task epoch in the append-only journal."""
+    epoch = task_epoch if isinstance(task_epoch, str) and task_epoch else "legacy"
+    token = localio.stable_hash(epoch)[:16]
+    data = _read_sidecar_bytes(_journal_path(target, session_id), _TIMEOUT_JOURNAL_MAX_BYTES)
+    prefix = f"stop-block {token} ".encode("ascii")
+    if any(line.startswith(prefix) for line in data.splitlines()):
+        return False
+    claim_id = f"{os.getpid()}-{threading.get_ident()}-{time.monotonic_ns()}"
+    if not _append_journal_line(target, session_id, prefix + claim_id.encode("ascii") + b"\n"):
+        return False
+    data = _read_sidecar_bytes(_journal_path(target, session_id), _TIMEOUT_JOURNAL_MAX_BYTES)
+    claims = [line for line in data.splitlines() if line.startswith(prefix)]
+    return bool(claims) and claims[0] == prefix + claim_id.encode("ascii")
 
 
 def _timeout_state_count(state: dict[str, Any]) -> int:
@@ -306,6 +325,25 @@ def read_last_timeout_step(target: Path, state_name: str) -> str | None:
     if not isinstance(event, str) or not isinstance(step, str):
         return None
     return f"{event}/{step}"
+
+
+def read_latch_summary(target: Path, state_name: str) -> tuple[bool, bool, str | None]:
+    """Read one candidate state once and summarize its latch diagnostics."""
+    state = anchored_io.read_json(target, state_name) or {}
+    path = _rt()._sessions_root(anchored_io.requested_target(target)) / state_name
+    journal = _read_sidecar_bytes(_timeouts_path(path), _TIMEOUT_JOURNAL_MAX_BYTES)
+    pending = _read_sidecar_bytes(_pending_path(path), _PENDING_MAX_BYTES)
+    latched = _is_latched(
+        state, _parse_timeout_journal(journal)[0], sum(bool(line.strip()) for line in pending.splitlines())
+    )
+    ended = isinstance(state.get("ended_unverified_after_latch"), str)
+    history = state.get("hook_timeout_history")
+    step = None
+    if isinstance(history, list) and history and isinstance(history[-1], dict):
+        event, name = history[-1].get("event"), history[-1].get("step")
+        if isinstance(event, str) and isinstance(name, str):
+            step = f"{event}/{name}"
+    return latched, ended, step
 
 
 def _read_hook_latch(target: Path, session_id: str) -> tuple[bool, bool]:
@@ -603,7 +641,12 @@ def _apply_timeout_followup_inprocess(
 
 
 def _bounded_timeout_followup(
-    event: str, log_target: Path, session_id: str, exc: BaseException, *, step: str = "unknown"
+    event: str,
+    log_target: Path,
+    session_id: str,
+    exc: BaseException,
+    *,
+    step: str | Callable[[], str] = "unknown",
 ) -> str:
     """Record timeout latch/state without blocking past a short budget.
 
@@ -633,8 +676,9 @@ def _bounded_timeout_followup(
 
     def followup() -> str:
         try:
+            resolved_step = step() if callable(step) else step
             return _rt()._apply_timeout_followup_inprocess(
-                event, log_target, session_id, detail, step=step, publish=publish
+                event, log_target, session_id, detail, step=resolved_step, publish=publish
             )
         except anchored_io.SessionIntegrityError:
             publish("integrity_refused")

@@ -1876,6 +1876,10 @@ def _normalize_state(
         normalized["hook_timeout_count"] = timeout_count
     normalized["hook_latched"] = payload.get("hook_latched") is True
     normalized["hook_latch_announced"] = payload.get("hook_latch_announced") is True
+    for key in ("latched_stop_blocked_at", "ended_unverified_after_latch"):
+        stamp = localio.parse_iso_datetime(payload.get(key))
+        if stamp is not None and stamp <= now:
+            normalized[key] = stamp.isoformat()
     session_repos = payload.get("session_repos")
     if isinstance(session_repos, list) and all(isinstance(item, str) for item in session_repos):
         normalized["session_repos"] = list(session_repos)
@@ -2752,6 +2756,8 @@ def _hook_run_body_unchecked(
             }
         )
     if latched and log_target is not None:
+        if event == "SessionStart" and payload.get("source") in _TASK_BOUNDARY_SOURCES:
+            return latched_stop.handle_task_boundary(log_target, session_id, payload)
         if event == "Stop":
             hook_steps.mark(log_target, session_id, event, "stop-receipt-gate")
             result = latched_stop.handle(log_target, session_id, payload)
@@ -3183,7 +3189,7 @@ def _append_error_diagnostic(event: str, log_target: Path | None, exc: BaseExcep
 def _bounded_timeout_followup(event: str, log_target: Path, session_id: str, exc: BaseException) -> str:
     """Compatibility wrapper: timeout follow-up lives in session_state."""
     return _bounded_timeout_followup_impl(
-        event, log_target, session_id, exc, step=hook_steps.read(log_target, session_id, event)
+        event, log_target, session_id, exc, step=lambda: hook_steps.read(log_target, session_id, event)
     )
 
 

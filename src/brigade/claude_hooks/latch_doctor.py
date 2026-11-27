@@ -41,10 +41,12 @@ def check(target: Path) -> tuple[str, str, str] | None:
         threshold = (datetime.now(UTC) - timedelta(days=1)).timestamp()
         candidates, scan_cut_short = _recent_candidates(target, threshold)
         recent = candidates[:_RECENT_LIMIT]
-        count = sum(session_state.read_latch_for_state_file(target, name) for name in recent)
-        ended_unverified = sum(session_state.read_ended_unverified(target, name) for name in recent)
-        steps = [session_state.read_last_timeout_step(target, name) for name in recent]
-        last_step = next((step for step in steps if step is not None), "unknown/unknown")
+        summaries = [session_state.read_latch_summary(target, name) for name in recent]
+        count = sum(latched for latched, _ended, _step in summaries)
+        ended_unverified = sum(ended for _latched, ended, _step in summaries)
+        last_step = next(
+            (step for latched, _ended, step in summaries if latched and step is not None), "unknown/unknown"
+        )
     except FileNotFoundError:
         return None
     except Exception:

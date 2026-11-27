@@ -20,7 +20,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from brigade.claude_hooks import envelope, hook_steps, latch_doctor, runtime
+from brigade.claude_hooks import envelope, hook_steps, latch_doctor, runtime, session_state
 from brigade.work_cmd import inbox_lock
 from tests import thread_sync
 from tests.test_claude_hooks_user_target import PACKAGE_REF, _payload, _wired_claude
@@ -1235,3 +1235,49 @@ def test_concurrent_hook_run_bodies_one_latched_one_silent(tmp_path: Path) -> No
         thread.join()
 
     _assert_one_latched_one_silent(kinds, target, "s")
+
+
+def test_overlapping_latched_stops_claim_one_block(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target, "overlap-stop")
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(runtime, "_shared_tree_block_is_foreign", lambda *_args, **_kwargs: False)
+    barrier = threading.Barrier(2)
+    original = session_state.claim_latched_stop
+
+    def claim(*args, **kwargs):
+        barrier.wait()
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(session_state, "claim_latched_stop", claim)
+    results: list[dict | None] = []
+    threads = [
+        threading.Thread(
+            target=lambda: results.append(runtime._hook_run_body("Stop", payload, pin_target=target)["result"])
+        )
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sum(result is not None and result.get("decision") == "block" for result in results) == 1
+
+
+def test_step_marker_malformed_and_oversized_are_unknown(tmp_path: Path) -> None:
+    target = _wired_claude(tmp_path)
+    hook_steps.mark(target, "bad-step", "Stop", "state-read")
+    marker = runtime._state_path(target, "bad-step").with_suffix(".json.step")
+    marker.write_bytes(b"{" + b"x" * 256)
+    assert hook_steps.read(target, "bad-step", "Stop") == "unknown"
+    marker.write_bytes(b"not json")
+    assert hook_steps.read(target, "bad-step", "Stop") == "unknown"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory mode")
+def test_step_marker_creates_private_sessions_directory(tmp_path: Path) -> None:
+    target = tmp_path / "repo"
+    target.mkdir()
+    hook_steps.mark(target, "fresh-step", "Stop", "state-read")
+    mode = runtime._sessions_root(target).stat().st_mode & 0o777
+    assert mode == 0o700
