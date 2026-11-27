@@ -1,1 +1,1 @@
-- Acknowledge observed terminal T3 tasks and finalize qualification runs when `abort-t3` records a failure, but keep a run open with cancel guidance while any task is still live or held.
+- Acknowledge observed terminal T3 tasks and finalize a qualification run after `abort-t3` records a failure only when every task is terminal, acknowledged and unheld; otherwise keep the run open and print the exact `status`, `cancel` or `hold-resolve` command to run next.
