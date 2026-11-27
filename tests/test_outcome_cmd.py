@@ -295,7 +295,8 @@ def test_capture_records_a_passing_verify_run_as_helped(tmp_path, capsys):
     assert len(records) == 1 and records[0].evidence_ref.endswith("receipt.json")
 
 
-def test_capture_copies_compact_code_graph_delta_from_verify_receipt(tmp_path, capsys):
+@pytest.mark.parametrize("digest_skip", [False, True])
+def test_capture_copies_compact_code_graph_delta_from_verify_receipt(tmp_path, capsys, digest_skip):
     delta = {
         "status": "ok",
         "summary": "changed_symbols=3 edge_churn=2",
@@ -305,6 +306,15 @@ def test_capture_copies_compact_code_graph_delta_from_verify_receipt(tmp_path, c
         "sidecar_path": "/tmp/not-copied.json",
         "internal_debug": {"ignored": True},
     }
+    if digest_skip:
+        delta.update(
+            delta_source="digest_equal",
+            summary="changed_symbols=0 edge_churn=0",
+            changed_symbol_count=0,
+            edge_churn=0,
+            raw_counts={"added_edges": 0, "removed_edges": 0},
+            digest_probe={"before": {"status": "ok"}, "after": {"status": "ok"}},
+        )
     _write_verify_receipt(tmp_path, run_id="with-delta", code_graph_delta=delta)
 
     assert (
@@ -326,6 +336,15 @@ def test_capture_copies_compact_code_graph_delta_from_verify_receipt(tmp_path, c
         "edge_churn": 2,
         "raw_counts": {"edges_added": 5, "edges_removed": 3},
     }
+    if digest_skip:
+        compact = {
+            "status": "ok",
+            "delta_source": "digest_equal",
+            "summary": "changed_symbols=0 edge_churn=0",
+            "changed_symbol_count": 0,
+            "edge_churn": 0,
+            "raw_counts": {"added_edges": 0, "removed_edges": 0},
+        }
     assert payload["record"]["code_graph_delta"] == compact
 
     row = json.loads((tmp_path / "memory" / "outcome" / "records.jsonl").read_text())
