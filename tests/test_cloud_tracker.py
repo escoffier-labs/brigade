@@ -12,7 +12,6 @@ from typing import Any
 import pytest
 
 from brigade import cli, cloud_tracker, codex_cloud, cursor_cloud, fleet_client
-from tests import legacy_job_seed as grokbot_jobs
 from brigade.cli import run_cloud
 
 
@@ -36,6 +35,7 @@ def _isolate_hosted_providers(monkeypatch) -> None:
 
 
 def _grokbot_spec() -> dict[str, object]:
+    """Build a retained-job fixture for compatibility tests outside the tracker."""
     return {
         "label": "Tracker-safe Grok Bot job",
         "role": "implementation-worker",
@@ -47,26 +47,6 @@ def _grokbot_spec() -> dict[str, object]:
         "artifact": {"kind": "draft-pr"},
         "timeout_seconds": 900,
     }
-
-
-def _completed_grokbot_job(tmp_path: Path, *, now: datetime = NOW) -> str:
-    job_id = grokbot_jobs.enqueue(tmp_path, _grokbot_spec(), "tracker-safe-job", now=now)["job_id"]
-    grokbot_jobs.claim(tmp_path, job_id, "bot-a", "lease-a", 600, now=now)
-    grokbot_jobs.transition(tmp_path, job_id, "bot-a", "lease-a", "running", now=now + timedelta(seconds=1))
-    grokbot_jobs.transition(
-        tmp_path,
-        job_id,
-        "bot-a",
-        "lease-a",
-        "completed",
-        artifact={
-            "kind": "draft-pr",
-            "url": "https://github.com/example/brigade/pull/123",
-            "branch": "grokbot/tracker-safe-job",
-        },
-        now=now + timedelta(seconds=2),
-    )
-    return job_id
 
 
 def test_register_persists_entry_without_prompt_text(tmp_path: Path):
@@ -287,115 +267,6 @@ def test_cursor_cloud_is_unwired_never_guessed(tmp_path: Path):
     assert row["evidence"]["provider"] == "unwired"
 
 
-def test_grokbot_queue_projects_safe_rows_and_reconciles_claimed_and_draft_pr(tmp_path: Path):
-    queued = grokbot_jobs.enqueue(tmp_path, _grokbot_spec(), "queued-tracker-job", now=NOW)["job_id"]
-    queued_status = cloud_tracker.status_payload(
-        tmp_path, now=NOW, provider_tasks={}, github={"branches": [], "prs": []}
-    )
-    queued_row = next(row for row in queued_status["entries"] if row.get("job_id") == queued)
-    assert queued_row["classification"] == "pending"
-    assert queued_row["state"] == "queued"
-    assert "PRIVATE TRACKER INSTRUCTIONS" not in json.dumps(queued_status)
-
-    grokbot_jobs.claim(tmp_path, queued, "bot-a", "lease-a", 600, now=NOW)
-    claimed_status = cloud_tracker.status_payload(
-        tmp_path, now=NOW, provider_tasks={}, github={"branches": [], "prs": []}
-    )
-    claimed_row = next(row for row in claimed_status["entries"] if row.get("job_id") == queued)
-    assert claimed_row["classification"] == "pending"
-    assert claimed_row["state"] == "claimed"
-    assert claimed_row["claimed_at"] == _iso(NOW)
-
-    completed = _completed_grokbot_job(tmp_path, now=NOW + timedelta(hours=1))
-    github = {
-        "branches": [{"name": "grokbot/tracker-safe-job"}],
-        "prs": [
-            {
-                "head": "grokbot/tracker-safe-job",
-                "state": "OPEN",
-                "url": "https://github.com/example/brigade/pull/123",
-                "isDraft": True,
-                "headRefOid": "a" * 40,
-            }
-        ],
-    }
-    completed_status = cloud_tracker.status_payload(tmp_path, now=NOW + timedelta(hours=1, minutes=1), github=github)
-    row = next(row for row in completed_status["entries"] if row.get("job_id") == completed)
-    assert row["provider"] == "grokbot-cloud"
-    assert row["classification"] == "ready-to-land"
-    assert row["artifact_refs"] == {
-        "kind": "draft-pr",
-        "branch": "grokbot/tracker-safe-job",
-        "pr_url": "https://github.com/example/brigade/pull/123",
-        "is_draft": True,
-        "head_sha": "a" * 40,
-    }
-    matching_branch_rows = [
-        entry
-        for entry in completed_status["entries"]
-        if entry.get("artifact_refs", {}).get("branch") == "grokbot/tracker-safe-job"
-        or entry.get("branch") == "grokbot/tracker-safe-job"
-    ]
-    assert [entry["id"] for entry in matching_branch_rows] == [f"grokbot:{completed}"]
-    assert set(row) <= {
-        "id",
-        "provider",
-        "job_id",
-        "label",
-        "task_hash",
-        "state",
-        "classification",
-        "artifact_refs",
-        "source",
-        "created_at",
-        "updated_at",
-        "queued_at",
-        "claimed_at",
-    }
-    assert completed_status["sources"]["grokbot-cloud"] == {"wired": True, "authority": "local-queue"}
-
-
-def test_grokbot_merged_draft_pr_lands_without_queue_attention(tmp_path: Path):
-    completed = _completed_grokbot_job(tmp_path, now=NOW - timedelta(hours=30))
-    github = {
-        "branches": [],
-        "prs": [
-            {
-                "head": "grokbot/tracker-safe-job",
-                "state": "MERGED",
-                "url": "https://github.com/example/brigade/pull/123",
-                "isDraft": True,
-                "headRefOid": "b" * 40,
-            }
-        ],
-    }
-
-    status = cloud_tracker.status_payload(tmp_path, now=NOW, provider_tasks={}, github=github)
-    row = next(entry for entry in status["entries"] if entry.get("job_id") == completed)
-    assert row["classification"] == "landed"
-    assert cloud_tracker.health(tmp_path, now=NOW, github=github)["issue_count"] == 0
-
-
-def test_grokbot_branch_is_orphaned_and_cloud_sweep_keeps_safe_references(tmp_path: Path):
-    status = cloud_tracker.status_payload(
-        tmp_path,
-        now=NOW,
-        github={"branches": [{"name": "grokbot/unregistered"}], "prs": []},
-    )
-    orphan = next(row for row in status["entries"] if row["id"] == "orphan-branch:grokbot/unregistered")
-    assert orphan["provider"] == "grokbot-cloud"
-    assert orphan["classification"] == "orphaned"
-
-    _completed_grokbot_job(tmp_path, now=NOW - timedelta(hours=30))
-    report = cloud_tracker.sweep(
-        tmp_path,
-        now=NOW,
-        status=cloud_tracker.status_payload(tmp_path, now=NOW, github={"branches": [], "prs": []}),
-    )
-    assert any(item["id"].startswith("grokbot:") for item in report["recoverable"])
-    assert "PRIVATE TRACKER INSTRUCTIONS" not in json.dumps(report)
-
-
 def test_stale_ready_threshold_configurable(tmp_path: Path):
     cloud_tracker.save_registry(
         tmp_path,
@@ -507,22 +378,6 @@ def test_stale_entries_surface_in_work_brief(tmp_path: Path, monkeypatch):
     assert any(row["classification"] == "stale" for row in cloud.get("stale_entries", []))
 
 
-def test_grokbot_stale_entry_surfaces_in_work_brief_without_task_text(tmp_path: Path, monkeypatch):
-    _completed_grokbot_job(tmp_path, now=NOW - timedelta(hours=30))
-    monkeypatch.setattr(
-        cloud_tracker,
-        "observe_providers",
-        lambda target, **kwargs: ({}, {"branches": [], "prs": []}, False),
-    )
-    from brigade.work_cmd.session import briefing
-
-    payload = briefing._brief_payload(tmp_path, limit=1)
-    cloud = payload["cloud_tracker"]
-    row = next(item for item in cloud["stale_entries"] if item.get("provider") == "grokbot-cloud")
-    assert row["job_id"].startswith("grokbot-")
-    assert "PRIVATE TRACKER INSTRUCTIONS" not in json.dumps(payload)
-
-
 def test_cli_run_cloud_status_json_contract(tmp_path: Path, capsys, monkeypatch):
     cloud_tracker.register(
         tmp_path,
@@ -621,22 +476,6 @@ def test_current_observer_fixture_controls_cli_without_transport(
     else:
         assert payload["sources"]["cursor-cloud"]["wired"] is False
     assert transport_calls == []
-
-
-def test_cli_cloud_status_includes_grokbot_without_private_envelope(tmp_path: Path, capsys, monkeypatch):
-    job_id = _completed_grokbot_job(tmp_path, now=NOW - timedelta(hours=1))
-    monkeypatch.setattr(
-        cloud_tracker,
-        "observe_providers",
-        lambda target, **kwargs: ({}, {"branches": [], "prs": []}, False),
-    )
-
-    assert cli.main(["run", "cloud", "status", "--target", str(tmp_path), "--json"]) == 0
-    payload = json.loads(capsys.readouterr().out)
-    row = next(item for item in payload["entries"] if item.get("job_id") == job_id)
-    assert row["provider"] == "grokbot-cloud"
-    assert row["artifact_refs"]["pr_url"].endswith("/pull/123")
-    assert "PRIVATE TRACKER INSTRUCTIONS" not in json.dumps(payload)
 
 
 def test_cli_run_cloud_register_and_adopt(tmp_path: Path, capsys):
@@ -780,8 +619,8 @@ def test_classic_brigade_run_task_still_parses(tmp_path: Path, monkeypatch, caps
     assert "cloud" not in err.lower() or "roster" in err.lower() or "error" in err.lower()
 
 
-def test_provider_normalization_contract_accepts_all_cloud_providers(tmp_path: Path):
-    for provider in ("codex-cloud", "cursor-cloud", "grokbot-cloud", "claude-cloud"):
+def test_provider_normalization_contract_accepts_active_cloud_providers(tmp_path: Path):
+    for provider in ("codex-cloud", "cursor-cloud", "claude-cloud"):
         entry = cloud_tracker.register(
             tmp_path,
             provider=provider,
@@ -790,6 +629,71 @@ def test_provider_normalization_contract_accepts_all_cloud_providers(tmp_path: P
             prompt_hash="sha256:aa",
         )
         assert entry["provider"] == provider
+
+
+def test_legacy_grokbot_provider_row_reconciles_merged_pull_request(tmp_path: Path, monkeypatch):
+    branch = "grokbot/legacy-task"
+    legacy = {
+        "id": "cloud-legacy",
+        "provider": "grokbot-cloud",
+        "task_id": "legacy-task",
+        "label": "legacy task",
+        "branch": branch,
+        "dispatched_at": _iso(NOW),
+    }
+    cloud_tracker.save_registry(tmp_path, {**cloud_tracker.empty_registry(), "entries": [legacy]})
+
+    def read(command, **kwargs):
+        if command[1:3] == ["repo", "view"]:
+            return 0, '{"nameWithOwner": "owner/repo"}', ""
+        endpoint = command[-1]
+        if endpoint.endswith("/branches?per_page=100"):
+            return 0, json.dumps([{"name": branch}, {"name": "grokbot/untracked"}]), ""
+        if endpoint.endswith("/pulls?state=open&per_page=100"):
+            return 0, "[]", ""
+        if endpoint.endswith("/pulls?state=closed&per_page=100"):
+            return 0, json.dumps([{"head": {"ref": branch}, "number": 1, "state": "closed", "merged_at": "date"}]), ""
+        raise AssertionError(command)
+
+    monkeypatch.setattr(cloud_tracker, "_run_text", read)
+    assert cloud_tracker.load_registry(tmp_path)["entries"] == [legacy]
+    github = cloud_tracker.observe_github(tmp_path)
+    (row,) = cloud_tracker.status_payload(tmp_path, now=NOW, github=github)["entries"]
+    assert (row["id"], row["provider"], row["classification"]) == ("cloud-legacy", "grokbot-cloud", "landed")
+    (activity,) = cloud_tracker.center_activity_records(
+        tmp_path, now=NOW, provider_tasks={}, github=github, cursor_wired=False
+    )
+    assert activity["state"] == "succeeded"
+
+
+@pytest.mark.parametrize("command", ["register", "adopt"])
+def test_cloud_registration_commands_reject_legacy_provider(command, capsys):
+    with pytest.raises(SystemExit) as rejected:
+        cli.main(["run", "cloud", command, "--provider", "grokbot-cloud", "--label", "legacy"])
+    assert rejected.value.code == 2
+    assert "invalid choice: 'grokbot-cloud'" in capsys.readouterr().err
+
+
+def test_new_grokbot_provider_row_is_rejected(tmp_path: Path):
+    with pytest.raises(
+        ValueError,
+        match="^provider must be one of: codex-cloud, cursor-cloud, claude-cloud$",
+    ):
+        cloud_tracker.register(
+            tmp_path,
+            provider="grokbot-cloud",
+            task_id="new-task",
+            label="new task",
+        )
+
+
+def test_grokbot_branch_is_not_classified_as_cloud(tmp_path: Path):
+    payload = cloud_tracker.status_payload(
+        tmp_path,
+        now=NOW,
+        github={"branches": [{"name": "grokbot/retired"}], "prs": []},
+    )
+    assert payload["entries"] == []
 
 
 def test_provider_state_normalization_and_active_classification():
@@ -835,7 +739,6 @@ def test_github_only_branch_is_orphaned_recovery_never_active_capacity(tmp_path:
         "codex/orphan",
         "cursor/orphan",
         "claude/orphan",
-        "grokbot/orphan",
     }
     assert all(o["source"] == "github-branch" for o in orphans)
 
@@ -1100,9 +1003,7 @@ def test_observe_provider_details_keeps_unconfigured_and_failed_inventory_distin
     assert payload["sources"]["claude-cloud"]["reason"] == "conductor-routed"
 
 
-def test_provider_auth_failures_are_configured_but_not_reachable(monkeypatch, tmp_path: Path, capsys):
-    from brigade import fleet_client_grokbot
-
+def test_provider_auth_failures_are_configured_but_not_reachable(monkeypatch, tmp_path: Path):
     _isolate_hosted_providers(monkeypatch)
     monkeypatch.setenv("CURSOR_API_KEY", "fake-cursor-key")
     monkeypatch.setattr(
@@ -1110,21 +1011,9 @@ def test_provider_auth_failures_are_configured_but_not_reachable(monkeypatch, tm
         "list_agents",
         lambda *a, **k: (_ for _ in ()).throw(cursor_cloud.CursorCloudError("sanitized", reason="auth-failure")),
     )
-    monkeypatch.setattr(
-        fleet_client_grokbot,
-        "whoami",
-        lambda **k: fleet_client_grokbot.GrokbotHubDecision(False, "auth-failed"),
-    )
 
     cursor = cloud_tracker.observe_provider("cursor-cloud", tmp_path)
     assert (cursor.configured, cursor.reachable, cursor.reason) == (
-        True,
-        False,
-        "auth-failure",
-    )
-    assert cli.main(["run", "cloud", "doctor", "--provider", "grokbot-cloud", "--target", str(tmp_path), "--json"]) == 1
-    grokbot = json.loads(capsys.readouterr().out)
-    assert (grokbot["configured"], grokbot["reachable"], grokbot["reason"]) == (
         True,
         False,
         "auth-failure",

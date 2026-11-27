@@ -2,7 +2,6 @@ import json
 import os
 import time
 from contextlib import contextmanager
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -22,7 +21,6 @@ from brigade import (
     runs_cmd,
     work_cmd,
 )
-from tests import legacy_job_seed as grokbot_jobs
 from brigade.roster import Agent, Roster
 
 
@@ -126,37 +124,26 @@ def test_daily_status_keeps_work_counts_when_optional_snapshot_times_out(tmp_pat
     assert "timed out" in center["detail"]
 
 
-def test_daily_status_includes_bounded_grokbot_cloud_summary(tmp_path, capsys, monkeypatch):
+def test_daily_status_displays_stored_cloud_rows(tmp_path, capsys, monkeypatch):
     from brigade import cloud_tracker
 
-    # gh uses ambient credentials/config and subprocesses shared with xdist peers.
-    # Discovery can exhaust center-status's deadline and yield the work-only fallback.
-    # Keep real queue classification and sanitization, with an offline GitHub snapshot.
-    monkeypatch.setattr(cloud_tracker, "observe_github", lambda target, **_kwargs: {"branches": [], "prs": []})
+    monkeypatch.setattr(cloud_tracker, "observe_github", lambda target: {"branches": [], "prs": []})
     _seed_ready_repo(tmp_path, capsys)
-    now = datetime.now(timezone.utc)
-    grokbot_jobs.enqueue(
-        tmp_path,
-        {
-            "label": "Daily Grok Bot job",
-            "role": "implementation-worker",
-            "repository": "example/brigade",
-            "base_ref": "main",
-            "ownership_paths": ["src/brigade/cloud_tracker.py"],
-            "instructions": "PRIVATE DAILY INSTRUCTIONS TOKEN=do-not-display",
-            "verification_commands": ["pytest -q tests/test_daily_driver_cmd.py"],
-            "artifact": {"kind": "draft-pr"},
-            "timeout_seconds": 900,
-        },
-        "daily-grokbot-job",
-        now=now,
-    )
+    legacy_queue = tmp_path / ".brigade/cloud/grokbot/jobs"
+    legacy_queue.mkdir(parents=True)
+    (legacy_queue / "retired.json").write_text("{}", encoding="utf-8")
+    legacy = {
+        "id": "cloud-legacy",
+        "task_id": "legacy-task",
+        "provider": "grokbot-cloud",
+        "label": "legacy task",
+    }
+    cloud_tracker.save_registry(tmp_path, {**cloud_tracker.empty_registry(), "entries": [legacy]})
 
     assert daily_cmd.status(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["grokbot_cloud"]["job_count"] == 1, payload["status_section_checks"]
-    assert payload["grokbot_cloud"]["classification_counts"]["pending"] == 1
-    assert "PRIVATE DAILY INSTRUCTIONS" not in json.dumps(payload)
+    assert payload["legacy_cloud_rows"] == [{**legacy, "classification": "pending"}]
+    assert "grokbot_cloud" not in payload
 
 
 def test_daily_status_timeout_degrades_slow_candidate_section(tmp_path, capsys, monkeypatch):

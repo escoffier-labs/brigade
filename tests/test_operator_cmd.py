@@ -1,10 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
-
 from brigade import cli, install as install_mod, operator_cmd, work_cmd
-from tests import legacy_job_seed as grokbot_jobs
 
 
 def _fake_surface_run(argv, timeout=8):
@@ -46,27 +43,24 @@ def _fake_surface_run(argv, timeout=8):
     return {"ok": False, "stdout": "", "error": "command not found"}
 
 
-def test_operator_status_includes_bounded_grokbot_cloud_summary(tmp_path):
-    grokbot_jobs.enqueue(
-        tmp_path,
-        {
-            "label": "Operator Grok Bot job",
-            "role": "implementation-worker",
-            "repository": "example/brigade",
-            "base_ref": "main",
-            "ownership_paths": ["src/brigade/cloud_tracker.py"],
-            "instructions": "PRIVATE OPERATOR INSTRUCTIONS TOKEN=do-not-display",
-            "verification_commands": ["pytest -q tests/test_operator_cmd.py"],
-            "artifact": {"kind": "draft-pr"},
-            "timeout_seconds": 900,
-        },
-        "operator-grokbot-job",
-        now=datetime.now(timezone.utc),
-    )
+def test_operator_status_displays_stored_cloud_rows(tmp_path, monkeypatch):
+    from brigade import cloud_tracker
+
+    monkeypatch.setattr(cloud_tracker, "observe_github", lambda target: {"branches": [], "prs": []})
+    legacy_queue = tmp_path / ".brigade/cloud/grokbot/jobs"
+    legacy_queue.mkdir(parents=True)
+    (legacy_queue / "retired.json").write_text("{}", encoding="utf-8")
+    legacy = {
+        "id": "cloud-legacy",
+        "task_id": "legacy-task",
+        "provider": "grokbot-cloud",
+        "label": "legacy task",
+    }
+    cloud_tracker.save_registry(tmp_path, {**cloud_tracker.empty_registry(), "entries": [legacy]})
 
     payload = operator_cmd.status_payload(tmp_path, profile="local-operator")
-    assert payload["grokbot_cloud"]["job_count"] == 1
-    assert "PRIVATE OPERATOR INSTRUCTIONS" not in json.dumps(payload)
+    assert payload["legacy_cloud_rows"] == [{**legacy, "classification": "pending"}]
+    assert "grokbot_cloud" not in payload
 
 
 def test_operator_adoption_plan_summarizes_existing_workspace_without_raw_surface_details(
