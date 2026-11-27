@@ -1,0 +1,1 @@
+- Acknowledge observed terminal T3 tasks and finalize qualification runs when `abort-t3` records a failure.

@@ -447,6 +447,11 @@ and an acknowledgement, and `failed` otherwise, and never refunds budget. An
 unresolved hold refuses with `finalize-held`. An abandoned-unknown task refuses
 with `finalize-abandoned` rather than release live-work capacity.
 
+> **Warning:** T3 status `completed` means that the worker turn ended, not that
+> the requested task was done. A refusal can therefore be observed and finalized
+> as `completed`; callers must not treat this lifecycle status as proof of task
+> success.
+
 `t3 status <run> [--json]` is read-only and prints fixed tokens, booleans, the
 attempt number and a seat digest, with no task text, option values, native
 payload or child ids.

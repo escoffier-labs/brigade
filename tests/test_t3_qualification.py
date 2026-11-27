@@ -74,6 +74,39 @@ def test_complete_matched_pairs(matched_records, effort):
     assert report["arms"]["run-batch"]["errors"]["other"] == 0
 
 
+def test_abort_t3_acknowledges_only_observed_terminal_tasks(tmp_path, monkeypatch):
+    from brigade import native_t3_dispatch, native_t3_lifecycle
+    from tests.test_native_t3_claim import THREAD, _claim, _enroll, _reply, _terminal_reply
+
+    workspace, run_id = _enroll(tmp_path, ("done", "running"))
+    for task_id in ("done", "running"):
+        _claim(workspace, run_id, task_id)
+        native_t3_dispatch.accepted(
+            workspace=workspace,
+            run_id=run_id,
+            task_id=task_id,
+            parent_thread=THREAD,
+            payload=(
+                _terminal_reply(workspace, run_id, task_id) if task_id == "done" else _reply(workspace, run_id, task_id)
+            ),
+        )
+    folder = tmp_path / "qualification"
+    folder.mkdir()
+    (folder / "expected.json").write_text(
+        json.dumps({"workspace": str(workspace), "run_ids": {"t3": run_id}}), encoding="utf-8"
+    )
+
+    monkeypatch.setattr(sys, "argv", ["t3_qualification", "abort-t3", str(folder), "parent failed"])
+    qualification.main()
+
+    report = native_t3_lifecycle.status(workspace=workspace, run_id=run_id)
+    tasks = {task["task_id"]: task for task in report["tasks"]}
+    assert tasks["done"]["terminal"] is tasks["done"]["acked"] is True
+    assert tasks["running"]["terminal"] is tasks["running"]["acked"] is False
+    assert report["status"] == "failed"
+    assert json.loads((folder / "failure.json").read_text(encoding="utf-8")) == {"error": "parent failed"}
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     [
