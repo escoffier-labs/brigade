@@ -5,6 +5,7 @@ from __future__ import annotations
 import ntpath
 import re
 import shlex
+from collections.abc import Iterator
 from pathlib import PurePosixPath
 
 
@@ -240,7 +241,7 @@ _POLICY_LAUNCHER_SUBCOMMANDS = {
     "direnv": {"exec"},
     "hatch": {"run"},
     "mise": {"exec"},
-    "npm": {"exec"},
+    "npm": {"exec", "x"},
     "pdm": {"run"},
     "pipx": {"run"},
     "pnpm": {"dlx", "exec"},
@@ -275,6 +276,8 @@ _POLICY_LAUNCHERS = {
 }
 
 _POLICY_FIRST_WORD_RE = re.compile(r"""^\s*("[^"]*"|'[^']*'|\S+)(?=\s|$)""")
+_POLICY_SPLIT_VALUE_RE = re.compile(r"""[\s"']""")
+_POLICY_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 _POLICY_MAX_EMBEDDED_DEPTH = 4
 
 # Use the standard Windows PATHEXT suffixes for consistent policy matching on every host.
@@ -290,22 +293,20 @@ def normalize_policy_executable(argv0: str) -> str:
     return stem if dot + suffix in _POLICY_EXECUTABLE_SUFFIXES else name
 
 
-def _policy_launcher_values(argument: str) -> tuple[str, ...]:
-    if not argument.startswith("-"):
-        return (argument,)
+def _policy_launcher_values(argument: str) -> Iterator[str]:
+    yield argument
     _, equals, value = argument.partition("=")
-    values = (value,) if equals else ()
-    if len(argument) > 2 and not argument.startswith("--"):
-        return (*values, argument[2:])
-    return values
+    if equals:
+        yield value
+    if argument.startswith("-") and not argument.startswith("--"):
+        for index, option in enumerate(argument[1:-1], start=2):
+            if not option.isascii() or not option.isalnum():
+                break
+            yield argument[index:]
 
 
 def policy_blocked_name(argv: list[str]) -> str | None:
     """Return the first listed name identified by the command policy."""
-    return _policy_blocked_name(argv, depth=0)
-
-
-def _policy_blocked_name(argv: list[str], *, depth: int) -> str | None:
     if not argv:
         return None
     executable = normalize_policy_executable(argv[0])
@@ -315,40 +316,41 @@ def _policy_blocked_name(argv: list[str], *, depth: int) -> str | None:
         return None
 
     subcommands = _POLICY_LAUNCHER_SUBCOMMANDS.get(executable)
-    if subcommands is not None and (len(argv) < 2 or argv[1] not in subcommands):
-        return None
-    argument_start = 2 if subcommands is not None else 1
-    for argument in argv[argument_start:]:
+    argument_start = 1
+    if subcommands is not None:
+        argument_start = next((after for after, arg in enumerate(argv[1:], start=2) if arg in subcommands), len(argv))
+    return _policy_blocked_arguments(argv[argument_start:], launcher=executable, depth=0)
+
+
+def _policy_blocked_arguments(arguments: list[str], *, launcher: str, depth: int) -> str | None:
+    for argument in arguments:
         for value in _policy_launcher_values(argument):
-            name = _policy_blocked_value(value, depth=depth)
+            name = _policy_blocked_value(value, launcher=launcher, depth=depth)
             if name is not None:
                 return name
     return None
 
 
-def _policy_blocked_value(value: str, *, depth: int) -> str | None:
+def _policy_blocked_value(value: str, *, launcher: str, depth: int) -> str | None:
     name = normalize_policy_executable(value.strip("\"'"))
     if name in SCANNER_HIGH_RISK_COMMANDS:
         return name
 
     first_word = _POLICY_FIRST_WORD_RE.match(value)
-    if first_word is None or first_word[1] == value:
-        return None
-    executable = first_word[1].strip("\"'")
-    name = normalize_policy_executable(executable)
-    if name in SCANNER_HIGH_RISK_COMMANDS:
-        return name
-
-    arguments = value[first_word.end() :].strip()
-    if name not in _POLICY_LAUNCHERS or not arguments:
+    if first_word is not None and first_word[1] != value and not _POLICY_ASSIGNMENT_RE.match(first_word[1]):
+        name = normalize_policy_executable(first_word[1].strip("\"'"))
+        if name in SCANNER_HIGH_RISK_COMMANDS:
+            return name
+    if not _POLICY_SPLIT_VALUE_RE.search(value):
         return None
     if depth >= _POLICY_MAX_EMBEDDED_DEPTH:
-        return name
+        return launcher
     try:
-        nested_argv = [executable, *shlex.split(arguments)]
+        words = shlex.split(value)
     except ValueError:
-        return name
-    return _policy_blocked_name(nested_argv, depth=depth + 1)
+        return launcher
+    start = next((index for index, word in enumerate(words) if not _POLICY_ASSIGNMENT_RE.match(word)), len(words))
+    return _policy_blocked_arguments(words[start:], launcher=launcher, depth=depth + 1)
 
 
 SCANNER_SHELL_META_RE = re.compile(r"[;&|`<>]|\$\(")

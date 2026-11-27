@@ -99,6 +99,50 @@ def test_policy_uses_launcher_subcommands(subcommand, blocked, policy_entry, pol
 
 
 @pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--quiet", "run", "policy-tool", "sample"],
+        ["--style", "sample", "run", "--", "policy-tool"],
+        ["x", "policy-tool", "sample"],
+        ["tool", "run", "policy-tool", "sample"],
+    ],
+    ids=["option", "value", "alias", "qualified"],
+)
+def test_policy_matches_runner_arguments(arguments, policy_entry, policy_name, monkeypatch):
+    runner = "fixture-runner"
+    aliases = constants._POLICY_LAUNCHER_SUBCOMMANDS["npm"]
+    monkeypatch.setattr(constants, "_POLICY_LAUNCHERS", {runner})
+    monkeypatch.setattr(constants, "_POLICY_LAUNCHER_SUBCOMMANDS", {runner: {*aliases, "run"}})
+    parse, kind = policy_entry
+    result, reason = parse([runner, *arguments])
+
+    assert result is None
+    assert reason is not None
+    assert f"high-risk {kind} command: {policy_name}" in reason
+
+
+@pytest.mark.parametrize(
+    ("argument", "expected"),
+    [
+        ("--sample=MODE=demo policy-tool record", "policy-tool"),
+        ("-abcPolicy-Tool.EXE record", "policy-tool"),
+        ("demo policy-tool record", "policy-tool"),
+        ('--sample=record"note', "fixture-wrapper"),
+    ],
+    ids=["named", "short", "words", "invalid"],
+)
+def test_policy_matches_launcher_input(argument, expected, policy_entry, policy_name, monkeypatch):
+    launcher = "fixture-wrapper"
+    monkeypatch.setattr(constants, "_POLICY_LAUNCHERS", {launcher})
+    parse, kind = policy_entry
+    result, reason = parse([launcher, argument])
+
+    assert result is None
+    assert reason is not None
+    assert f"high-risk {kind} command: {expected}" in reason
+
+
+@pytest.mark.parametrize(
     ("argv", "listed_name"),
     [
         (["pytest", "-k", "policy-tool"], "policy-tool"),
