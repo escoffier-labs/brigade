@@ -58,7 +58,7 @@ Each receipt includes the run id, scanner id, source, argv, cwd, started and com
 
 ## Command Policy
 
-The command policy checks the program name and the documented direct-exec forms of a reviewed set of launchers. It guards against accidental or casual shell use. For containment, restrict who can write scanner, reviewer, verification, and fleet health configuration, and run commands in a sandbox.
+The command policy checks the program name and the documented direct-exec forms of a reviewed set of launchers. It guards against accidental or casual shell use and is not a containment boundary. The controls beyond it are who can write scanner, reviewer, verification, and fleet health configuration, and running commands in a sandbox.
 
 ## Daily Sweeps
 
