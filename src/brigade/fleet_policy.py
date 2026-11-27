@@ -68,6 +68,7 @@ TOP_LEVEL_FIELDS = frozenset(
 DEFAULT_TELEMETRY_TTL_SECONDS = 300
 DEFAULT_RESERVATION_TTL_SECONDS = 300
 DEFAULT_QUOTA_RESERVE_PERCENT = 4
+DEFAULT_AGENT_SESSION_WEIGHT = 0.0
 MAX_PERCENT = 100
 PIN_IDENTITY_FIELDS = ("provider", "model", "effort")
 PIN_BINDING_MODEL_PATHS = (("brigade", "model"), ("native", "model"))
@@ -165,6 +166,7 @@ def empty_routing() -> dict[str, Any]:
         "telemetry_ttl_seconds": DEFAULT_TELEMETRY_TTL_SECONDS,
         "reservation_ttl_seconds": DEFAULT_RESERVATION_TTL_SECONDS,
         "quota_reserve_percent": DEFAULT_QUOTA_RESERVE_PERCENT,
+        "agent_session_weight": DEFAULT_AGENT_SESSION_WEIGHT,
         "workload_requirements": {},
         "quota_pools": {},
         "inventory_collectors": {},
@@ -173,6 +175,8 @@ def empty_routing() -> dict[str, Any]:
 
 def empty_document() -> dict[str, Any]:
     """The safe, generic starting policy: no machines, seats, or repositories."""
+    routing = empty_routing()
+    del routing["agent_session_weight"]
     return {
         "schema": POLICY_SCHEMA,
         "defaults": {},
@@ -180,7 +184,7 @@ def empty_document() -> dict[str, Any]:
         "seats": {},
         "consumers": {},
         "repositories": {},
-        "routing": empty_routing(),
+        "routing": routing,
     }
 
 
@@ -768,17 +772,25 @@ def parse_routing(raw: Any) -> dict[str, Any]:
             "telemetry_ttl_seconds",
             "reservation_ttl_seconds",
             "quota_reserve_percent",
+            "agent_session_weight",
             "workload_requirements",
             "quota_pools",
             "inventory_collectors",
         ),
         "routing",
     )
+    weight = body.get("agent_session_weight", DEFAULT_AGENT_SESSION_WEIGHT)
+    try:
+        if type(weight) not in (int, float) or weight < 0 or not math.isfinite(weight):
+            raise ValueError
+    except (ValueError, OverflowError):
+        raise FleetPolicyError("routing.agent_session_weight must be a finite non-negative number") from None
     workloads = _records(body.get("workload_requirements") or {}, "routing.workload_requirements")
     pools = _records(body.get("quota_pools") or {}, "routing.quota_pools")
     collectors = _records(body.get("inventory_collectors") or {}, "routing.inventory_collectors")
     return {
         "enabled": _bool(body.get("enabled"), "routing.enabled", default=False),
+        "agent_session_weight": float(weight),
         "telemetry_ttl_seconds": _int(
             body.get("telemetry_ttl_seconds"),
             "routing.telemetry_ttl_seconds",
@@ -944,6 +956,9 @@ def parse_document(raw: Any) -> dict[str, Any]:
         },
         "routing": parse_routing(body.get("routing")),
     }
+    # Preserve the wire format and digest accepted by clients with older routing keys.
+    if document["routing"]["agent_session_weight"] == DEFAULT_AGENT_SESSION_WEIGHT:
+        del document["routing"]["agent_session_weight"]
     # Omitted when empty so every pre-owners revision keeps its stored digest.
     owners = fleet_policy_owners.parse_owners(body.get("owners"))
     if owners:

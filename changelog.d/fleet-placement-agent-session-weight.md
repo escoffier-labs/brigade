@@ -1,0 +1,1 @@
+- Add an optional routing weight for standalone agent sessions in fleet placement. A zero weight preserves existing placement behavior.
