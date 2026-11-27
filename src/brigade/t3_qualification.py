@@ -26,6 +26,7 @@ from . import (
     orca_qualification,
     roster,
     run_batch,
+    run_tasks,
 )
 from . import t3_qualification_evidence as evidence
 from .codex_appserver import AppServer, AppServerError
@@ -536,6 +537,39 @@ def finish_t3(folder: Path) -> None:
     localio.write_json_exclusive(folder / "measurements.json", measurements)
 
 
+def abort_t3(folder: Path, error: str) -> None:
+    """Retain the failure, acknowledge safe results, and leave closing the run to the operator."""
+    try:
+        localio.write_json_exclusive(folder / "failure.json", {"error": error})
+    except FileExistsError:
+        pass
+    context = evidence.read(folder / "expected.json")
+    workspace = Path(context["workspace"])
+    run_id = context["run_ids"]["t3"]
+    try:
+        tasks = native_t3_lifecycle.status(workspace=workspace, run_id=run_id)["tasks"]
+        run_dir = native_t3_capacity.runs_root(workspace) / run_id
+        results = {result.handle.spec.task_id: result for result in run_tasks.read_tasks(run_dir)}
+    except QUALIFICATION_ERRORS:
+        tasks = ()
+        results = {}
+    for task in tasks:
+        result = results.get(task["task_id"])
+        result_id = result.result_id if result is not None else None
+        if result_id is None or not task["terminal"] or task["acked"] or task["held_reason"] is not None:
+            continue
+        try:
+            native_t3_lifecycle.ack(workspace=workspace, run_id=run_id, task_id=task["task_id"], result_id=result_id)
+        except QUALIFICATION_ERRORS:
+            continue
+    print(shlex.join((*CLI, "t3", "status", run_id, "--target", str(workspace))))
+    finalize = shlex.join((*CLI, "t3", "finalize", run_id, "--target", str(workspace)))
+    print(
+        f"Close this run with `{finalize}` once status shows no live or held tasks. "
+        "Resolve any hold first. Finalize records failed unless every task is terminal and acknowledged."
+    )
+
+
 QUALIFICATION_ERRORS = (
     OSError,
     ValueError,
@@ -593,7 +627,7 @@ def main() -> None:
         elif args.command == "finish-t3":
             finish_t3(args.folder)
         else:
-            localio.write_json_exclusive(args.folder / "failure.json", {"error": args.error})
+            abort_t3(args.folder, args.error)
     except QUALIFICATION_ERRORS as exc:
         parser.exit(2, f"Qualification stopped: {exc}\n")
 

@@ -74,6 +74,273 @@ def test_complete_matched_pairs(matched_records, effort):
     assert report["arms"]["run-batch"]["errors"]["other"] == 0
 
 
+def _abort_folder(tmp_path, workspace, run_id):
+    folder = tmp_path / "qualification"
+    folder.mkdir()
+    (folder / "expected.json").write_text(
+        json.dumps({"workspace": str(workspace), "run_ids": {"t3": run_id}, "parent_thread": "thread-parent"}),
+        encoding="utf-8",
+    )
+    return folder
+
+
+def _status_line(workspace, run_id):
+    return shlex.join((*qualification.CLI, "t3", "status", run_id, "--target", str(workspace)))
+
+
+def _finalize_command(workspace, run_id):
+    return shlex.join((*qualification.CLI, "t3", "finalize", run_id, "--target", str(workspace)))
+
+
+def _operator_lines(workspace, run_id):
+    return [
+        _status_line(workspace, run_id),
+        f"Close this run with `{_finalize_command(workspace, run_id)}` once status shows no live or held tasks. "
+        "Resolve any hold first. Finalize records failed unless every task is terminal and acknowledged.",
+    ]
+
+
+def _abort(monkeypatch, folder):
+    monkeypatch.setattr(sys, "argv", ["t3_qualification", "abort-t3", str(folder), "parent failed"])
+    qualification.main()
+
+
+def _acknowledge_terminal(workspace, run_id, task_id="done"):
+    from brigade import native_t3_capacity, native_t3_lifecycle, run_tasks
+
+    run_dir = native_t3_capacity.runs_root(workspace) / run_id
+    result_id = next(result.result_id for result in run_tasks.read_tasks(run_dir))
+    native_t3_lifecycle.ack(workspace=workspace, run_id=run_id, task_id=task_id, result_id=result_id)
+
+
+def test_abort_t3_acknowledges_terminal_tasks_and_keeps_a_live_run_open(tmp_path, monkeypatch, capsys):
+    from brigade import native_t3_dispatch, native_t3_lifecycle
+    from tests.test_native_t3_claim import THREAD, _claim, _enroll, _reply, _terminal_reply
+
+    workspace, run_id = _enroll(tmp_path, ("done", "running"))
+    for task_id in ("done", "running"):
+        _claim(workspace, run_id, task_id)
+        native_t3_dispatch.accepted(
+            workspace=workspace,
+            run_id=run_id,
+            task_id=task_id,
+            parent_thread=THREAD,
+            payload=(
+                _terminal_reply(workspace, run_id, task_id) if task_id == "done" else _reply(workspace, run_id, task_id)
+            ),
+        )
+    folder = _abort_folder(tmp_path, workspace, run_id)
+
+    _abort(monkeypatch, folder)
+
+    report = native_t3_lifecycle.status(workspace=workspace, run_id=run_id)
+    tasks = {task["task_id"]: task for task in report["tasks"]}
+    assert tasks["done"]["terminal"] is tasks["done"]["acked"] is True
+    assert tasks["running"]["terminal"] is tasks["running"]["acked"] is False
+    assert report["status"] == "awaiting-native-parent"
+    assert capsys.readouterr().out.splitlines() == _operator_lines(workspace, run_id)
+    assert json.loads((folder / "failure.json").read_text(encoding="utf-8")) == {"error": "parent failed"}
+
+
+def test_abort_t3_acknowledges_an_all_terminal_run_without_finalizing(tmp_path, monkeypatch, capsys):
+    from brigade import cli, native_t3_dispatch, native_t3_lifecycle
+    from tests.test_native_t3_claim import THREAD, _claim, _enroll, _terminal_reply
+
+    workspace, run_id = _enroll(tmp_path, ("done",))
+    _claim(workspace, run_id, "done")
+    native_t3_dispatch.accepted(
+        workspace=workspace,
+        run_id=run_id,
+        task_id="done",
+        parent_thread=THREAD,
+        payload=_terminal_reply(workspace, run_id, "done"),
+    )
+    folder = _abort_folder(tmp_path, workspace, run_id)
+
+    _abort(monkeypatch, folder)
+
+    report = native_t3_lifecycle.status(workspace=workspace, run_id=run_id)
+    assert report["status"] == "awaiting-native-parent"
+    assert report["tasks"][0]["acked"] is True
+    printed = capsys.readouterr().out.splitlines()
+    assert printed == _operator_lines(workspace, run_id)
+    instruction = printed[1]
+    assert instruction == (
+        f"Close this run with `{_finalize_command(workspace, run_id)}` once status shows no live or held tasks. "
+        "Resolve any hold first. Finalize records failed unless every task is terminal and acknowledged."
+    )
+
+    finalize = shlex.split(printed[1].split("`")[1])
+    assert cli.main(finalize[len(qualification.CLI) :]) == 0
+    assert native_t3_lifecycle.status(workspace=workspace, run_id=run_id)["status"] == "completed"
+
+
+def test_abort_t3_leaves_an_already_finalized_run_untouched(tmp_path, monkeypatch, capsys):
+    from brigade import native_t3_dispatch, native_t3_lifecycle
+    from tests.test_native_t3_claim import THREAD, _claim, _enroll, _terminal_reply
+
+    workspace, run_id = _enroll(tmp_path, ("done",))
+    _claim(workspace, run_id, "done")
+    native_t3_dispatch.accepted(
+        workspace=workspace,
+        run_id=run_id,
+        task_id="done",
+        parent_thread=THREAD,
+        payload=_terminal_reply(workspace, run_id, "done"),
+    )
+    _acknowledge_terminal(workspace, run_id)
+    native_t3_lifecycle.finalize(workspace=workspace, run_id=run_id)
+    folder = _abort_folder(tmp_path, workspace, run_id)
+
+    _abort(monkeypatch, folder)
+
+    assert capsys.readouterr().out.splitlines() == _operator_lines(workspace, run_id)
+    assert native_t3_lifecycle.status(workspace=workspace, run_id=run_id)["status"] == "completed"
+
+
+def test_abort_t3_prints_the_operator_lines_when_a_hold_lands_after_status(tmp_path, monkeypatch, capsys):
+    from brigade import cli, native_t3_dispatch, native_t3_lifecycle
+    from tests.test_native_t3_claim import THREAD, _claim, _enroll, _terminal_reply
+
+    workspace, run_id = _enroll(tmp_path, ("done",))
+    _claim(workspace, run_id, "done")
+    native_t3_dispatch.accepted(
+        workspace=workspace,
+        run_id=run_id,
+        task_id="done",
+        parent_thread=THREAD,
+        payload=_terminal_reply(workspace, run_id, "done"),
+    )
+    folder = _abort_folder(tmp_path, workspace, run_id)
+    real_status = native_t3_lifecycle.status
+    holds = []
+
+    def status_then_hold(**kwargs):
+        report = real_status(**kwargs)
+        if not holds:
+            holds.append("done")
+            native_t3_dispatch.hold_resolve(
+                workspace=workspace, run_id=run_id, task_id="done", payload=None, abandon=True
+            )
+        return report
+
+    with monkeypatch.context() as patch:
+        patch.setattr(native_t3_lifecycle, "status", status_then_hold)
+        _abort(patch, folder)
+
+    printed = capsys.readouterr().out.splitlines()
+    assert printed == _operator_lines(workspace, run_id)
+    report = real_status(workspace=workspace, run_id=run_id)
+    assert report["status"] == "awaiting-native-parent"
+    assert report["tasks"][0]["held_reason"] == "abandoned-unknown"
+
+    finalize = shlex.split(printed[1].split("`")[1])
+    assert cli.main(finalize[len(qualification.CLI) :]) == 2
+    assert "finalize-abandoned" in capsys.readouterr().err
+    held = real_status(workspace=workspace, run_id=run_id)
+    assert held["status"] == "awaiting-native-parent"
+    assert held["tasks"][0]["held_reason"] == "abandoned-unknown"
+
+
+def test_abort_t3_leaves_a_queued_task_open_for_the_printed_finalize(tmp_path, monkeypatch, capsys):
+    from brigade import cli, native_t3_lifecycle
+    from tests.test_native_t3_claim import _enroll
+
+    workspace, run_id = _enroll(tmp_path, ("queued",))
+    folder = _abort_folder(tmp_path, workspace, run_id)
+
+    _abort(monkeypatch, folder)
+
+    printed = capsys.readouterr().out.splitlines()
+    assert printed == _operator_lines(workspace, run_id)
+    report = native_t3_lifecycle.status(workspace=workspace, run_id=run_id)
+    assert report["status"] == "awaiting-native-parent"
+    assert report["tasks"][0]["terminal"] is False
+
+    finalize = shlex.split(printed[1].split("`")[1])
+    assert cli.main(finalize[len(qualification.CLI) :]) == 0
+    assert native_t3_lifecycle.status(workspace=workspace, run_id=run_id)["status"] == "failed"
+
+
+def test_abort_t3_ignores_an_ack_error_and_prints_the_operator_lines(tmp_path, monkeypatch, capsys):
+    from brigade import native_t3_dispatch, native_t3_lifecycle
+    from tests.test_native_t3_claim import THREAD, _claim, _enroll, _terminal_reply
+
+    workspace, run_id = _enroll(tmp_path, ("done",))
+    _claim(workspace, run_id, "done")
+    native_t3_dispatch.accepted(
+        workspace=workspace,
+        run_id=run_id,
+        task_id="done",
+        parent_thread=THREAD,
+        payload=_terminal_reply(workspace, run_id, "done"),
+    )
+    folder = _abort_folder(tmp_path, workspace, run_id)
+
+    def refuse(**kwargs):
+        raise OSError("journal unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(native_t3_lifecycle, "ack", refuse)
+        _abort(patch, folder)
+
+    assert capsys.readouterr().out.splitlines() == _operator_lines(workspace, run_id)
+    assert json.loads((folder / "failure.json").read_text(encoding="utf-8")) == {"error": "parent failed"}
+    assert native_t3_lifecycle.status(workspace=workspace, run_id=run_id)["status"] == "awaiting-native-parent"
+
+
+def test_abort_t3_prints_the_operator_lines_when_status_fails(tmp_path, monkeypatch, capsys):
+    from brigade import native_t3_dispatch, native_t3_lifecycle
+    from tests.test_native_t3_claim import THREAD, _claim, _enroll, _terminal_reply
+
+    workspace, run_id = _enroll(tmp_path, ("done",))
+    _claim(workspace, run_id, "done")
+    native_t3_dispatch.accepted(
+        workspace=workspace,
+        run_id=run_id,
+        task_id="done",
+        parent_thread=THREAD,
+        payload=_terminal_reply(workspace, run_id, "done"),
+    )
+    folder = _abort_folder(tmp_path, workspace, run_id)
+
+    def refuse(**kwargs):
+        raise OSError("journal unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(native_t3_lifecycle, "status", refuse)
+        _abort(patch, folder)
+
+    assert capsys.readouterr().out.splitlines() == _operator_lines(workspace, run_id)
+    assert json.loads((folder / "failure.json").read_text(encoding="utf-8")) == {"error": "parent failed"}
+    assert native_t3_lifecycle.status(workspace=workspace, run_id=run_id)["tasks"][0]["acked"] is False
+
+
+def test_abort_t3_can_run_twice(tmp_path, monkeypatch, capsys):
+    from brigade import native_t3_dispatch, native_t3_lifecycle
+    from tests.test_native_t3_claim import THREAD, _claim, _enroll, _terminal_reply
+
+    workspace, run_id = _enroll(tmp_path, ("done",))
+    _claim(workspace, run_id, "done")
+    native_t3_dispatch.accepted(
+        workspace=workspace,
+        run_id=run_id,
+        task_id="done",
+        parent_thread=THREAD,
+        payload=_terminal_reply(workspace, run_id, "done"),
+    )
+    folder = _abort_folder(tmp_path, workspace, run_id)
+
+    _abort(monkeypatch, folder)
+    capsys.readouterr()
+    assert native_t3_lifecycle.status(workspace=workspace, run_id=run_id)["tasks"][0]["acked"] is True
+
+    _abort(monkeypatch, folder)
+
+    assert capsys.readouterr().out.splitlines() == _operator_lines(workspace, run_id)
+    assert json.loads((folder / "failure.json").read_text(encoding="utf-8")) == {"error": "parent failed"}
+
+
 @pytest.mark.parametrize(
     ("change", "message"),
     [

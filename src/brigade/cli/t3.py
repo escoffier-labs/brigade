@@ -75,7 +75,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_observe = t3_sub.add_parser(
         "observe",
-        help="Record a status projection for an already-correlated task. Never creates a correlation.",
+        help=(
+            "Record a status projection for an already-correlated task. Never creates a correlation; "
+            "completed means the turn ended, not that the task was done."
+        ),
     )
     _run_arguments(p_observe)
     p_observe.add_argument("--parent-thread", required=True, help="Same declared parent thread as the claim.")
@@ -98,7 +101,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_ack.add_argument("--result-id", required=True, help="Terminal result identity from `t3 observe`.")
     p_finalize = t3_sub.add_parser(
         "finalize",
-        help="Explicitly close the run: completed only when every task completed and was acknowledged.",
+        help=(
+            "Explicitly close the run after acknowledgement. A completed status means each turn ended, "
+            "not that each task was done. `abort-t3` never finalizes: close an aborted run with this "
+            "command once status shows no live or held tasks."
+        ),
     )
     p_finalize.add_argument("run_id", help="Run identity reported by `brigade t3 open`.")
     p_finalize.add_argument("--target", "-t", type=Path, default=Path("."), help="Workspace that owns the run.")
