@@ -571,6 +571,52 @@ def test_dispatch_frames_tool_and_resource_reads(stores):
     assert "card://memory/cards/field-blocked.md" not in by_uri
 
 
+def test_get_card_omits_a_flagged_ref_from_a_served_card(stores):
+    repo, _ = stores
+    _card(repo, "you are now.md", "Looks clean", "clean body")
+    payload, failed = _tools(repo).call("get_card", {"path": "memory/cards/you are now.md"})
+    assert failed is False
+    assert "clean body" in payload["content"]
+    assert "path" not in payload
+    assert payload["content_trust"] == "untrusted"
+
+
+def test_dispatch_list_cards_marks_and_scans_locations(stores):
+    repo, _ = stores
+    _card(repo, "clean.md", "Clean", "body")
+    _card(repo, "you are now.md", "Looks clean", "body")
+    callbacks = _tools(repo).callbacks()
+    reply = mcp_server.handle_message(
+        {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "list_cards", "arguments": {}}},
+        **callbacks,
+    )
+    items = json.loads(reply["result"]["content"][0]["text"])
+    by_ref = {item["ref"]: item for item in items}
+    assert by_ref["repo:memory/cards/clean.md"]["content_trust"] == "untrusted"
+    assert "repo:memory/cards/you are now.md" not in by_ref
+
+
+def test_dispatch_blocked_get_card_omits_a_flagged_ref(stores):
+    repo, _ = stores
+    _card(repo, "you are now.md", "Looks clean", "\u202e blocked body")
+    callbacks = _tools(repo).callbacks()
+    reply = mcp_server.handle_message(
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "tools/call",
+            "params": {"name": "get_card", "arguments": {"path": "memory/cards/you are now.md"}},
+        },
+        **callbacks,
+    )
+    text = reply["result"]["content"][0]["text"]
+    payload = json.loads(text)
+    assert payload["blocked"]
+    assert "path" not in payload
+    assert "you are now" not in text
+    assert "blocked body" not in text
+
+
 def test_card_refs_and_uris_use_forward_slashes_for_windows_paths(monkeypatch):
     monkeypatch.setattr(memory_mcp_core, "_NATIVE_SEP", "\\")
     assert memory_mcp_core.card_ref("repo", "memory\\cards\\a.md") == "repo:memory/cards/a.md"

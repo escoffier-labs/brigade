@@ -367,12 +367,17 @@ class MemoryTools:
                 continue
             for path in _store_cards(store):
                 rel = path.relative_to(store.root).as_posix()
+                uri = card_uri(store.origin, rel)
+                ref = card_ref(store.origin, rel)
+                if _card_refusal(rel, uri, ref) is not None:
+                    continue
                 items.append(
                     {
                         "path": rel,
-                        "uri": card_uri(store.origin, rel),
+                        "uri": uri,
                         "origin": store.origin,
-                        "ref": card_ref(store.origin, rel),
+                        "ref": ref,
+                        "content_trust": UNTRUSTED,
                     }
                 )
         return items, False
@@ -382,10 +387,18 @@ class MemoryTools:
         text, origin = self.read_card(ref)
         if text is None:
             return f"card not found: {ref}", True
+        location_ok = _card_refusal(ref) is None
         refusal = _card_refusal(text)
         if refusal is not None:
-            return {"path": ref, **refusal}, False
-        return {"path": ref, "origin": origin, "content": text, "content_trust": UNTRUSTED}, False
+            withheld: dict[str, Any] = dict(refusal)
+            if location_ok:
+                withheld["path"] = ref
+                withheld["content_trust"] = UNTRUSTED
+            return withheld, False
+        payload: dict[str, Any] = {"origin": origin, "content": text, "content_trust": UNTRUSTED}
+        if location_ok:
+            payload["path"] = ref
+        return payload, False
 
     def _search_cards(self, arguments: dict[str, Any]) -> ToolResult:
         query = str(arguments.get("query") or "")
