@@ -12,7 +12,7 @@ import time
 
 import pytest
 
-from brigade import localio
+from brigade import localio, verify_manifest_git
 from brigade.cli import main
 from brigade.work_cmd import verify_gate, verify_push, verify_required, verify_runtime
 
@@ -476,21 +476,23 @@ def test_malformed_declaration(push_repo, capsys):
 
 def test_slow_git_shares_the_deadline(push_repo, capsys, monkeypatch):
     real = subprocess.run
-    deadlines = []
+    now = 0.0
+    budgets = []
 
     def slow_git(argv, *args, **kwargs):
-        deadlines.append(kwargs["timeout"])
-        if argv[1] == "merge-base":
-            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
-        return real(argv, *args, **kwargs)
+        nonlocal now
+        budgets.append(kwargs["timeout"])
+        result = real(argv, *args, **{**kwargs, "timeout": None})
+        now += 0.5
+        return result
 
+    monkeypatch.setattr(verify_push, "monotonic", lambda: now)
+    monkeypatch.setattr(verify_manifest_git, "monotonic", lambda: now)
     monkeypatch.setattr(subprocess, "run", slow_git)
-    started = time.monotonic()
     code, result = _single(push_repo, capsys)
-    assert time.monotonic() - started < 2
     assert (code, result["status"]) == (3, "indeterminate")
-    assert "timed out" in result["reason"]
-    assert len(deadlines) > 2 and 0 < deadlines[-1] < deadlines[0] <= 2
+    assert "two-second time limit" in result["reason"]
+    assert budgets == [2.0, 1.5, 1.0, 0.5]
 
 
 @pytest.mark.parametrize(("missing", "prior_pass"), [([], False), ([EXTRA_SELECTOR], False), ([EXTRA_SELECTOR], True)])
@@ -783,6 +785,9 @@ def test_stray_malformed_receipt_warns_without_masking_pass(push_repo, capsys):
         (["git", "status"], "completed", [None], "indeterminate"),
         ([*PREFIX, "tests/has a space.py"], "completed", [shlex.join([*PREFIX, "tests/has a space.py"])], "ok"),
         ([*PREFIX, SELECTOR], "completed", ["SETTING=yes " + shlex.join([*PREFIX, SELECTOR])], "ok"),
+        (["env", *PREFIX, SELECTOR], "completed", [shlex.join([*PREFIX, SELECTOR])], "ok"),
+        ([*PREFIX, SELECTOR], "completed", [shlex.join(["env", *PREFIX, EXTRA_SELECTOR])], "indeterminate"),
+        (["git", "status"], "completed", [shlex.join(["env", *PREFIX, SELECTOR])], "indeterminate"),
     ],
 )
 def test_planned_command_agreement(push_repo, capsys, recorded, overall_status, plan, expected):
@@ -830,3 +835,117 @@ def test_writer_bookkeeping_failure_before_required_command_is_indeterminate(pus
     code, verdict = _single(push_repo, capsys)
     assert (code, verdict["status"]) == (3, "indeterminate")
     assert "planned commands and recorded results" in verdict["reason"]
+
+
+IDENTITY_WRAPPERS = [
+    ("SETTING=yes",),
+    ("env", "-i", "-u", "SETTING", "OTHER=yes"),
+    ("command", "-p", "--"),
+    ("nice", "-n", "5"),
+    ("nohup", "--"),
+    ("time", "-f", "%e"),
+    ("timeout", "-k", "1s", "10s"),
+    ("stdbuf", "-oL", "-e", "L"),
+]
+
+
+@pytest.mark.parametrize("selector", ["tests", "tests/test_core.py", "tests/test_core.py::test_one", "tests/a b.py"])
+@pytest.mark.parametrize(
+    ("classification", "prefix"),
+    [
+        *(("required", wrapper) for wrapper in IDENTITY_WRAPPERS),
+        *(
+            ("unrelated", command)
+            for command in [
+                ("ruff", "check", "."),
+                ("git", "status", "--short"),
+                ("npm", "run", "build"),
+                ("python", "-m", "mypy", "src"),
+                ("uv", "run", "ruff", "check"),
+                ("env", "ruff", "format"),
+                ("make", "test"),
+                ("pytest-cov", "--version"),
+            ]
+        ),
+        *(
+            ("ambiguous", command)
+            for command in [
+                ("bash", "-c", "pytest"),
+                ("sh", "-lc", "exec pytest"),
+                ("xargs", "-r", "pytest"),
+                ("sudo", "-n", "pytest"),
+                ("eval", "pytest"),
+                ("make", "check", "TEST=pytest"),
+                ("npm", "run", "pytest"),
+                ("uv", "run", "pytest"),
+            ]
+        ),
+    ],
+)
+def test_required_check_identity(classification, prefix, selector):
+    required = ("pytest", "-q")
+    argv = (*prefix, *required, selector) if classification == "required" else (*prefix, selector)
+    expected = {"required": (*required, selector), "unrelated": None, "ambiguous": "ambiguous"}
+    assert verify_push._required_identity(argv, required, windows=False) == expected[classification]
+
+
+@pytest.mark.parametrize(
+    ("program", "required", "windows", "matches"),
+    [
+        (r"C:\Tools\PYTEST.EXE", "pytest", True, True),
+        (r".\PYTEST.CmD", "pytest", True, True),
+        ("PYTEST.BAT", "pytest", True, True),
+        ("pytest.com", "pytest", True, False),
+        (r".\scripts\CHECK.CMD", "./scripts/check", True, True),
+        (r"C:\scripts\CHECK.CMD", "./scripts/check", True, False),
+        ("/tmp/pytest", "pytest", False, True),
+        ("./pytest", "pytest", False, True),
+        ("tools/pytest", "pytest", False, False),
+        ("PYTEST", "pytest", False, False),
+        ("pytest.exe", "pytest", False, False),
+        ("pytest", "./pytest", False, True),
+    ],
+)
+def test_required_check_identity_platform(program, required, windows, matches):
+    assert verify_push._required_identity((program, "-q"), (required, "-q"), windows=windows) == (
+        (required, "-q") if matches else None
+    )
+
+
+@pytest.mark.parametrize("depth", [2, 8, 9])
+def test_required_check_identity_bounds_nested_wrappers(depth):
+    argv = ("env", "SETTING=yes", "nice", "-n5", *("nohup",) * (depth - 2), "pytest", "-q")
+    assert verify_push._required_identity(argv, ("pytest", "-q"), windows=False) == (
+        ("pytest", "-q") if depth <= 8 else "ambiguous"
+    )
+
+
+@pytest.mark.parametrize("limit", ["length", "tokens", "commands"])
+def test_planned_command_limits_bound_parser_work(push_repo, capsys, monkeypatch, limit):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree)
+    path = _receipt(push_repo, tree, second=2)
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    planned = {
+        "length": ["x"],
+        "tokens": ["x " * 1025],
+        "commands": ["git status"] * 65,
+    }[limit]
+    receipt["planned_commands"] = planned
+    if limit == "length":
+        planned[0] *= 4 * 1024 * 1024 - len(json.dumps(receipt).encode("utf-8")) + 1
+    raw = json.dumps(receipt).encode("utf-8")
+    path.write_bytes(raw)
+    if limit == "length":
+        assert len(raw) == 4 * 1024 * 1024
+    parse = verify_push.shlex.split
+    calls = []
+
+    def count(text):
+        calls.append(text)
+        return parse(text)
+
+    monkeypatch.setattr(verify_push.shlex, "split", count)
+    assert _single(push_repo, capsys)[1]["status"] == "indeterminate"
+    assert calls == (planned if limit == "tokens" else [])

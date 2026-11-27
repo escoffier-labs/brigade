@@ -1,0 +1,2 @@
+- Use the same required-check identity for push gate passes, failures, and planned commands. Bound planned-command parsing.
+- Add a block-only push gate install option with a diff preview and backup for customised hooks.

@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import io
 import json
+import ntpath
 import os
 import re
 import shlex
 import stat
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from functools import cache, cached_property, partial
@@ -19,11 +20,11 @@ from pathlib import Path
 from queue import Empty, Queue
 from threading import Thread
 from time import monotonic
-from typing import Any
+from typing import Any, Literal
 
 from .. import config, localio, verify_manifest_git
 from ..verify_command import split_verify_command
-from . import push_gate_display, verify_gate
+from . import constants, push_gate_display, verify_gate
 from .verify_push_input import INPUT_BYTES, branch_updates
 
 _BUDGET_SECONDS = 2.0
@@ -36,6 +37,10 @@ _UNFINISHED = {"running", "busy", "canceled"}
 _EARLIEST = datetime.min.replace(tzinfo=UTC)
 _MASKED_PASS = "newer_required_failure"
 _UNCONFIRMED_PLAN = "planned_command_unconfirmed"
+_PLAN_COMMANDS = 64
+_PLAN_CHARS = 16 * 1024
+_PLAN_TOKENS = 1024
+_WRAPPER_DEPTH = 8
 _ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 
@@ -354,14 +359,10 @@ def _remedy(target: Path, policy: verify_gate._GatePolicy, receipt: dict[str, An
     stamp = receipt.get("gating")
     plan = stamp.get("plan") if isinstance(stamp, dict) else None
     argv = plan.get("run_argv") if isinstance(plan, dict) else None
-    prefix = list(policy.argv_prefix)
-    if (
-        isinstance(argv, list)
-        and argv[: len(prefix)] == prefix
-        and len(argv) > len(prefix)
-        and all(isinstance(arg, str) and arg for arg in argv)
-    ):
-        return render(argv)
+    if isinstance(argv, list) and all(isinstance(arg, str) and arg for arg in argv):
+        identity = _required_identity(argv, policy.argv_prefix, windows=os.name == "nt")
+        if isinstance(identity, tuple) and len(identity) > len(policy.argv_prefix):
+            return render(list(identity))
     command = render(verify_gate._suggested_argv(policy))
     if fresh:
         command += " --no-reuse"
@@ -429,9 +430,101 @@ def _tree_verdict(
     return _rejected(target, policy, receipt, reason, run_label)
 
 
+# Only options with a known command boundary are transparent. For example,
+# env's --split-string is not transparent because it parses its own command.
+_WRAPPER_FLAGS = {
+    "env": {"-", "-i", "--ignore-environment", "-v", "--debug"},
+    "command": {"-p"},
+    "nice": set(),
+    "nohup": set(),
+    "time": {"-p", "--portability", "-a", "--append", "-v", "--verbose", "-q", "--quiet"},
+    "timeout": {"--foreground", "--preserve-status", "-v", "--verbose"},
+    "stdbuf": set(),
+}
+_WRAPPER_VALUES = {
+    "env": {"-u", "--unset"},
+    "nice": {"-n", "--adjustment"},
+    "time": {"-f", "--format", "-o", "--output"},
+    "timeout": {"-k", "--kill-after", "-s", "--signal"},
+    "stdbuf": {"-i", "--input", "-o", "--output", "-e", "--error"},
+}
+_OPAQUE_LAUNCHERS = constants.SCANNER_HIGH_RISK_COMMANDS | {"xargs", "sudo", "eval", "make", "npm", "uv"}
+_DURATION = re.compile(r"(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)[smhd]?")
+
+
+def _unwrap(argv: tuple[str, ...], launcher: str) -> tuple[str, ...] | None:
+    index = 1
+    values = _WRAPPER_VALUES.get(launcher, set())
+    while index < len(argv):
+        arg = argv[index]
+        if arg == "--":
+            index += 1
+            break
+        if arg in _WRAPPER_FLAGS[launcher] or (launcher == "nice" and re.fullmatch(r"-[0-9]+", arg)):
+            index += 1
+        elif arg in values:
+            index += 2
+        elif (arg.startswith("--") and arg.partition("=")[0] in values and "=" in arg) or (
+            len(arg) > 2 and arg[:2] in values
+        ):
+            index += 1
+        elif arg.startswith("-"):
+            return None
+        else:
+            break
+    if launcher == "timeout":
+        if index >= len(argv) or not _DURATION.fullmatch(argv[index]):
+            return None
+        index += 1
+    if launcher == "env":
+        while index < len(argv) and _ENV_ASSIGNMENT.match(argv[index]):
+            index += 1
+    elif index < len(argv) and _ENV_ASSIGNMENT.match(argv[index]):
+        return None
+    return argv[index:]
+
+
+def _required_identity(
+    argv: Sequence[str], prefix: Sequence[str], *, windows: bool
+) -> tuple[str, ...] | Literal["ambiguous"] | None:
+    """Return canonical argv for a match, or the weaker evidence from an opaque launcher."""
+    if not prefix:
+        return None
+    normalize = partial(constants.normalize_policy_executable, windows=windows)
+    policy_program = normalize(prefix[0])
+    policy_bare = "/" not in prefix[0].replace("\\", "/") and not (windows and ntpath.splitdrive(prefix[0])[0])
+    start = next((i for i, arg in enumerate(argv) if not _ENV_ASSIGNMENT.match(arg)), len(argv))
+    args = tuple(argv[start:])
+    for depth in range(_WRAPPER_DEPTH + 1):
+        if not args:
+            return None
+        program = normalize(args[0])
+        directory, _, launcher = program.rpartition("/")
+        absolute = program.startswith("/") or (windows and bool(ntpath.splitdrive(program)[0]) and "/" in program)
+        if (program == policy_program or (policy_bare and absolute and launcher == policy_program)) and tuple(
+            prefix[1:]
+        ) == args[1 : len(prefix)]:
+            return (*prefix, *args[len(prefix) :])
+        if launcher in _WRAPPER_FLAGS and (not directory or absolute) and depth < _WRAPPER_DEPTH:
+            unwrapped = _unwrap(args, launcher)
+            if unwrapped is not None:
+                args = unwrapped
+                continue
+        if launcher in _WRAPPER_FLAGS or launcher in _OPAQUE_LAUNCHERS or re.fullmatch(r"python[0-9.]*|py", launcher):
+            name = policy_program.rsplit("/", 1)[-1]
+            suffix = r"(?:\.(?:exe|bat|cmd))?" if windows else ""
+            mention = re.compile(rf"(?<![\w.-]){re.escape(name)}{suffix}(?![\w.-])", re.IGNORECASE if windows else 0)
+            if name and any(mention.search(arg) for arg in args[1:]):
+                return "ambiguous"
+        return None
+    return None
+
+
 def _planned_argvs(command: str) -> set[tuple[str, ...]]:
     # The writer preserves raw --command text but uses POSIX shlex.join for
     # argv lists on every platform. The receipt does not identify the form.
+    if len(command) > _PLAN_CHARS or "\x00" in command:
+        return set()
     parsers = (shlex.split, split_verify_command) if os.name == "nt" else (shlex.split,)
     alternatives: set[tuple[str, ...]] = set()
     for parse in parsers:
@@ -439,36 +532,40 @@ def _planned_argvs(command: str) -> set[tuple[str, ...]]:
             argv = parse(command)
         except ValueError:
             continue
-        if not argv or not argv[0] or "\x00" in command:
-            continue
-        alternatives.add(tuple(argv))
-        # Raw commands may start with environment assignments removed from
-        # recorded argv. Pre-parsed argv lists do not strip these tokens.
-        start = next((index for index, arg in enumerate(argv) if not _ENV_ASSIGNMENT.match(arg)), len(argv))
-        if start < len(argv):
-            alternatives.add(tuple(argv[start:]))
+        if len(argv) > _PLAN_TOKENS:
+            return set()
+        if argv and argv[0]:
+            alternatives.add(tuple(argv))
     return alternatives
 
 
 def _required_plan_unconfirmed(
-    planned: list[str], commands: list[dict[str, Any]], prefix: list[str], deadline: float
+    planned: list[str],
+    commands: list[dict[str, Any]],
+    identities: list[tuple[str, ...] | Literal["ambiguous"] | None],
+    prefix: list[str],
+    deadline: float,
 ) -> bool:
-    required = tuple(prefix)
-    for command, record in zip_longest(planned, commands):
+    if len(planned) > _PLAN_COMMANDS:
+        return True
+    for command, record, recorded_identity in zip_longest(planned, commands, identities):
         _remaining(deadline)
-        recorded = tuple(record["argv"] or ()) if record is not None else ()
         if command is None:
-            if recorded[: len(required)] == required:
+            if recorded_identity is not None:
                 return True
             continue
         possible = _planned_argvs(command)
         if not possible:
             return True
-        if recorded[: len(required)] == required:
-            if recorded not in possible:
+        planned_identities = {_required_identity(argv, prefix, windows=os.name == "nt") for argv in possible}
+        if isinstance(recorded_identity, tuple):
+            if recorded_identity not in planned_identities:
                 return True
-        elif any(argv[: len(required)] == required for argv in possible):
+        elif any(isinstance(identity, tuple) for identity in planned_identities):
             return True
+        elif "ambiguous" in planned_identities or recorded_identity == "ambiguous":
+            if record is None or tuple(record["argv"] or ()) not in possible:
+                return True
     return False
 
 
@@ -478,23 +575,33 @@ def _classify_receipt(
     eligible, reason = verify_gate.evaluate_receipt(policy, receipt, tree, deadline=deadline)
     if reason == "policy_timeout":
         raise _Indeterminate(_TIMEOUT, "check_timeout")
-    required = [
-        command
-        for command in receipt["commands"]
-        if prefix and isinstance(command["argv"], list) and command["argv"][: len(prefix)] == prefix
-    ]
+    identities = []
+    required = []
+    ambiguous = False
+    for command in receipt["commands"]:
+        _remaining(deadline)
+        identity = _required_identity(command["argv"] or (), prefix, windows=os.name == "nt")
+        identities.append(identity)
+        if isinstance(identity, tuple):
+            required.append({**command, "argv": list(identity)})
+        elif identity == "ambiguous":
+            ambiguous |= _command_status(receipt, command) != "completed" or _failed_required_check(receipt, [command])
     statuses = {_command_status(receipt, command) for command in required}
     failed = _failed_required_check(receipt, required)
     plan_unconfirmed = (
         bool(prefix)
         and "planned_commands" in receipt
-        and _required_plan_unconfirmed(receipt["planned_commands"], receipt["commands"], prefix, deadline)
+        and _required_plan_unconfirmed(receipt["planned_commands"], receipt["commands"], identities, prefix, deadline)
     )
     uncertain = plan_unconfirmed or (
         bool(prefix)
         and not failed
         and (
-            receipt["status"] not in {"completed", "failed", "rejected", "timed_out"}
+            ambiguous
+            or (
+                "planned_commands" not in receipt
+                and receipt["status"] not in {"completed", "failed", "rejected", "timed_out"}
+            )
             or any(command["argv"] is None for command in receipt["commands"])
             or bool(statuses - {"completed", "rejected"})
         )
@@ -503,15 +610,18 @@ def _classify_receipt(
         eligible, reason = False, _UNCONFIRMED_PLAN
     elif "timed_out" in statuses:
         eligible, reason = False, "required_check_timed_out"
-    elif eligible and (failed or uncertain or "rejected" in statuses):
+    elif (eligible or reason == "not_the_required_check") and (failed or uncertain or "rejected" in statuses):
         eligible, reason = False, "not_completed"
-    elif eligible and prefix:
-        eligible, reason = verify_gate._required_check_verdict(receipt, policy)
+    elif prefix and (eligible or reason == "not_the_required_check"):
+        # The writer can reject on literal argv spelling. Recheck that verdict
+        # using canonical argv, retaining its tree, policy and coverage checks.
+        if required or eligible:
+            eligible, reason = verify_gate._required_check_verdict({**receipt, "commands": required}, policy)
     return _Candidate(
         receipt,
         _receipt_started_at(receipt),
         bool(required),
-        eligible,
+        eligible and not uncertain and not failed,
         failed or (bool(required) and not eligible and not uncertain),
         reason,
         uncertain,

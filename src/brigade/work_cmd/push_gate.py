@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import difflib
 import json
 import os
 import re
@@ -10,6 +11,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from importlib.resources import files
@@ -17,7 +19,7 @@ from pathlib import Path
 from shutil import which
 from typing import Any
 
-from .. import config
+from .. import config, localio
 from . import push_gate_display, push_gate_log
 
 _MODE_KEY = "brigade.pushGate"
@@ -285,6 +287,108 @@ def _install(repo: Repository, mode: str) -> None:
         raise ValueError(issue)
 
 
+_BLOCK_MARKER = re.compile(rb"^[ \t]*#[ \t]*(?:BEGIN|END)[ \t]+Brigade push gate[^\n]*", re.M)
+_BLOCK_BOUNDARY = re.compile(rb"# (BEGIN|END) Brigade push gate v([0-9]+)\r?")
+_CAPTURE_REFS = re.compile(rb'^STDIN_REFS="\$\(cat\)"(\r?\n)', re.M)
+
+
+def _block_replacement(raw: bytes, *, insert: bool, preview: bool) -> tuple[bytes, str]:
+    markers = list(_BLOCK_MARKER.finditer(raw))
+    if not markers:
+        if not (insert or preview):
+            raise ValueError("No Brigade block found. Pass --confirm-insert to insert it.")
+        captures = list(_CAPTURE_REFS.finditer(raw))
+        if len(captures) != 1:
+            raise ValueError('Insertion needs one STDIN_REFS="$(cat)" line to locate the gate.')
+        capture = captures[0]
+        start = end = capture.end()
+        newline = capture[1]
+        action = "Insert the Brigade push gate block"
+    else:
+        if len(markers) > 2:
+            raise ValueError("The hook contains multiple Brigade push gate block markers.")
+        boundaries = [_BLOCK_BOUNDARY.fullmatch(marker.group()) for marker in markers]
+        if (
+            len(markers) != 2
+            or (begin := boundaries[0]) is None
+            or (finish := boundaries[1]) is None
+            or begin[1] != b"BEGIN"
+            or finish[1] != b"END"
+            or begin[2] != finish[2]
+        ):
+            raise ValueError("The hook contains damaged Brigade push gate block markers.")
+        start, end = markers[0].start(), markers[1].end()
+        end += raw[end : end + 1] == b"\n"
+        newline = b"\r\n" if markers[0].group().endswith(b"\r") else b"\n"
+        action = f"Replace the Brigade push gate block v{begin[2].decode('ascii')}"
+    return raw[:start] + _snippet().replace(b"\n", newline) + raw[end:], action
+
+
+def _install_block(repo: Repository, *, insert: bool, preview: bool) -> None:
+    if preview:
+        print(_snippet().decode("ascii"), end="")
+    hooks = repo.hook.parent.resolve()
+    path = repo.hook.resolve(strict=True)
+    if not path.is_relative_to(hooks):
+        raise ValueError("The effective pre-push hook points outside the hooks directory.")
+    original = path.stat()
+    mode = stat.S_IMODE(original.st_mode)
+    if not stat.S_ISREG(original.st_mode):
+        raise ValueError("The effective pre-push hook must be a regular file.")
+    if not preview and (not mode & 0o222 or not os.access(path, os.W_OK)):
+        raise PermissionError("The effective pre-push hook is not writable.")
+    raw = path.read_bytes()
+    updated, action = _block_replacement(raw, insert=insert, preview=preview)
+    if raw == updated:
+        print("The Brigade push gate block is already current.")
+        return
+    print(push_gate_display.terminal_text(f"{action} in {repo.hook}."))
+    if preview:
+        diff = difflib.diff_bytes(
+            difflib.unified_diff,
+            raw.splitlines(keepends=True),
+            updated.splitlines(keepends=True),
+            b"pre-push (before)",
+            b"pre-push (after)",
+        )
+        for line in diff:
+            print(push_gate_display.terminal_text(line.rstrip(b"\r\n").decode("utf-8", errors="backslashreplace")))
+        return
+
+    stamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%S%fZ")
+    backup = repo.hook.with_name(f"{repo.hook.name}.{stamp}.bak")
+    fd, temp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
+    temporary = Path(temp_name)
+    try:
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(updated)
+            stream.flush()
+            os.fsync(stream.fileno())
+        temporary.chmod(mode)
+        localio.write_bytes_exclusive(backup, raw)
+        try:
+            backup.chmod(mode)
+            current = path.stat()
+            if (
+                repo.hook.resolve(strict=True) != path
+                or not os.path.samestat(original, current)
+                or current.st_mtime_ns != original.st_mtime_ns
+                or current.st_ctime_ns != original.st_ctime_ns
+                or current.st_mode != original.st_mode
+            ):
+                raise OSError("The pre-push hook changed during the update. Inspect it and retry.")
+            os.replace(temporary, path)
+        except OSError:
+            backup.unlink()
+            raise
+    finally:
+        temporary.unlink(missing_ok=True)
+
+    backup_arg = push_gate_display.shell_arg(backup.as_posix())
+    path_arg = push_gate_display.shell_arg(path.as_posix())
+    print(f"Restore the previous hook with: cp -p -- {backup_arg} {path_arg}")
+
+
 def _uninstall(repo: Repository) -> None:
     _write_mode(repo.root, None)
     if (
@@ -394,7 +498,12 @@ def register(parsers: Any) -> None:
         parser = commands.add_parser(name)
         parser.add_argument("--target", "-t", type=Path, default=Path("."))
         if name == "install":
-            parser.add_argument("--mode", default="warn", metavar="{warn,enforce,off}")
+            parser.add_argument("--mode", metavar="{warn,enforce,off}")
+            parser.add_argument("--block-only", action="store_true", help="Update only the Brigade block in the hook.")
+            parser.add_argument("--dry-run", action="store_true", help="Print the block and proposed diff.")
+            parser.add_argument(
+                "--confirm-insert", action="store_true", help="Allow insertion when the block is absent."
+            )
         if name in {"status", "report"}:
             parser.add_argument("--json", action="store_true")
         if name == "report":
@@ -407,9 +516,15 @@ def dispatch(args: argparse.Namespace) -> int:
         from .push_gate_hook import run
 
         return run(hook_v2=args.hook_v2)
-    if command == "install" and args.mode not in {"warn", "enforce", "off"}:
-        print("push gate: expected mode warn, enforce, or off", file=sys.stderr)
-        return 2
+    if command == "install":
+        if args.mode not in {None, "warn", "enforce", "off"}:
+            print("push gate: expected mode warn, enforce, or off", file=sys.stderr)
+            return 2
+        if (args.block_only and args.mode is not None) or (
+            not args.block_only and (args.dry_run or args.confirm_insert)
+        ):
+            print("push gate: use --dry-run and --confirm-insert with --block-only, without --mode", file=sys.stderr)
+            return 2
     try:
         repo = Repository.locate(args.target)
         if repo is None:
@@ -425,7 +540,10 @@ def dispatch(args: argparse.Namespace) -> int:
             info = status(repo)
             print(json.dumps(info) if args.json else describe(info))
         elif command == "install":
-            _install(repo, args.mode)
+            if args.block_only:
+                _install_block(repo, insert=args.confirm_insert, preview=args.dry_run)
+            else:
+                _install(repo, args.mode or "warn")
         elif command == "prune":
             return _prune(repo)
         else:

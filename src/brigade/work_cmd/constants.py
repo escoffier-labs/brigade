@@ -234,17 +234,38 @@ SCANNER_HIGH_RISK_COMMANDS = {
     "zsh",
 }
 
-# Use the standard Windows PATHEXT suffixes for consistent policy matching on every host.
-_POLICY_EXECUTABLE_SUFFIXES = {".com", ".exe", ".bat", ".cmd", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".wsh", ".msc"}
+# The command safety policy recognizes Windows spellings on every host.
+_WINDOWS_EXECUTABLE_SUFFIXES = {".exe", ".bat", ".cmd"}
+_POLICY_EXECUTABLE_SUFFIXES = _WINDOWS_EXECUTABLE_SUFFIXES | {
+    ".com",
+    ".vbs",
+    ".vbe",
+    ".js",
+    ".jse",
+    ".wsf",
+    ".wsh",
+    ".msc",
+}
 
 
-def normalize_policy_executable(argv0: str) -> str:
-    basename = PurePosixPath(argv0.replace("\\", "/")).name
-    _, basename = ntpath.splitdrive(basename)
-    # Reduce platform-equivalent spellings of a name to one policy name.
-    name = basename.partition(":")[0].rstrip(". ").casefold()
-    stem, dot, suffix = name.rpartition(".")
-    return stem if dot + suffix in _POLICY_EXECUTABLE_SUFFIXES else name
+def normalize_policy_executable(argv0: str, *, windows: bool | None = None) -> str:
+    """Normalize a policy name, retaining its directory when a platform is specified."""
+    spelling = argv0.replace("\\", "/")
+    directory, separator, basename = spelling.rpartition("/")
+    if windows is None:
+        directory = separator = ""
+        _, basename = ntpath.splitdrive(PurePosixPath(spelling).name)
+        basename = basename.partition(":")[0].rstrip(". ")
+        suffixes = _POLICY_EXECUTABLE_SUFFIXES
+    else:
+        suffixes = _WINDOWS_EXECUTABLE_SUFFIXES if windows else set()
+
+    if windows is not False:
+        basename = basename.casefold()
+    stem, dot, suffix = basename.rpartition(".")
+    if dot + suffix in suffixes:
+        basename = stem
+    return (directory + separator + basename).removeprefix("./")
 
 
 SCANNER_SHELL_META_RE = re.compile(r"[;&|`<>]|\$\(")
