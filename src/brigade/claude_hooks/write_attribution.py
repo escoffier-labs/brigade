@@ -65,15 +65,24 @@ def restore_pending(state: dict[str, Any], current: Mapping[str, Any], *, now: d
         key: [baseline, _clamp_start(stamp, now).isoformat()]
         for key, (baseline, stamp) in _pending_commands(current).items()
     }
+    raw_commands = current.get(_BASH_COMMANDS)
+    malformed_map = _BASH_COMMANDS in current and (
+        not isinstance(raw_commands, dict) or len(raw_commands) != len(commands)
+    )
+    has_baseline = isinstance(fingerprint, str) and bool(fingerprint)
+    malformed_legacy = (_BASH_FINGERPRINT in current or _BASH_STARTED in current) and not (
+        has_baseline and isinstance(started, str)
+    )
     for key in PENDING_BASH_KEYS:
         state.pop(key, None)
-    if isinstance(fingerprint, str) and fingerprint:
-        state[_BASH_FINGERPRINT] = fingerprint
-    if _BASH_FINGERPRINT in state or started is not None:
+    if has_baseline or started is not None:
+        state[_BASH_FINGERPRINT] = fingerprint if has_baseline else _rt()._UNAVAILABLE_FINGERPRINT
         state[_BASH_STARTED] = _clamp_start(started, now).isoformat()
-    if len(commands) > _MAX_PENDING_COMMANDS:
+    oversized = len(commands) > _MAX_PENDING_COMMANDS
+    if oversized:
         newest = sorted(commands, key=lambda key: commands[key][1], reverse=True)[:_MAX_PENDING_COMMANDS]
         commands = {key: commands[key] for key in newest}
+    if malformed_map or malformed_legacy or oversized:
         _stamp_write(state, now.isoformat())
     if commands:
         state[_BASH_COMMANDS] = commands

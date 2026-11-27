@@ -2423,6 +2423,7 @@ def _handle_event(
         unverified_handoff: Path | None = None
         context_target: Path | None = None
         closed_without_handoff = _closes_nothing_durable(payload)
+        missing_pending = object()
         for stop_target in _stop_targets(payload, session_id, task_epoch=task_epoch):
             if not stop_target.is_dir():
                 continue
@@ -2431,7 +2432,8 @@ def _handle_event(
                 stop_target, session_id, persisted_stop, task_epoch=task_epoch, fingerprint=event_fingerprint
             )
             if persisted_stop and any(
-                stop_state.get(key) != persisted_stop.get(key) for key in write_attribution.PENDING_BASH_KEYS
+                stop_state.get(key, missing_pending) != persisted_stop.get(key, missing_pending)
+                for key in write_attribution.PENDING_BASH_KEYS
             ):
                 _write_session_state_preserving_latch(stop_target, session_id, stop_state, log_target=stop_target)
             write_attribution.include_pending_at_stop(stop_state)
