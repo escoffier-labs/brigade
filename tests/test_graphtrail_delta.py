@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import sqlite3
 import subprocess
@@ -11,7 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from brigade import code_graph_background, code_graph_delta, component_bins, engine_paths
+from brigade import code_graph_background, code_graph_delta, component_bins, engine_paths, localio, work_cmd
 
 
 @pytest.mark.parametrize("signal_type", [KeyboardInterrupt, SystemExit])
@@ -129,6 +130,8 @@ def fake_digest_engine(monkeypatch, tmp_path):
     probe_timeouts = []
     after_backup_timeouts = []
     timed_snapshot = code_graph_delta._timed_snapshot
+    run_subprocess = subprocess.run
+    sync_results = iter(())
 
     def snapshot(db, path, timeout, timings, stage):
         snapshots.append(stage)
@@ -136,12 +139,17 @@ def fake_digest_engine(monkeypatch, tmp_path):
             after_backup_timeouts.append(timeout)
         return timed_snapshot(db, path, timeout, timings, stage)
 
-    def engine(argv, **kwargs):
+    def engine(argv, *args, **kwargs):
+        if not isinstance(argv, list) or argv[:1] != ["fake-engine"]:
+            return run_subprocess(argv, *args, **kwargs)
         db, command, *args = argv[2:]
         calls.append(command)
         if command == "digest":
             assert args == ["--json"]
-            assert Path(db) == (run_dir / code_graph_delta.SNAPSHOT_NAME if calls.count("digest") == 1 else live_db)
+            if calls.count("digest") == 1:
+                assert Path(db).name == code_graph_delta.SNAPSHOT_NAME
+            else:
+                assert Path(db) == live_db
             assert 0 < kwargs["timeout"] <= 0.75
             probe_timeouts.append(kwargs["timeout"])
             code, stdout = next(responses)
@@ -151,6 +159,8 @@ def fake_digest_engine(monkeypatch, tmp_path):
                 raise OSError("could not launch engine")
             if code == "decode":
                 raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid output")
+            if code == "unsupported":
+                return subprocess.CompletedProcess(argv, 2, "", "error: unrecognized subcommand 'digest'")
             return subprocess.CompletedProcess(argv, code, stdout, "")
         if command == "diff":
             assert (run_dir / code_graph_delta.SNAPSHOT_AFTER_NAME).is_file()
@@ -158,7 +168,10 @@ def fake_digest_engine(monkeypatch, tmp_path):
                 return subprocess.CompletedProcess(argv, 1, "", "missing snapshot")
             return subprocess.CompletedProcess(argv, 0, '{"summary":{"changed_nodes":1}}', "")
         assert command == "sync"
-        return subprocess.CompletedProcess(argv, 0, "", "")
+        code = next(sync_results, 0)
+        if code == "timeout":
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        return subprocess.CompletedProcess(argv, code, "", "")
 
     monkeypatch.setattr(code_graph_delta, "_graphtrail_bin", lambda: "fake-engine")
     monkeypatch.setattr(code_graph_delta, "_timed_snapshot", snapshot)
@@ -166,23 +179,47 @@ def fake_digest_engine(monkeypatch, tmp_path):
     monkeypatch.setattr(subprocess, "run", engine)
     monkeypatch.delenv(engine_paths.CODE_GRAPH_DB_ENV, raising=False)
 
-    def capture(*digest_responses, snapshot_timeout=None, remove_baseline=False):
+    def respond(*digest_responses):
         nonlocal responses
         responses = iter(digest_responses)
-        before = code_graph_delta.capture_before(
-            tmp_path, run_dir, snapshot_timeout=snapshot_timeout, digest_shortcut=True
-        )
+
+    def capture(
+        *digest_responses,
+        snapshot_timeout=None,
+        remove_baseline=False,
+        change_baseline=False,
+        before_sync=0,
+        after_sync=0,
+        sync_timeout=None,
+        **before_options,
+    ):
+        nonlocal sync_results
+        respond(*digest_responses)
+        sync_results = iter((before_sync, after_sync))
+        before = code_graph_delta.capture_before(tmp_path, run_dir, snapshot_timeout=snapshot_timeout, **before_options)
         if remove_baseline:
             (run_dir / code_graph_delta.SNAPSHOT_NAME).unlink()
-        delta = code_graph_delta.capture_after_and_diff(tmp_path, run_dir, before)
+        if change_baseline:
+            with closing(sqlite3.connect(run_dir / code_graph_delta.SNAPSHOT_NAME)) as db, db:
+                # Changing an excluded table keeps the content digest equal.
+                db.execute("CREATE TABLE meta (value text)")
+        delta = code_graph_delta.capture_after_and_diff(tmp_path, run_dir, before, sync_timeout=sync_timeout)
         sidecar = json.loads((run_dir / code_graph_delta.SIDECAR_NAME).read_text(encoding="utf-8"))
         return delta, sidecar, calls, snapshots
 
-    return SimpleNamespace(capture=capture, probe_timeouts=probe_timeouts, after_backup_timeouts=after_backup_timeouts)
+    return SimpleNamespace(
+        capture=capture,
+        respond=respond,
+        calls=calls,
+        probe_timeouts=probe_timeouts,
+        after_backup_timeouts=after_backup_timeouts,
+    )
 
 
 def test_equal_digest_skips_after_backup_and_diff(fake_digest_engine):
-    receipt, sidecar, calls, snapshots = fake_digest_engine.capture((0, _DIGEST_JSON), (0, _DIGEST_JSON))
+    receipt, sidecar, calls, snapshots = fake_digest_engine.capture(
+        (0, _DIGEST_JSON), (0, _DIGEST_JSON), digest_shortcut=True
+    )
 
     assert calls == ["sync", "digest", "sync", "digest"]
     assert snapshots == ["before"]
@@ -193,6 +230,14 @@ def test_equal_digest_skips_after_backup_and_diff(fake_digest_engine):
         assert delta["raw_counts"]["changed_nodes"] == delta["changed_symbol_count"] == delta["edge_churn"] == 0
         assert delta["code_reference_nodes"] == []
         assert delta["commands"]["diff"] is None
+        assert delta["digest_probe"].keys() == {"before", "after"}
+        for probe in delta["digest_probe"].values():
+            assert {key: value for key, value in probe.items() if key != "duration_seconds"} == {
+                "status": "ok",
+                "format_version": 2,
+                "schema_version": 9,
+            }
+            assert isinstance(probe["duration_seconds"], float)
     assert sidecar["attestations"]["before_snapshot_sha256"]
     assert sidecar["attestations"]["after_snapshot_sha256"] is None
     assert sidecar["attestations"]["diff_stdout_sha256"] is None
@@ -200,34 +245,50 @@ def test_equal_digest_skips_after_backup_and_diff(fake_digest_engine):
 
 
 @pytest.mark.parametrize(
-    "before,after",
+    "before,after,expected_status",
     [
-        pytest.param((0, _DIGEST_JSON), (0, json.dumps({**_DIGEST, "sha256": "b" * 64})), id="different-content"),
-        pytest.param((2, ""), None, id="unsupported-command"),
-        pytest.param((7, _DIGEST_JSON), None, id="nonzero-exit-with-valid-output"),
-        pytest.param(("timeout", ""), None, id="timeout-with-valid-output"),
-        pytest.param(("spawn", ""), None, id="launch-error"),
-        pytest.param(("decode", ""), None, id="encoding-error"),
-        pytest.param((0, "{"), None, id="malformed-json"),
-        pytest.param((0, "[]"), None, id="non-object"),
-        pytest.param((0, '{"schema_version":9,"sha256":"abc"}'), None, id="missing-format"),
-        pytest.param((0, '{"format_version":2,"sha256":"abc"}'), None, id="missing-schema"),
-        pytest.param((0, '{"format_version":2,"schema_version":9}'), None, id="missing-sha"),
-        pytest.param((0, json.dumps({**_DIGEST, "format_version": 3})), None, id="unknown-format"),
-        pytest.param((0, json.dumps({**_DIGEST, "format_version": 2.0})), None, id="noninteger-format"),
-        pytest.param((0, json.dumps({**_DIGEST, "schema_version": 10})), None, id="unexpected-baseline-schema"),
-        pytest.param((0, json.dumps({**_DIGEST, "schema_version": "9"})), None, id="noninteger-schema"),
-        pytest.param((0, json.dumps({**_DIGEST, "sha256": "g" * 64})), None, id="nonhex-sha"),
-        pytest.param((0, json.dumps({**_DIGEST, "sha256": "a" * 63})), None, id="short-sha"),
-        pytest.param((0, json.dumps({**_DIGEST, "sha256": 123})), None, id="nonstring-sha"),
-        pytest.param((0, _DIGEST_JSON[:-1] + ', "schema_version": 9}'), None, id="duplicate-field"),
-        pytest.param((0, _DIGEST_JSON), (0, json.dumps({**_DIGEST, "schema_version": 10})), id="schema-changed"),
-        pytest.param((0, _DIGEST_JSON), (7, _DIGEST_JSON), id="after-probe-fails"),
-        pytest.param((0, _DIGEST_JSON), ("timeout", ""), id="after-probe-times-out"),
+        pytest.param((0, _DIGEST_JSON), (0, json.dumps({**_DIGEST, "sha256": "b" * 64})), "ok", id="different-content"),
+        pytest.param(("unsupported", ""), None, "unsupported", id="unsupported-command"),
+        pytest.param((7, _DIGEST_JSON), None, "error", id="nonzero-exit-with-valid-output"),
+        pytest.param(("timeout", ""), None, "timeout", id="timeout-with-valid-output"),
+        pytest.param(("spawn", ""), None, "error", id="launch-error"),
+        pytest.param(("decode", ""), None, "error", id="encoding-error"),
+        pytest.param((0, "{"), None, "malformed", id="malformed-json"),
+        pytest.param((0, "[]"), None, "malformed", id="non-object"),
+        pytest.param((0, '{"schema_version":9,"sha256":"abc"}'), None, "malformed", id="missing-format"),
+        pytest.param((0, '{"format_version":2,"sha256":"abc"}'), None, "malformed", id="missing-schema"),
+        pytest.param((0, '{"format_version":2,"schema_version":9}'), None, "malformed", id="missing-sha"),
+        pytest.param(
+            (0, json.dumps({**_DIGEST, "format_version": 3})), None, "format_version_unexpected", id="unknown-format"
+        ),
+        pytest.param((0, json.dumps({**_DIGEST, "format_version": 2.0})), None, "malformed", id="noninteger-format"),
+        pytest.param(
+            (0, json.dumps({**_DIGEST, "schema_version": 10})),
+            None,
+            "schema_version_unexpected",
+            id="unexpected-baseline-schema",
+        ),
+        pytest.param((0, json.dumps({**_DIGEST, "schema_version": "9"})), None, "malformed", id="noninteger-schema"),
+        pytest.param((0, json.dumps({**_DIGEST, "sha256": "g" * 64})), None, "malformed", id="nonhex-sha"),
+        pytest.param((0, json.dumps({**_DIGEST, "sha256": "a" * 63})), None, "malformed", id="short-sha"),
+        pytest.param((0, json.dumps({**_DIGEST, "sha256": 123})), None, "malformed", id="nonstring-sha"),
+        pytest.param((0, _DIGEST_JSON[:-1] + ', "schema_version": 9}'), None, "malformed", id="duplicate-field"),
+        pytest.param(
+            (0, _DIGEST_JSON),
+            (0, json.dumps({**_DIGEST, "schema_version": 10})),
+            "schema_version_unexpected",
+            id="schema-changed",
+        ),
+        pytest.param((0, _DIGEST_JSON), (7, _DIGEST_JSON), "error", id="after-probe-fails"),
+        pytest.param((0, _DIGEST_JSON), ("timeout", ""), "timeout", id="after-probe-times-out"),
+        pytest.param((0, json.dumps({**_DIGEST, "format_version": True})), None, "malformed", id="boolean-format"),
+        pytest.param((0, json.dumps({**_DIGEST, "schema_version": True})), None, "malformed", id="boolean-schema"),
     ],
 )
-def test_digest_fallback_uses_after_backup_and_diff(fake_digest_engine, before, after):
-    receipt, sidecar, calls, snapshots = fake_digest_engine.capture(before, *([after] if after is not None else []))
+def test_digest_fallback_uses_after_backup_and_diff(fake_digest_engine, before, after, expected_status):
+    receipt, sidecar, calls, snapshots = fake_digest_engine.capture(
+        before, *([after] if after is not None else []), digest_shortcut=True
+    )
 
     assert calls == ["sync", "digest", "sync"] + (["digest"] if after is not None else []) + ["diff"]
     assert snapshots == ["before", "after"]
@@ -236,17 +297,34 @@ def test_digest_fallback_uses_after_backup_and_diff(fake_digest_engine, before, 
     assert receipt["raw_counts"] == {"changed_nodes": 1}
     assert sidecar["attestations"]["after_snapshot_sha256"]
     assert sidecar["attestations"]["diff_stdout_sha256"]
+    probes = sidecar["digest_probe"]
+    assert probes.keys() == ({"before", "after"} if after is not None else {"before"})
+    probe = probes["after" if after is not None else "before"]
+    assert probe["status"] == expected_status
+    assert isinstance(probe["duration_seconds"], float)
+    assert probe.keys() <= {"status", "duration_seconds", "format_version", "schema_version"}
+    if expected_status.endswith("_unexpected"):
+        key = expected_status.removesuffix("_unexpected")
+        assert probe[key] == (3 if key == "format_version" else 10)
 
 
 def test_digest_fallback_preserves_diff_failure_when_baseline_disappears(fake_digest_engine):
-    receipt, _, calls, snapshots = fake_digest_engine.capture((0, _DIGEST_JSON), remove_baseline=True)
+    receipt, _, calls, snapshots = fake_digest_engine.capture(
+        (0, _DIGEST_JSON), remove_baseline=True, digest_shortcut=True
+    )
 
     assert calls == ["sync", "digest", "sync", "diff"]
     assert snapshots == ["before", "after"]
     assert receipt["status"] == "diff_failed"
 
 
-def test_digest_probes_share_spare_baseline_capture_budget(fake_digest_engine, monkeypatch):
+@pytest.mark.parametrize(
+    "budget,before_elapsed,expected_timeouts",
+    [(0.625, 0.375, [0.625, 0.25]), (10.0, 0.875, [0.75, 0.625]), (0.625, 0.625, [0.625])],
+)
+def test_digest_probes_share_spare_baseline_capture_budget(
+    fake_digest_engine, monkeypatch, budget, before_elapsed, expected_timeouts
+):
     now = 0.0
     real_run = code_graph_delta._run_graphtrail
 
@@ -254,15 +332,23 @@ def test_digest_probes_share_spare_baseline_capture_budget(fake_digest_engine, m
         nonlocal now
         result = real_run(binary, db, command, *args, **kwargs)
         if command == "digest" and db.name == code_graph_delta.SNAPSHOT_NAME:
-            now += 0.375
+            now += before_elapsed
         return result
 
     monkeypatch.setattr(code_graph_delta, "time", SimpleNamespace(monotonic=lambda: now))
     monkeypatch.setattr(code_graph_delta, "_run_graphtrail", run)
 
-    fake_digest_engine.capture((0, _DIGEST_JSON), (3, ""), snapshot_timeout=0.625)
+    receipt, sidecar, calls, snapshots = fake_digest_engine.capture(
+        (0, _DIGEST_JSON), (3, ""), snapshot_timeout=budget, digest_shortcut=True
+    )
 
-    assert fake_digest_engine.probe_timeouts == [0.625, 0.25]
+    assert fake_digest_engine.probe_timeouts == expected_timeouts
+    assert sidecar["digest_probe"]["before"]["duration_seconds"] == before_elapsed
+    after_timeout = expected_timeouts[1] if len(expected_timeouts) == 2 else 0
+    assert before_elapsed + after_timeout <= min(budget, 1.5)
+    assert calls.count("digest") == len(expected_timeouts)
+    assert snapshots == ["before", "after"]
+    assert receipt["status"] == "ok"
     assert fake_digest_engine.after_backup_timeouts == [10.0]
 
 
@@ -272,15 +358,117 @@ def test_background_only_graph_capture_does_not_probe_digest(fake_digest_engine,
     monkeypatch.setattr(code_graph_background, "index_ready", lambda db: True)
     monkeypatch.setattr(code_graph_background, "last_engine_lock_refusal", lambda *args: None)
 
-    receipt, _, calls, snapshots = fake_digest_engine.capture()
+    receipt, _, calls, snapshots = fake_digest_engine.capture(digest_shortcut=True)
 
     assert calls == ["diff"]
     assert snapshots == ["before", "after"]
     assert receipt["stale_graph_used"] is True
 
 
-def test_equal_digest_with_native_engine(monkeypatch, tmp_path):
+def test_digest_versions_match_native_source():
+    engine = Path(__file__).resolve().parents[1] / "engines" / "code-graph" / "src"
+    for name, source, expected in (
+        ("FORMAT_VERSION", engine / "query" / "digest.rs", code_graph_delta._DIGEST_FORMAT_VERSION),
+        ("SCHEMA_VERSION", engine / "store" / "schema.rs", code_graph_delta._DIGEST_SCHEMA_VERSION),
+    ):
+        definition = re.search(rf"\bconst {name}: u32 = (\d+);", source.read_text(encoding="utf-8"))
+        assert definition, f"Cannot find {name} in {source.name}"
+        assert int(definition[1]) == expected, f"{source.name} {name} changed. Update the Python digest contract."
 
+
+def test_verify_run_records_equal_digest_sidecar_and_summary(fake_digest_engine, monkeypatch, tmp_path, capsys):
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True, timeout=10)
+    monkeypatch.setattr(code_graph_background, "index_ready", lambda db: True)
+    monkeypatch.setattr(code_graph_background, "status_or_start", lambda *args, **kwargs: None)
+    fake_digest_engine.respond((0, _DIGEST_JSON), (0, _DIGEST_JSON))
+
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True, reuse=False) == 0
+
+    receipt = json.loads(capsys.readouterr().out)
+    delta = receipt["code_graph_delta"]
+    sidecar_path = Path(delta["sidecar_path"])
+    stored = json.loads((sidecar_path.parent / "receipt.json").read_text(encoding="utf-8"))
+    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    assert stored["code_graph_delta"] == delta
+    assert delta["delta_source"] == sidecar["delta_source"] == "digest_equal"
+    assert delta["digest"] == sidecar["digest"] == _DIGEST
+    assert (
+        receipt["digests"]["logs"]["graph-delta.json"] == delta["sidecar_sha256"] == localio.file_sha256(sidecar_path)
+    )
+    summary = "code graph delta: ok changed_symbols=0 edge_churn=0"
+    assert delta["summary"].startswith(summary)
+    assert f"- Code graph delta: {delta['summary']}" in (sidecar_path.parent / "summary.md").read_text(encoding="utf-8")
+    assert fake_digest_engine.calls == ["sync", "digest", "sync", "digest"]
+
+
+def test_digest_shortcut_disabled_by_default(fake_digest_engine):
+    receipt, sidecar, calls, snapshots = fake_digest_engine.capture()
+
+    assert calls == ["sync", "sync", "diff"]
+    assert snapshots == ["before", "after"]
+    assert receipt["status"] == "ok"
+    assert "digest_probe" not in sidecar
+
+
+def test_baseline_snapshot_exhausts_digest_budget(fake_digest_engine, monkeypatch):
+    take_snapshot = code_graph_delta._timed_snapshot
+
+    def snapshot(db, path, timeout, timings, stage):
+        sha256 = take_snapshot(db, path, timeout, timings, stage)
+        if stage == "before":
+            timings[stage]["duration_seconds"] = timeout
+        return sha256
+
+    monkeypatch.setattr(code_graph_delta, "_timed_snapshot", snapshot)
+    receipt, sidecar, calls, snapshots = fake_digest_engine.capture(digest_shortcut=True)
+
+    assert calls == ["sync", "sync", "diff"]
+    assert snapshots == ["before", "after"]
+    assert receipt["status"] == "ok"
+    assert "digest_probe" not in sidecar
+
+
+def test_modified_baseline_forces_diff_even_with_equal_engine_digests(fake_digest_engine):
+    receipt, sidecar, calls, snapshots = fake_digest_engine.capture(
+        (0, _DIGEST_JSON), (0, _DIGEST_JSON), change_baseline=True, digest_shortcut=True
+    )
+
+    assert calls == ["sync", "digest", "sync", "diff"]
+    assert snapshots == ["before", "after"]
+    assert receipt["raw_counts"] == {"changed_nodes": 1}
+    assert sidecar["digest_probe"].keys() == {"before"}
+
+
+@pytest.mark.parametrize("failure", [7, "timeout"])
+def test_after_sync_failure_prevents_after_digest(fake_digest_engine, monkeypatch, failure):
+    monkeypatch.setattr(code_graph_background, "status_or_start", lambda *args, **kwargs: None)
+    monkeypatch.setattr(code_graph_background, "index_ready", lambda db: True)
+    receipt, sidecar, calls, snapshots = fake_digest_engine.capture(
+        (0, _DIGEST_JSON), after_sync=failure, sync_timeout=0.5, digest_shortcut=True
+    )
+
+    assert sidecar["digest_probe"].keys() == {"before"}
+    if failure == "timeout":
+        assert calls == ["sync", "digest", "sync", "diff"]
+        assert snapshots == ["before", "after"]
+        assert receipt["stale_after"] is True
+    else:
+        assert calls == ["sync", "digest", "sync"]
+        assert snapshots == ["before"]
+        assert receipt["status"] == "sync_failed"
+
+
+def test_posix_stale_baseline_prevents_digest(fake_digest_engine):
+    receipt, sidecar, calls, snapshots = fake_digest_engine.capture(before_sync="timeout", digest_shortcut=True)
+
+    assert calls == ["sync", "sync", "diff"]
+    assert snapshots == ["before", "after"]
+    assert receipt["stale_graph_used"] is True
+    assert "digest_probe" not in sidecar
+
+
+@pytest.fixture
+def native_digest_baseline(monkeypatch, tmp_path):
     if not code_graph_background.may_run_killable_foreground_sync():
         pytest.skip("requires foreground graph capture")
     engine = shutil.which("brigade-code-graph")
@@ -296,8 +484,33 @@ def test_equal_digest_with_native_engine(monkeypatch, tmp_path):
     run_dir = tmp_path / ".brigade" / "receipt"
 
     before = code_graph_delta.capture_before(tmp_path, run_dir, digest_shortcut=True)
+    probe = before.get("digest_probe", {}).get("before", {})
+    if (schema_version := probe.get("schema_version")) is not None and schema_version != (
+        code_graph_delta._DIGEST_SCHEMA_VERSION
+    ):
+        pytest.skip(
+            f"native engine reports schema {schema_version}, expected {code_graph_delta._DIGEST_SCHEMA_VERSION}"
+        )
+    assert probe.get("status") == "ok"
+    return run_dir, before
+
+
+def test_equal_digest_with_native_engine(tmp_path, native_digest_baseline):
+    run_dir, before = native_digest_baseline
     receipt = code_graph_delta.capture_after_and_diff(tmp_path, run_dir, before)
 
     assert receipt["delta_source"] == "digest_equal"
-    assert receipt["digest"]["schema_version"] == 9
+    assert receipt["digest"]["schema_version"] == code_graph_delta._DIGEST_SCHEMA_VERSION
     assert set(receipt["snapshots"]) == {"before"}
+
+
+def test_digest_mismatch_with_native_engine_records_nonempty_delta(tmp_path, native_digest_baseline):
+    run_dir, before = native_digest_baseline
+    (tmp_path / "source.py").write_text("def first():\n    pass\n\ndef second():\n    pass\n", encoding="utf-8")
+
+    receipt = code_graph_delta.capture_after_and_diff(tmp_path, run_dir, before)
+
+    assert "delta_source" not in receipt
+    assert receipt["digest_probe"]["after"]["status"] == "ok"
+    assert receipt["raw_counts"]["added_nodes"] >= 1
+    assert set(receipt["snapshots"]) == {"before", "after"}

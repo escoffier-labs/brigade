@@ -1172,6 +1172,7 @@ def _compact_code_graph_delta(receipt: dict) -> dict | None:
             "edge_churn",
             "raw_counts",
             "stale_graph_used",
+            "delta_source",
         )
         if key in delta
     }

@@ -471,6 +471,7 @@ def _snapshot_hash_from_delta(payload: dict[str, Any]) -> str:
             return value.strip()
     attestations = payload.get("attestations")
     if isinstance(attestations, dict):
+        # Digest equality skips the after snapshot, so use the before file hash in that case.
         for key in ("after_snapshot_sha256", "before_snapshot_sha256", "diff_stdout_sha256"):
             value = attestations.get(key)
             if isinstance(value, str) and value.strip():

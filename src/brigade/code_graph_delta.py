@@ -23,7 +23,9 @@ SIDECAR_NAME = "graph-delta.json"
 CHANGED_SYMBOL_LIMIT = 20
 CODE_REFERENCE_NODE_LIMIT = 20
 _DIGEST_TIMEOUT_SECONDS = 0.75
+# engines/code-graph/src/query/digest.rs::FORMAT_VERSION
 _DIGEST_FORMAT_VERSION = 2
+# engines/code-graph/src/store/schema.rs::SCHEMA_VERSION
 _DIGEST_SCHEMA_VERSION = 9
 LINE_KEYS = {
     "line",
@@ -157,11 +159,14 @@ def capture_before(
             remaining = backup_budget - details["snapshots"]["before"]["duration_seconds"]
             if remaining > 0 and (signature := _snapshot_signature(snapshot_path)) is not None:
                 # Digest the exact backup that a fallback diff would use.
-                started = time.monotonic()
-                before_digest = _read_graph_digest(binary, snapshot_path, target, timeout=remaining)
+                probe: dict[str, Any] = {}
+                details["digest_probe"] = {"before": probe}
+                before_digest = _read_graph_digest(binary, snapshot_path, target, probe, timeout=remaining)
                 if before_digest is not None:
                     details["_before_digest"] = _BaselineDigest(
-                        before_digest, signature, remaining - (time.monotonic() - started)
+                        before_digest,
+                        signature,
+                        min(remaining, 2 * _DIGEST_TIMEOUT_SECONDS) - probe["duration_seconds"],
                     )
         return {
             **details,
@@ -184,13 +189,23 @@ def _snapshot_signature(path: Path) -> tuple[int, ...] | None:
     return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
 
 
-def _read_graph_digest(binary: str, db: Path, target: Path, *, timeout: float) -> dict[str, Any] | None:
+def _read_graph_digest(
+    binary: str, db: Path, target: Path, probe: dict[str, Any], *, timeout: float
+) -> dict[str, Any] | None:
+    started = time.monotonic()
+    probe["status"] = "error"
     try:
         result = _run_graphtrail(
             binary, db, "digest", timeout=min(timeout, _DIGEST_TIMEOUT_SECONDS), json_output=True, cwd=target
         )
-        if result["returncode"] != 0 or result.get("timed_out"):
+        if result.get("timed_out"):
+            probe["status"] = "timeout"
             return None
+        if result["returncode"] != 0:
+            if "unrecognized subcommand 'digest'" in result["stderr"]:
+                probe["status"] = "unsupported"
+            return None
+        probe["status"] = "malformed"
         # Retain object pairs so duplicate fields cannot be silently overwritten.
         fields = json.loads(result["stdout"], object_pairs_hook=tuple)
         if not isinstance(fields, tuple) or len(fields) != 3:
@@ -199,16 +214,27 @@ def _read_graph_digest(binary: str, db: Path, target: Path, *, timeout: float) -
         format_version = digest.get("format_version")
         schema_version = digest.get("schema_version")
         sha256 = digest.get("sha256")
-        if type(format_version) is not int or format_version != _DIGEST_FORMAT_VERSION:
-            return None
-        if type(schema_version) is not int or schema_version != _DIGEST_SCHEMA_VERSION:
+        if type(format_version) is int:
+            probe["format_version"] = format_version
+        if type(schema_version) is int:
+            probe["schema_version"] = schema_version
+        if type(format_version) is not int or type(schema_version) is not int:
             return None
         if not isinstance(sha256, str) or re.fullmatch(r"[0-9a-fA-F]{64}", sha256) is None:
             return None
+        if format_version != _DIGEST_FORMAT_VERSION:
+            probe["status"] = "format_version_unexpected"
+            return None
+        if schema_version != _DIGEST_SCHEMA_VERSION:
+            probe["status"] = "schema_version_unexpected"
+            return None
+        probe["status"] = "ok"
         return digest
     except Exception:
         # This is an optional probe. The existing snapshot and diff report failures.
         return None
+    finally:
+        probe["duration_seconds"] = time.monotonic() - started
 
 
 def _timed_snapshot(db: Path, path: Path, timeout: float, timings: dict[str, Any], stage: str) -> str:
@@ -347,7 +373,9 @@ def capture_after_and_diff(
             and _snapshot_signature(snapshot_path) == baseline.snapshot_signature
         ):
             # Both probes use spare baseline capture time. The fallback keeps its original timeouts.
-            after_digest = _read_graph_digest(binary, db_path, target, timeout=baseline.remaining_seconds)
+            probe: dict[str, Any] = {}
+            before["digest_probe"]["after"] = probe
+            after_digest = _read_graph_digest(binary, db_path, target, probe, timeout=baseline.remaining_seconds)
             if (
                 after_digest is not None
                 and after_digest == baseline.digest
@@ -449,6 +477,8 @@ def capture_after_and_diff(
         )
     except Exception as exc:
         payload = _status("capture_failed", f"code graph delta unavailable: {type(exc).__name__}: {exc}")
+        if isinstance(before, dict) and "digest_probe" in before:
+            payload["digest_probe"] = before["digest_probe"]
         try:
             return _write_and_compact(run_dir, payload)
         except Exception:
@@ -659,6 +689,7 @@ def _success_payload(
         "before_snapshot_path": str(snapshot_path),
         "db_path": str(db_path),
         "commands": {"before_sync": before.get("sync"), "after_sync": after_sync, "diff": diff},
+        # Footprints use the after file hash, or the before file hash on a digest match.
         "attestations": {
             "before_snapshot_sha256": before.get("before_snapshot_sha256"),
             "after_snapshot_sha256": after_snapshot_sha256,
@@ -740,6 +771,7 @@ def _capture_metadata(payload: dict[str, Any]) -> dict[str, Any]:
             "stale_after",
             "delta_source",
             "digest",
+            "digest_probe",
         )
         if payload.get(key) is not None
     }

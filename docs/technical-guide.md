@@ -1832,7 +1832,7 @@ When `.brigade/code-graph/code-graph.db` is present, `brigade run` can attach bo
 
 Work verification and non-read-only agent runs can also record a brigade-code-graph delta receipt. Brigade syncs the graph, takes a SQLite backup of `.brigade/code-graph/code-graph.db`, runs the work, syncs again, then normally takes an after snapshot and diffs the two snapshots. It writes `graph-delta.json` and stores a compact `code_graph_delta` in the receipt or run artifacts.
 
-When work verification completes both foreground syncs, Brigade can ask the engine for a content digest of the before snapshot and the live after state. Matching, supported digests let Brigade skip the after snapshot and diff. The receipt and sidecar record `delta_source: "digest_equal"` and the digest's format version, schema version, and SHA-256. Missing or unusable digests fall back to the snapshot and diff. The digest covers nine graph content tables and excludes the full-text search index and the `meta` table. Digest equality describes graph content. The SQLite files can differ at the byte level.
+When work verification completes both foreground syncs, Brigade can ask the engine for a content digest of the before snapshot and the live after state. Matching, supported digests let Brigade skip the after snapshot and diff. The receipt and sidecar record `delta_source: "digest_equal"` and the digest's format version, schema version, and SHA-256. The optional `digest_probe` object records the status, duration in seconds, and any parsed integer versions for each attempted probe under `before` and `after`. Statuses distinguish an unsupported command, unexpected versions, malformed output, a timeout, other errors, and success. Missing or unusable digests fall back to the snapshot and diff. The digest covers nine graph content tables and excludes the full-text search index and the `meta` table. Digest equality describes graph content. The SQLite files can differ at the byte level.
 
 Delta capture is fail-open. Missing brigade-code-graph, sync failures, malformed diff JSON, and snapshot problems are recorded as status data instead of failing the run. `--no-code-graph`, read-only runs, and dry runs record skip statuses and do not run brigade-code-graph sync.
 
@@ -1843,7 +1843,7 @@ brigade outcome capture <artifact-id> --run-id <verify-run-id|latest>
 brigade outcome capture <artifact-id> --run-receipt <run-id|latest>
 ```
 
-`--run-id` reads work verification receipts under `.brigade/work/verify-runs/`. `--run-receipt` reads agent run receipts under `.brigade/runs/<run-id>/run.json`. The flags are mutually exclusive. Both sources store the same compact `code_graph_delta` fields in the outcome ledger: `status`, `summary`, `changed_symbol_count`, `edge_churn`, and `raw_counts`.
+`--run-id` reads work verification receipts under `.brigade/work/verify-runs/`. `--run-receipt` reads agent run receipts under `.brigade/runs/<run-id>/run.json`. The flags are mutually exclusive. Both sources store the same compact `code_graph_delta` fields in the outcome ledger: `status`, `summary`, `changed_symbol_count`, `edge_churn`, `raw_counts`, and optional `stale_graph_used` and `delta_source` fields.
 
 Run-receipt signal mapping is fixed and local: `status: ok` records `+1`, `status: error` and `status: failed` record `-1`, and `dry_run: true` or `read_only: true` records neutral `0`. The evidence reference points at the `run.json` file that supplied the signal and delta. Verification receipts keep their existing mapping: completed is positive, failed or timed out is negative, and rejected or unknown statuses are neutral through the same outcome rule table.
 
@@ -1853,7 +1853,7 @@ Run receipts usually carry the useful code delta because a non-read-only `brigad
 
 For those counters, a delta is changing only when `status` is `ok` and `changed_symbol_count` or `edge_churn` is greater than zero. A delta is no-op only when `status` is `ok` and both counts are zero. Zero graph delta does not mean nothing happened: docs-only changes, test-only changes, and pre-v3 body-edit blind spots can still read as no-op.
 
-Snapshots use sqlite backup instead of copying the db file directly. That keeps the baseline safe when the database is in WAL mode or brigade-code-graph is writing adjacent sqlite state. After the diff, BrigadeStack deletes the temporary snapshot and records SHA-256 attestations for the before snapshot, after database, diff stdout, sidecar, and receipt log digests when those files exist.
+Snapshots use sqlite backup instead of copying the db file directly. That keeps the baseline safe when the database is in WAL mode or brigade-code-graph is writing adjacent sqlite state. After the diff, BrigadeStack deletes the temporary snapshot and records SHA-256 attestations for the before snapshot, after database, diff stdout, sidecar, and receipt log digests when those files exist. The after-database and diff stdout attestations are null when Brigade skips the diff.
 
 brigade-code-graph raw diff counts are preserved under `raw_counts`. A digest match records zero for every count. BrigadeStack also computes a line-insensitive edge churn value by stripping line and range fields from added and removed edges before pairing them, so pure line-number movement is less noisy than raw edge add/remove totals.
 
