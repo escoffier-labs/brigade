@@ -20,7 +20,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import uuid
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from pathlib import Path
@@ -877,48 +876,48 @@ def _assert_parent_unchanged(parent: int, parent_path: Path) -> None:
 
 @contextmanager
 def _held_card_publication(
-    dest: Path, target: Path, *, limit: int | None = None
+    dest: Path,
+    target: Path,
+    *,
+    limit: int | None = None,
+    on_publish: Callable[[int, str, bytes | None, int | None, bytes], None] | None = None,
 ) -> Iterator[tuple[bytes | None, Callable[[bytes, bool], None]]]:
     """Read and publish the same card revision through a held directory."""
+    from .handoff_publish import replace_held_card
+
     if not dirfd.available():
         raise OSError("no-follow descriptor operations are unavailable; refusing a path-based publish")
     parent_path = target.resolve() / dest.parent.relative_to(target)
     name = dest.name
 
     def read_child(parent: int) -> tuple[bytes, int] | None:
-        if limit is None:
-            return _read_card_child(parent, name)
-        return _read_card_child(parent, name, limit=limit)
+        return _read_card_child(parent, name) if limit is None else _read_card_child(parent, name, limit=limit)
 
     parent = dirfd.open_directory_chain(parent_path, create=True)
     try:
         found = read_child(parent)
         data, mode = found if found is not None else (None, None)
 
+        def validate() -> None:
+            _assert_parent_unchanged(parent, parent_path)
+            again = read_child(parent)
+            if (again[0] if again is not None else None) != data:
+                raise OSError("publication revision changed")
+
         def publish(content: bytes, replace: bool) -> None:
-            staged = f".{name}.{uuid.uuid4().hex[:12]}.tmp"
-            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
-            if dirfd.posix_available():
-                flags = dirfd.file_flags(flags)
-            try:
-                descriptor = dirfd.open_child_file(parent, staged, flags, 0o600)
-                with os.fdopen(descriptor, "wb") as handle:
-                    if mode is not None and hasattr(os, "fchmod"):
-                        os.fchmod(handle.fileno(), stat.S_IMODE(mode))
-                    handle.write(content)
-                    handle.flush()
-                    os.fsync(handle.fileno())
-                _assert_parent_unchanged(parent, parent_path)
-                again = read_child(parent)
-                if (again[0] if again is not None else None) != data:
-                    raise OSError("publication revision changed")
-                dirfd.replace_children(parent, staged, name, replace=replace)
-                dirfd.fsync_directory(parent)
-            finally:
-                try:
-                    dirfd.unlink_child(parent, staged)
-                except OSError:
-                    pass
+            def recorded() -> None:
+                assert on_publish is not None
+                on_publish(parent, name, data, mode, content)
+
+            replace_held_card(
+                parent,
+                name,
+                content,
+                mode,
+                replace=replace,
+                validate=validate,
+                published=recorded if on_publish is not None else None,
+            )
 
         yield data, publish
     finally:

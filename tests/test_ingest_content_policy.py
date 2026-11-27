@@ -559,3 +559,139 @@ def test_matching_update_retains_card_mode(tmp_path, monkeypatch):
     set_update(tmp_path, path, hashlib.sha256(dest.read_bytes()).hexdigest())
     assert run_ingest(tmp_path).promoted == 1
     assert S_IMODE(dest.stat().st_mode) == 0o640
+
+
+@pytest.mark.parametrize("existing", [False, True], ids=["create", "update"])
+@pytest.mark.parametrize(
+    "boundary",
+    ["before-rename", "directory-sync", "writer-check", "projection-record", "decision-record", "decision-sync"],
+)
+def test_card_and_decision_at_publication_failure(tmp_path, monkeypatch, existing, boundary):
+    from brigade import dirfd
+
+    path = draft(tmp_path, monkeypatch)
+    dest = tmp_path / CARD_PATH
+    before = None
+    if existing:
+        before = current_card(tmp_path).read_bytes()
+        set_update(tmp_path, path, hashlib.sha256(before).hexdigest())
+
+    def file_bytes():
+        return dest.read_bytes() if dest.exists() else None
+
+    injected = False
+    rename = dirfd.replace_children
+    link = dirfd.link_child
+    sync = dirfd.fsync_directory
+    check = journal.kernel._assert_regular_on_held_parent
+    write_record = journal.store.write_json
+    write_projection = journal.kernel._write_journal
+
+    def fail_rename(parent, src, name, **kwargs):
+        nonlocal injected
+        if not injected and name == dest.name:
+            injected = True
+            raise OSError("card write unavailable")
+        return rename(parent, src, name, **kwargs)
+
+    def fail_link(parent, src, name):
+        nonlocal injected
+        if not injected and name == dest.name:
+            injected = True
+            raise OSError("card write unavailable")
+        return link(parent, src, name)
+
+    def fail_sync(fd):
+        nonlocal injected
+        if not injected and file_bytes() != before:
+            injected = True
+            raise OSError("directory sync unavailable")
+        return sync(fd)
+
+    def fail_check(parent, name):
+        nonlocal injected
+        if not injected and name == dest.name:
+            injected = True
+            raise OSError("publication check unavailable")
+        return check(parent, name)
+
+    def fail_projection(directory, value):
+        nonlocal injected
+        if not injected and value.get("committed_indexes"):
+            injected = True
+            raise OSError("projection write unavailable")
+        return write_projection(directory, value)
+
+    def fail_record(record, value):
+        nonlocal injected
+        if not injected and value.get("status") == "committed":
+            injected = True
+            if boundary == "decision-sync":
+                write_record(record, value)
+            raise OSError("decision write unavailable")
+        return write_record(record, value)
+
+    with monkeypatch.context() as patch:
+        if boundary == "before-rename":
+            patch.setattr(dirfd, "replace_children", fail_rename)
+            patch.setattr(dirfd, "link_child", fail_link)
+        elif boundary == "directory-sync":
+            patch.setattr(dirfd, "fsync_directory", fail_sync)
+        elif boundary == "writer-check":
+            patch.setattr(journal.kernel, "_assert_regular_on_held_parent", fail_check)
+        elif boundary == "projection-record":
+            patch.setattr(journal.kernel, "_write_journal", fail_projection)
+        else:
+            patch.setattr(journal.store, "write_json", fail_record)
+        stats = run_ingest(tmp_path)
+    assert injected
+    assert stats.inboxed == stats.failed == 1
+    assert stats.promoted == 0
+    assert file_bytes() == before
+    assert not list((tmp_path / journal.JOURNAL_REL).glob("*/decision.json"))
+    assert review_reason(tmp_path) == "reason: content-policy-error"
+    assert run_ingest(tmp_path).promoted == 0
+    assert file_bytes() == before
+
+
+def test_card_creation_staging_cleanup_failure(tmp_path, monkeypatch):
+    from brigade import dirfd
+
+    if not dirfd.posix_available():
+        pytest.skip("POSIX card creation")
+    path = draft(tmp_path, monkeypatch)
+    dest = tmp_path / CARD_PATH
+    unlink = dirfd.unlink_child
+    injected = False
+
+    def fail_cleanup(parent, name, **kwargs):
+        nonlocal injected
+        if not injected and name.startswith(f".{dest.name}.") and dest.exists():
+            injected = True
+            raise OSError("staging cleanup unavailable")
+        return unlink(parent, name, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(dirfd, "unlink_child", fail_cleanup)
+        stats = run_ingest(tmp_path)
+    assert injected and stats.inboxed == stats.failed == 1
+    assert not dest.exists()
+    assert not list(dest.parent.iterdir())
+    assert not path.exists()
+    assert not list((tmp_path / journal.JOURNAL_REL).glob("*/decision.json"))
+    assert run_ingest(tmp_path).promoted == 0
+
+
+def test_committed_card_index_error_reports_filing(tmp_path, monkeypatch, capsys):
+    draft(tmp_path, monkeypatch)
+
+    def fail_register(*args):
+        raise OSError("card index unavailable")
+
+    monkeypatch.setattr(ingest.CardIdIndex, "register", fail_register)
+    assert run_ingest(tmp_path).promoted == 1
+    assert "warning: card filing follow-up failed" in capsys.readouterr().err
+    (decision,) = journal.entries(tmp_path)
+    assert decision.after_sha256[CARD_PATH] == hashlib.sha256((tmp_path / CARD_PATH).read_bytes()).hexdigest()
+    assert not memory_inbox_drain.pending(tmp_path)
+    assert run_ingest(tmp_path).promoted == 0

@@ -229,11 +229,14 @@ def commit(
     applied: bool = False,
     metadata: dict[str, Any] | None = None,
     writer: Callable[[Path, bytes], None] | None = None,
+    rollback: Callable[[], None] | None = None,
 ) -> Decision:
     from .memory_cmd import _config_or_default
 
     if not changes or not re.fullmatch("[a-z]+", kind):
         raise JournalConflict("empty changes or invalid kind")
+    if rollback is not None and writer is None:
+        raise JournalConflict("a rollback callback needs a custom writer")
     if writer is not None and (applied or len(changes) != 1 or changes[0].after is None):
         raise JournalConflict("a custom writer needs one pending file write")
     config = _config_or_default(target)
@@ -275,6 +278,7 @@ def commit(
     store.write_json(directory / "decision.json", payload)
     store.fsync_dir(directory / "before")
     store.fsync_dir(directory)
+    committed = {**payload, "status": "committed"}
     try:
         if applied:
             if any(current(target, c.path) != c.after for c in changes):
@@ -301,10 +305,18 @@ def commit(
             receipt = kernel.execute(plan, target=target)
             if receipt.terminal_state != "committed":
                 raise JournalConflict(f"kernel {receipt.terminal_state}")
-    except (ValueError, OSError, kernel.ProjectionError) as exc:
+        if rollback is not None:
+            store.write_json(directory / "decision.json", committed)
+    except Exception as exc:
+        if rollback is not None:
+            rollback()
+            shutil.rmtree(kernel.operation_dir(target, decision_id), ignore_errors=True)
+        elif not isinstance(exc, (ValueError, OSError, kernel.ProjectionError)):
+            raise
         shutil.rmtree(directory)
         raise JournalConflict(str(exc)) from exc
-    store.write_json(directory / "decision.json", {**payload, "status": "committed"})
+    if rollback is None:
+        store.write_json(directory / "decision.json", committed)
     return decision
 
 

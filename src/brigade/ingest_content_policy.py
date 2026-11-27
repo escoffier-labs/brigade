@@ -4,14 +4,17 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from datetime import date, datetime, timezone
+from functools import partial
 import hashlib
 import os
+import sys
 from pathlib import Path
 
 from . import dirfd, handoff_origin, handoff_worktrees, ingest, memory_cmd, memory_content_scan
 from . import memory_care_journal as journal
 from .card_fingerprint import _insert_frontmatter_fields
 from .handoff_ingest_rules import CARDS_RELATIVE, EXPECTED_SHA_SECTION, SHA256_RE, sha_matches
+from .handoff_publish import replace_held_card
 from .inbox_lock import InboxLockTimeout, held_file_lock
 from .memory_inbox_io import read
 
@@ -95,6 +98,30 @@ def decide(
         return ingest.Outcome("inboxed", code="content-policy-error")
 
 
+def _restore_card(parent: int, name: str, before: bytes | None, mode: int | None, after: bytes) -> None:
+    """Restore the saved revision through its held directory."""
+
+    def current() -> bytes | None:
+        found = ingest._read_card_child(parent, name, limit=ingest.INSPECTION_CEILING)
+        return found[0] if found is not None else None
+
+    def validate() -> None:
+        if current() != after:
+            raise OSError("publication revision changed")
+
+    if current() == before:
+        return
+    validate()
+    if before is None:
+        dirfd.unlink_child(parent, name)
+    else:
+        replace_held_card(parent, name, before, mode, replace=True, validate=validate, sync_directory=False)
+    try:
+        dirfd.fsync_directory(parent)
+    except OSError:
+        print("warning: restored card directory sync failed", file=sys.stderr)
+
+
 def file_card(
     outcome: ingest.Outcome,
     owner: Path,
@@ -111,6 +138,17 @@ def file_card(
     dest = outcome.dest
     assert dest is not None
     relative = dest.relative_to(owner).as_posix()
+    restore: Callable[[], None] | None = None
+    committed = False
+
+    def remember_publication(parent: int, name: str, before: bytes | None, mode: int | None, after: bytes) -> None:
+        nonlocal restore
+        restore = partial(_restore_card, parent, name, before, mode, after)
+
+    def rollback() -> None:
+        if restore is not None:
+            restore()
+
     try:
         lock = journal.safe_path(owner, ".brigade/memory/proposals/proposal.lock")
         if not dry_run:
@@ -119,7 +157,9 @@ def file_card(
             with (
                 nullcontext((read(owner, relative, limit=ingest.INSPECTION_CEILING), None))
                 if dry_run
-                else (ingest._held_card_publication(dest, owner, limit=ingest.INSPECTION_CEILING)) as (before, publish)
+                else ingest._held_card_publication(
+                    dest, owner, limit=ingest.INSPECTION_CEILING, on_publish=remember_publication
+                ) as (before, publish)
             ):
                 refusal = _destination_refusal(sections, before, publishing=True)
                 if refusal:
@@ -144,6 +184,7 @@ def file_card(
                         card_id=None,
                         changes=[journal.Change(relative, before, after)],
                         writer=write_card,
+                        rollback=rollback,
                         metadata={
                             "decision": "content-policy",
                             "origin": {
@@ -151,11 +192,14 @@ def file_card(
                             },
                         },
                     )
+                    committed = True
+        card_ids.register(relative, built)
     except InboxLockTimeout:
         return "card-publication-busy"
     except Exception:
-        return "content-policy-error"
-    card_ids.register(relative, built)
+        if not committed:
+            return "content-policy-error"
+        print("warning: card filing follow-up failed", file=sys.stderr)
     return None
 
 
