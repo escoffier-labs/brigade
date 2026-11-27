@@ -29,7 +29,7 @@ _TAILNET_HOSTNAME_RE = re.compile(
 _CPU_MODEL_RE = re.compile(
     r"\b(?:"
     r"Intel\s+Core\s+(?:i[3579](?:-\s*|\s+)?\d+[A-Za-z0-9]*|Ultra\s+(?:[3579]\s+)?\d{3,}[A-Za-z0-9]*)"
-    r"|Xeon(?:\s+(?!Xeon\b)[A-Za-z]+){0,3}\s+[A-Za-z]*\d[A-Za-z0-9-]*"
+    r"|Xeon(?:\s+(?!Xeon\b)[A-Za-z]+){0,3}\s+(?=[A-Za-z0-9-]*\d{4})[A-Za-z]*-?\d[A-Za-z0-9-]*"
     r"|AMD\s+Ryzen\s+\d\s+\d{4}[A-Za-z0-9]*"
     r"|Threadripper(?:\s+PRO)?\s+\d{4}[A-Za-z0-9]*"
     r"|EPYC\s+\d{4}[A-Za-z0-9]*"
@@ -39,7 +39,7 @@ _CPU_MODEL_RE = re.compile(
 )
 _KERNEL_BUILD_RE = re.compile(
     r"(?<![\d.])(?:"
-    r"\d+\.\d+\.\d+-\d+-(?:generic|pve|lowlatency|aws|azure|gcp|amd64|arm64|cloud-amd64)"
+    r"\d+\.\d+\.\d+-\d+-(?:generic|pve|lowlatency|aws|azure|gcp|amd64|arm64|cloud-amd64|cloud-arm64|rt-amd64|rt-arm64)"
     r"|\d+\.\d+\.\d+-arch\d+-\d+"
     r")\b",
     re.IGNORECASE,
@@ -122,17 +122,17 @@ def _tracked_regular_files(root: Path) -> list[str]:
     return paths
 
 
-def test_public_docs_and_benchmarks_exclude_host_details() -> None:
-    root = REPO_ROOT
-    try:
-        tracked = _tracked_regular_files(root)
-    except (OSError, subprocess.CalledProcessError) as error:
-        # Inside a checkout (or on CI) a git failure is a real problem; only an
-        # unreachable git outside both may skip.
-        if (root / ".git").exists() or os.environ.get("CI"):
-            raise AssertionError(f"git repository scan failed: {error}") from error
-        pytest.skip(f"git repository root is unavailable: {error}")
+def _fail_or_skip_on_git_error(root: Path, error: Exception) -> None:
+    """Fail inside a checkout or on CI; skip only when git is unreachable outside both."""
+    # Inside a checkout (or on CI) a git failure is a real problem; only an
+    # unreachable git outside both may skip.
+    if (root / ".git").exists() or os.environ.get("CI", "").strip().lower() not in ("", "0", "false"):
+        raise AssertionError(f"git repository scan failed: {error}") from error
+    pytest.skip(f"git repository root is unavailable: {error}")
 
+
+def _scan_tracked_files(root: Path, tracked: Iterable[str]) -> list[str]:
+    """Return "path:line rule" findings for the scanned tracked paths under `root`."""
     findings: list[str] = []
     for relative in tracked:
         if not _is_scanned_path(relative):
@@ -146,18 +146,27 @@ def test_public_docs_and_benchmarks_exclude_host_details() -> None:
                 if b"\0" in head:
                     continue
                 data = head + handle.read()
-        except OSError:
-            # A tracked-but-deleted path (or an unreadable one) is not a file.
+        except (FileNotFoundError, NotADirectoryError):
+            # A tracked path deleted from the working tree is not a file to scan.
             continue
+        except OSError as error:
+            raise AssertionError(f"cannot read tracked file {relative}: {error}") from error
         try:
             text = data.decode("utf-8")
         except UnicodeDecodeError:
             continue
-        file_findings = findings_for_text(text)
-        if not file_findings:
-            continue
-        findings.extend(f"{relative}:{line_number} {rule_id}" for line_number, rule_id in file_findings)
+        findings.extend(f"{relative}:{line_number} {rule_id}" for line_number, rule_id in findings_for_text(text))
+    return findings
 
+
+def test_public_docs_and_benchmarks_exclude_host_details() -> None:
+    root = REPO_ROOT
+    try:
+        tracked = _tracked_regular_files(root)
+    except (OSError, subprocess.CalledProcessError) as error:
+        _fail_or_skip_on_git_error(root, error)
+
+    findings = _scan_tracked_files(root, tracked)
     assert not findings, "public host details found:\n" + "\n".join(findings)
 
 
@@ -176,6 +185,35 @@ def test_is_scanned_path(path: str, scanned: bool) -> None:
     assert _is_scanned_path(path) is scanned
 
 
+def test_git_failure_skips_only_outside_checkout_and_ci(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    error = subprocess.CalledProcessError(128, ["git", "ls-files"])
+    assert not (tmp_path / ".git").exists()
+    for ci_value in ("0", "false"):
+        monkeypatch.setenv("CI", ci_value)
+        with pytest.raises(pytest.skip.Exception):
+            _fail_or_skip_on_git_error(tmp_path, error)
+    monkeypatch.setenv("CI", "1")
+    with pytest.raises(AssertionError, match="git repository scan failed"):
+        _fail_or_skip_on_git_error(tmp_path, error)
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0,
+    reason="root and this platform's chmod do not make files unreadable",
+)
+def test_scan_tracked_files_fails_on_unreadable_file(tmp_path: Path) -> None:
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    unreadable = docs / "private.md"
+    unreadable.write_text("host details\n", encoding="utf-8")
+    unreadable.chmod(0o000)
+    try:
+        with pytest.raises(AssertionError, match=r"cannot read tracked file docs/private\.md"):
+            _scan_tracked_files(tmp_path, ["docs/private.md"])
+    finally:
+        unreadable.chmod(0o644)
+
+
 @pytest.mark.parametrize(
     ("value", "rule_id"),
     [
@@ -186,11 +224,17 @@ def test_is_scanned_path(path: str, scanned: bool) -> None:
         ("Intel Core i9-14900KS", "cpu-model"),
         ("Intel Core i5-1240P", "cpu-model"),
         ("Xeon Gold 6248R", "cpu-model"),
+        ("Xeon W-2295", "cpu-model"),
+        ("Xeon E-2288G", "cpu-model"),
+        ("Xeon D-2146NT", "cpu-model"),
         ("Threadripper PRO 5995WX", "cpu-model"),
         ("6.8.0-45-generic", "kernel-build"),
         ("6.1.0-18-amd64", "kernel-build"),
         ("6.1.0-18-arm64", "kernel-build"),
         ("6.1.0-18-cloud-amd64", "kernel-build"),
+        ("6.1.0-18-cloud-arm64", "kernel-build"),
+        ("6.1.0-18-rt-amd64", "kernel-build"),
+        ("6.1.0-18-rt-arm64", "kernel-build"),
         ("6.12.1-arch1-1", "kernel-build"),
         ("32 GB DDR5", "ram-size"),
         ("32GB DDR5", "ram-size"),
@@ -210,7 +254,7 @@ def test_matching_host_details_negative(value: str) -> None:
 
 
 def test_matching_host_details_negative_xeon_prose() -> None:
-    assert matching_host_details("Xeon servers are fast") == []
+    assert matching_host_details("Xeon servers have 16 cores") == []
 
 
 def test_xeon_pattern_scans_repeated_tokens_quickly() -> None:
