@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Mapping
 
+from .. import localio
+from . import producer_session
 from .anchored_io import SessionIntegrityError
 from .command_tokens import (
     EVENT_BUDGET,
@@ -14,6 +17,117 @@ from .command_tokens import (
     UnreadableCommand,
     event_wired_target as resolve_wired_target,
 )
+
+_BASH_FINGERPRINT = "pending_bash_fingerprint"
+_BASH_STARTED = "pending_bash_started_at"
+_BASH_COMMANDS = "pending_bash_commands"
+_MAX_PENDING_COMMANDS = 8
+
+
+def _tool_use_id(payload: Mapping[str, Any]) -> str | None:
+    value = payload.get("tool_use_id")
+    return value if isinstance(value, str) and value else None
+
+
+def restore_pending(state: dict[str, Any], current: Mapping[str, Any]) -> None:
+    for key in (_BASH_FINGERPRINT, _BASH_STARTED, _BASH_COMMANDS):
+        state.pop(key, None)
+        if key in current:
+            state[key] = current[key]
+
+
+def _pending_commands(state: Mapping[str, Any]) -> dict[str, list[str]]:
+    commands = state.get(_BASH_COMMANDS)
+    if not isinstance(commands, dict):
+        return {}
+    return {
+        key: value
+        for key, value in commands.items()
+        if isinstance(key, str)
+        and isinstance(value, list)
+        and len(value) == 2
+        and all(isinstance(item, str) and item for item in value)
+    }
+
+
+def _pending_record(state: Mapping[str, Any], tool_id: str | None) -> tuple[object, object]:
+    if tool_id is None:
+        return state.get(_BASH_FINGERPRINT), state.get(_BASH_STARTED)
+    record = _pending_commands(state).get(tool_id)
+    return (record[0], record[1]) if record else (None, None)
+
+
+def pending_start(state: Mapping[str, Any], *, unknown_at: datetime) -> datetime | None:
+    legacy = _pending_record(state, None)
+    starts: list[object] = [record[1] for record in _pending_commands(state).values()]
+    if any(value is not None for value in legacy):
+        starts.append(legacy[1])
+    return max((localio.parse_iso_datetime(stamp) or unknown_at for stamp in starts), default=None)
+
+
+def include_pending_at_stop(state: dict[str, Any]) -> None:
+    # Use the start as a receipt boundary without consuming the pending record.
+    # A new receipt can cover it, and a delayed completion can still match it.
+    started = localio.parse_iso_datetime(state.get("started_at")) or localio.utc_now()
+    pending = pending_start(state, unknown_at=started)
+    if pending is None:
+        return
+    state["write_observed"] = True
+    previous = localio.parse_iso_datetime(state.get("last_verification_write_at") or state.get("last_write_at"))
+    if previous is None or pending > previous:
+        state["last_verification_write_at"] = pending.isoformat()
+
+
+def record_write(
+    state: dict[str, Any],
+    target: Path,
+    payload: dict[str, Any],
+    *,
+    handoff: bool = False,
+    fingerprint: str | None = None,
+) -> None:
+    written_at = localio.utc_now_iso()
+    producer_session.record_write(state, target, payload, written_at)
+    state["write_observed"] = True
+    state["last_write_at"] = state["last_attributed_write_at"] = written_at
+    if not handoff:
+        state["last_verification_write_at"] = written_at
+    if fingerprint is not None:
+        state["repo_fingerprint"] = fingerprint
+
+
+def begin_bash(
+    target: Path, session_id: str, state: dict[str, Any], payload: dict[str, Any], baseline: str | None
+) -> None:
+    rt = _rt()
+    tool_id = _tool_use_id(payload)
+    baseline = baseline or rt._UNAVAILABLE_FINGERPRINT
+    started = localio.utc_now_iso()
+    proposed = {_BASH_FINGERPRINT: baseline, _BASH_STARTED: started} if tool_id is None else {}
+
+    def save_pending(current: dict[str, Any]) -> None:
+        if tool_id is None:
+            occupied = any(value is not None for value in _pending_record(current, None))
+            current.update(proposed)
+            if occupied:
+                # Either completion could arrive first when neither has an ID.
+                current[_BASH_FINGERPRINT] = rt._UNAVAILABLE_FINGERPRINT
+                record_write(current, target, payload)
+            return
+        commands = _pending_commands(current)
+        replaced = tool_id in commands
+        if replaced:
+            record_write(current, target, payload)
+        elif len(commands) >= _MAX_PENDING_COMMANDS:
+            oldest = min(commands, key=lambda key: commands[key][1])
+            del commands[oldest]
+            record_write(current, target, payload)
+        commands[tool_id] = [rt._UNAVAILABLE_FINGERPRINT if replaced else baseline, started]
+        current[_BASH_COMMANDS] = commands
+
+    rt._write_session_state_preserving_latch(
+        target, session_id, {**state, **proposed}, log_target=target, pending_bash_update=save_pending
+    )
 
 
 def _rt() -> Any:
@@ -265,36 +379,88 @@ def post_bash_write(
     event: str,
     target: Path,
     payload: dict[str, Any],
-    state: dict[str, Any],
+    pending: tuple[object, object],
     session_id: str,
     fingerprint: Callable[[Path], str | None],
-) -> tuple[bool, str | None, bool, bool, str | None]:
+) -> tuple[bool, str | None, bool, str | None]:
     """Detect writes without catching errors from subsequent state updates."""
     rt = _rt()
     budget = EVENT_BUDGET.get()
     if budget is not None and budget.attribution_incomplete:
-        return True, None, False, False, None
+        return True, None, False, None
     command = rt._as_tool_input(payload.get("tool_input")).get("command")
     try:
-        wrote = touches_worktree(target, command, cwd=payload.get("cwd"))
         routed = rt._is_routed_verify(command)
-        brigade_command = routed or rt._is_brigade_run(command)
         capture = rt._parse_capture_flag(command) if routed and event == "PostToolUse" else None
+        baseline, started = pending
+        if not isinstance(baseline, str) or not baseline:
+            # A command with no explicit write operands can still change the tree.
+            return True, capture, False, None
+        wrote = touches_worktree(target, command, cwd=payload.get("cwd"))
+        brigade_command = routed or rt._is_brigade_run(command)
         # A failed write-capable command can exit before it changes any file.
         if (not wrote and not brigade_command) or (wrote and event == "PostToolUseFailure"):
             wrote = rt._bash_write_detected(
                 target,
-                state.get("pending_bash_fingerprint"),
+                baseline,
                 session_id=session_id,
-                started_at=state.get("pending_bash_started_at"),
+                started_at=started,
                 fingerprint=fingerprint,
             )
         handoff = wrote and rt._bash_write_targets_handoffs(target, command)
         updated_fingerprint = fingerprint(target) if wrote else None
-        return wrote, capture, handoff, brigade_command and not wrote, updated_fingerprint
+        return wrote, capture, handoff, updated_fingerprint
     except Exception as exc:  # noqa: BLE001 - only attribution, never state updates
         mark_analysis_failure(event, exc)
-        return True, None, False, False, None
+        return True, None, False, None
+
+
+def finish_bash(
+    event: str,
+    target: Path,
+    payload: dict[str, Any],
+    state: dict[str, Any],
+    session_id: str,
+    fingerprint: Callable[[Path], str | None],
+) -> bool:
+    tool_id = _tool_use_id(payload)
+    pending = _pending_record(state, tool_id)
+    wrote, capture, handoff, updated_fp = post_bash_write(event, target, payload, pending, session_id, fingerprint)
+
+    def finish_pending(current: dict[str, Any]) -> None:
+        nonlocal wrote
+        # Attribution runs outside the state lock. Use the locked record to
+        # detect a competing completion, replacement, or eviction.
+        matched_snapshot = pending == _pending_record(current, tool_id)
+        if tool_id is None:
+            current.pop(_BASH_FINGERPRINT, None)
+            current.pop(_BASH_STARTED, None)
+        else:
+            commands = _pending_commands(current)
+            commands.pop(tool_id, None)
+            if commands:
+                current[_BASH_COMMANDS] = commands
+            else:
+                current.pop(_BASH_COMMANDS, None)
+        wrote = wrote or not matched_snapshot
+        if wrote:
+            record_write(
+                current,
+                target,
+                payload,
+                handoff=matched_snapshot and handoff,
+                fingerprint=updated_fp if matched_snapshot else None,
+            )
+
+    saved = _rt()._write_session_state_preserving_latch(
+        target,
+        session_id,
+        state,
+        log_target=target,
+        capture_artifact_id=capture,
+        pending_bash_update=finish_pending,
+    )
+    return bool(saved and wrote)
 
 
 def _linked_pending_roots(primary: Path, payload: dict[str, Any]) -> dict[Path, bool]:
@@ -336,6 +502,7 @@ def handle_event(event: str, payload: dict[str, Any], *, pin: Path | None) -> di
             return None
         scopes = _linked_pending_roots(primary, payload) if event != "PreToolUse" else {}
     targets = [primary, *scopes]
+    bash_starts: list[Callable[[], None]] = []
     result = None
     for target in dict.fromkeys(targets):
         # Reuse the normal pin/home policy for every additional root.
@@ -345,13 +512,15 @@ def handle_event(event: str, payload: dict[str, Any], *, pin: Path | None) -> di
             # A post event without a corresponding pre event has no baseline
             # to compare in an observation-only root. Do not create state there.
             state = rt.read_session_state(target, str(payload.get("session_id") or ""))
-            if not state or not state.get("pending_bash_fingerprint"):
+            if not state or not _pending_record(state, _tool_use_id(payload))[0]:
                 continue
         budget.target = target
         with budget.in_phase("followup"):
-            current = rt._handle_event(event, payload, pin=pin, target_override=target)
+            current = rt._handle_event(event, payload, pin=pin, target_override=target, bash_starts=bash_starts)
         if current is not None:
             result = current
             if current.get("hookSpecificOutput", {}).get("permissionDecision") == "deny":
-                break
+                return result
+    for start in bash_starts:
+        start()
     return result

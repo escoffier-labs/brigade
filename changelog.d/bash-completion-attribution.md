@@ -1,0 +1,1 @@
+- Keep Claude Code session write records consistent when Bash completion events cannot be matched to their start.

@@ -1358,18 +1358,16 @@ def test_final_bash_handoff_write_does_not_require_verification_again(tmp_path: 
         + "\n"
     )
     handoff = target / ".claude" / "memory-handoffs" / "handoff.md"
-    handoff.write_text("durable finding\n")
-    command = "printf '%s\\n' finding >> .claude/memory-handoffs/handoff.md"
-    runtime.handle_payload(
-        "PostToolUse",
-        _payload(
-            target,
-            "PostToolUse",
-            session_id=session_id,
-            tool_name="Bash",
-            tool_input={"command": command},
-        ),
+    pre = _payload(
+        target,
+        "PreToolUse",
+        session_id=session_id,
+        tool_name="Bash",
+        tool_input={"command": "printf '%s\\n' finding >> .claude/memory-handoffs/handoff.md"},
     )
+    assert runtime.handle_payload("PreToolUse", pre) is None
+    handoff.write_text("durable finding\n")
+    runtime.handle_payload("PostToolUse", {**pre, "hook_event_name": "PostToolUse"})
 
     updated = runtime.read_session_state(target, session_id)
     assert updated["last_write_at"] >= updated["last_verification_write_at"]
@@ -1484,17 +1482,18 @@ def test_stop_ignores_postcapture_brigade_run_artifact_writes(tmp_path: Path, mo
         )
         + "\n"
     )
-    artifact = target / ".brigade" / "runs" / "detached-1" / "run.json"
-    runtime.handle_payload(
-        "PostToolUse",
-        _payload(
-            target,
-            "PostToolUse",
-            session_id=session_id,
-            tool_name="Bash",
-            tool_input={"command": f"mkdir -p {artifact.parent} && touch {artifact}"},
-        ),
+    artifact = Path(".brigade", "runs", "detached-1", "run.json")
+    pre = _payload(
+        target,
+        "PreToolUse",
+        session_id=session_id,
+        tool_name="Bash",
+        tool_input={"command": f"mkdir -p {artifact.parent.as_posix()} && touch {artifact.as_posix()}"},
     )
+    assert runtime.handle_payload("PreToolUse", pre) is None
+    (target / artifact).parent.mkdir(parents=True)
+    (target / artifact).write_text("{}\n")
+    runtime.handle_payload("PostToolUse", {**pre, "hook_event_name": "PostToolUse"})
 
     updated = runtime.read_session_state(target, session_id)
     assert updated["last_verification_write_at"] == state["last_verification_write_at"]
@@ -4384,3 +4383,187 @@ def test_bash_hook_transport_denies_unreadable_verifier(target, capsys):
     output = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
     assert output["permissionDecision"] == "deny"
     assert "brigade work verify run" in output["permissionDecisionReason"]
+
+
+@pytest.mark.parametrize(
+    "event, interrupted",
+    [("PostToolUse", False), ("PostToolUseFailure", False), ("PostToolUseFailure", True)],
+    ids=["success", "failure", "interrupt"],
+)
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "unmatched",
+        "duplicate",
+        "overlap",
+        "anonymous-overlap",
+        "different-tool",
+        "different-target",
+        "read-only",
+        "no-command",
+        "matched-write",
+        "evicted",
+        "evicted-at-stop",
+        "legacy",
+        "pending-only",
+    ],
+)
+def test_bash_pending_events_at_stop(tmp_path, event, interrupted, scenario):
+    target = _git_wired_claude(tmp_path)
+    session_id = "pending-session"
+    other = _wired_claude(tmp_path / "other") if scenario == "different-target" else target
+
+    def bash(name, tool_use_id="tool-first", *, cwd=target, tool="Bash", command="custom-generator"):
+        fields = {"tool_use_id": tool_use_id} if tool_use_id else {}
+        return runtime.handle_payload(
+            name,
+            _payload(
+                cwd,
+                name,
+                session_id=session_id,
+                tool_name=tool,
+                tool_input={"command": command},
+                is_interrupt=interrupted,
+                **fields,
+            ),
+        )
+
+    def edit(filename, session):
+        path = target / filename
+        path.write_text("value = 1\n")
+        runtime.handle_payload(
+            "PostToolUse",
+            _payload(target, "PostToolUse", session_id=session, tool_name="Write", tool_input={"file_path": str(path)}),
+        )
+
+    # The pending-only case has no previously observed write. Its receipt is real
+    # session evidence, with a timestamp taken before the command starts.
+    if scenario == "pending-only":
+        runtime.handle_payload("SessionStart", _payload(target, "SessionStart", session_id=session_id))
+        state = runtime.read_session_state(target, session_id)
+        state["last_verification_write_at"] = localio.utc_now_iso()
+        runtime.write_session_state(target, session_id, state)
+    else:
+        edit("earlier.py", session_id)
+    before = _write_session_receipt(target, session_id, tree_fingerprint=localio.tree_fingerprint(target))
+    original_stamp = before.get("last_write_at")
+    command = "git status" if scenario in {"read-only", "duplicate"} else "custom-generator"
+    command_id = None if scenario in {"anonymous-overlap", "legacy"} else "tool-first"
+    if scenario == "legacy":
+        # Pre-upgrade state stored only these two fields on disk.
+        runtime.write_session_state(
+            target,
+            session_id,
+            {
+                **before,
+                "pending_bash_fingerprint": runtime.repo_worktree_fingerprint(target),
+                "pending_bash_started_at": localio.utc_now_iso(),
+            },
+        )
+    elif scenario not in {"unmatched", "no-command"}:
+        assert bash("PreToolUse", command_id, command=command) is None
+    if scenario in {"unmatched", "overlap", "anonymous-overlap", "matched-write", "legacy"}:
+        (target / "owned.py").write_text("value = 2\n")
+    if scenario in {"overlap", "anonymous-overlap"}:
+        second_id = None if scenario == "anonymous-overlap" else "tool-second"
+        assert bash("PreToolUse", second_id) is None
+        if scenario == "anonymous-overlap":
+            assert runtime.read_session_state(target, session_id)["last_write_at"] > original_stamp
+        bash(event, command_id, command=command)
+        if scenario == "overlap":
+            assert set(runtime.read_session_state(target, session_id)["pending_bash_commands"]) == {"tool-second"}
+        bash(event, second_id)
+    elif scenario in {"evicted", "evicted-at-stop"}:
+        for index in range(8):
+            assert bash("PreToolUse", f"tool-{index}") is None
+        assert set(runtime.read_session_state(target, session_id)["pending_bash_commands"]) == {
+            f"tool-{index}" for index in range(8)
+        }
+        for index in range(8):
+            bash(event, f"tool-{index}")
+        if scenario == "evicted":
+            bash(event, command_id)
+    elif scenario not in {"no-command", "pending-only"}:
+        if scenario == "duplicate":
+            bash(event, command_id, command=command)
+            assert runtime.read_session_state(target, session_id)["last_write_at"] == original_stamp
+        bash(
+            event,
+            command_id,
+            command=command,
+            tool="Glob" if scenario == "different-tool" else "Bash",
+            cwd=other,
+        )
+    state = runtime.read_session_state(target, session_id)
+    unresolved = scenario in {"different-tool", "different-target", "pending-only"}
+    assert bool(state.get("pending_bash_commands")) is unresolved
+    assert "pending_bash_fingerprint" not in state and "pending_bash_started_at" not in state
+    blocked = scenario not in {"read-only", "no-command"}
+    if blocked and not unresolved:
+        assert state["last_write_at"] > original_stamp
+        assert state["last_write_at"] == state["last_attributed_write_at"] == state["last_verification_write_at"]
+    else:
+        assert state.get("last_write_at") == original_stamp
+
+    edit("foreign.py", "later-writer")
+    stop = _payload(target, "Stop", session_id=session_id)
+    assert ((runtime.handle_payload("Stop", stop) or {}).get("decision") == "block") is blocked
+    if unresolved:
+        assert runtime.read_session_state(target, session_id)["pending_bash_commands"] == state["pending_bash_commands"]
+        # A new receipt covers the unresolved start without consuming it.
+        receipt = target / ".brigade" / "work" / "verify-runs" / f"run-{session_id}" / "receipt.json"
+        saved = json.loads(receipt.read_text())
+        saved["started_at"] = saved["completed_at"] = localio.utc_now_iso()
+        saved["tree_fingerprint"] = localio.tree_fingerprint(target)
+        receipt.write_text(json.dumps(saved) + "\n")
+        assert (runtime.handle_payload("Stop", stop) or {}).get("decision") != "block"
+
+
+@pytest.mark.parametrize("interleave", ["PreToolUse", "PostToolUse"])
+def test_bash_pending_updates_merge_with_interleaved_events(tmp_path, monkeypatch, interleave):
+    target = _git_wired_claude(tmp_path)
+    session = "parallel-session"
+    runtime.handle_payload("PostToolUse", _write_payload(target, session_id=session))
+    _write_session_receipt(target, session, tree_fingerprint=localio.tree_fingerprint(target))
+
+    def bash(event, tool_id):
+        return runtime.handle_payload(
+            event,
+            _payload(
+                target,
+                event,
+                session_id=session,
+                tool_name="Bash",
+                tool_use_id=tool_id,
+                tool_input={"command": "custom-generator"},
+            ),
+        )
+
+    save = runtime._write_session_state_preserving_latch
+    calls = []
+
+    def save_after_other_event(*args, **kwargs):
+        if kwargs.get("pending_bash_update") is not None and not calls:
+            calls.append(interleave)
+            assert bash(interleave, "tool-second") is None
+        return save(*args, **kwargs)
+
+    if interleave == "PostToolUse":
+        assert bash("PreToolUse", "tool-first") is None
+        assert bash("PreToolUse", "tool-second") is None
+        (target / "owned.py").write_text("value = 1\n")
+    with monkeypatch.context() as patch:
+        patch.setattr(runtime, "_write_session_state_preserving_latch", save_after_other_event)
+        assert bash(interleave, "tool-first") is None
+    assert calls == [interleave]
+
+    state = runtime.read_session_state(target, session)
+    if interleave == "PreToolUse":
+        assert set(state["pending_bash_commands"]) == {"tool-first", "tool-second"}
+        (target / "owned.py").write_text("value = 1\n")
+        assert bash("PostToolUse", "tool-first") is None
+        assert bash("PostToolUse", "tool-second") is None
+    assert "pending_bash_commands" not in runtime.read_session_state(target, session)
+    (target / "src.py").write_text("value = 2\n")
+    runtime.handle_payload("PostToolUse", _write_payload(target, session_id="later-writer"))
+    assert runtime.handle_payload("Stop", _payload(target, "Stop", session_id=session))["decision"] == "block"

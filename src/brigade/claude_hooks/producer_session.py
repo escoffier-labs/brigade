@@ -341,10 +341,10 @@ def _bash_in_flight(state: Mapping[str, Any], now: datetime) -> bool:
     command that failed, was denied or was killed stops vetoing once no command could still be running.
     A marker without a readable start time counts, since its state file is recent enough to be read.
     """
-    if state.get("pending_bash_started_at") is None and state.get("pending_bash_fingerprint") is None:
-        return False
-    started = localio.parse_iso_datetime(state.get("pending_bash_started_at"))
-    return started is None or now - started <= BASH_MARKER_LIFETIME
+    from .write_attribution import pending_start
+
+    started = pending_start(state, unknown_at=now)
+    return started is not None and now - started <= BASH_MARKER_LIFETIME
 
 
 def _foreign_wrote(state: Mapping[str, Any], subject_path: str, since: datetime, now: datetime) -> bool:

@@ -1654,6 +1654,9 @@ def _shared_tree_block_is_foreign(
     ):
         return False
     own_write = localio.parse_iso_datetime(state.get("last_attributed_write_at"))
+    pending = write_attribution.pending_start(state, unknown_at=localio.utc_now())
+    if pending is not None and (own_write is None or pending > own_write):
+        own_write = pending
     if own_write is not None and not _receipt_since(target, own_write, session_fingerprint=fingerprint, gate=gate):
         return False
     threshold = localio.parse_iso_datetime(
@@ -1861,6 +1864,8 @@ def _normalize_state(
     pending_fp = payload.get("pending_bash_fingerprint")
     if isinstance(pending_fp, str) and pending_fp:
         normalized["pending_bash_fingerprint"] = pending_fp
+    if isinstance(payload.get("pending_bash_commands"), dict):
+        normalized["pending_bash_commands"] = payload["pending_bash_commands"]
     for key in _STATE_TIMESTAMP_KEYS:
         stamp = localio.parse_iso_datetime(payload.get(key))
         if stamp is not None and stamp <= now:
@@ -2201,7 +2206,12 @@ def _handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None) ->
 
 
 def _handle_event(
-    event: str, payload: dict[str, Any], *, pin: Path | None, target_override: Path | None = None
+    event: str,
+    payload: dict[str, Any],
+    *,
+    pin: Path | None,
+    target_override: Path | None = None,
+    bash_starts: list[Callable[[], None]] | None = None,
 ) -> dict[str, Any] | None:
     if event == "PreCompact":
         return _handle_pre_compact(payload, pin=pin)
@@ -2305,9 +2315,10 @@ def _handle_event(
         command = tool_input.get("command")
         budget = EVENT_BUDGET.get()
         baseline = event_fingerprint(target)
-        state["pending_bash_fingerprint"] = baseline or _UNAVAILABLE_FINGERPRINT
-        state["pending_bash_started_at"] = localio.utc_now_iso()
-        _write_session_state_preserving_latch(target, session_id, state, log_target=target)
+        if bash_starts is not None:
+            bash_starts.append(
+                functools.partial(write_attribution.begin_bash, target, session_id, state, payload, baseline)
+            )
         recognition = _recognize(command)
         if recognition is Recognition.UNDECIDED or (budget is not None and budget.unreadable):
             return _bash_analysis_refusal(
@@ -2379,43 +2390,23 @@ def _handle_event(
                     target, session_id, state, log_target=target, patch_fields=("read_files",)
                 )
             return None
-        wrote = tool_name in _WRITE_TOOLS
-        handoff_write = wrote and _is_handoff_tool_write(target, post_tool_input)
-        capture_artifact_id = None
-        updated_fp = event_fingerprint(target) if wrote else None
         if tool_name == "Bash":
-            wrote, capture_artifact_id, handoff_write, metadata_only, updated_fp = write_attribution.post_bash_write(
-                event, target, payload, state, session_id, event_fingerprint
+            wrote = write_attribution.finish_bash(event, target, payload, state, session_id, event_fingerprint)
+        elif tool_name in _WRITE_TOOLS:
+            wrote = True
+            write_attribution.record_write(
+                state,
+                target,
+                payload,
+                handoff=_is_handoff_tool_write(target, post_tool_input),
+                fingerprint=event_fingerprint(target),
             )
-            if metadata_only and event == "PostToolUse":
-                state.pop("pending_bash_fingerprint", None)
-                state.pop("pending_bash_started_at", None)
-                _write_session_state_preserving_latch(
-                    target, session_id, state, log_target=target, capture_artifact_id=capture_artifact_id
-                )
-                return None
-        if wrote:
-            state["write_observed"] = True
-            written_at = localio.utc_now_iso()
-            producer_session.record_write(state, target, payload, written_at)
-            state["last_write_at"] = written_at
-            state["last_attributed_write_at"] = written_at
-            if not handoff_write:
-                state["last_verification_write_at"] = written_at
-            if updated_fp is not None:
-                state["repo_fingerprint"] = updated_fp
-            state.pop("pending_bash_fingerprint", None)
-            state.pop("pending_bash_started_at", None)
             state.pop("pending_write_at", None)
-            _write_session_state_preserving_latch(
-                target, session_id, state, log_target=target, capture_artifact_id=capture_artifact_id
-            )
-            if presence_target is not None and event == "PostToolUse":
-                presence.emit_presence("PostToolUse", presence_target, session_id)
-        elif state.get("pending_bash_fingerprint") is not None:
-            state.pop("pending_bash_fingerprint", None)
-            state.pop("pending_bash_started_at", None)
             _write_session_state_preserving_latch(target, session_id, state, log_target=target)
+        else:
+            wrote = False
+        if wrote and presence_target is not None and event == "PostToolUse":
+            presence.emit_presence("PostToolUse", presence_target, session_id)
         if event == "PostToolUse" or (budget is not None and budget.attribution_incomplete):
             return None
 
@@ -2443,6 +2434,7 @@ def _handle_event(
             stop_state = _normalize_state(
                 stop_target, session_id, stop_state, task_epoch=task_epoch, fingerprint=event_fingerprint
             )
+            write_attribution.include_pending_at_stop(stop_state)
             if not stop_state.get("write_observed"):
                 continue
             if not work_mode.is_strict(stop_target):
