@@ -1,10 +1,9 @@
 """Ask for the tracked manifest verify when a change touches a manifest subject (#2589).
 
 An ad-hoc ``--command`` verify never produces a scoreable trial, because only a
-tracked manifest builds the subject binding. When the working tree changed the
-exact ``subject_path`` of a tracked manifest, the PreToolUse deny names that
-manifest's verify next to the agent's own check, and the Stop gate holds closeout
-until a completed receipt from that manifest postdates the write. Every probe
+tracked manifest builds the subject binding. When a session writes the exact
+``subject_path`` of a tracked manifest, the Stop gate can hold closeout until a
+completed receipt from that manifest postdates the write. Every probe
 here is advisory: any git, filesystem or manifest error reads as "no match" so
 the hooks fall back to their pre-existing behavior.
 """
@@ -199,24 +198,6 @@ STOP_HEADER = "A tracked verify manifest covers a file changed this session and 
 def _commands(target: Path, covered: list[CoveredManifest], prefix: str) -> list[str]:
     """One manifest verify per covered manifest. The manifest, not the agent, decides the scored subject."""
     return [f"{prefix}{verify_command(target, item.source)}" for item in covered]
-
-
-def deny_hint(target: Path, prefix: str) -> str:
-    """Extra deny text, starting with a newline, naming the manifest verify for a changed subject, or ``""``.
-
-    ``prefix`` is the session-env prefix the runtime puts in front of every verify replacement.
-    """
-    covered = covered_manifests(target)
-    if not covered:
-        return ""
-    lines = [
-        "",
-        "This change touches the subject of a tracked verify manifest. Keep your own check, and also run the "
-        "manifest verify, the scoreable one (the manifest picks what it scores):",
-    ]
-    for item, command in zip(covered, _commands(target, covered, prefix), strict=True):
-        lines.append(f"- {item.subject_path}: {command}")
-    return "\n".join(lines)
 
 
 def session_written_paths(state: dict[str, Any]) -> list[str]:

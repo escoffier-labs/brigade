@@ -6,7 +6,7 @@ import os
 import pytest
 
 from brigade import observed_checks, work_mode
-from brigade.claude_hooks import package, runtime
+from brigade.claude_hooks import check_events, package, runtime
 from tests._home import set_home
 from tests.test_work_mode import _bash, _payload, _set_mode, _wired, _write
 
@@ -67,6 +67,28 @@ def test_no_capture_in_other_modes(target, capsys, mode):
 def test_ignore_non_raw_checks(target, command):
     runtime.handle_payload("PostToolUse", _bash(target, "PostToolUse", command))
     assert observed_checks.read_checks(target)[0] == []
+
+
+def test_failure_followup_skips_oversized_commands(target, capsys):
+    _set_mode(target, "strict", capsys)
+    payload = _bash(target, "PostToolUseFailure", "brigade work verify run --command " + "x" * 65536)
+    assert check_events.failure_followup(payload, target, "s1", {}) is None
+
+
+def test_failure_followup_is_silent_when_recognition_raises(target, monkeypatch):
+    def broken(_command):
+        raise RuntimeError("recognition failed")
+
+    monkeypatch.setattr(runtime, "_is_routed_verify", broken)
+    payload = _bash(target, "PostToolUseFailure", "brigade work verify run --command pytest")
+    assert check_events.failure_followup(payload, target, "s1", {}) is None
+
+
+def test_failed_command_with_nul_in_cd_is_silent(target, capsys):
+    _set_mode(target, "strict", capsys)
+    payload = _bash(target, "PostToolUseFailure", "cd './bad\x00path' && pytest")
+    assert check_events.failure_followup(payload, target, "s1", {}) is None
+    assert runtime.handle_payload("PostToolUseFailure", payload) is None
 
 
 def test_capture_exception_is_silent(target, monkeypatch, capsys):

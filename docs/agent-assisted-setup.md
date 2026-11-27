@@ -121,7 +121,7 @@ Session start then injects the work brief. An unwired repo prints the exact `bri
 
 ## Strict, observe and off modes and safety rails
 
-Brigade's default remains `strict`. Hooks route checks through `brigade work verify run`, and the Stop gate asks for a receipt after code changes. `observe` and `off` allow direct checks and session completion without a receipt. Observe does not record raw checks. Recording requires `brigade work verify run`.
+Brigade defaults to `strict`. Claude Code can run checks directly in every mode. In strict mode the Claude Stop hook checks for a verification receipt after code changes. Use `brigade work verify run` to create a receipt. In `observe` and `off`, the Claude Stop hook skips the receipt check. In `observe`, supported harness hooks record recognized checks as observations.
 
 ```bash
 brigade init --target . --depth repo --harnesses claude --observe

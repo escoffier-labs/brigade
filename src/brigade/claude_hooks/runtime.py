@@ -18,7 +18,7 @@ from io import StringIO
 from itertools import chain
 from queue import Empty
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Generator, Iterator, Literal
+from typing import TYPE_CHECKING, Any, BinaryIO, Callable, Iterator
 
 from .. import handoff_worktrees, localio, work_mode
 from ..component_paths import cache_root
@@ -36,13 +36,12 @@ from . import (
     presence,
     producer_session,
     skill_invocations,
-    verification_mode,
     write_attribution,
 )
 from .command_tokens import (
     EVENT_BUDGET,
     MAX_COMMAND_CHARS,
-    Recognition,
+    Recognition as Recognition,
     RecognitionBudget,
     RecognitionLimit,
     TokenTail,
@@ -50,17 +49,11 @@ from .command_tokens import (
     UnreadableCommand,
     charge_event,
     command_event,
-    command_step_limit,
     event_wired_target as resolve_wired_target,
     resolve_command_path as _resolve_command_path,
     split_posix,
     _is_env_assignment,
-    _package_runner_script as _package_runner_script,
     _strip_env,
-    _strip_make_global_options,
-    _strip_npx_options,
-    _strip_runner_global_options,
-    _strip_runner_run_options,
 )
 from .fingerprint import repo_worktree_fingerprint
 from .handoff_close import (
@@ -68,6 +61,13 @@ from .handoff_close import (
     handoff_since as _handoff_since,
     handoff_stop_note as _handoff_stop_note,
     handoff_stop_record as _handoff_stop_record,
+)
+from .observed_verifiers import (
+    _is_raw_verification_text as _is_raw_verification_text,
+    _recognize,
+    _scan_position as _scan_position,
+    first_verifier_command as _first_verifier_command,  # noqa: F401 - scanner compatibility alias
+    is_raw_verification as is_raw_verification,
 )
 from .package import PACKAGE_REF
 from .paths import is_operator_home, resolved_path
@@ -122,8 +122,6 @@ class HookDegraded(Exception):
 _SHELL_SEPARATORS = {"&&", "||", ";", "|", "|&", "&", "\n"}
 _PIPELINE_SEPARATORS = {"|", "|&"}
 _SHELL_WRAPPERS = {"bash", "dash", "ksh", "sh", "zsh"}
-_SHELL_CONTROL_PREFIXES = {"!", "{", "do", "elif", "if", "then", "time", "until", "while"}
-_SHELL_CONTROL_TOKENS = _SHELL_CONTROL_PREFIXES | {"}", "case", "done", "else", "esac", "fi", "for", "select"}
 _HEREDOC_DELIMITER = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _WRITE_TOOLS = {"Edit", "Write", "NotebookEdit"}
 _UNAVAILABLE_FINGERPRINT = "unavailable"
@@ -839,15 +837,6 @@ def _brief_records(text: str) -> list[str]:
     return records if records else [text]
 
 
-def _runner_options_ambiguous(command: str, tokens: list[str]) -> bool:
-    tail, global_ambiguous = _strip_runner_global_options(command, tokens)
-    if global_ambiguous:
-        return True
-    if command in {"uv", "poetry"} and tail[:1] == ["run"]:
-        return _strip_runner_run_options(command, tail[1:])[1]
-    return False
-
-
 def _shell_lexer(command: str | StringIO) -> shlex.shlex:
     # Bash payloads use POSIX quoting on Windows too (Claude Code uses Git Bash).
     lexer = shlex.shlex(command, posix=True, punctuation_chars=";&|<>\n")
@@ -1175,270 +1164,6 @@ def _shell_wrapper_payload(tokens: TokenTail) -> str | None:
     return tail[1] if len(tail) >= 2 and _is_shell_command_option(tail[0]) else None
 
 
-def _classify_segment(segment: list[str], depth: int, budget: RecognitionBudget) -> bool:
-    key = id(segment), depth
-    cached = budget.segment_results.get(key)
-    if cached is not None:
-        return cached[1]
-    pending = len(budget.shell_pending)
-    result = _scan_verifier(TokenView(segment, budget), depth=depth)
-    if pending == len(budget.shell_pending):
-        budget.segment_results[key] = segment, result
-    return result
-
-
-def _segment_is_verifier(segment: list[str]) -> bool:
-    active = EVENT_BUDGET.get()
-    with command_event() as budget:
-        try:
-            if _classify_segment(segment, 0, budget):
-                return True
-            return bool(budget.shell_pending) and _is_raw_verification_text(
-                budget.shell_pending.pop(), depth=0, budget=budget
-            )
-        except RecognitionLimit:
-            if active is not None:
-                raise
-            return False
-        finally:
-            budget.shell_pending.clear()
-
-
-_ScanKind = Literal["command", "tail", "run", "package"]
-_ScanRequest = tuple[TokenView, int, _ScanKind]
-_ScanGenerator = Generator[_ScanRequest, bool, bool]
-
-
-def _scan_verifier(segment: TokenView, *, depth: int) -> bool:
-    """Evaluate suffix dependencies once without using Python's call stack."""
-    results: dict[tuple[object, int, int, _ScanKind], bool] = {}
-    stack: list[tuple[tuple[object, int, int, _ScanKind], _ScanGenerator, bool]] = []
-
-    def push(request: _ScanRequest) -> bool:
-        tokens, count, kind = request
-        storage, index = tokens.position
-        key = (storage, index, count, kind)
-        if key in results:
-            return results[key]
-        tokens.budget.charge(1)
-        evaluate = _scan_position(tokens, depth=count) if kind == "command" else _scan_candidates(tokens, count, kind)
-        stack.append((key, evaluate, False))
-        return False
-
-    answer = push((segment, depth, "command"))
-    while stack:
-        key, evaluate, started = stack[-1]
-        stack[-1] = key, evaluate, True
-        try:
-            answer = push(evaluate.send(answer) if started else next(evaluate))
-        except StopIteration as done:
-            answer = bool(done.value)
-            results[key] = answer
-            stack.pop()
-    return answer
-
-
-def _scan_candidates(tokens: TokenView, depth: int, kind: _ScanKind) -> _ScanGenerator:
-    if not tokens:
-        return False
-    if kind == "tail":
-        if (yield tokens, depth, "command"):
-            return True
-    elif Path(tokens[0]).name == "run":
-        if kind == "package":
-            if _test_script(_package_runner_script(tokens)):
-                return True
-        else:
-            tail = tokens.drop(1)
-            if tail and tail[0] == "--":
-                tail = tail.drop(1)
-            if (yield tail, depth, "command"):
-                return True
-    return (yield tokens.drop(1), depth, kind)
-
-
-def _test_script(script: str | None) -> bool:
-    return bool(script and (script in {"test", "check"} or script.startswith(("test:", "check:"))))
-
-
-def _scan_position(segment: TokenView, *, depth: int) -> _ScanGenerator:
-    if not segment:
-        return False
-    tokens = segment
-    head = tokens[0]
-    command = Path(head).name
-    if "=" in head or command in {"env", "command"}:
-        tokens = _strip_env(tokens)
-        if not tokens:
-            return False
-        head = tokens[0]
-        command = Path(head).name
-    if head in _SHELL_CONTROL_PREFIXES:
-        tokens = tokens.skip_while("shell control", _SHELL_CONTROL_PREFIXES.__contains__)
-        if not tokens:
-            return False
-        head = tokens[0]
-        command = Path(head).name
-    next_depth = depth
-    if command in {"pytest", "py.test", "nose2", "tox", "nox", "vitest", "jest", "mocha", "rspec", "phpunit", "ctest"}:
-        return True
-    if command.startswith("python"):
-        python_invocation = _python_module_invocation(tokens)
-        if python_invocation and python_invocation[0] in {"pytest", "unittest", "nose", "nose2"}:
-            return True
-    if command in {"npm", "pnpm", "yarn", "bun"}:
-        tail, ambiguous = _strip_runner_global_options(command, tokens[1:])
-        return _test_script(_package_runner_script(tail)) or (ambiguous and (yield tail, next_depth, "package"))
-    if command in {"uv", "poetry"}:
-        tail, ambiguous = _strip_runner_global_options(command, tokens[1:])
-        if not tail or tail[0] != "run":
-            return ambiguous and (yield tail, next_depth, "run")
-        tail, ambiguous = _strip_runner_run_options(command, tail[1:])
-        return (yield tail, next_depth, "command") or (ambiguous and (yield tail[1:], next_depth, "tail"))
-    if command == "npx":
-        tail, ambiguous = _strip_npx_options(tokens[1:])
-        return (yield tail, next_depth, "command") or (ambiguous and (yield tail[1:], next_depth, "tail"))
-    if command in _SHELL_WRAPPERS:
-        shell_payload = _shell_wrapper_payload(tokens)
-        if shell_payload is not None:
-            tokens.budget.shell_pending.append(shell_payload)
-            return False
-    if command == "go":
-        return len(tokens) > 1 and Path(tokens[1]).name in {"test", "vet"}
-    if command == "cargo":
-        return len(tokens) > 1 and Path(tokens[1]).name in {"test", "clippy"}
-    if command == "make":
-        tail, ambiguous = _strip_make_global_options(tokens[1:])
-        if ambiguous:
-            return (yield tokens[2:], next_depth, "tail")
-        return bool(tail and Path(tail[0]).name in {"test", "check", "verify"})
-    if command == "ruff" and len(tokens) > 1:
-        subcommand = Path(tokens[1]).name
-        return subcommand == "check" or (
-            subcommand == "format"
-            and bool(tokens[2:].skip_while("ruff check", lambda token: Path(token).name != "--check"))
-        )
-    if command in {"mypy", "pyright", "eslint", "tsc"}:
-        return True
-    if command == "pre-commit" and len(tokens) > 1 and Path(tokens[1]).name == "run":
-        return True
-    normalized = head.replace("\\", "/")
-    return normalized in {"scripts/verify", "scripts/verify-focused"} or normalized.endswith(
-        ("/scripts/verify", "/scripts/verify-focused")
-    )
-
-
-def _is_raw_verification_text(command: str, *, depth: int, budget: RecognitionBudget) -> bool:
-    pending = budget.shell_pending
-    pending.append(command)
-    seen: set[str] = set()
-    try:
-        while pending:
-            text = pending.pop()
-            if text in seen:
-                continue
-            seen.add(text)
-            if EVENT_BUDGET.get() is None:
-                budget.charge(1 + 5 * len(text))
-            text = _strip_heredoc_bodies(text)
-            try:
-                tokens, segments, _ = _segmented_command(text)
-            except ValueError:
-                continue
-            if EVENT_BUDGET.get() is None:
-                budget.charge(len(tokens))
-            if any(_classify_segment(segment, depth, budget) for segment in segments):
-                return True
-            pending.extend(_nested_shell_commands(text))
-        return False
-    finally:
-        pending.clear()
-
-
-def _recognize(command: object, budget: RecognitionBudget | None = None) -> Recognition:
-    if not isinstance(command, str):
-        return Recognition.NO
-    if len(command) > MAX_COMMAND_CHARS:
-        return Recognition.UNDECIDED
-    if not command.strip():
-        return Recognition.NO
-    active = EVENT_BUDGET.get()
-    budget = budget if budget is not None else (active if active is not None else RecognitionBudget())
-    with budget.in_phase("classification"):
-        if command not in budget.verdicts:
-            try:
-                budget.charge(len(command))
-                budget.unreadable |= bool(re.search(r"[\x00\ud800-\udfff]", command))
-                yes = _is_raw_verification_text(command, depth=0, budget=budget)
-                budget.verdicts[command] = (
-                    Recognition.YES if yes else Recognition.UNDECIDED if budget.unreadable else Recognition.NO
-                )
-            except (RecognitionLimit, UnreadableCommand):
-                budget.verdicts[command] = Recognition.UNDECIDED
-        verdict = budget.verdicts[command]
-    if active is None:
-        budget.release()
-    return verdict
-
-
-def is_raw_verification(command: object) -> bool:
-    return _recognize(command) is Recognition.YES
-
-
-def _has_unsupported_verifier_structure(command: str) -> bool:
-    if _nested_shell_commands(command):
-        return True
-    charge_event(len(command))
-    try:
-        tokens, segments, _ = _segmented_command(command)
-    except ValueError:
-        return False
-    if any(
-        token and set(token) <= set(";&|<>") and token != "&&" and any(operator in token for operator in "|<>")
-        for token in tokens
-    ):
-        return True
-    if any(segment and segment[0] in _SHELL_CONTROL_TOKENS for segment in segments):
-        return True
-    for index, segment in enumerate(segments):
-        if not _segment_is_verifier(segment):
-            continue
-        if index > 0:
-            return True
-        if any(any(character in token for character in "$`*?[]{}~") for token in segment):
-            return True
-        if _shell_wrapper_payload(_strip_env(segment)) is not None:
-            return True
-        stripped = _strip_env(segment)
-        if stripped and Path(stripped[0]).name == "npx" and _strip_npx_options(stripped[1:])[1]:
-            return True
-        if stripped and Path(stripped[0]).name in {"uv", "poetry", "npm", "pnpm", "yarn", "bun"}:
-            runner = Path(stripped[0]).name
-            if _runner_options_ambiguous(runner, stripped[1:]):
-                return True
-    return False
-
-
-def _first_verifier_command(command: str) -> str:
-    charge_event(len(command))
-    try:
-        _, segments, _ = _segmented_command(command)
-    except ValueError:
-        return command
-    for segment in segments:
-        if _segment_is_verifier(segment):
-            runnable = list(segment)
-            command_index = 0
-            while command_index < len(runnable) and _is_env_assignment(runnable[command_index]):
-                command_index += 1
-            if command_index < len(runnable) and Path(runnable[command_index]).name == "command":
-                stripped = _strip_env(runnable[command_index:])
-                runnable = [*runnable[:command_index], *stripped]
-            if runnable:
-                return shlex.join(runnable)
-    return command
-
-
 def _is_routed_verify(command: object) -> bool:
     if not isinstance(command, str) or not command.strip():
         return False
@@ -1746,47 +1471,27 @@ def _record_exercised_artifact(state: dict[str, Any], artifact_id: str | None, *
     return True
 
 
-def exercised_artifact_for_fingerprint(target: Path, session_fingerprint: str) -> str | None:
-    """Look up an exercised artifact id for a Claude session fingerprint."""
-    for state in iter_session_states(target, limit=MAX_RECENT_SESSION_STATES):
-        if state.get("session_fingerprint") != session_fingerprint:
-            continue
-        artifact_id = state.get("exercised_artifact_id")
-        if isinstance(artifact_id, str) and artifact_id.strip():
-            return artifact_id.strip()
-    return None
-
-
 def _verify_replacement(
     target: Path,
     command: str | list[str],
     session_fingerprint: str,
     *,
     capture_artifact_id: str | None = None,
-    hook_target: Path | None = None,
 ) -> str:
     from .. import outcome_attribution
 
     # No explicit or exercised id: let verify resolve skills from this session (veto-only).
-    artifact_id = (
-        capture_artifact_id
-        or exercised_artifact_for_fingerprint(target, session_fingerprint)
-        or outcome_attribution.AUTO_CAPTURE
-    )
+    artifact_id = capture_artifact_id or outcome_attribution.AUTO_CAPTURE
     option, value = ("--command", command) if isinstance(command, str) else ("--argv-json", json.dumps(command))
     return (
-        f"{_verify_env_prefix(session_fingerprint, hook_target)}"
+        f"{_verify_env_prefix(session_fingerprint)}"
         f"brigade work verify run --target {shlex.quote(str(target))} "
         f"{option} {shlex.quote(value)} --capture {shlex.quote(artifact_id)}"
     )
 
 
-def _verify_env_prefix(session_fingerprint: str, hook_target: Path | None) -> str:
-    from .. import outcome_attribution
-
-    # The session state lives where the hook fired; point a verifier in another checkout at it.
-    state_at = f"{outcome_attribution.SESSION_TARGET_ENV}={shlex.quote(str(hook_target))} " if hook_target else ""
-    return f"{CLAUDE_SESSION_ENV}={shlex.quote(session_fingerprint)} {state_at}"
+def _verify_env_prefix(session_fingerprint: str) -> str:
+    return f"{CLAUDE_SESSION_ENV}={shlex.quote(session_fingerprint)} "
 
 
 def _new_state(target: Path, session_id: str, repo_fp: str | None, *, task_epoch: str | None = None) -> dict[str, Any]:
@@ -1797,7 +1502,6 @@ def _new_state(target: Path, session_id: str, repo_fp: str | None, *, task_epoch
         "started_at": localio.utc_now_iso(),
         "briefed": False,
         "write_observed": False,
-        "verify_denied_count": 0,
         "hook_timeout_count": 0,
         "hook_latched": False,
         "hook_latch_announced": False,
@@ -1865,9 +1569,6 @@ def _normalize_state(
         stamp = localio.parse_iso_datetime(payload.get(key))
         if stamp is not None and stamp <= now:
             normalized[key] = stamp.isoformat()
-    denied = payload.get("verify_denied_count")
-    if isinstance(denied, int) and not isinstance(denied, bool) and denied >= 0:
-        normalized["verify_denied_count"] = denied
     timeout_count = payload.get("hook_timeout_count")
     if isinstance(timeout_count, int) and not isinstance(timeout_count, bool) and timeout_count >= 0:
         normalized["hook_timeout_count"] = timeout_count
@@ -2103,36 +1804,13 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
                 write_attribution.mark_analysis_failure(event, exc)
             with budget.in_phase("attribution"):
                 return _handle_payload(event, payload, pin=pin)
-        verdict = Recognition.UNDECIDED
         try:
-            verdict = _recognize(command)
             with budget.in_phase("attribution"):
                 return _handle_payload(event, payload, pin=pin)
         except anchored_io.SessionIntegrityError:
             raise
-        except Exception as exc:  # noqa: BLE001 - strict returns a permission decision on analysis errors
-            target = budget.target or _bash_fallback_target(payload, pin)
-            return _bash_analysis_refusal(target, verdict, command, unreadable=not isinstance(exc, RecognitionLimit))
-
-
-_BASH_FILE_ADVICE = "Split the command, or move the long content into a file and run the command using that file."
-
-
-def _bash_analysis_refusal(
-    target: Path | None, verdict: Recognition, command: object, *, unreadable: bool
-) -> dict[str, Any] | None:
-    if target is None or not work_mode.is_strict(target):
-        return None
-    if verdict is Recognition.YES:
-        if unreadable:
-            return _bash_permission(
-                "The hook recognized a verification command but could not read it completely. "
-                f"Run the verification through `brigade work verify run`. {_BASH_FILE_ADVICE}"
-            )
-        return _bash_permission("Split the command or run the verification through `brigade work verify run`.")
-    if unreadable:
-        return _bash_permission(f"The hook could not read this command. {_BASH_FILE_ADVICE}")
-    return _undecided_pretooluse(target, command) if verdict is Recognition.UNDECIDED else None
+        except Exception:  # noqa: BLE001 - Bash analysis does not control permission
+            return None
 
 
 def _bash_fallback_target(payload: dict[str, Any], pin: Path | None) -> Path | None:
@@ -2146,27 +1824,6 @@ def _bash_fallback_target(payload: dict[str, Any], pin: Path | None) -> Path | N
         return _pinned_hook_target(derived, cwd, pin)
     finally:
         EVENT_BUDGET.reset(context)
-
-
-def _bash_permission(reason: str) -> dict[str, Any]:
-    return {
-        "hookSpecificOutput": {
-            "hookEventName": "PreToolUse",
-            "permissionDecision": "deny",
-            "permissionDecisionReason": reason,
-        }
-    }
-
-
-def _undecided_pretooluse(target: Path | None, command: object) -> dict[str, Any] | None:
-    if target is None or not work_mode.is_strict(target):
-        return None
-    limit = (
-        f"{MAX_COMMAND_CHARS:,}-character"
-        if isinstance(command, str) and len(command) > MAX_COMMAND_CHARS
-        else f"{command_step_limit():,}-step"
-    )
-    return _bash_permission(f"This command exceeds the {limit} classification limit. {_BASH_FILE_ADVICE}")
 
 
 def _handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None) -> dict[str, Any] | None:
@@ -2300,66 +1957,11 @@ def _handle_event(
             return _additional_context(event, warning, target=target, session_id=session_id) if warning else None
         if tool_name != "Bash":
             return None
-        raw_tool_input = payload.get("tool_input")
-        tool_input: dict[str, Any] = raw_tool_input if isinstance(raw_tool_input, dict) else {}
-        command = tool_input.get("command")
-        budget = EVENT_BUDGET.get()
         baseline = event_fingerprint(target)
         state["pending_bash_fingerprint"] = baseline or _UNAVAILABLE_FINGERPRINT
         state["pending_bash_started_at"] = localio.utc_now_iso()
         _write_session_state_preserving_latch(target, session_id, state, log_target=target)
-        recognition = _recognize(command)
-        if recognition is Recognition.UNDECIDED or (budget is not None and budget.unreadable):
-            return _bash_analysis_refusal(
-                target, recognition, command, unreadable=budget is not None and budget.unreadable
-            )
-        if recognition is Recognition.NO:
-            return None
-        if not verification_mode.verification_enforced(command, payload.get("cwd"), target):
-            return None
-        state["verify_denied_count"] = int(state.get("verify_denied_count") or 0) + 1
-        _write_session_state_preserving_latch(target, session_id, state, log_target=target)
-        capture_artifact_id = state.get("exercised_artifact_id")
-        if not isinstance(capture_artifact_id, str):
-            capture_artifact_id = None
-        # The replacement runs the verifier with cwd=target, so it names the
-        # verifier's checkout, not a worktree a later segment writes to.
-        verify_target = (
-            target
-            if budget is not None and budget.attribution_incomplete
-            else (effective_hook_target(payload, pin=pin, attribute_writes=False) or target)
-        )
-        if _has_unsupported_verifier_structure(str(command)):
-            from .. import outcome_attribution
-
-            capture_id = capture_artifact_id or outcome_attribution.AUTO_CAPTURE
-            reason = (
-                "Route verification through Brigade so failed, rejected, and passing results create receipts.\n"
-                "Split shell grouping, command substitution, pipelines, redirection, or complex directory changes "
-                f"from the verifier, then run that verifier with `brigade work verify run --capture {capture_id}`."
-            )
-        else:
-            replacement = _verify_replacement(
-                verify_target,
-                _first_verifier_command(str(command)),
-                str(state["session_fingerprint"]),
-                capture_artifact_id=capture_artifact_id,
-                hook_target=target if verify_target != target else None,
-            )
-            reason = (
-                "Route verification through Brigade so failed, rejected, and passing results create receipts.\n"
-                f"Use: {replacement}"
-            )
-        hook_at = target if verify_target != target else None
-        prefix = _verify_env_prefix(str(state["session_fingerprint"]), hook_at)
-        reason += manifest_loop.deny_hint(verify_target, prefix)
-        return {
-            "hookSpecificOutput": {
-                "hookEventName": "PreToolUse",
-                "permissionDecision": "deny",
-                "permissionDecisionReason": reason,
-            }
-        }
+        return None
 
     budget = EVENT_BUDGET.get()
     if event == "PostToolUse" or (event == "PostToolUseFailure" and payload.get("tool_name") == "Bash"):
@@ -2488,7 +2090,7 @@ def _handle_event(
             manifest_failures += manifest_loop.stop_failures(
                 stop_target,
                 stop_state,
-                _verify_env_prefix(fingerprint, None),
+                _verify_env_prefix(fingerprint),
                 is_foreign=functools.partial(_shared_tree_block_is_foreign, stop_target, session_id, stop_state, gate),
             )
         if blocking_failures or manifest_failures:
@@ -2770,14 +2372,7 @@ def _hook_run_body_unchecked(
             "session_id": session_id,
         }
 
-    if log_probe_failed and event == "PreToolUse":
-        command = _as_tool_input(payload.get("tool_input")).get("command")
-        try:
-            verdict = _recognize(command)
-        except Exception:  # noqa: BLE001 - fall back to unreadable-command refusal
-            verdict = Recognition.UNDECIDED
-        result = _bash_analysis_refusal(log_target, verdict, command, unreadable=True)
-    elif log_probe_failed:
+    if log_probe_failed:
         with command_event() as budget:
             budget.attribution_incomplete = budget.unreadable = True
             result = _isolated_handle_payload(event, payload, pin=pin)

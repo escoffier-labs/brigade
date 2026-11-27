@@ -61,7 +61,6 @@ def _write_claude_session(
         "last_write_at": last_write_at.isoformat(),
         "briefed": True,
         "write_observed": True,
-        "verify_denied_count": 0,
     }
     if last_verification_write_at is not None:
         state["last_verification_write_at"] = last_verification_write_at.isoformat()

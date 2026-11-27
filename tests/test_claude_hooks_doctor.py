@@ -286,7 +286,6 @@ def test_doctor_uses_last_write_time_for_receipt_threshold(tmp_path: Path, capsy
             "last_write_at": (now - timedelta(minutes=30)).isoformat(),
             "briefed": True,
             "write_observed": True,
-            "verify_denied_count": 0,
         },
     )
     run_dir = target / ".brigade" / "work" / "verify-runs" / "before-write"
@@ -326,7 +325,6 @@ def test_doctor_ignores_foreign_write_outrunning_this_session_receipt(tmp_path: 
             "last_write_at": (now - timedelta(minutes=5)).isoformat(),
             "briefed": True,
             "write_observed": True,
-            "verify_denied_count": 0,
         },
     )
     run_dir = target / ".brigade" / "work" / "verify-runs" / "session-capture"
@@ -356,7 +354,6 @@ def test_doctor_ignores_foreign_write_outrunning_this_session_receipt(tmp_path: 
             "last_write_at": (now - timedelta(minutes=1)).isoformat(),
             "briefed": True,
             "write_observed": True,
-            "verify_denied_count": 0,
         },
     )
     other_dir = target / ".brigade" / "work" / "verify-runs" / "other-capture"

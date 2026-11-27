@@ -1,0 +1,1 @@
+- Claude Code's PreToolUse hook lets test commands run directly. Strict sessions still check verification receipts at Stop, and observe mode still records recognized checks.

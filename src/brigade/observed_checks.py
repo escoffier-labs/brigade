@@ -30,6 +30,7 @@ from .claude_hooks.command_tokens import (
     command_event,
     split_posix,
 )
+from .claude_hooks import observed_verifiers
 from .claude_hooks.envelope import redact_paths
 from .guard.types import ScanOptions
 from .inbox_lock import InboxLockTimeout, held_file_lock_descriptor as held_file_lock
@@ -197,7 +198,7 @@ def _normalize_tokens(tokens: TokenView) -> str:
         if not tokens:
             break
         head = tokens[0]
-        if head in rt._SHELL_CONTROL_PREFIXES:
+        if head in observed_verifiers.SHELL_CONTROL_PREFIXES:
             tokens = tokens.drop(1)
             continue
         name = Path(head).name
@@ -206,22 +207,22 @@ def _normalize_tokens(tokens: TokenView) -> str:
             tokens = module[1].prepend([module[0]])
             continue
         if name in {"uv", "poetry", "npm", "pnpm", "yarn", "bun"}:
-            tail, ambiguous = rt._strip_runner_global_options(name, tokens.drop(1))
+            tail, ambiguous = observed_verifiers.strip_runner_global_options(name, tokens.drop(1))
             if ambiguous:
                 break
             if name in {"uv", "poetry"}:
                 if not tail or tail[0] != "run":
                     break
-                tokens, ambiguous = rt._strip_runner_run_options(name, tail.drop(1))
+                tokens, ambiguous = observed_verifiers.strip_runner_run_options(name, tail.drop(1))
                 if ambiguous:
                     break
                 continue
-            script = rt._package_runner_script(tail)
+            script = observed_verifiers.package_runner_script(tail)
             if name in {"pnpm", "yarn", "bun"} and tail and tail[0] in _TOOL_TARGETS[name]:
                 script = tail[0]
             return _tool_label(name, script, ":")
         if name == "npx":
-            tokens, ambiguous = rt._strip_npx_options(tokens.drop(1))
+            tokens, ambiguous = observed_verifiers.strip_npx_options(tokens.drop(1))
             if ambiguous:
                 break
             continue
@@ -230,7 +231,7 @@ def _normalize_tokens(tokens: TokenView) -> str:
             if normalized.endswith(suffix):
                 return suffix
         if name == "make":
-            tail, ambiguous = rt._strip_make_global_options(tokens.drop(1))
+            tail, ambiguous = observed_verifiers.strip_make_global_options(tokens.drop(1))
             return _tool_label("make", tail[0] if tail and not ambiguous else None)
         if name in {"go", "cargo", "ruff"} and len(tokens) > 1:
             return _tool_label(name, tokens[1])
@@ -244,7 +245,7 @@ def normalize_tool(command: str) -> str:
     rt = _rt()
     with command_event() as budget:
         try:
-            segment = rt._shell_tokens(rt._first_verifier_command(command))
+            segment = rt._shell_tokens(observed_verifiers.first_verifier_command(command))
             label = _normalize_tokens(TokenView(segment, budget))
             return label if label in _TOOL_LABELS else "other"
         except (ValueError, RecognitionLimit):

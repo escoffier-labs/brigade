@@ -116,7 +116,7 @@ The code graph is a local index of your repository's symbols and the calls betwe
 
 ## Modes<sup>*</sup>
 
-`strict` is the default. Checks run through `brigadestack work verify run`, and Claude Code's stop hook asks for a record before a session finishes. `observe` records checks and blocks nothing. `off` drops the check rules and keeps memory and briefs. Safety rails (secret scanning and pre-push checks) are a separate setting, on by default in every mode.
+`strict` is the default. Claude Code allows direct checks in every mode. Use `brigadestack work verify run` to create a verification receipt. In strict mode, the Claude Stop hook checks for receipts after code changes. `observe` records recognized checks as observations. `off` keeps memory and briefs. Safety rails (secret scanning and pre-push checks) are a separate setting, on by default in every mode.
 
 <sup>*</sup> `observe` and the names `strict` and `off` are in the 0.32.0 beta, as the capture shows. Version 0.31.0 calls them `engineer` and `yolo` and has no `observe`. The beta still accepts the old names.
 

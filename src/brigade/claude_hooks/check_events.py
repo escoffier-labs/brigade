@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from .. import agent_identity, observed_checks, work_mode, dirfd
-from . import verification_mode
+from . import observed_verifiers
 
 IDENTITY_FIELDS = ("model", "model_source")
 AGENT_SESSION_ENV = "BRIGADE_AGENT_SESSION"
@@ -99,10 +99,10 @@ def _on_event(
     modes = (
         [(target, work_mode.resolve_mode(target))]
         if unclassified
-        else verification_mode.governing_modes(command, payload.get("cwd"), target)
+        else observed_verifiers.governing_modes(command, payload.get("cwd"), target)
     )
     for governed, mode in modes:
-        if mode == "observe" or (unclassified and mode == "off"):
+        if unclassified or mode == "observe":
             # The pin and home policy apply to every destination, as they do for write tracking.
             if governed != target and rt.effective_hook_target({"cwd": str(governed)}, pin=pin) != governed:
                 continue
@@ -128,35 +128,37 @@ def _on_event(
 def failure_followup(
     payload: dict[str, Any], target: Path, session_id: str, state: dict[str, Any]
 ) -> dict[str, Any] | None:
-    rt = _rt()
+    if payload.get("tool_name") != "Bash":
+        return None
     raw_tool_input = payload.get("tool_input")
     tool_input = raw_tool_input if isinstance(raw_tool_input, dict) else {}
     command = tool_input.get("command")
-    verifier = rt.is_raw_verification(command) or rt._is_routed_verify(command)
-    if (
-        payload.get("tool_name") == "Bash"
-        and verifier
-        and verification_mode.verification_enforced(command, payload.get("cwd"), target)
-    ):
-        from .. import outcome_attribution, outcome_cmd
+    rt = _rt()
+    if not isinstance(command, str) or len(command) > rt.MAX_COMMAND_CHARS:
+        return None
+    try:
+        if not rt._is_routed_verify(command) or not work_mode.is_strict(target):
+            return None
+    except Exception:  # Advisory recognition must not interrupt hook handling.
+        return None
+    from .. import outcome_attribution, outcome_cmd
 
-        capture_id = outcome_cmd.resolve_capture_artifact_id(
-            rt._parse_capture_flag(command),
-            state.get("exercised_artifact_id") if isinstance(state.get("exercised_artifact_id"), str) else None,
-            outcome_attribution.AUTO_CAPTURE,
-        )
-        return rt._additional_context(
-            "PostToolUseFailure",
-            "",
-            target=target,
-            session_id=session_id,
-            records=[
-                "The failed or rejected verification must remain recorded in Brigade before retrying. "
-                "Inspect the receipt, fix the cause, then rerun through "
-                f"`brigade work verify run --capture {capture_id}`.",
-            ],
-        )
-    return None
+    capture_id = outcome_cmd.resolve_capture_artifact_id(
+        rt._parse_capture_flag(command),
+        state.get("exercised_artifact_id") if isinstance(state.get("exercised_artifact_id"), str) else None,
+        outcome_attribution.AUTO_CAPTURE,
+    )
+    return rt._additional_context(
+        "PostToolUseFailure",
+        "",
+        target=target,
+        session_id=session_id,
+        records=[
+            "The failed or rejected verification must remain recorded in Brigade before retrying. "
+            "Inspect the receipt, fix the cause, then rerun through "
+            f"`brigade work verify run --capture {capture_id}`.",
+        ],
+    )
 
 
 def after_handling(event: str, payload: dict[str, Any], *, pin: Path | None) -> None:

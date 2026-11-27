@@ -146,8 +146,6 @@ def test_switching_back_to_enforced_restores_block_and_hooks(tmp_path: Path, mon
     _set_mode(target, "strict", capsys)
     assert (target / ".claude" / "settings.json").read_text() == enforced_settings
     assert "work_mode" not in install_cmd.status_payload(target)
-    denied = runtime.handle_payload("PreToolUse", _bash(target, "PreToolUse", "python -m pytest -q"))
-    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
     runtime.handle_payload("SessionStart", _payload(target, "SessionStart"))
     runtime.handle_payload("PostToolUse", _write(target))
     assert runtime.handle_payload("Stop", _payload(target, "Stop", stop_hook_active=False))["decision"] == "block"
@@ -327,8 +325,6 @@ def test_legacy_enforced_name_reads_and_sets_as_engineer(tmp_path: Path, capsys)
     _set_mode(target, "enforced", capsys)
     assert work_mode.resolve_mode(target) == "strict"
     assert json.loads(path.read_text(encoding="utf-8"))["work"] == {"mode": "strict"}
-    denied = runtime.handle_payload("PreToolUse", _bash(target, "PreToolUse", "python -m pytest -q"))
-    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
 
 
 def test_mode_set_rejects_unknown_mode_without_naming_the_alias(tmp_path: Path, capsys) -> None:
@@ -370,7 +366,6 @@ def _unreceipted_session(repo: Path, session_id: str = "yolo-session") -> None:
             "last_write_at": (now - timedelta(minutes=30)).isoformat(),
             "briefed": True,
             "write_observed": True,
-            "verify_denied_count": 0,
         },
     )
 
@@ -1006,8 +1001,6 @@ def test_strict_behavior_unchanged_under_each_alias(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(runtime, "_run_brief", lambda _repo: "work brief")
     monkeypatch.setattr(runtime, "_run_recall", lambda *args, **kwargs: "")
     runtime.handle_payload("SessionStart", _payload(target, "SessionStart"))
-    denied = runtime.handle_payload("PreToolUse", _bash(target, "PreToolUse", "python -m pytest -q"))
-    assert denied["hookSpecificOutput"]["permissionDecision"] == "deny"
     runtime.handle_payload("PostToolUse", _write(target))
     assert runtime.handle_payload("Stop", _payload(target, "Stop", stop_hook_active=False))["decision"] == "block"
 

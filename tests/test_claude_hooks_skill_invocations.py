@@ -93,18 +93,6 @@ def test_malformed_or_failed_skill_calls_record_nothing(tmp_path: Path):
     assert state is None or not state.get(skill_invocations.STATE_KEY)
 
 
-def test_unsupported_structure_hint_uses_auto_capture(tmp_path: Path):
-    target = _wired_claude(tmp_path)
-    result = runtime.handle_payload(
-        "PreToolUse",
-        _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "cd src && pytest -q"}),
-    )
-    reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "Split shell grouping" in reason
-    assert "--capture auto" in reason
-    assert "--capture brigade-work" not in reason
-
-
 def _read_skill(target: Path, skill_id: str) -> None:
     runtime.handle_payload(
         "PostToolUse",
@@ -115,37 +103,6 @@ def _read_skill(target: Path, skill_id: str) -> None:
             tool_input={"file_path": str(target / ".claude" / "skills" / skill_id / "SKILL.md")},
         ),
     )
-
-
-def _type_capture(target: Path, skill_id: str) -> None:
-    command = f'brigade work verify run --target . --command "true" --capture {skill_id}'
-    runtime.handle_payload(
-        "PostToolUse", _payload(target, "PostToolUse", tool_name="Bash", tool_input={"command": command})
-    )
-
-
-def test_unsupported_structure_hint_says_auto_after_a_skill_read(tmp_path: Path):
-    target = _wired_claude(tmp_path)
-    _install_skill(target, "taste")
-    _read_skill(target, "taste")
-    result = runtime.handle_payload(
-        "PreToolUse",
-        _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "cd src && pytest -q"}),
-    )
-    reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "--capture auto" in reason
-    assert "--capture taste" not in reason
-
-
-def test_unsupported_structure_hint_keeps_an_explicitly_typed_capture(tmp_path: Path):
-    target = _wired_claude(tmp_path)
-    _install_skill(target, "taste")
-    _type_capture(target, "taste")
-    result = runtime.handle_payload(
-        "PreToolUse",
-        _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "cd src && pytest -q"}),
-    )
-    assert "--capture taste" in result["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 def test_failure_followup_says_auto_after_a_skill_read(tmp_path: Path):

@@ -44,7 +44,7 @@ for the `auto_apply` policy field, the switch and rollback.
 
 ## The default loop
 
-This is the setup the rest of this page assumes, and it is one command. `brigade init` with the Claude harness (the default) writes the project-scope Claude Code work-loop hooks to `.claude/settings.json`, so verify routing and the Stop gate work from the first session. It also turns on extras and installs the care schedule, so scoring keeps running without anyone remembering to capture, rank or reconcile.
+This is the setup the rest of this page assumes, and it is one command. `brigade init` with the Claude harness (the default) writes the project-scope Claude Code work-loop hooks to `.claude/settings.json`. The strict Stop gate checks receipts after code changes. Agents can run checks directly and use `brigade work verify run` to capture receipts from the first session. It also turns on extras and installs the care schedule, so scoring keeps running without anyone remembering to capture, rank or reconcile.
 
 ```bash
 brigade init --target . --depth repo --harnesses claude   # hooks, extras on, care schedule installed
@@ -54,8 +54,8 @@ That is the same as running `brigade extras on` and `brigade care install --targ
 
 With the hooks and the schedule on, this happens with no operator command:
 
-1. **Verify is routed with automatic attribution.** In a hook-enabled Claude Code session, the hook denies a raw test command and supplies the Brigade replacement: `brigade work verify run --target . --command "<check>" --capture auto`. The receipt records the real exit code. `auto` writes one `session_observed` row for each skill the session read or invoked. When nothing resolves, it writes one `caller_typed` `brigade-work` row instead. If the session state already holds an artifact id from an earlier typed capture, the replacement uses that id. Neither kind of row can promote a skill. See [Attribution sources](#attribution-sources).
-2. **A manifest subject change gets the manifest verify.** When the working tree changes the exact `subject_path` of a tracked manifest, the same deny adds `brigade work verify run --manifest <manifest> --capture auto` beside the agent's own check. A match on `scope_globs` alone does not count. The Stop gate then holds closeout until a completed receipt from that manifest postdates the write. If the hook session wrote the subject itself and no other session did, that receipt can be a scoreable trial. See [Producer session for a manifest trial](#producer-session-for-a-manifest-trial).
+1. **Run verify with automatic attribution.** In a hook-enabled Claude Code session, run `brigade work verify run --target . --command "<check>" --capture auto`. The receipt records the real exit code. `auto` writes one `session_observed` row for each skill the session read or invoked. When nothing resolves, it writes one `caller_typed` `brigade-work` row instead. Neither kind of row can promote a skill. See [Attribution sources](#attribution-sources).
+2. **A manifest subject change gets the manifest verify.** When a strict Claude Code session writes the exact `subject_path` of a tracked manifest, the Stop gate can hold closeout until a completed manifest receipt postdates the write. It suggests `brigade work verify run --manifest <manifest> --capture auto`. A match on `scope_globs` alone does not count. If the hook session wrote the subject itself and no other session did, that receipt can be a scoreable trial. See [Producer session for a manifest trial](#producer-session-for-a-manifest-trial).
 3. **The weekly ratchet runs.** The `weekly-outcome-ratchet` care entry fires Monday at 07:00 local time and runs two steps from its shipped runbook: `brigade outcome rank --target .`, then `brigade outcome reconcile --target . --report --proposals`. Both are dry runs. Reconcile evaluates every scored artifact (it reloads records, scorecards and status itself and reads nothing `rank` writes). A verified regression produces `regression_hold` on a candidate or `regression_rollback` on a promoted artifact, and bounded session-observed hurt vetoes an install or bump as `observed_regression_hold`. Reconcile writes the [ratchet report](#weekly-ratchet-report) and files a skills inbox proposal for a verified regression on a Brigade-bundled skill, at most one per skill text, so a later regression on unchanged text reports `existing` (see [Regression proposals](#regression-proposals)).
 4. **The report is shown.** `brigade work brief` prints an `outcome_ratchet:` line, the Center dashboard outcomes view shows a ratchet panel, and `brigade outcome ratchet --target .` prints the report. A report older than seven days is labeled stale on the dashboard.
 
@@ -63,7 +63,7 @@ To check that the loop ran, run `brigade care status --target .` and look for a 
 
 ```mermaid
 flowchart TD
-    A[Claude Code session with hooks] -->|verify routed| B["verify run --capture auto"]
+    A[Claude Code session with hooks] -->|agent runs verify| B["verify run --capture auto"]
     A -->|manifest subject changed| C["verify run --manifest --capture auto"]
     B --> D[Receipt and ledger rows]
     C --> D
@@ -202,7 +202,7 @@ The soak needs two things inside seven days: one real attested promotion, and on
 
 ## Workflow
 
-The default loop runs only the hook-routed verify commands, `outcome rank` and `outcome reconcile --report --proposals`. The other commands below are manual. Run them to score outside a hook-enabled session, to inspect a result, or to apply a decision.
+The default loop uses receipts from explicit verify commands, `outcome rank`, and `outcome reconcile --report --proposals`. The other commands below are manual. Run them to score outside a hook-enabled session, to inspect a result, or to apply a decision.
 
 ```bash
 # scoreable evidence: a git-tracked manifest under verify/manifests/ authors subject_binding
@@ -462,7 +462,7 @@ Every `*.json` under `verify/manifests/` must resolve through `verify_manifest.r
 
 Write check commands as the argv the receipt will record. Do not prefix `PYTHONPATH=src`: receipts store env assignments separately, and a plan mismatch makes the trial `verifier_manifest_mismatch`.
 
-When the working tree changes a tracked manifest's exact `subject_path`, the Claude Code hook adds the manifest verify to its verify deny and to the Stop gate:
+When the strict Claude Stop gate finds an attributed write to a tracked manifest's exact `subject_path` without a qualifying manifest receipt, it suggests this command.
 
 ```text
 brigade work verify run --target <target> --manifest "<manifest source path>" --capture auto

@@ -444,10 +444,10 @@ def test_lesson_contention_preserves_existing_capture(target, monkeypatch, tool)
         assert observe_session_path(target, "private-session").exists()
 
 
-@pytest.mark.parametrize("mode", ["observe", "off"])
-def test_unclassified_capture_has_an_explicit_marker(target, monkeypatch, capsys, mode):
+@pytest.mark.parametrize("mode", ["strict", "observe", "off"])
+@pytest.mark.parametrize("command", ["echo " + "x" * 70_000, "echo a\x00b"], ids=["long", "unreadable"])
+def test_unclassified_capture_has_an_explicit_marker(target, monkeypatch, capsys, mode, command):
     _set_mode(target, mode, capsys)
-    command = "echo " + "x" * 70_000
     assert run(monkeypatch, "codex", payload(target, "codex", tool_input={"command": command})) == 0
     (record,) = observed_checks.read_checks(target)[0]
     assert record.tool == "unclassified"
@@ -477,7 +477,7 @@ def test_codex_bash_event_work_bound(target, monkeypatch, shape):
     ["surrogate", "null", "long-component", "windows-missing-component", "windows-invalid-component", "attribution"],
 )
 def test_codex_observation_does_not_classify_unreadable_commands(target, monkeypatch, capsys, mode, case):
-    from brigade.claude_hooks import command_tokens, verification_mode
+    from brigade.claude_hooks import command_tokens, observed_verifiers
 
     _set_mode(target, mode, capsys)
     if case == "attribution":
@@ -485,7 +485,7 @@ def test_codex_observation_does_not_classify_unreadable_commands(target, monkeyp
         def unavailable(*_args, **_kwargs):
             raise RuntimeError("fixture attribution error")
 
-        monkeypatch.setattr(verification_mode, "governing_modes", unavailable)
+        monkeypatch.setattr(observed_verifiers, "governing_modes", unavailable)
     if case == "windows-missing-component":
         monkeypatch.setattr(command_tokens, "_WINDOWS", True)
     if case == "windows-invalid-component":

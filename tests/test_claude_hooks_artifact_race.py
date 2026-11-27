@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import shlex
 import sys
 from pathlib import Path
 
@@ -71,7 +70,7 @@ def seed_artifact(target: Path, artifact_id: str | None, *, kind: str = "runbook
 
 
 @pytest.mark.parametrize("stale_artifact", [None, "brigade-work", "prior-skill"])
-def test_read_during_bash_preserves_guidance_and_receipt_attribution(target, monkeypatch, stale_artifact):
+def test_read_during_bash_preserves_receipt_attribution(target, monkeypatch, stale_artifact):
     seed_artifact(target, stale_artifact)
     interleaved = False
 
@@ -84,19 +83,13 @@ def test_read_during_bash_preserves_guidance_and_receipt_attribution(target, mon
 
     with monkeypatch.context() as boundary:
         boundary.setattr(runtime, "repo_worktree_fingerprint", fingerprint)
-        result = event(target, "PreToolUse", tool_name="Bash", tool_input={"command": "python -m pytest -q"})
+        event(target, "PreToolUse", tool_name="Bash", tool_input={"command": "echo ready"})
     assert interleaved
     state = runtime.read_session_state(target, SESSION)
     assert state is not None
     assert (state.get("exercised_artifact_id"), state.get("exercised_artifact_kind")) == ("taste", "skill")
-    reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-    tokens = shlex.split(reason.split("Use: ", 1)[1])
-    capture = tokens[tokens.index("--capture") + 1]
-    assert capture == "taste"
-    assert runtime.exercised_artifact_for_fingerprint(target, state["session_fingerprint"]) == "taste"
 
-    # Exercise the real receipt/capture path using the hook's selected artifact,
-    # with a tiny verifier instead of starting another pytest suite.
+    # Exercise the receipt path with the artifact preserved across the interleaved read.
     monkeypatch.setenv(runtime.CLAUDE_SESSION_ENV, state["session_fingerprint"])
     assert (
         cli.main(
@@ -109,7 +102,7 @@ def test_read_during_bash_preserves_guidance_and_receipt_attribution(target, mon
                 "--argv-json",
                 json.dumps([sys.executable, "-c", "pass"]),
                 "--capture",
-                capture,
+                state["exercised_artifact_id"],
             ]
         )
         == 0
@@ -190,8 +183,6 @@ def test_task_reset_does_not_inherit_artifact_or_accept_old_snapshot(target):
     assert not runtime._write_session_state_preserving_latch(target, SESSION, old)
     assert old == before
     assert runtime.read_session_state(target, SESSION) == current
-    result = event(target, "PreToolUse", tool_name="Bash", tool_input={"command": "python -m pytest -q"})
-    assert "--capture auto" in result["hookSpecificOutput"]["permissionDecisionReason"]
 
 
 @pytest.mark.parametrize("failure", ["lock", "write"])

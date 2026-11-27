@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from . import agent_identity, observed_checks, work_mode
-from .claude_hooks import runtime, verification_mode
+from .claude_hooks import runtime, observed_verifiers
 from .claude_hooks.command_tokens import EVENT_BUDGET, command_event, event_wired_target as resolve_wired_target
 
 CODEX_HOOK_CONTEXT = "codex-observe"
@@ -71,19 +71,19 @@ def _capture(harness: str, payload: dict[str, Any], target: Path | None, pin: Pa
         tool_input = payload.get("tool_input")
         command = tool_input.get("command") if isinstance(tool_input, dict) else None
         verdict = runtime._recognize(command)
-        if not isinstance(command, str) or verdict is runtime.Recognition.NO:
-            return
         budget = EVENT_BUDGET.get()
         unclassified = verdict is runtime.Recognition.UNDECIDED or (budget is not None and budget.unreadable)
+        if not isinstance(command, str) or (verdict is runtime.Recognition.NO and not unclassified):
+            return
         identity = codex_identity(payload)
         modes = (
             [(target, work_mode.resolve_mode(target))]
             if unclassified
-            else verification_mode.governing_modes(command, cwd, target, harness=harness)
+            else observed_verifiers.governing_modes(command, cwd, target, harness=harness)
         )
         for governed, mode in modes:
             observed_checks.check_capture_deadline()
-            if (mode != "observe" and not (unclassified and mode == "off")) or not _allowed(governed, harness, pin):
+            if (mode != "observe" and not unclassified) or not _allowed(governed, harness, pin):
                 continue
             observed_checks.append_check(
                 governed,

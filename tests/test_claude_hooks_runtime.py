@@ -18,7 +18,7 @@ import pytest
 from types import SimpleNamespace
 
 from brigade import cli, localio
-from brigade.claude_hooks import command_tokens, envelope
+from brigade.claude_hooks import command_tokens, envelope, observed_verifiers
 from brigade.claude_hooks.package import PACKAGE_REF
 from brigade.claude_hooks import fingerprint as hook_fingerprint
 from brigade.claude_hooks import runtime
@@ -285,273 +285,15 @@ def test_other_events_stay_silent_for_unwired_git_repo(tmp_path: Path):
     assert runtime.handle_payload("Stop", _payload(repo, "Stop", stop_hook_active=False)) is None
 
 
-def test_pretooluse_denies_raw_verification_with_exact_replacement(tmp_path: Path):
+def test_pretooluse_leaves_plain_test_command_alone_and_records_bash_baseline(tmp_path: Path, monkeypatch):
     target = _wired_claude(tmp_path)
-    result = runtime.handle_payload(
-        "PreToolUse",
-        _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "python -m pytest -q"}),
-    )
-    specific = result["hookSpecificOutput"]
-    assert specific["hookEventName"] == "PreToolUse"
-    assert specific["permissionDecision"] == "deny"
-    reason = specific["permissionDecisionReason"]
-    assert "brigade work verify run" in reason
-    assert f"--target {target.resolve()}" in reason
-    assert "--capture auto" in reason
-    assert "python -m pytest -q" in reason
+    monkeypatch.setattr(runtime, "repo_worktree_fingerprint", lambda _target: "baseline")
+    payload = _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "pytest -q tests/x.py"})
 
-
-def test_pretooluse_denies_raw_focused_verify_without_matching_similar_names(tmp_path: Path):
-    target = _wired_claude(tmp_path)
-    result = runtime.handle_payload(
-        "PreToolUse",
-        _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "./scripts/verify-focused"}),
-    )
-
-    assert runtime.is_raw_verification("./scripts/verify-focused")
-    assert not runtime.is_raw_verification("./scripts/verify-focused-extra")
-    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
-def test_pretooluse_avoids_recursion_and_false_positive_noise(tmp_path: Path):
-    target = _wired_claude(tmp_path)
-    for command in (
-        'brigade work verify run --target . --command "pytest" --capture brigade-work',
-        "echo pytest",
-        "echo '$(pytest -q)'",
-        'echo "(pytest -q)"',
-        "sh -c 'echo pytest'",
-        "bash -o errexit -c 'echo pytest'",
-        "bash script.sh -c pytest",
-        "if true; then echo pytest; fi",
-        "{ echo pytest; }",
-        "python -V -m pytest",
-        "python -c \"print('pytest')\"",
-        "ruff format src/",
-        "rg test src",
-        "cat tests/test_cli.py",
-    ):
-        result = runtime.handle_payload(
-            "PreToolUse",
-            _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": command}),
-        )
-        assert result is None, command
-
-
-def test_pretooluse_denies_compound_containing_verifier(tmp_path: Path):
-    target = _wired_claude(tmp_path)
-    result = runtime.handle_payload(
-        "PreToolUse",
-        _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "cd src && pytest -q"}),
-    )
-    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-
-
-def test_pretooluse_denies_verifier_smuggled_with_routed_verify(tmp_path: Path):
-    target = _wired_claude(tmp_path)
-    routed = 'brigade work verify run --target . --command "pytest" --capture brigade-work'
-    for command in (
-        f"pytest -q && {routed}",
-        f"{routed} && pytest -q",
-        f"cd src && pytest -q; {routed}",
-        "pytest brigade work verify",
-        f"{routed}\npytest -q",
-        f"pytest -q\n{routed}",
-        "echo ok\npytest -q",
-    ):
-        result = runtime.handle_payload(
-            "PreToolUse",
-            _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": command}),
-        )
-        assert result["hookSpecificOutput"]["permissionDecision"] == "deny", command
-
-
-def test_pretooluse_denies_confident_verifier_wrappers(tmp_path: Path):
-    target = _wired_claude(tmp_path)
-    for command in (
-        "uv run pytest -q",
-        "uv run -- pytest -q",
-        "uv run --no-sync pytest -q",
-        "uv run --python 3.12 pytest -q",
-        "uv run --with rich pytest -q",
-        "uv --directory src run pytest -q",
-        "poetry run pytest -q",
-        "poetry run -- pytest -q",
-        "poetry run -C src pytest -q",
-        "poetry -C src run pytest -q",
-        "npx jest",
-        "npm run test:unit",
-        "npm run -- test",
-        "npm run -s test",
-        "npm run --silent test",
-        "pnpm --filter app run test",
-        "yarn run -- test",
-        "bun run -- test",
-        "make -p test",
-    ):
-        result = runtime.handle_payload(
-            "PreToolUse",
-            _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": command}),
-        )
-        assert result["hookSpecificOutput"]["permissionDecision"] == "deny", command
-
-
-def test_pretooluse_denies_standard_shell_and_npx_wrappers(tmp_path: Path):
-    target = _wired_claude(tmp_path)
-    for command in (
-        "env CI=1 pytest -q",
-        "env -i CI=1 pytest -q",
-        "env -v pytest -q",
-        "env -iv pytest -q",
-        "env -Csrc pytest -q",
-        "env -uFOO pytest -q",
-        "env --argv0=verify pytest -q",
-        "env -S 'pytest -q'",
-        "env --split-string='pytest -q'",
-        "command pytest -q",
-        "command -p pytest -q",
-        "npx --yes jest",
-        "npx --prefer-offline jest",
-        "npx -y jest",
-        "npx --prefix /tmp jest",
-        "npx --node-options=--test jest",
-        "npx --future-option /tmp jest",
-        "python -u -m pytest -q",
-        "python -B -m unittest",
-        "python -d -m pytest -q",
-        "python -X dev -m pytest -q",
-        "python -W ignore -m pytest -q",
-    ):
-        result = runtime.handle_payload(
-            "PreToolUse",
-            _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": command}),
-        )
-        assert result["hookSpecificOutput"]["permissionDecision"] == "deny", command
-
-
-def test_pretooluse_withholds_exact_guidance_for_unknown_npx_options(tmp_path: Path):
-    target = _wired_claude(tmp_path)
-    result = runtime.handle_payload(
-        "PreToolUse",
-        _payload(
-            target,
-            "PreToolUse",
-            tool_name="Bash",
-            tool_input={"command": "npx --future-option /tmp jest"},
-        ),
-    )
-    reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "Use:" not in reason
-
-
-def test_pretooluse_withholds_exact_guidance_for_unknown_runner_options(tmp_path: Path):
-    target = _wired_claude(tmp_path)
-    result = runtime.handle_payload(
-        "PreToolUse",
-        _payload(
-            target,
-            "PreToolUse",
-            tool_name="Bash",
-            tool_input={"command": "uv --future-option value run pytest -q"},
-        ),
-    )
-    reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "Use:" not in reason
-
-
-def test_pretooluse_compound_guidance_routes_only_the_verifier_segment(tmp_path: Path):
-    target = _wired_claude(tmp_path)
-    for command, expected in (
-        ("pytest -q; echo done", "pytest -q"),
-        ("pytest -q\ntrue", "pytest -q"),
-    ):
-        result = runtime.handle_payload(
-            "PreToolUse",
-            _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": command}),
-        )
-        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-        replacement = shlex.split(reason.split("Use: ", 1)[1])
-        routed_command = replacement[replacement.index("--command") + 1]
-        assert routed_command == expected, command
-
-
-def test_pretooluse_denies_nested_verifiers_without_unsafe_guidance(tmp_path: Path):
-    target = _wired_claude(tmp_path)
-    for command in (
-        "(pytest -q)",
-        'echo "$(pytest -q)"',
-        "pytest -q > result.txt",
-        "printf setup | pytest -q",
-        "cd -P src && pytest -q",
-        "cd src && cd nested && pytest -q",
-        "cd src; pytest -q",
-        "cd src\npytest -q",
-        "cd src && true && pytest -q",
-        "sh -c 'pytest -q'",
-        "bash -lc 'pytest -q'",
-        "pytest -q 2>&1",
-        "pytest -q &> result.txt",
-        "printf setup |& pytest -q",
-        'echo "$(echo "$(pytest -q)")"',
-        "if true; then pytest -q; fi",
-        "{ pytest -q; }",
-        "bash -o errexit -c 'pytest -q'",
-        "bash -O extglob -c 'pytest -q'",
-        "sh -o errexit -c 'pytest -q'",
-        "cd src && pytest -q",
-        "pushd src && pytest -q",
-        "builtin cd src && pytest -q",
-        "command cd src && pytest -q",
-        "source setup.sh && pytest -q",
-        "echo setup && pytest -q",
-        "cd - && pytest -q",
-        "cd ~ && pytest -q",
-        'cd "$SOURCE_ROOT" && pytest -q',
-        'PYTHONPATH="$PWD/src" python -m pytest -q',
-        "pytest -q tests/test_*.py",
-    ):
-        result = runtime.handle_payload(
-            "PreToolUse",
-            _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": command}),
-        )
-        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-        assert result["hookSpecificOutput"]["permissionDecision"] == "deny", command
-        assert "Use:" not in reason, command
-        assert "Split shell grouping" in reason, command
-
-
-def test_pretooluse_guidance_preserves_safe_verifier_context(tmp_path: Path):
-    target = _wired_claude(tmp_path)
-    for command, expected in (
-        ("CI=1 pytest -q", "CI=1 pytest -q"),
-        ("env -C src pytest -q", "env -C src pytest -q"),
-        ("command pytest -q", "pytest -q"),
-        ("command -p pytest -q", "pytest -q"),
-    ):
-        result = runtime.handle_payload(
-            "PreToolUse",
-            _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": command}),
-        )
-        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-        replacement = shlex.split(reason.split("Use: ", 1)[1])
-        routed_command = replacement[replacement.index("--command") + 1]
-        assert routed_command == expected, command
-
-
-def test_pretooluse_denies_make_with_global_options(tmp_path: Path):
-    target = _wired_claude(tmp_path)
-    for command in (
-        "make -C src test",
-        "make --directory=src test",
-        "make -j4 test",
-        "make -j 4 check",
-        "make -s verify",
-    ):
-        result = runtime.handle_payload(
-            "PreToolUse",
-            _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": command}),
-        )
-        assert result["hookSpecificOutput"]["permissionDecision"] == "deny", command
+    assert runtime.handle_payload("PreToolUse", payload) is None
+    state = runtime.read_session_state(target, "session-1")
+    assert state["pending_bash_fingerprint"] == "baseline"
+    assert state["pending_bash_started_at"]
 
 
 def test_posttooluse_records_python_c_write_via_repo_snapshot(tmp_path: Path):
@@ -2105,7 +1847,6 @@ def test_stop_rejects_receipt_created_before_later_write(tmp_path: Path):
             "last_write_at": (now - timedelta(minutes=30)).isoformat(),
             "briefed": True,
             "write_observed": True,
-            "verify_denied_count": 0,
         },
     )
     run_dir = target / ".brigade" / "work" / "verify-runs" / "before-write"
@@ -2272,7 +2013,7 @@ def test_receipt_since_fails_open_when_tree_snapshot_is_unavailable(tmp_path: Pa
     assert runtime._receipt_since(target, threshold.isoformat(), session_fingerprint=fingerprint) is True
 
 
-def test_hook_run_normalizes_malformed_persisted_state_before_denial(tmp_path: Path, capsys):
+def test_hook_run_normalizes_malformed_persisted_state_before_bash(tmp_path: Path, capsys):
     target = _wired_claude(tmp_path)
     session_id = "malformed"
     runtime.write_session_state(
@@ -2285,7 +2026,6 @@ def test_hook_run_normalizes_malformed_persisted_state_before_denial(tmp_path: P
             "briefed": True,
             "write_observed": False,
             "session_fingerprint": {"invalid": True},
-            "verify_denied_count": "not-an-integer",
         },
     )
     payload = _payload(
@@ -2306,11 +2046,9 @@ def test_hook_run_normalizes_malformed_persisted_state_before_denial(tmp_path: P
         == 0
     )
 
-    result = json.loads(capsys.readouterr().out)
-    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
+    assert json.loads(capsys.readouterr().out) == {}
     state = runtime.read_session_state(target, session_id)
     assert state["session_fingerprint"] == runtime._session_fingerprint(session_id)
-    assert state["verify_denied_count"] == 1
 
 
 def test_stop_persists_normalized_future_timestamps(tmp_path: Path):
@@ -2329,7 +2067,6 @@ def test_stop_persists_normalized_future_timestamps(tmp_path: Path):
             "last_write_at": future.isoformat(),
             "briefed": True,
             "write_observed": True,
-            "verify_denied_count": 0,
         },
     )
 
@@ -2611,7 +2348,7 @@ def test_heredoc_bodies_are_data_not_commands(tmp_path: Path):
         "EOF\n"
         "echo done"
     )
-    assert not runtime.is_raw_verification(prose)
+    assert not observed_verifiers.is_raw_verification(prose)
     assert (
         runtime.wired_target_from_payload(
             _payload(tmp_path, "PreToolUse", tool_name="Bash", tool_input={"command": prose})
@@ -2626,7 +2363,7 @@ def test_heredoc_bodies_are_data_not_commands(tmp_path: Path):
         "unrelated document text\n"
         "EOF"
     )
-    assert not runtime.is_raw_verification(captured)
+    assert not observed_verifiers.is_raw_verification(captured)
     pretool = runtime.handle_payload(
         "PreToolUse",
         _payload(repo, "PreToolUse", tool_name="Bash", tool_input={"command": captured}),
@@ -2850,29 +2587,29 @@ def test_unmatched_quote_and_quoted_literal_do_not_attribute_cd(tmp_path: Path):
 
 def test_heredoc_scanner_is_quote_aware_and_queues_delimiters(tmp_path: Path):
     quoted_multiline = "printf '<<EOF\npytest\nEOF\n' && echo ok"
-    assert not runtime.is_raw_verification(quoted_multiline)
+    assert not observed_verifiers.is_raw_verification(quoted_multiline)
     assert "pytest" in runtime._strip_heredoc_bodies(quoted_multiline)
 
     assert "pytest" in runtime._strip_heredoc_bodies("printf '<<EOF' && pytest")
-    assert runtime.is_raw_verification("printf '<<EOF' && pytest")
+    assert observed_verifiers.is_raw_verification("printf '<<EOF' && pytest")
 
     dual = "cat <<ONE <<TWO\nalpha\nONE\nbeta\nTWO\necho done"
     stripped = runtime._strip_heredoc_bodies(dual)
     assert stripped == "cat <<ONE <<TWO\necho done"
     assert "alpha" not in stripped
     assert "beta" not in stripped
-    assert not runtime.is_raw_verification("cat <<ONE <<TWO\npytest\nTWO\necho done")
+    assert not observed_verifiers.is_raw_verification("cat <<ONE <<TWO\npytest\nTWO\necho done")
 
     commented = "# <<END\npytest -q\nEND"
-    assert runtime.is_raw_verification(commented)
+    assert observed_verifiers.is_raw_verification(commented)
     assert "pytest" in runtime._strip_heredoc_bodies(commented)
 
     commented_apostrophe = "# ' <<END\npytest -q\nEND"
-    assert runtime.is_raw_verification(commented_apostrophe)
+    assert observed_verifiers.is_raw_verification(commented_apostrophe)
     assert "pytest" in runtime._strip_heredoc_bodies(commented_apostrophe)
 
     inline = "echo hi # <<END not a heredoc\npytest -q"
-    assert runtime.is_raw_verification(inline)
+    assert observed_verifiers.is_raw_verification(inline)
     assert "pytest" in runtime._strip_heredoc_bodies(inline)
 
     quoted_hash = "printf '# <<END' && cat <<EOF\nbody\nEOF\necho done"
@@ -2881,7 +2618,7 @@ def test_heredoc_scanner_is_quote_aware_and_queues_delimiters(tmp_path: Path):
     assert "body" not in stripped_hash
 
     backslash = "cat <<\\END\npytest -q\nEND\necho done"
-    assert not runtime.is_raw_verification(backslash)
+    assert not observed_verifiers.is_raw_verification(backslash)
     stripped_bs = runtime._strip_heredoc_bodies(backslash)
     assert stripped_bs == "cat <<\\END\necho done"
     assert "pytest" not in stripped_bs
@@ -2928,64 +2665,37 @@ def test_posttooluse_read_external_skill_does_not_set_exercised_artifact(tmp_pat
     assert "exercised_artifact_id" not in state
 
 
-def test_verify_replacement_after_a_skill_read_still_says_auto(tmp_path: Path):
+@pytest.mark.parametrize("capture", [None, "taste"], ids=["read-only-skill", "typed-capture"])
+def test_stop_guidance_uses_typed_capture_or_auto(tmp_path: Path, monkeypatch, capture):
     target = _wired_claude(tmp_path)
+    monkeypatch.setattr(runtime, "_run_brief", lambda _target: "brief")
+    monkeypatch.setattr(runtime, "_run_recall", lambda *_args, **_kwargs: "")
+    stop_payload = _unverified_write_stop(target, session_id="capture-guide")
     skill = target / ".claude" / "skills" / "taste" / "SKILL.md"
-    skill.parent.mkdir(parents=True, exist_ok=True)
+    skill.parent.mkdir(parents=True)
     skill.write_text("# taste\n")
     runtime.handle_payload(
         "PostToolUse",
-        _payload(target, "PostToolUse", tool_name="Read", tool_input={"file_path": str(skill)}),
-    )
-    result = runtime.handle_payload(
-        "PreToolUse",
-        _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "python -m pytest -q"}),
-    )
-    reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "--capture auto" in reason
-    assert "--capture taste" not in reason
-
-
-def test_verify_replacement_prefers_an_explicitly_typed_capture(tmp_path: Path):
-    target = _wired_claude(tmp_path)
-    runtime.handle_payload(
-        "PostToolUse",
         _payload(
-            target,
-            "PostToolUse",
-            tool_name="Bash",
-            tool_input={"command": 'brigade work verify run --target . --command "true" --capture taste'},
+            target, "PostToolUse", session_id="capture-guide", tool_name="Read", tool_input={"file_path": str(skill)}
         ),
     )
-    result = runtime.handle_payload(
-        "PreToolUse",
-        _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "python -m pytest -q"}),
-    )
-    reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "--capture taste" in reason
-    assert "--capture auto" not in reason
+    if capture is not None:
+        runtime.handle_payload(
+            "PostToolUse",
+            _payload(
+                target,
+                "PostToolUse",
+                session_id="capture-guide",
+                tool_name="Bash",
+                tool_input={"command": f"brigade work verify run --capture {capture}"},
+            ),
+        )
 
-
-def test_verify_replacement_names_the_hook_target_when_the_verifier_checkout_differs(tmp_path: Path):
-    hook_target = tmp_path / "hook"
-    verify_target = tmp_path / "verify"
-    hook_target.mkdir()
-    verify_target.mkdir()
-    same = runtime._verify_replacement(hook_target, "pytest", "0123456789abcdef", hook_target=None)
-    assert "BRIGADE_CLAUDE_SESSION_TARGET" not in same
-    other = runtime._verify_replacement(verify_target, "pytest", "0123456789abcdef", hook_target=hook_target)
-    assert f"BRIGADE_CLAUDE_SESSION_TARGET={hook_target}" in other
-    assert "--capture auto" in other
-
-
-def test_verify_replacement_falls_back_to_auto_capture(tmp_path: Path):
-    target = _wired_claude(tmp_path)
-    result = runtime.handle_payload(
-        "PreToolUse",
-        _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "python -m pytest -q"}),
-    )
-    reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "--capture auto" in reason
+    result = runtime.handle_payload("Stop", stop_payload)
+    assert result["decision"] == "block"
+    assert f"--capture {capture or 'auto'}" in result["reason"]
+    assert "BRIGADE_CLAUDE_SESSION_TARGET" not in result["reason"]
 
 
 def test_posttooluse_routed_verify_records_capture_artifact(tmp_path: Path):
@@ -3322,7 +3032,6 @@ def test_stop_ignores_nothing_durable_outside_final_assistant_line(tmp_path: Pat
 # --- Manifest verify in the loop (#2589) ---------------------------------------------------------
 
 _MANIFEST_SUBJECT = "src/subject.py"
-_MANIFEST_SOURCE = "verify/manifests/subject-manifest.json"
 
 
 def _manifest_repo(tmp_path: Path) -> Path:
@@ -3361,71 +3070,6 @@ def _manifest_repo(tmp_path: Path) -> Path:
     subprocess.run(["git", "add", "."], cwd=target, check=True, capture_output=True, text=True)
     subprocess.run(["git", "commit", "-m", "fixture"], cwd=target, check=True, capture_output=True, text=True)
     return target
-
-
-def _deny_reason(target: Path) -> str:
-    result = runtime.handle_payload(
-        "PreToolUse",
-        _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "python -m pytest -q"}),
-    )
-    assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-    return result["hookSpecificOutput"]["permissionDecisionReason"]
-
-
-def test_deny_without_manifest_match_keeps_todays_message(tmp_path: Path):
-    target = _manifest_repo(tmp_path)
-    (target / "src" / "other.py").write_text("other = 1\n")  # not a manifest subject
-
-    reason = _deny_reason(target)
-
-    assert "--command" in reason and "--capture auto" in reason
-    assert "--manifest" not in reason
-    assert "tracked verify manifest" not in reason
-
-
-def test_deny_with_manifest_subject_change_adds_manifest_command_and_keeps_own(tmp_path: Path):
-    target = _manifest_repo(tmp_path)
-    (target / _MANIFEST_SUBJECT).write_text("value = 2\n")
-
-    reason = _deny_reason(target)
-
-    own = f"--command {shlex.quote('python -m pytest -q')} --capture auto"
-    assert own in reason  # the agent's own check is kept
-    assert (
-        f"--target {shlex.quote(str(target.resolve()))} --manifest verify/manifests/subject-manifest.json --capture auto"
-        in reason
-    )
-    assert _MANIFEST_SUBJECT in reason
-
-
-def test_deny_ignores_a_scope_glob_only_change(tmp_path: Path):
-    target = _manifest_repo(tmp_path)
-    manifest_path = target / "verify" / "manifests" / "subject-manifest.json"
-    payload = json.loads(manifest_path.read_text())
-    payload["scope_globs"] = [_MANIFEST_SUBJECT, "src/extra/**"]
-    manifest_path.write_text(json.dumps(payload) + "\n")
-    subprocess.run(["git", "commit", "-am", "scope"], cwd=target, check=True, capture_output=True, text=True)
-    (target / "src" / "extra").mkdir()
-    (target / "src" / "extra" / "x.py").write_text("x = 1\n")  # in scope_globs, not the subject
-
-    assert "--manifest" not in _deny_reason(target)
-
-
-def test_deny_fails_open_when_git_errors(tmp_path: Path, monkeypatch):
-    from brigade.claude_hooks import manifest_loop
-
-    target = _manifest_repo(tmp_path)
-    (target / _MANIFEST_SUBJECT).write_text("value = 2\n")
-
-    def broken_git(*_args, **_kwargs):
-        raise OSError("git unavailable")
-
-    monkeypatch.setattr(manifest_loop.subprocess, "run", broken_git)
-
-    reason = _deny_reason(target)
-
-    assert "--command" in reason
-    assert "--manifest" not in reason
 
 
 def _session_writes(target: Path, session_id: str, path: Path) -> None:
@@ -3624,30 +3268,15 @@ def test_stop_skips_the_manifest_gate_when_the_generic_gate_sees_a_foreign_tree(
     assert result is None or result.get("decision") != "block"
 
 
-def test_stop_ignores_a_deleted_subject_and_the_deny_does_not_name_it(tmp_path: Path, monkeypatch):
+def test_stop_ignores_a_deleted_subject(tmp_path: Path, monkeypatch):
     target = _manifest_repo(tmp_path)
     stop, _written = _stop_after_subject_write(target, monkeypatch)
     (target / _MANIFEST_SUBJECT).unlink()
     # Re-capture so the generic gate matches the tree without the subject.
     _write_session_receipt(target, "manifest-stop", tree_fingerprint=localio.tree_fingerprint(target))
 
-    assert "--manifest" not in _deny_reason(target)
     result = runtime.handle_payload("Stop", stop)
     assert result is None or result.get("decision") != "block"
-
-
-def test_deny_names_the_manifest_for_unsupported_verifier_structure(tmp_path: Path):
-    target = _manifest_repo(tmp_path)
-    (target / _MANIFEST_SUBJECT).write_text("value = 2\n")
-
-    result = runtime.handle_payload(
-        "PreToolUse",
-        _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": "cd src && pytest -q"}),
-    )
-
-    reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-    assert "Split shell grouping" in reason
-    assert f"--target {shlex.quote(str(target.resolve()))} --manifest {_MANIFEST_SOURCE} --capture auto" in reason
 
 
 def test_manifest_command_uses_a_path_that_resolves_when_the_id_is_ambiguous(tmp_path: Path):
@@ -3818,12 +3447,7 @@ def test_long_runner_command_through_pre_and_post_tool_use(target, monkeypatch, 
         budget = _assert_hook_steps(command, budgets)
         steps.append(budget.steps)
         assert not budget.stopped
-        if event == "PreToolUse":
-            output = result["hookSpecificOutput"]
-            assert output["permissionDecision"] == "deny"
-            assert "Route verification through Brigade" in output["permissionDecisionReason"]
-        else:
-            assert result is None
+        assert result is None
     _assert_hook_scaling(*steps)
 
 
@@ -3913,7 +3537,7 @@ def test_recognizer_windows_env_lexer_matches_shlex(monkeypatch):
 
 @pytest.mark.parametrize("mode", ["strict", "observe", "off"])
 @pytest.mark.parametrize("limit", ["length", "work"])
-def test_undecided_recognition_enforces_only_strict(target, monkeypatch, mode, limit):
+def test_undecided_recognition_has_no_permission_decision(target, monkeypatch, mode, limit):
     from brigade.claude_hooks import command_tokens
 
     monkeypatch.setattr(runtime.work_mode, "resolve_mode", lambda _target: mode)
@@ -3928,16 +3552,7 @@ def test_undecided_recognition_enforces_only_strict(target, monkeypatch, mode, l
     result = runtime.handle_payload(
         "PreToolUse", _payload(target, "PreToolUse", tool_name="Bash", tool_input={"command": command})
     )
-    if mode != "strict":
-        assert result is None
-    else:
-        assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
-        reason = result["hookSpecificOutput"]["permissionDecisionReason"]
-        limit_text = "65,536-character" if limit == "length" else "1-step"
-        assert reason == (
-            f"This command exceeds the {limit_text} classification limit. "
-            "Split the command, or move the long content into a file and run the command using that file."
-        )
+    assert result is None
 
 
 def test_recognizer_finds_verifier_after_long_control_prefix():
@@ -4097,12 +3712,11 @@ def _measure_event_budget(monkeypatch):
 @pytest.mark.parametrize("event", ["PreToolUse", "PostToolUse", "PostToolUseFailure"])
 def test_claude_bash_event_work_bound(target, monkeypatch, shape, event):
     from brigade import observed_checks
-    from brigade.claude_hooks import command_tokens
 
     monkeypatch.setattr(observed_checks, "_capture_clock", lambda: 0.0)
     budgets = _measure_event_budget(monkeypatch)
     steps = []
-    for index, (command, deny) in enumerate(_hook_commands_at_both_sizes(shape)):
+    for index, (command, _) in enumerate(_hook_commands_at_both_sizes(shape)):
         payload = _payload(
             target, event, session_id=f"event-{index}", tool_name="Bash", tool_input={"command": command}
         )
@@ -4113,10 +3727,7 @@ def test_claude_bash_event_work_bound(target, monkeypatch, shape, event):
             assert elapsed < _HOOK_TIME_BACKSTOP_SECONDS
         steps.append(_assert_hook_steps(command, budgets, shape=shape).steps)
         if event == "PreToolUse":
-            output = (result or {}).get("hookSpecificOutput", {})
-            assert (output.get("permissionDecision") == "deny") is deny
-            if len(command) <= command_tokens.MAX_COMMAND_CHARS:
-                assert "classification limit" not in output.get("permissionDecisionReason", "")
+            assert result is None
     _assert_hook_scaling(*steps)
 
 
@@ -4169,12 +3780,12 @@ def test_incomplete_attribution_keeps_write_evidence(target):
     assert state and state["write_observed"] and state["last_verification_write_at"]
 
 
-@pytest.mark.parametrize("mode", ["observe", "off"])
-def test_claude_unclassified_capture(target, monkeypatch, mode):
+@pytest.mark.parametrize("mode", ["strict", "observe", "off"])
+@pytest.mark.parametrize("command", ["echo " + "x" * 70_000, "echo a\x00b"], ids=["long", "unreadable"])
+def test_claude_unclassified_capture(target, monkeypatch, mode, command):
     from brigade import observed_checks
 
     monkeypatch.setattr(runtime.work_mode, "resolve_mode", lambda _target: mode)
-    command = "echo " + "x" * 70_000
     event = "PostToolUse"
     result = runtime.handle_payload(event, _payload(target, event, tool_name="Bash", tool_input={"command": command}))
     assert result is None
@@ -4333,7 +3944,7 @@ def test_windows_command_path_limits_precede_filesystem_probe(tmp_path, monkeypa
     "case",
     ["surrogate", "null", "long-component", "windows-missing-component", "path-io", "attribution", "known-verifier"],
 )
-def test_bash_pretooluse_unreadable_command_is_denied_only_in_strict(target, monkeypatch, mode, case):
+def test_bash_pretooluse_unreadable_command_has_no_permission_decision(target, monkeypatch, mode, case):
     monkeypatch.setattr(runtime.work_mode, "resolve_mode", lambda _target: mode)
     long_component = "echo " + shlex.quote(str(target / ("x" * 300)))
     commands = {
@@ -4359,28 +3970,13 @@ def test_bash_pretooluse_unreadable_command_is_denied_only_in_strict(target, mon
     result = runtime.handle_payload(
         event, _payload(target, event, tool_name="Bash", tool_input={"command": commands[case]})
     )
-    if mode != "strict":
-        assert result is None
-        return
+    assert result is None
     state = runtime.read_session_state(target, "session-1")
     assert state is None or not state.get("write_observed")
-    output = result["hookSpecificOutput"]
-    assert output["permissionDecision"] == "deny"
-    expected = (
-        "The hook recognized a verification command but could not read it completely. "
-        "Run the verification through `brigade work verify run`. "
-        if case in {"surrogate", "known-verifier"}
-        else "The hook could not read this command. "
-    )
-    assert output["permissionDecisionReason"] == (
-        expected + "Split the command, or move the long content into a file and run the command using that file."
-    )
 
 
-def test_bash_hook_transport_denies_unreadable_verifier(target, capsys):
+def test_bash_hook_transport_allows_unreadable_verifier(target, capsys):
     event = "PreToolUse"
     payload = _payload(target, event, tool_name="Bash", tool_input={"command": "pytest /\ud800"})
     assert runtime.hook_run(event=event, package=runtime.PACKAGE_REF, stdin_text=json.dumps(payload)) == 0
-    output = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
-    assert output["permissionDecision"] == "deny"
-    assert "brigade work verify run" in output["permissionDecisionReason"]
+    assert json.loads(capsys.readouterr().out) == {}

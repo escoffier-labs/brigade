@@ -138,13 +138,10 @@ def test_unwired_session_cd_is_discovered(target, tmp_path, capsys, mode):
     unwired = tmp_path / "unwired"
     unwired.mkdir()
     command = f"cd {target.as_posix()} && pytest"
-    pre = runtime.handle_payload("PreToolUse", _bash(unwired, "PreToolUse", command))
-    assert (pre is None) == (mode == "observe")
-    if mode == "strict":
-        assert pre["hookSpecificOutput"]["permissionDecision"] == "deny"
-    else:
-        assert runtime.handle_payload("PostToolUse", _bash(unwired, "PostToolUse", command)) is None
-        assert len(observed_checks.read_checks(target)[0]) == 1
+    assert runtime.handle_payload("PreToolUse", _bash(unwired, "PreToolUse", command)) is None
+    assert runtime.read_session_state(target, "s1")["pending_bash_fingerprint"]
+    assert runtime.handle_payload("PostToolUse", _bash(unwired, "PostToolUse", command)) is None
+    assert len(observed_checks.read_checks(target)[0]) == (1 if mode == "observe" else 0)
 
 
 def test_outcome_maps_edited_identity(target):
