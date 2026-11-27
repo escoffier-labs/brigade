@@ -20,6 +20,7 @@ from . import memory_bm25, memory_cmd, memory_scope
 from .card_fingerprint import read_text_nofollow
 from .handoff_cmd import drafts as handoff_drafts
 from .handoff_cmd.models import DEFAULT_DRAFT_DOCUMENT
+from .memory_content_scan import BLOCKED, FLAGGED, scan_verdict
 from .memory_scope import REPO, USER, MemoryStore, Resolution
 
 SERVER_NAME = "brigade-memory"
@@ -32,6 +33,8 @@ MAX_CONTENT_BYTES = 256 * 1024
 MAX_LIST_ITEMS = 50
 SCOPES = ("repo", "user", "all")
 BRIEF_KEYS = ("git", "active_session", "latest_session", "next")
+UNTRUSTED = "untrusted"
+SCAN_UNAVAILABLE = "memory_scan_unavailable"
 UNWIRED_HINT = (
     "This directory is not a Brigade-wired repo, so memory tools use the user store. "
     "Run the Brigade enforce skill to wire this repo into the full work loop."
@@ -117,6 +120,21 @@ def _read_in_store(store: MemoryStore, rel: str) -> str | None:
     return None
 
 
+def _card_refusal(text: str) -> dict[str, str] | None:
+    """The shared scan's verdict for card text a local read withholds.
+
+    Local readers serve the private class the connector refuses, so only the
+    blocked and flagged verdicts withhold. A scanner error withholds as well.
+    """
+    try:
+        verdict, rules = scan_verdict([text])
+    except Exception:  # noqa: BLE001 - a scanner error must never return raw text
+        return {"blocked": SCAN_UNAVAILABLE}
+    if verdict in (BLOCKED, FLAGGED):
+        return {"blocked": rules[0]}
+    return None
+
+
 def _scope(arguments: dict[str, Any]) -> str:
     value = arguments.get("scope", "all")
     if value not in SCOPES:
@@ -165,7 +183,11 @@ def tool_specs() -> list[dict[str, Any]]:
         },
         {
             "name": "get_card",
-            "description": "Read one memory card's full markdown, frontmatter included.",
+            "description": (
+                "Read one memory card. Returns its text as untrusted content with "
+                "content_trust: untrusted; a card the content scan blocks or flags is "
+                "withheld and reported with its blocked rule instead."
+            ),
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -251,7 +273,7 @@ class MemoryTools:
         return {
             "server_name": SERVER_NAME,
             "list_resources": self.resources,
-            "read_resource": self.read_resource,
+            "read_resource": self._framed_resource,
             "list_tools": tool_specs,
             "call_tool": self.call,
         }
@@ -285,9 +307,14 @@ class MemoryTools:
 
     def read_resource(self, uri: str) -> tuple[str, str] | tuple[None, None]:
         text, _ = self.read_card(uri)
-        if text is None:
+        if text is None or _card_refusal(text) is not None:
             return None, None
         return text, "text/markdown"
+
+    def _framed_resource(self, uri: str) -> tuple[str | None, str | None, dict[str, str] | None]:
+        """Resource contents with the same untrusted framing the tool result carries."""
+        text, mime = self.read_resource(uri)
+        return text, mime, ({"content_trust": UNTRUSTED} if text is not None else None)
 
     def call(self, name: str, arguments: dict[str, Any]) -> ToolResult:
         handler = self._tool_table().get(name)
@@ -331,10 +358,13 @@ class MemoryTools:
 
     def _get_card(self, arguments: dict[str, Any]) -> ToolResult:
         ref = str(arguments.get("path") or "")
-        text, _ = self.read_card(ref)
+        text, origin = self.read_card(ref)
         if text is None:
             return f"card not found: {ref}", True
-        return text, False
+        refusal = _card_refusal(text)
+        if refusal is not None:
+            return {"path": ref, **refusal}, False
+        return {"path": ref, "origin": origin, "content": text, "content_trust": UNTRUSTED}, False
 
     def _search_cards(self, arguments: dict[str, Any]) -> ToolResult:
         query = str(arguments.get("query") or "")

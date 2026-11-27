@@ -1,0 +1,2 @@
+- Local memory card reads return text marked `content_trust: untrusted`, and card resources carry the same marker in their contents metadata.
+- A card the content scan blocks or flags is withheld from local `get_card` and card resources, and a scan error withholds rather than returning the text.

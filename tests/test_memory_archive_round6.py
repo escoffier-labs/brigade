@@ -40,7 +40,7 @@ else:
     state.mkdir(parents=True, exist_ok=True)
     state.chmod(0o500)
 content, failed = memory_mcp_core.MemoryTools(target=root).call('get_card', {'path': 'memory/cards/notes.md'})
-assert not failed and 'widget' in content
+assert not failed and 'widget' in content['content']
 """
     env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
     try:

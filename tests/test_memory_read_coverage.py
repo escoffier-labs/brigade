@@ -142,6 +142,6 @@ def test_mcp_content_read_survives_unwritable_state(stores, monkeypatch):  # noq
 
     monkeypatch.setattr(reads, "_write_json", denied)
     content, error = _tools(repo).call("get_card", {"path": "memory/cards/old.md"})
-    assert "still readable" in content
+    assert "still readable" in content["content"]
     assert not error
     assert reads.load(repo).recorder_error
