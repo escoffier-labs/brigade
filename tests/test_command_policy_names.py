@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import shlex
 import sys
+from timeit import Timer
 
 import pytest
 
@@ -119,6 +120,43 @@ def test_policy_matches_runner_arguments(arguments, policy_entry, policy_name, m
     assert result is None
     assert reason is not None
     assert f"high-risk {kind} command: {policy_name}" in reason
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [["mise", "x", "--", "policy-tool"], ["hatch", "run", "demo:policy-tool"]],
+    ids=["alias", "environment"],
+)
+def test_policy_checks_documented_runner_forms(argv, policy_entry, policy_name, monkeypatch):
+    monkeypatch.setattr(config.shutil, "which", lambda executable, *, path=None: executable)
+    parse, kind = policy_entry
+    result, reason = parse(argv)
+
+    assert result is None
+    assert reason is not None
+    assert f"high-risk {kind} command: {policy_name}" in reason
+
+
+def test_policy_bounds_launcher_arguments(policy_entry, policy_name, monkeypatch):
+    monkeypatch.setattr(config.shutil, "which", lambda executable, *, path=None: executable)
+    parse, kind = policy_entry
+    result, reason = parse(["mise", "exec", "a" * 4095])
+    assert result is not None
+    assert reason is None
+
+    result, reason = parse(["mise", "exec", "a" * 4097])
+    assert result is None
+    assert reason is not None
+    assert f"high-risk {kind} command: mise" in reason
+
+
+def test_policy_option_scan_scales_with_input(policy_name):
+    def best_time(size):
+        argv = ["mise", "exec", "-" + "a" * size + " report"]
+        assert constants.policy_blocked_name(argv) is None
+        return min(Timer(lambda: constants.policy_blocked_name(argv)).repeat(repeat=3, number=2))
+
+    assert best_time(4000) < 8 * best_time(1000)
 
 
 @pytest.mark.parametrize(

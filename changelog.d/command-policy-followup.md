@@ -1,0 +1,1 @@
+- Complete the command policy table for documented launcher forms and bound the cost of option parsing.
