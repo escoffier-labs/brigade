@@ -77,7 +77,8 @@ def test_overview_report_age_initial_and_soft_refresh(tmp_path, monkeypatch, cas
                 assert "Last run report" not in panel
                 if case in {"job", "session"}:
                     assert ">working<" in panel
-                    assert ("1/4 slots" if case == "job" else "0/4 slots") in panel
+                    assert 'value="1" max="4" aria-label="Live work"' in panel
+                    assert ("brigade run 1/4" in panel) == (case == "job")
                     assert ("<span>Agent sessions</span><b>1</b>" in panel) == (case == "session")
             else:
                 # Plain HTML outside agent-only data, tooltips, details, and scripts:
@@ -196,7 +197,7 @@ async function check(){
  assert.ok(ages()[0].includes('Last run report: 1h 13m'));
  assert.ok(ages()[1].includes('Last run report: never'));
  const working=document.querySelectorAll('.overview-machine-row')[2].textContent;
- assert.ok(!working.includes('Last run report')&&working.includes('1/4 slots'));
+ assert.ok(!working.includes('Last run report')&&working.includes('brigade run 1/4'));
  for(const mode of ['admin','agent']){
   window.fleetSetAudience(mode);
   assert.equal(htmlRoot.getAttribute('data-audience-mode'),mode);

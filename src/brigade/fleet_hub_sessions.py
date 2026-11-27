@@ -247,6 +247,30 @@ def count_live_by_node(conn: sqlite3.Connection, *, now_epoch: float) -> dict[st
     return {str(node_id): int(count) for node_id, count in rows}
 
 
+def live_breakdown_by_node(
+    conn: sqlite3.Connection, *, now_epoch: float
+) -> dict[str, tuple[tuple[str, int, int, int], ...]]:
+    """Uncapped visible live counts by harness, including linked and cloud counts."""
+    rows = conn.execute(
+        f"""
+        WITH visible AS (
+            SELECT * FROM interactive_sessions AS observer WHERE {_LIVE_SESSION} {_VISIBLE_SESSION}
+        )
+        SELECT node_id, harness, COUNT(*), SUM(provider_link_json IS NOT NULL OR EXISTS (
+            SELECT 1 FROM interactive_sessions AS observer
+            WHERE observer.harness = 't3' AND observer.provider_link_json IS NOT NULL
+            AND observer.state = 'active' AND observer.expires_at > ? AND {_PROVIDER_MATCH}
+        )), SUM(cloud_context_json IS NOT NULL)
+        FROM visible AS provider GROUP BY node_id, harness ORDER BY node_id, harness
+        """,
+        (now_epoch, now_epoch, now_epoch, now_epoch),
+    ).fetchall()
+    by_node: dict[str, list[tuple[str, int, int, int]]] = {}
+    for node, harness, count, linked, cloud in rows:
+        by_node.setdefault(node, []).append((harness, count, linked, cloud))
+    return {node: tuple(groups) for node, groups in by_node.items()}
+
+
 def count_standalone_by_node(conn: sqlite3.Connection, *, now_epoch: float) -> dict[str, int]:
     """Count live agent reports that have no live T3 thread representing them."""
     rows = conn.execute(

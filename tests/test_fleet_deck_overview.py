@@ -1633,26 +1633,45 @@ def test_station_counts_live_sessions_per_node_without_touching_slots():
     assert overview.station_status(alpha, machines[NODE_A]) == "working"
     html = pages.render_overview_machines(view, NOW)
     assert "<span>Agent sessions</span><b>2</b>" in html
-    assert "0/2 slots" in html
+    assert 'value="2" max="2" aria-label="Live work"' in html
     page = pages.render_capacity(view, NOW, nonce="n", worklore_enabled=True)
     assert "Agent sessions" in page
 
 
-def test_managed_runs_hint_shows_only_without_runs_and_with_sessions():
+def test_machine_row_leads_with_live_work_and_harness_split():
     from brigade import fleet_admin_pages as pages
 
-    hint = "No managed runs. Agent sessions do not use slots."
-    sessions_only = pages.render_overview_machines(_sessions_view([_live_session(NODE_A, "s1")]), NOW)
-    assert "<span>Managed runs</span><b>0/2 slots</b>" in sessions_only
-    assert 'aria-label="Managed runs"' in sessions_only
-    assert "Reported use" not in sessions_only
-    assert sessions_only.count(hint) == 1
-    assert pages.render_overview_machines(_sessions_view([]), NOW).count(hint) == 0
-    running = pages.render_overview_machines(
-        _sessions_view([_live_session(NODE_A, "s1")], runs=[_run(NODE_A, "run-a", "example/tool")]), NOW
-    )
-    assert "<span>Managed runs</span><b>1/2 slots</b>" in running
-    assert running.count(hint) == 0
+    view = _sessions_view([_live_session(NODE_A, "s1")])
+    view = replace(view, session_breakdown={NODE_A: (("claude", 4, 2, 0), ("codex", 2, 0, 0), ("opencode", 1, 0, 0))})
+    view = replace(view, stations=(replace(view.stations[0], sessions=7), view.stations[1]))
+    html = pages.render_overview_machines(view, NOW)
+    assert "<span>Agent sessions</span><b>7</b>" in html
+    assert 'value="7" max="2" aria-label="Live work"' in html
+    assert "claude 4 · codex 2 · opencode 1 (2 T3-linked, 0 cloud)" in html
+    assert "brigade run 0/2" not in html
+    assert "Agent sessions do not use slots" not in html
+    assert 'value="0" max="2" aria-label="Live work"' in html
+    assert "No live work" in html
+
+
+def test_machine_row_keeps_managed_work_visible_when_no_agents_run():
+    from brigade import fleet_admin_pages as pages
+
+    view = _sessions_view([], runs=[_run(NODE_A, "run-a", "example/tool")])
+    html = pages.render_overview_machines(view, NOW)
+    assert 'value="1" max="2" aria-label="Live work"' in html
+    assert "brigade run 1/2" in html
+
+
+def test_machine_row_orders_busy_inputs_by_load():
+    from brigade import fleet_admin_pages as pages
+
+    view = _sessions_view([])
+    plane = _plane([_machine("alpha", NODE_A, state="busy", load="0.96"), _machine("beta", NODE_B, load="0.03")])
+    view = replace(view, control_plane=plane, machine_pressure={NODE_A: (0.81, 0.75), NODE_B: (0.26, 0)})
+    html = pages.render_overview_machines(view, NOW)
+    assert "Busy because: CPU 96%, memory 81%, session load 75%, node reports busy" in html
+    assert "CPU 3%, memory 26%" in html
 
 
 def test_station_without_jobs_or_sessions_stays_idle():

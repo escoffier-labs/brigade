@@ -12,6 +12,8 @@ import pytest
 from brigade import (
     cli,
     fleet_client_policy,
+    fleet_command_deck,
+    fleet_deck_pages_http,
     fleet_hub,
     fleet_hub_placement,
     fleet_hub_policy,
@@ -255,6 +257,27 @@ def test_weighted_reports_shed_to_an_idle_node(fleet):
     assert busy["load_inputs"]["agent_session_weight"] == 0.5
     assert result["recommended"]["machine"] == "worker-linux-2"
     assert result["recommended"]["load_inputs"]["agent_sessions"] == 0
+
+
+def test_deck_uses_placement_session_load_and_deduplicates_harness_counts(fleet):
+    _save(fleet, agent_session_weight=0.5)
+    _session(fleet, NODE_CLOUD, "provider")
+    _session(
+        fleet,
+        NODE_CLOUD,
+        "t3-thread",
+        harness="t3",
+        provider_link={"harness": "claude", "session_id": "provider"},
+    )
+    _session(fleet, NODE_CLOUD, "standalone", harness="codex")
+    _health(fleet, NODE_CLOUD, 5, memory=0.33)
+    config = fleet_command_deck.DeckConfig(stations=(fleet_command_deck.StationConfig(NODE_CLOUD, "Example", 10),))
+    view, _, _ = fleet_deck_pages_http.build_view(fleet, config, _now())
+
+    cloud = next(row for row in _place(fleet)["candidates"] if row["machine"] == "worker-cloud-1")
+    assert view.machine_pressure[NODE_CLOUD] == (0.33, cloud["effective_load"]) == (0.33, 0.75)
+    assert view.stations[0].sessions == 2
+    assert view.session_breakdown[NODE_CLOUD] == (("claude", 1, 1, 0), ("codex", 1, 0, 0))
 
 
 def test_linked_provider_report_counts_once_at_full_weight(fleet):

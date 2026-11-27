@@ -318,8 +318,6 @@ class MachineState:
     available_slots: str = UNKNOWN
     eligible_queued_work: str = UNKNOWN
     unused_reason: str = UNKNOWN
-    # The enrolled node this policy machine runs on. Additive: snapshots from
-    # before the key existed parse with ``unknown`` and join to no station.
     node_id: str = UNKNOWN
 
 
@@ -490,6 +488,8 @@ class DeckView:
     observed_work_groups: tuple[ObservedWorkGroup, ...] = ()
     stale_after_seconds: int = 1800
     octopool_observation: OctopoolObservation | Mapping[str, object] | None = None
+    session_breakdown: Mapping[str, tuple[tuple[str, int, int, int], ...]] = field(default_factory=dict)
+    machine_pressure: Mapping[str, tuple[float | None, float | None]] = field(default_factory=dict)
 
 
 def resolve_config_path(flag_value: str | Path | None, environ: Mapping[str, str]) -> Path | None:

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import sqlite3
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Any
 
 from . import fleet_command_deck, fleet_hub as _hub, fleet_hub_routing, fleet_hub_sessions
+from . import fleet_hub_placement, fleet_hub_policy, fleet_policy, fleet_t3_health
 from .fleet_hub import FleetHubError
 
 CAPACITY_TABS = {
@@ -48,6 +49,31 @@ def control_plane_from_hub(conn: Any) -> Any:
     return fleet_command_deck.control_plane_from_snapshot(raw)
 
 
+def _machine_pressure(
+    conn: sqlite3.Connection,
+    plane: fleet_command_deck.ControlPlane,
+    counts: Mapping[str, int],
+    now: datetime,
+) -> dict[str, tuple[float | None, float | None]]:
+    document = fleet_hub_policy.current_policy(conn)["document"]
+    routing = document.get("routing") or {}
+    weight = routing.get("agent_session_weight", fleet_policy.DEFAULT_AGENT_SESSION_WEIGHT)
+    standalone = fleet_hub_sessions.count_standalone_by_node(conn, now_epoch=now.timestamp()) if weight else {}
+    health = fleet_t3_health.classify_nodes(conn, now)
+    memory = fleet_t3_health.memory_by_node(conn, now) or {}
+    pressure = {}
+    for machine in plane.machines:
+        node = machine.node_id
+        sessions = counts.get(node, 0) if fleet_t3_health.sessions_unknown_reason(health, node) is None else None
+        ratio = (
+            fleet_hub_placement.session_load_ratio(sessions, standalone.get(node, 0), int(machine.capacity), weight)
+            if machine.capacity.isdigit()
+            else None
+        )
+        pressure[node] = (memory.get(node), ratio)
+    return pressure
+
+
 def build_view(
     conn: sqlite3.Connection, config: fleet_command_deck.DeckConfig, now: datetime
 ) -> tuple[fleet_command_deck.DeckView, Any, Any]:
@@ -60,6 +86,10 @@ def build_view(
     )
     station_ids = [station.node_id for station in config.stations]
     interactive_sessions = deck.fetch_interactive_sessions(conn, now=now)
+    now_epoch = now.timestamp()
+    plane = control_plane_from_hub(conn)
+    breakdown = fleet_hub_sessions.live_breakdown_by_node(conn, now_epoch=now_epoch)
+    session_counts = {node: sum(group[1] for group in groups) for node, groups in breakdown.items()}
     view = deck.build_view(
         config,
         live_runs=live_runs,
@@ -79,10 +109,15 @@ def build_view(
         now=now,
         cloud_workers=deck.cloud_workers_from_snapshot(_hub.cloud_snapshot(conn, config)),
         interactive_sessions=interactive_sessions,
-        control_plane=control_plane_from_hub(conn),
+        control_plane=plane,
         # Uncapped per-node counts: the Activity list above stops at a row limit.
-        session_counts=fleet_hub_sessions.count_live_by_node(conn, now_epoch=now.timestamp()),
+        session_counts=session_counts,
         revoked_node_ids=revoked_node_ids,
+    )
+    view = replace(
+        view,
+        session_breakdown=breakdown,
+        machine_pressure=_machine_pressure(conn, plane, session_counts, now) if plane is not None else {},
     )
     return view, live_runs, interactive_sessions
 
