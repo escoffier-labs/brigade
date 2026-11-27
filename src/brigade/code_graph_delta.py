@@ -365,26 +365,30 @@ def capture_after_and_diff(
         baseline = before.get("_before_digest")
         if (
             isinstance(baseline, _BaselineDigest)
-            and baseline.remaining_seconds > 0
             and not stale_after
             and sync is not None
             and sync["returncode"] == 0
             and not sync.get("timed_out")
-            and _snapshot_signature(snapshot_path) == baseline.snapshot_signature
         ):
-            # Both probes use spare baseline capture time. The fallback keeps its original timeouts.
-            probe: dict[str, Any] = {}
-            before["digest_probe"]["after"] = probe
-            after_digest = _read_graph_digest(binary, db_path, target, probe, timeout=baseline.remaining_seconds)
-            if (
-                after_digest is not None
-                and after_digest == baseline.digest
-                and _snapshot_signature(snapshot_path) == baseline.snapshot_signature
-            ):
-                payload = _success_payload(
-                    target, db_path, snapshot_path, before, sync, timeout, {}, digest=after_digest
-                )
-                return _write_and_compact(run_dir, payload, snapshot_path=snapshot_path)
+            probes = before["digest_probe"]
+            if not baseline.remaining_seconds > 0:
+                probes["after"] = {"status": "skipped_budget"}
+            elif _snapshot_signature(snapshot_path) != baseline.snapshot_signature:
+                probes["after"] = {"status": "skipped_baseline_changed"}
+            else:
+                # Both probes use spare baseline capture time. The fallback keeps its original timeouts.
+                probe: dict[str, Any] = {}
+                probes["after"] = probe
+                after_digest = _read_graph_digest(binary, db_path, target, probe, timeout=baseline.remaining_seconds)
+                if (
+                    after_digest is not None
+                    and after_digest == baseline.digest
+                    and _snapshot_signature(snapshot_path) == baseline.snapshot_signature
+                ):
+                    payload = _success_payload(
+                        target, db_path, snapshot_path, before, sync, timeout, {}, digest=after_digest
+                    )
+                    return _write_and_compact(run_dir, payload, snapshot_path=snapshot_path)
 
         after_snapshot_path = run_dir / SNAPSHOT_AFTER_NAME
         try:

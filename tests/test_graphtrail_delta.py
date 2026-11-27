@@ -346,6 +346,8 @@ def test_digest_probes_share_spare_baseline_capture_budget(
     assert sidecar["digest_probe"]["before"]["duration_seconds"] == before_elapsed
     after_timeout = expected_timeouts[1] if len(expected_timeouts) == 2 else 0
     assert before_elapsed + after_timeout <= min(budget, 1.5)
+    if not after_timeout:
+        assert sidecar["digest_probe"]["after"] == {"status": "skipped_budget"}
     assert calls.count("digest") == len(expected_timeouts)
     assert snapshots == ["before", "after"]
     assert receipt["status"] == "ok"
@@ -436,7 +438,29 @@ def test_modified_baseline_forces_diff_even_with_equal_engine_digests(fake_diges
     assert calls == ["sync", "digest", "sync", "diff"]
     assert snapshots == ["before", "after"]
     assert receipt["raw_counts"] == {"changed_nodes": 1}
-    assert sidecar["digest_probe"].keys() == {"before"}
+    assert sidecar["digest_probe"]["after"] == {"status": "skipped_baseline_changed"}
+
+
+def test_baseline_modified_during_after_digest_forces_diff(fake_digest_engine, monkeypatch, tmp_path):
+    read_digest = code_graph_delta._read_graph_digest
+    snapshot = tmp_path / "receipt" / code_graph_delta.SNAPSHOT_NAME
+
+    def digest(binary, db, target, probe, *, timeout):
+        if db == snapshot:
+            return read_digest(binary, db, target, probe, timeout=timeout)
+        with snapshot.open("ab") as file:
+            file.write(b"x")
+        probe.update(status="ok", format_version=2, schema_version=9, duration_seconds=0.0)
+        return _DIGEST
+
+    monkeypatch.setattr(code_graph_delta, "_read_graph_digest", digest)
+    receipt, sidecar, calls, snapshots = fake_digest_engine.capture((0, _DIGEST_JSON), digest_shortcut=True)
+
+    assert calls == ["sync", "digest", "sync", "diff"]
+    assert snapshots == ["before", "after"]
+    assert receipt["raw_counts"] == {"changed_nodes": 1}
+    assert sidecar["digest_probe"].keys() == {"before", "after"}
+    assert sidecar["digest_probe"]["after"]["status"] == "ok"
 
 
 @pytest.mark.parametrize("failure", [7, "timeout"])
@@ -485,11 +509,17 @@ def native_digest_baseline(monkeypatch, tmp_path):
 
     before = code_graph_delta.capture_before(tmp_path, run_dir, digest_shortcut=True)
     probe = before.get("digest_probe", {}).get("before", {})
-    if (schema_version := probe.get("schema_version")) is not None and schema_version != (
-        code_graph_delta._DIGEST_SCHEMA_VERSION
+    format_version = probe.get("format_version")
+    schema_version = probe.get("schema_version")
+    if (
+        probe.get("status") in {"format_version_unexpected", "schema_version_unexpected"}
+        or format_version not in (None, code_graph_delta._DIGEST_FORMAT_VERSION)
+        or schema_version not in (None, code_graph_delta._DIGEST_SCHEMA_VERSION)
     ):
         pytest.skip(
-            f"native engine reports schema {schema_version}, expected {code_graph_delta._DIGEST_SCHEMA_VERSION}"
+            f"native engine digest reports format {format_version} and schema {schema_version}, "
+            f"expected format {code_graph_delta._DIGEST_FORMAT_VERSION} and schema "
+            f"{code_graph_delta._DIGEST_SCHEMA_VERSION} (probe status {probe.get('status')})"
         )
     assert probe.get("status") == "ok"
     return run_dir, before
