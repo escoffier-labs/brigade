@@ -56,6 +56,10 @@ Scanner run receipts are gitignored under:
 
 Each receipt includes the run id, scanner id, source, argv, cwd, started and completed timestamps, duration, exit code, timeout state, stdout/stderr summaries, full local log paths, and output path snapshots from before and after execution. Use `brigade work scanners runs` and `brigade work scanners run-show <run-id>` to review them. `doctor` also reports failed or timed-out runs, malformed receipts, missing logs, stale successful runs, and due scanners.
 
+## Command Policy
+
+The command policy checks the program name and the documented direct-exec forms of a reviewed set of launchers. It guards against accidental or casual shell use and is not a containment boundary. The controls beyond it are who can write scanner, reviewer, verification, and fleet health configuration, and running commands in a sandbox.
+
 ## Daily Sweeps
 
 `brigade work sweep` runs due enabled scanners from `.brigade/scanners.toml` as one explicit foreground operator action. It uses the same scanner execution path as `brigade work scanners run --due`, but defaults to ingesting each successful scanner's configured `import_path` when `import_format = "jsonl"`. Use `--no-ingest` to leave outputs untouched, `--all` to run every configured scanner, or `--scanner <id>` to run one scanner. Disabled scanners still require `--include-disabled`, and overlapping running receipts still require `--force`.
