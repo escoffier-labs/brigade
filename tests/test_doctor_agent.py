@@ -280,6 +280,84 @@ def test_doctor_agent_separates_corrupt_hooks_and_integrity_refusal(tmp_path: Pa
     assert refusal["expected"] == "check status OK"
 
 
+def test_doctor_agent_keeps_pending_stale_skill_hint_out_of_refusal(tmp_path: Path, capsys):
+    target = _wire(tmp_path)
+    (target / ".claude" / "skills" / "brigade-work" / "SKILL.md").write_text("custom skill text\n")
+    assert install_selection(target, Selection(depth="workspace", harnesses=["claude"], owner="claude")) == 0
+    (target / ".claude" / "settings.json").write_text("{not-json\n")
+    sessions = target / ".brigade" / "work" / "claude-hooks" / "sessions"
+    sessions.parent.mkdir(parents=True, exist_ok=True)
+    sessions.write_text("not a directory")
+    capsys.readouterr()
+
+    assert doctor_mod.run(target=target, agent=True, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    skill, settings, refusal = [item for item in payload["findings"] if item["name"] == "claude work loop"]
+    assert "stale skill" in skill["observed"]
+    assert "parse failure" in settings["observed"]
+    inbox_command = f"brigade skills inbox list --target {target}"
+    assert inbox_command in skill["commands"]
+    assert inbox_command not in refusal["commands"]
+    assert "bundled brigade-work skill differs" not in refusal["observed"]
+    assert "session directory integrity refused" not in settings["observed"]
+
+
+def test_doctor_agent_separates_missing_import_unreadable_settings_and_refusal(tmp_path: Path, capsys, monkeypatch):
+    target = _wire(tmp_path)
+    (target / "CLAUDE.md").write_text("Custom instructions without the managed import\n")
+    settings_path = target / ".claude" / "settings.json"
+    original_read_text = Path.read_text
+
+    def unreadable_settings(path, *args, **kwargs):
+        if path == settings_path:
+            raise PermissionError("settings access denied")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", unreadable_settings)
+    sessions = target / ".brigade" / "work" / "claude-hooks" / "sessions"
+    sessions.parent.mkdir(parents=True, exist_ok=True)
+    sessions.write_text("not a directory")
+    capsys.readouterr()
+
+    assert doctor_mod.run(target=target, agent=True, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    instruction, settings, refusal = [item for item in payload["findings"] if item["name"] == "claude work loop"]
+    assert instruction["observed"] == "missing: instruction import @AGENTS.md"
+    assert settings["observed"] == "parse failure: PermissionError: settings access denied"
+    assert settings["expected"] == "readable, valid JSON settings"
+    assert "session directory integrity refused" in refusal["observed"]
+    assert "settings access denied" not in instruction["observed"]
+    assert "settings access denied" not in refusal["observed"]
+
+
+def test_doctor_agent_split_findings_preserve_suppressed_check_counts(tmp_path: Path, capsys, monkeypatch):
+    target = tmp_path / "ws"
+    (target / ".claude").mkdir(parents=True)
+    checks = [
+        (doctor_mod.OK, "healthy", "ready"),
+        (doctor_mod.INFO, "information", "optional"),
+        (doctor_mod.FAIL, "hermes: workspace handoff inbox", "missing inbox"),
+        (
+            doctor_mod.FAIL,
+            "claude work loop",
+            "state=error; hook settings error: unable to read settings: JSONDecodeError; "
+            "session directory integrity refused: not a directory",
+        ),
+    ]
+    # Identical checks are distinct sources, even when their finding names and scopes match.
+    checks.append(checks[-1])
+    monkeypatch.setattr(doctor_mod, "_gather_checks", lambda _ctx: checks)
+
+    assert doctor_mod.run(target=target, agent=True) == 1
+    assert "3 checks passed, 4 findings" in capsys.readouterr().out
+    assert doctor_mod.run(target=target, agent=True, json_output=True) == 1
+    summary = json.loads(capsys.readouterr().out)["summary"]
+    assert summary["passed"] == 3
+    assert summary["suppressed"] == 1
+    assert summary["findings"] == 4
+    assert summary["total"] == 5
+
+
 def test_doctor_agent_ledger_stale_finding(tmp_path: Path, monkeypatch):
     target = _wire(tmp_path)
     stale_ts = (datetime.now(timezone.utc) - timedelta(days=doctor_mod.OUTCOME_LEDGER_STALE_DAYS + 2)).isoformat()

@@ -1,1 +1,4 @@
 - Keep Claude work-loop doctor issue ordering reliable and report settings errors separately from session integrity refusals in agent output.
+- Keep pending skill proposal notices and inbox commands with the settings finding when a session integrity refusal is reported separately.
+- Count split agent findings by their source check so suppressed harness checks still contribute correctly to passed and suppressed totals.
+- Report instruction and skill issues separately from hook settings errors so a missing import cannot hide an unreadable settings diagnosis.
