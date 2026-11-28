@@ -65,3 +65,23 @@ def test_restored_scope_replays_dropped_heads(hub, tmp_path, monkeypatch, bounde
     assert restored.heads[store.Replica.key(scope, "old")]["text"] == "an unchanged card\n"
     assert restored.heads[store.Replica.key(scope, "updated")]["text"] == "after refusal\n"
     assert restored.meta["backfill_watermarks"][scope] == hub.seq
+
+
+def test_scan_refusal_drops_the_scope_watermark(hub, tmp_path, monkeypatch):
+    set_home(monkeypatch, tmp_path / "isolated")
+    target = workspace(tmp_path / "reader", mode="read")
+    scope = "repo:test/app"
+    _put(hub, scope, "old", "an unchanged card")
+    _put(hub, "fleet", "kept", "a readable card")
+    sync.pull(target, client(hub), settings(target))
+    live = store.replica(target)
+    live.meta["backfill_watermarks"] = {scope: 5, "fleet": 5}
+    live.save()
+    meta = store.replica(target).meta
+
+    sync._drop_revoked_scope(target, meta["hub"], meta.get("principal"), str(meta.get("log_epoch") or ""), scope)
+
+    after = store.replica(target).meta
+    assert scope not in after.get("read_scopes", [])
+    assert scope not in after.get("backfill_watermarks", {})
+    assert after["backfill_watermarks"].get("fleet") == 5

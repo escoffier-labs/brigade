@@ -377,6 +377,10 @@ def _drop_revoked_scope(target: Path, hub: str, principal: object, epoch: str, s
         kept = {name for name in live.meta.get("read_scopes") or [] if name != scope}
         live.retain_scopes(kept)
         live.meta["read_scopes"] = sorted(kept)
+        watermarks = live.meta.get("backfill_watermarks")
+        if isinstance(watermarks, dict):
+            # Its heads are gone, so a restored grant must replay this scope from 0.
+            watermarks.pop(scope, None)
         live.save()
 
 
