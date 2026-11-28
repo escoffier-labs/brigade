@@ -1696,6 +1696,7 @@ def test_brigade_hub_seat_usage_uses_the_fullest_limited_seat(monkeypatch):
         fleet_client_policy,
         "read_seat_usage",
         lambda: {
+            "schema": "brigade.fleet_hub_seat_usage.v1",
             "roster_revision": 7,
             "policy_digest": ENROLLED_DIGEST,
             "seats": {"a": {"occupied": 0}, "b": {"occupied": 2}},
@@ -1704,15 +1705,67 @@ def test_brigade_hub_seat_usage_uses_the_fullest_limited_seat(monkeypatch):
     snapshot = {"revision": 7, "fleet_policy": {"digest": ENROLLED_DIGEST}}
     # Seat a is idle but seat b is full, so the operation has no free capacity.
     obs = roster_readiness_brigade._hub_seat_usage_capacity(
-        [("a", 2), ("b", 2)], snapshot, observed_at=1.0, scope="scope"
+        [("a", 2), ("b", 2)], snapshot, 2, observed_at=1.0, scope="scope"
     )
     assert obs.status == "passed"
     assert obs.capacity == 0
     # A limited seat missing from the usage response is unknown, never ready.
     missing = roster_readiness_brigade._hub_seat_usage_capacity(
-        [("a", 2), ("c", 2)], snapshot, observed_at=1.0, scope="scope"
+        [("a", 2), ("c", 2)], snapshot, 2, observed_at=1.0, scope="scope"
     )
     assert missing.status == "unknown"
+
+
+@pytest.mark.parametrize("schema", [None, "brigade.fleet_hub_seat_usage.v2"])
+def test_brigade_hub_seat_usage_requires_expected_schema(monkeypatch, schema):
+    from brigade import fleet_client_policy, roster_readiness_brigade
+
+    payload = {
+        "roster_revision": 7,
+        "policy_digest": ENROLLED_DIGEST,
+        "seats": {"worker": {"occupied": 0}},
+    }
+    if schema is not None:
+        payload["schema"] = schema
+    monkeypatch.setattr(fleet_client_policy, "read_seat_usage", lambda: payload)
+
+    obs = roster_readiness_brigade._hub_seat_usage_capacity(
+        [("worker", 4)],
+        {"revision": 7, "fleet_policy": {"digest": ENROLLED_DIGEST}},
+        2,
+        observed_at=1.0,
+        scope="scope",
+    )
+
+    assert obs.status == "unknown"
+    assert obs.capacity is None
+    assert "schema" in obs.detail
+
+
+def test_brigade_hub_seat_usage_caps_capacity_at_max_workers(monkeypatch):
+    from brigade import fleet_client_policy, roster_readiness_brigade
+
+    monkeypatch.setattr(
+        fleet_client_policy,
+        "read_seat_usage",
+        lambda: {
+            "schema": "brigade.fleet_hub_seat_usage.v1",
+            "roster_revision": 7,
+            "policy_digest": ENROLLED_DIGEST,
+            "seats": {"worker": {"occupied": 1}},
+        },
+    )
+
+    obs = roster_readiness_brigade._hub_seat_usage_capacity(
+        [("worker", 8)],
+        {"revision": 7, "fleet_policy": {"digest": ENROLLED_DIGEST}},
+        3,
+        observed_at=1.0,
+        scope="scope",
+    )
+
+    assert obs.status == "passed"
+    assert obs.capacity == 3
 
 
 @pytest.mark.parametrize(

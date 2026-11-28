@@ -1,0 +1,1 @@
+- Keep memory read tests reliable when the local calendar date differs from UTC.

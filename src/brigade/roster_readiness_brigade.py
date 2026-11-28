@@ -96,6 +96,7 @@ def _capacity_or_unknown(
 def _hub_seat_usage_capacity(
     limits: list[tuple[str, int]],
     snapshot: Mapping[str, Any] | None,
+    max_workers: int,
     *,
     observed_at: float,
     scope: str,
@@ -107,7 +108,7 @@ def _hub_seat_usage_capacity(
     response must carry the same roster revision and policy digest as the
     admission snapshot; anything else is unknown, never ready.
     """
-    from . import fleet_client_policy
+    from . import fleet_client_policy, fleet_hub_model_roster
 
     def _unknown(detail: str) -> Observation:
         return _governance("unknown", observed_at, scope, detail=detail)
@@ -118,6 +119,8 @@ def _hub_seat_usage_capacity(
         return _unknown(f"hub seat usage unavailable ({safe_detail(str(exc))})")
     if not isinstance(usage, Mapping):
         return _unknown("hub seat usage returned a malformed payload")
+    if usage.get("schema") != fleet_hub_model_roster.SEAT_USAGE_SCHEMA:
+        return _unknown("hub seat usage returned a missing or unexpected schema")
     seats = usage.get("seats")
     revision = usage.get("roster_revision")
     digest = usage.get("policy_digest")
@@ -134,7 +137,7 @@ def _hub_seat_usage_capacity(
         if type(occupied) is not int or occupied < 0:
             return _unknown(f"hub seat usage returned malformed occupancy for seat {seat_name!r}")
         free = max(0, limit - occupied)
-        capacity = free if capacity is None else min(capacity, free)
+        capacity = min(max_workers, free) if capacity is None else min(capacity, free)
         details.append(f"seat {seat_name!r} limit {limit}, occupied {occupied}")
     if capacity is None:
         return _unknown("hub seat usage had no limited seat to check")
@@ -718,7 +721,13 @@ def _hub_capacity(
                     capacity=0,
                 )
             if positive_seats:
-                return _hub_seat_usage_capacity(positive_seats, snapshot, observed_at=observed_at, scope=scope)
+                return _hub_seat_usage_capacity(
+                    positive_seats,
+                    snapshot,
+                    effective_roster.max_workers,
+                    observed_at=observed_at,
+                    scope=scope,
+                )
         return _governance(
             "unknown",
             observed_at,
@@ -766,7 +775,13 @@ def _hub_capacity(
             detail=f"hub model admission returned malformed limit for seat {malformed_seat!r}",
         )
     if positive_limit_seats:
-        return _hub_seat_usage_capacity(positive_limit_seats, snapshot, observed_at=observed_at, scope=scope)
+        return _hub_seat_usage_capacity(
+            positive_limit_seats,
+            snapshot,
+            effective_roster.max_workers,
+            observed_at=observed_at,
+            scope=scope,
+        )
 
     extra_source = (
         "hub repo claim and hub model seat limits (unlimited)" if claim_checked else "hub model seat limits (unlimited)"

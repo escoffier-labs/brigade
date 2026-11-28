@@ -1791,6 +1791,74 @@ async fn compensation_referral_at_scope_quota_still_lets_the_quorum_apply() {
 }
 
 #[tokio::test]
+async fn compensation_referral_does_not_discount_retained_bytes() {
+    let (mut h, id, _) = applied().await;
+    let referral = review_referral(&h).await;
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    let principal_bytes: i64 = db
+        .query_row(
+            "SELECT sum(retained_bytes) FROM memory_proposals WHERE principal='hub:admin'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let scope_bytes: i64 = db
+        .query_row(
+            "SELECT sum(p.retained_bytes) FROM memory_proposals p JOIN memory_proposal_scopes s USING(proposal_id) WHERE s.scope=?1",
+            [FIXTURE_SCOPE],
+            |row| row.get(0),
+        )
+        .unwrap();
+    drop(db);
+    pending_limits(
+        &mut h,
+        json!({
+            "pending_per_principal": 1000,
+            "pending_per_scope": 1000,
+            "bytes_per_principal": principal_bytes,
+            "bytes_per_scope": scope_bytes,
+        }),
+    );
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"verifier","principal":"node-1","verifier":true,"client_event_id":h.id()}),
+    )
+    .await;
+    let result = watch(&h).await;
+    assert_eq!(result.body["results"][0]["result"], "failed", "{result:?}");
+    assert_eq!(
+        result.body["results"][0]["reason"],
+        "memory_proposal_principal_quota"
+    );
+    assert_eq!(result.body["results"][0]["rollback_of"], id);
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    let retained: i64 = db
+        .query_row(
+            "SELECT retained_bytes FROM memory_proposals WHERE proposal_id=?1",
+            [referral],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(retained > 0);
+    let after_principal: i64 = db
+        .query_row(
+            "SELECT sum(retained_bytes) FROM memory_proposals WHERE principal='hub:admin'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let after_scope: i64 = db
+        .query_row(
+            "SELECT sum(p.retained_bytes) FROM memory_proposals p JOIN memory_proposal_scopes s USING(proposal_id) WHERE s.scope=?1",
+            [FIXTURE_SCOPE],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(after_principal <= principal_bytes);
+    assert!(after_scope <= scope_bytes);
+}
+
+#[tokio::test]
 async fn compensation_held_inverse_never_exceeds_the_pending_quota() {
     let (mut h, id, _) = applied().await;
     let referral = review_referral(&h).await;

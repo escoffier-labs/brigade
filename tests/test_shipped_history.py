@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import shipped_history
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -150,7 +151,7 @@ def test_the_loader_refuses_a_symlinked_manifest_and_a_fifo(tmp_path):
     with pytest.raises(OSError):
         shipped_history.load(link)
     fifo = tmp_path / "fifo.json"
-    os.mkfifo(fifo)
+    make_fifo(fifo)
     assert shipped_history.digests("skill:x", fifo) == frozenset()
 
 

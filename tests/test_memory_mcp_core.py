@@ -631,9 +631,11 @@ def test_card_refs_keep_literal_backslashes_where_they_are_filename_characters(m
 
 
 def test_only_explicit_mcp_opens_count_as_use(stores):
-    from datetime import date
+    from datetime import datetime, timezone
 
     from brigade import memory_card_reads as reads
+
+    utc_today = datetime.now(timezone.utc).date()
 
     repo, user = stores
     from tests.memory_read_fixtures import signing_key
@@ -648,14 +650,14 @@ def test_only_explicit_mcp_opens_count_as_use(stores):
     assert "alpha repo text" in tools.call("get_card", {"path": "memory/cards/fetched.md"})[0]["content"]
     assert tools.call("search_cards", {"query": "zebra"})[1] is False
     repo_ledger = reads.load(repo.resolve())
-    assert reads.last_read(repo_ledger, ["memory/cards/fetched.md"]) == date.today()
+    assert reads.last_read(repo_ledger, ["memory/cards/fetched.md"]) == utc_today
     assert reads.last_read(repo_ledger, ["memory/cards/found.md"]) is None
     assert reads.last_read(repo_ledger, ["memory/cards/untouched.md"]) is None
     # A card from the user store is counted in the user store's ledger, not the repo's.
     assert reads.last_read(repo_ledger, ["memory/cards/mine.md"]) is None
     assert reads.last_read(reads.load(user.resolve()), ["memory/cards/mine.md"]) is None
     assert "zebra" in tools.call("get_card", {"path": "user:memory/cards/mine.md"})[0]["content"]
-    assert reads.last_read(reads.load(user.resolve()), ["memory/cards/mine.md"]) == date.today()
+    assert reads.last_read(reads.load(user.resolve()), ["memory/cards/mine.md"]) == utc_today
 
 
 def test_a_failed_read_records_nothing(stores):

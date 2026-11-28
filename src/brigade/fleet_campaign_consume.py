@@ -555,6 +555,7 @@ def _prerequisites(repo_path: Path, worker: str) -> str | None:
 def _local_task(repo_path: Path, text: str, work_id: str, acceptance: Sequence[str]) -> tuple[str | None, str]:
     """The one local task for this campaign work id, reopened if an earlier pass cancelled it."""
     from .work_cmd import helpers
+    from .work_cmd import claiming
     from .work_cmd.ledger import locking, tasks_plans
 
     with locking._task_ledger_lock(repo_path):
@@ -565,7 +566,7 @@ def _local_task(repo_path: Path, text: str, work_id: str, acceptance: Sequence[s
                     return str(task["id"]), ""
                 if task.get("status") != "cancelled":
                     return None, f"local task for this member is {task.get('status')}"
-                task["status"], task["updated_at"] = "pending", helpers._now().isoformat()
+                claiming._clear_claim(task, now=helpers._now().isoformat())
                 locking._write_task_ledger(repo_path, ledger)
                 return str(task["id"]), ""
         task, _ = tasks_plans._apply_add_task_to_ledger(
@@ -581,17 +582,23 @@ def _local_task(repo_path: Path, text: str, work_id: str, acceptance: Sequence[s
         return str(task["id"]), ""
 
 
-def _retire_task(repo_path: Path, task_id: str) -> None:
-    """Cancel the local task unless it is still running, so a plain dispatch cannot pick it up."""
+def _retire_task(repo_path: Path, task_id: str, consumer: str) -> str | None:
+    """Cancel a pending local task unless another consumer holds its claim."""
     from .work_cmd import helpers
+    from .work_cmd import claiming
     from .work_cmd.ledger import locking
 
     with locking._task_ledger_lock(repo_path):
         ledger = locking._read_task_ledger(repo_path)
         for task in ledger["tasks"]:
             if isinstance(task, dict) and task.get("id") == task_id and task.get("status") == "pending":
+                claim = claiming.claim_record(task)
+                if claim is not None and claim["actor"] != consumer:
+                    return f"task {task_id} is claimed by {claim['actor']}"
                 task["status"], task["updated_at"] = "cancelled", helpers._now().isoformat()
                 locking._write_task_ledger(repo_path, ledger)
+                return None
+    return None
 
 
 def _dispatch_detail(out: str, err: str, code: int, task_id: str) -> str:
@@ -610,10 +617,10 @@ def _dispatch_detail(out: str, err: str, code: int, task_id: str) -> str:
     return f"dispatch exit {code}: {detail or (lines[-1] if lines else 'no intent was created')}"[:300]
 
 
-def _retire_quietly(repo_path: Path, task_id: str) -> None:
+def _retire_quietly(repo_path: Path, task_id: str, consumer: str) -> None:
     """Cancel the local task, best effort. A cleanup failure must never hide a run that happened."""
     with contextlib.suppress(Exception):
-        _retire_task(repo_path, task_id)
+        _retire_task(repo_path, task_id, consumer)
 
 
 def launch_local(
@@ -648,7 +655,7 @@ def launch_local(
         # Setup (prerequisites, the ledger lock) spends lease too; the child gets only what is left.
         deadline_seconds -= time.monotonic() - started
         if deadline_seconds <= 0:
-            _retire_quietly(repo_path, task_id)
+            _retire_quietly(repo_path, task_id, worker)
             return Launch("refused", detail="lease used up during setup")
     try:
         seen = {row["intent_id"] for _, row in dispatch_state.intents(repo_path)}
@@ -668,7 +675,7 @@ def launch_local(
             if row["task_id"] == task_id and row["intent_id"] not in seen
         ]
     finally:
-        _retire_quietly(repo_path, task_id)
+        _retire_quietly(repo_path, task_id, worker)
     if not fresh:
         return Launch("refused", detail=_dispatch_detail(out.getvalue(), err.getvalue(), code, task_id))
     row = max(fresh, key=lambda r: r["attempt_no"])

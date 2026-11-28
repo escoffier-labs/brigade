@@ -12,6 +12,7 @@ import subprocess
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import cli
 from tests._home import set_home
 
@@ -133,7 +134,7 @@ def test_unsafe_final_inputs_fail_closed(project, tmp_path, capsys, relative, ki
         elif kind == "fifo":
             if not hasattr(os, "mkfifo"):
                 pytest.skip("FIFOs unavailable")
-            os.mkfifo(path)
+            make_fifo(path)
         else:
             path.mkdir()
     except (OSError, NotImplementedError):

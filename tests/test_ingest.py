@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import handoff_case_probe, handoff_cmd, ingest as ingest_mod
 from brigade.install import install_selection
 from brigade.selection import Selection
@@ -883,7 +884,7 @@ def test_ordinary_handoff_cannot_replace_governed_card(tmp_target, action, field
 def test_card_destination_inspection_refuses_named_pipe_without_blocking(tmp_path):
     cards = tmp_path / "memory/cards"
     cards.mkdir(parents=True)
-    os.mkfifo(cards / "example.md")
+    make_fifo(cards / "example.md")
     result = subprocess.run(
         [
             sys.executable,

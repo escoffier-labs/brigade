@@ -4,6 +4,7 @@ import os
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import receipt_signing
 from tests.memory_read_fixtures import signing_key
 
@@ -48,7 +49,7 @@ def test_unsafe_fixed_key_is_rejected(tmp_path, monkeypatch, unsafe):
         elif unsafe == "hardlink":
             os.link(outside, key)
         else:
-            os.mkfifo(key)
+            make_fifo(key)
     elif unsafe == "parent-link":
         (tmp_path / ".brigade").rename(tmp_path / "outside")
         (tmp_path / ".brigade").symlink_to(tmp_path / "outside", target_is_directory=True)

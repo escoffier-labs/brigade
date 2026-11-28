@@ -1,6 +1,6 @@
 """Promotion ranking uses observed opens without changing cards or state."""
 
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 import json
 import os
 import time
@@ -21,6 +21,10 @@ needs_dir_fd = pytest.mark.skipif(
     os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
     reason="safe directory descriptors unavailable",
 )
+
+
+def utc_today():
+    return datetime.now(timezone.utc).date()
 
 
 def card(target, name, *, trust="agent-unreviewed", scope=None):
@@ -67,7 +71,7 @@ def test_heavy_use_ranks_first_and_every_file_is_unchanged(tmp_path):
     assert use["interactive_sessions"] == 2
     assert use["distinct_days"] == 2
     assert use["score"] == 221
-    assert use["last_recorded_read"] == today.isoformat()
+    assert use["last_recorded_read"] == utc_today().isoformat()
     assert before == {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
 
 
@@ -214,7 +218,7 @@ def test_redirected_hook_opens_are_reviewed_at_memory_root(tmp_path):
     row = memory_review.review_payload(memory)["items"][0]
     assert row["use"]["interactive_sessions"] == 1
     assert row["use"]["distinct_days"] == 1
-    assert row["use"]["last_recorded_read"] == date.today().isoformat()
+    assert row["use"]["last_recorded_read"] == utc_today().isoformat()
     # Hub capture still consumes the wired target's opened ledger.
     assert hub_recall.load(hub_recall.ledger_path(target, "human"))["opened"] == ["opened"]
 

@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import bug_collect
 from brigade.localio import write_json
 
@@ -58,7 +59,7 @@ def test_diagnostics_skip_nonregular_files(tmp_path, monkeypatch, name, kind, fa
         write_json(victim, payload)
         path.symlink_to(victim)
     else:
-        os.mkfifo(path)
+        make_fifo(path)
         original = Path.open
 
         def deny_blocking_open(p, *args, **kwargs):
