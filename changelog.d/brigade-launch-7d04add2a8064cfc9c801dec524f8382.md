@@ -1,0 +1,2 @@
+- Preserve concurrent fleet campaign holds and refresh them while watching for work.
+- Read campaign hold snapshots without creating or waiting for writer locks, while refusing unreadable state at startup and during watch.

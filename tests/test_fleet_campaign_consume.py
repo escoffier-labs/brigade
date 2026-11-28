@@ -15,6 +15,7 @@ from brigade import fleet_campaign_consume as consumer
 from brigade import fleet_hub
 from brigade.work_cmd.ledger import locking
 from brigade.worklore_client import WorkloreClientError
+from tests._home import set_home
 from tests.test_work_dispatch import dispatch_target, requires_dispatch_apply  # noqa: F401
 from tests.test_work_dispatch_apply import apply_target  # noqa: F401
 from tests.test_worklore_campaign_take import OFFER, call, create, create_body, ledger  # noqa: F401
@@ -761,12 +762,140 @@ def test_unreadable_holds_refuse_the_pass_instead_of_forgetting_holds(tmp_path, 
     assert "w-1" not in consumer.Holds(tmp_path / "absent.json")
 
 
+def test_concurrent_holds_adds_preserve_both_entries(tmp_path):
+    path = tmp_path / "holds.json"
+    ready = threading.Barrier(3)
+
+    def add(work_id):
+        holds = consumer.Holds(path)
+        ready.wait()
+        holds.add(work_id, "lost grant", datetime.fromisoformat("2026-01-01T00:00:00+00:00"))
+
+    workers = [threading.Thread(target=add, args=(work_id,)) for work_id in ("w-1", "w-2")]
+    for worker in workers:
+        worker.start()
+    ready.wait()
+    for worker in workers:
+        worker.join()
+
+    assert set(json.loads(path.read_text(encoding="utf-8"))) == {"w-1", "w-2"}
+
+
+def test_contains_reloads_holds_added_after_consumer_started(tmp_path):
+    path = tmp_path / "holds.json"
+    watching = consumer.Holds(path)
+
+    consumer.Holds(path).add("w-late", "lost grant", datetime.fromisoformat("2026-01-01T00:00:00+00:00"))
+
+    assert "w-late" in watching
+
+
 def test_a_failing_task_cleanup_never_hides_the_run(tmp_path, monkeypatch):
     def fail(repo_path, task_id, consumer_name):
         raise OSError("ledger lock timed out")
 
     monkeypatch.setattr(consumer, "_retire_task", fail)
     consumer._retire_quietly(tmp_path, "task-1", "coder")
+
+
+@pytest.mark.parametrize("during_watch", [False, True])
+def test_permission_denied_holds_refuse_cli_without_launching_more_work(
+    hub, tmp_path, monkeypatch, capsys, during_watch
+):
+    from brigade import cli, fleet_client, worklore_client
+    from brigade.cli import fleet_campaign
+
+    set_home(monkeypatch, tmp_path / "home")
+    from functools import partial
+
+    conn, _, _, now = hub
+    monkeypatch.setattr(consumer, "consume", partial(consumer.consume, now=now))
+    path = consumer.holds_path(tmp_path, KEY)
+    path.parent.mkdir(parents=True)
+    path.write_text("{}", encoding="utf-8")
+    original_open = Path.open
+    denied = not during_watch
+
+    def permission_checked_open(self, *args, **kwargs):
+        if self == path and denied:
+            raise PermissionError("synthetic holds read permission denied")
+        return original_open(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", permission_checked_open)
+    monkeypatch.setattr(fleet_campaign, "_local_repos", lambda target: (REPOS, []))
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda target: "node-a")
+    node = Node(conn, "node-a")
+    for name in ("get_campaign", "get_ownership", "get_item", "ownership_action", "record_attempt"):
+        monkeypatch.setattr(worklore_client, name, getattr(node, name))
+    launches = []
+
+    def launch(*args, **kwargs):
+        nonlocal denied
+        launches.append(kwargs["work_id"])
+        denied = True
+        return consumer.Launch("refused", detail="synthetic launch refusal")
+
+    monkeypatch.setattr(consumer, "launch_local", launch)
+    code = cli.main(
+        [
+            "fleet",
+            "campaign",
+            "consume",
+            KEY,
+            "--target",
+            str(tmp_path),
+            "--worker",
+            "coder",
+            "--watch",
+            "--json",
+        ]
+    )
+    assert code == 2
+    assert json.loads(capsys.readouterr().err) == {"error": "campaign_holds_unreadable"}
+    assert len(launches) == int(during_watch)
+    assert not path.with_suffix(".lock").exists()
+
+
+def test_readable_holds_in_read_only_directory_need_no_lock_file(tmp_path, monkeypatch):
+    path = tmp_path / "holds.json"
+    path.write_text('{"w-held": {}}', encoding="utf-8")
+    original_open = Path.open
+
+    def read_only_open(self, mode="r", *args, **kwargs):
+        if self.parent == tmp_path and any(flag in mode for flag in "wax+"):
+            raise PermissionError("synthetic read-only directory")
+        return original_open(self, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", read_only_open)
+    with pytest.raises(PermissionError):
+        path.with_suffix(".lock").open("a")
+    holds = consumer.Holds(path)
+    assert "w-held" in holds
+    assert "w-other" not in holds
+    assert not path.with_suffix(".lock").exists()
+
+
+def test_holds_reader_does_not_wait_for_an_existing_held_lock(tmp_path):
+    path = tmp_path / "holds.json"
+    path.write_text('{"w-held": {}}', encoding="utf-8")
+    ready, release = threading.Event(), threading.Event()
+
+    def writer():
+        with consumer.held_file_lock(path.with_suffix(".lock"), deadline_seconds=2):
+            ready.set()
+            release.wait(timeout=10)
+
+    worker = threading.Thread(target=writer)
+    worker.start()
+    try:
+        assert ready.wait(timeout=5)
+        holds = consumer.Holds(path)
+        assert "w-held" in holds
+        assert "w-other" not in holds
+    finally:
+        release.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive()
 
 
 def seed_link(conn, work_id, index, *, fleet=True):

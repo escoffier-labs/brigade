@@ -20,6 +20,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
+from . import localio
+from .inbox_lock import held_file_lock
 from .worklore_client import (
     LIST_MAX_ITEMS,
     LIST_MAX_PAGES,
@@ -106,26 +108,38 @@ class Holds:
         self.path = path
         self.rows: dict[str, Any] = {}
         if path is not None:
-            try:
-                loaded = json.loads(path.read_text(encoding="utf-8"))
-            except FileNotFoundError:
-                loaded = {}
-            except (OSError, ValueError) as exc:
-                raise HoldsUnreadable(f"cannot read campaign holds at {path}") from exc
-            if not isinstance(loaded, dict):
-                raise HoldsUnreadable(f"campaign holds at {path} is not a JSON object")
-            self.rows = loaded
+            # Writers atomically replace the snapshot; readers need no writable lock file.
+            self.rows = self._read()
+
+    def _read(self) -> dict[str, Any]:
+        assert self.path is not None
+        path = self.path
+        try:
+            loaded = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            loaded = {}
+        except (OSError, ValueError) as exc:
+            raise HoldsUnreadable(f"cannot read campaign holds at {path}") from exc
+        if not isinstance(loaded, dict):
+            raise HoldsUnreadable(f"campaign holds at {path} is not a JSON object")
+        return loaded
 
     def __contains__(self, work_id: object) -> bool:
+        if self.path is None:
+            return work_id in self.rows
+        self.rows = self._read()
         return work_id in self.rows
 
     def add(self, work_id: str, reason: str, at: datetime) -> None:
-        self.rows[work_id] = {"reason": reason, "at": at.isoformat()}
-        if self.path is not None:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            scratch = self.path.with_suffix(".tmp")
-            scratch.write_text(json.dumps(self.rows, sort_keys=True, indent=2), encoding="utf-8")
-            scratch.replace(self.path)
+        row = {"reason": reason, "at": at.isoformat()}
+        if self.path is None:
+            self.rows[work_id] = row
+            return
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        with held_file_lock(self.path.with_suffix(".lock"), deadline_seconds=2):
+            self.rows = self._read()
+            self.rows[work_id] = row
+            localio.write_json(self.path, self.rows)
 
 
 def _now() -> datetime:
