@@ -180,6 +180,21 @@ def test_usage_route_reports_occupancy_without_writing(tmp_path):
             db.close()
 
 
+def test_usage_route_reports_missing_roster_metadata_as_bad_request(tmp_path):
+    with _hub(tmp_path) as hub:
+        db = fleet_hub.open_db(hub[2])
+        try:
+            db.execute("DELETE FROM model_roster_meta WHERE singleton=1")
+            db.commit()
+        finally:
+            db.close()
+
+        assert _request(hub, "/models/usage", token=ADMIN_TOKEN) == (
+            400,
+            {"error": "model roster revision metadata is missing"},
+        )
+
+
 def test_legacy_usage_counts_only_unexpired_unreleased_leases(tmp_path):
     conn = fleet_hub.init_db(tmp_path / "legacy.db")
     try:
