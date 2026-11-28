@@ -1,0 +1,1 @@
+- Fail closed when stored campaign authorization offers are malformed, while preserving selection of members with valid offers.
