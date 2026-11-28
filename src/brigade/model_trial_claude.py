@@ -708,6 +708,8 @@ class _StderrCapture:
         self.tail = bytearray()
         self.total = 0
         self.overflow = False
+        self.expired = False
+        self.deadline: float | None = None
 
     def _keep(self, data: bytes) -> None:
         self.tail += data
@@ -717,7 +719,19 @@ class _StderrCapture:
     def drain(self, pipe: BinaryIO, on_overflow: Any) -> None:
         carry = b""  # The last bytes of the previous read, in case the token straddles two reads.
         try:
-            while chunk := pipe.read1(65536):  # type: ignore[attr-defined]
+            while True:
+                if self.deadline is not None:
+                    remaining = self.deadline - time.monotonic()
+                    if remaining <= 0:
+                        self.expired = True
+                        break
+                    ready, _, _ = select.select((pipe,), (), (), remaining)
+                    if not ready:
+                        self.expired = True
+                        break
+                chunk = pipe.read1(65536)  # type: ignore[attr-defined]
+                if not chunk:
+                    break
                 self.total += len(chunk)
                 if self.total > MAX_STDERR_BYTES and not self.overflow:
                     self.overflow = True
@@ -1096,6 +1110,7 @@ def _run_process(
         **extra,
     )
     deadline = time.monotonic() + max(timeout, 0.0)
+    capture.deadline = deadline
     # Every descendant of the arm starts at or after its leader, so this bound separates a stray
     # from a long-lived same-user process whose environ is unreadable (sshd, a compositor).
     scanning = drain_supported() and bool(cell_token)
@@ -1210,6 +1225,7 @@ def _run_process(
         try:
             drainer.join(timeout=EXIT_GRACE)
         finally:
+            held_pipes = held_pipes or (getattr(capture, "expired", False) and not timed_out.is_set())
             if drainer.is_alive():
                 cleanup_failed = True
             for pipe in (child.stdout, child.stderr):

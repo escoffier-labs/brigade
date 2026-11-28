@@ -1108,6 +1108,37 @@ def test_windows_job_stops_a_descendant_that_inherits_both_arm_output_pipes(tmp_
     assert (run.code, run.timed_out, run.cleanup_failed) == (0, False, False)
 
 
+@pytest.mark.skipif(not hasattr(os, "setsid"), reason="requires os.setsid")
+def test_stderr_reader_stops_at_the_cell_deadline_when_a_setsid_child_holds_the_pipe(tmp_path):
+    pid_file = tmp_path / "holder.pid"
+    script = (
+        "import os, pathlib, sys, time\n"
+        "if os.fork() == 0:\n"
+        "    os.setsid()\n"
+        "    sys.stdout.close()\n"
+        f"    pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
+        "    print('diagnostic', file=sys.stderr, flush=True)\n"
+        "    time.sleep(30)\n"
+        "    os._exit(0)\n"
+        "print('complete output', flush=True)\n"
+    )
+    observer = _Observer(expected_model="m", session_id="s", version="v", cwd=tmp_path)
+    env = {key: os.environ[key] for key in ENV_PASSTHROUGH if key in os.environ}
+    started = time.monotonic()
+    try:
+        run = _run_process([sys.executable, "-c", script], env, tmp_path, "", 0.5, observer, "tok")
+        assert time.monotonic() - started < 2
+        assert run.stream == b"complete output\n"
+        assert run.stderr == b"diagnostic\n"
+        assert run.held_pipes and not run.timed_out
+    finally:
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except OSError:
+                pass
+
+
 @requires_process_groups
 def test_expiry_cannot_flip_a_finished_cell_or_signal_a_recycled_group(monkeypatch, tmp_path):
     events, callbacks, kills = [], [], []
