@@ -195,11 +195,43 @@ def _record_path(target: Path, head: str, check_name: str = DEFAULT_CHECK_NAME) 
 
 
 def _tree_state(target: Path, head: str, tree: str) -> str:
-    """Return ``clean``, ``dirty`` or ``unreadable`` for the working tree against HEAD."""
-    live = localio.tree_fingerprint_with_head(target, extra_untracked_paths=(_STATE_DIR,))
-    if None in live:
+    """Return the target and repository working tree state against HEAD."""
+    target_live = localio.tree_fingerprint_with_head(target, extra_untracked_paths=(_STATE_DIR,))
+    if None in target_live:
         return "unreadable"
-    return "clean" if live == (tree, head) else "dirty"
+    root_value = helpers._git_value(target, "rev-parse", "--show-toplevel")
+    if root_value is None:
+        return "unreadable"
+    root = Path(root_value).resolve()
+    try:
+        relative_target = target.relative_to(root)
+    except ValueError:
+        return "unreadable"
+    repository_live = (
+        target_live
+        if root == target
+        else localio.tree_fingerprint_with_head(
+            root, extra_untracked_paths=(_STATE_DIR, (relative_target / _STATE_DIR).as_posix())
+        )
+    )
+    if None in repository_live:
+        return "unreadable"
+    if repository_live == (tree, head):
+        return "clean"
+    if root == target:
+        return "dirty"
+    scoped_status = helpers._git(
+        root,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--",
+        str(relative_target),
+        f":(exclude){(relative_target / _STATE_DIR).as_posix()}",
+    )
+    if scoped_status.returncode != 0:
+        return "unreadable"
+    return "dirty" if scoped_status.stdout else "dirty_outside_target"
 
 
 def verify_ci(*, target: Path, check_name: str = DEFAULT_CHECK_NAME, json_output: bool = False) -> int:
@@ -215,6 +247,12 @@ def verify_ci(*, target: Path, check_name: str = DEFAULT_CHECK_NAME, json_output
         return 2
     if tree_state == "dirty":
         print("error: the working tree differs from HEAD. Commit and push your changes first.", file=sys.stderr)
+        return 2
+    if tree_state == "dirty_outside_target":
+        print(
+            "error: the working tree differs from HEAD outside --target. Commit and push your changes first.",
+            file=sys.stderr,
+        )
         return 2
 
     repository = _github_repository(target)
@@ -258,6 +296,7 @@ def closeout_evidence(target: Path) -> dict[str, Any]:
     check name, another commit, or a tree that has changed since is not
     evidence for the work being closed.
     """
+    target = target.expanduser().resolve()
     identity = _head_identity(target)
     head, tree = identity or (None, None)
     unknown = {"head_sha": head, "tree_id": tree, "state": "unknown", "hint": "brigade work verify ci"}
@@ -280,6 +319,11 @@ def closeout_evidence(target: Path) -> dict[str, Any]:
         if record["state"] == "failed":
             return {**record, "reason": "Local changes are not covered by this failed CI result."}
         return {**unknown, "reason": "The working tree differs from HEAD, so the saved CI result does not cover it."}
+    if tree_state == "dirty_outside_target":
+        return {
+            **unknown,
+            "reason": "The working tree differs from HEAD outside --target, so the saved CI result does not cover it.",
+        }
     if tree_state != "clean":
         return {**unknown, "reason": "The working tree state could not be read from git."}
     return record
