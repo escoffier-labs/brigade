@@ -3209,3 +3209,21 @@ def test_has_matching_stale_claim_never_mutates_lock_or_stale_claims(tmp_path, m
 
     assert sorted(p.name for p in stale.parent.iterdir()) == snapshot_paths
     assert (stale / "owner.json").read_bytes() == stale_owner_bytes
+
+
+def test_plain_checkout_named_run_locks_keeps_recovery_gate_in_brigade(tmp_path, monkeypatch):
+    from tests._home import set_home
+
+    set_home(monkeypatch, tmp_path / "isolated-home")
+    repo = _repo(tmp_path).rename(tmp_path / ".run-locks")
+    lock_path = runguard.lock_path(repo)
+    lock_path.mkdir(parents=True)
+    (lock_path / "pid").write_text("43210\n")
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+
+    with runguard.run_lock(repo):
+        assert runguard._recovery_gate_path(lock_path) == repo / ".brigade" / ".run.lock.recovery-gate"
+    assert (repo / ".brigade" / ".run.lock.recovery-gate").is_file()
+    assert runguard.require_clean_worktree(repo) == []
+    with runguard.run_lock(repo):
+        assert lock_path.is_dir()

@@ -392,7 +392,11 @@ def test_release_leaves_a_reserved_worktree_lease_directory_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The lease dir must be empty after a run so its owner can remove it."""
-    lease = tmp_path / ".run-locks" / "repo-run"
+    from brigade.worktree_lease import brigade_worktree_root
+    from tests._home import set_home
+
+    set_home(monkeypatch, tmp_path)
+    lease = brigade_worktree_root().resolve() / ".run-locks" / "repo-run"
     lease.mkdir(parents=True)
     lock_path = lease / "run.lock"
     ownership = runguard._publish_lock(lock_path, run_dir=None)
@@ -405,14 +409,25 @@ def test_release_leaves_a_reserved_worktree_lease_directory_empty(
     assert sorted(entry.name for entry in lease.iterdir()) == []
 
 
-def test_a_reserved_worktree_lock_keeps_its_gate_out_of_the_lease_directory(tmp_path: Path) -> None:
-    gate = runguard_gate._recovery_gate_path(tmp_path / ".run-locks" / "repo-run" / "run.lock")
-    assert gate == tmp_path / ".run-locks" / ".repo-run.run.lock.recovery-gate"
+def test_a_reserved_worktree_lock_keeps_its_gate_out_of_the_lease_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from brigade.worktree_lease import brigade_worktree_root
+    from tests._home import set_home
+
+    set_home(monkeypatch, tmp_path)
+    lease_root = brigade_worktree_root().resolve() / ".run-locks"
+    gate = runguard_gate._recovery_gate_path(lease_root / "repo-run" / "run.lock")
+    assert gate == lease_root / ".repo-run.run.lock.recovery-gate"
     assert runguard_gate._recovery_gate_path(tmp_path / "run.lock") == tmp_path / ".run.lock.recovery-gate"
 
 
-def test_the_lease_gate_still_excludes_a_second_recoverer(tmp_path: Path) -> None:
-    lock_path = tmp_path / ".run-locks" / "repo-run" / "run.lock"
+def test_the_lease_gate_still_excludes_a_second_recoverer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from brigade.worktree_lease import brigade_worktree_root
+    from tests._home import set_home
+
+    set_home(monkeypatch, tmp_path)
+    lock_path = brigade_worktree_root().resolve() / ".run-locks" / "repo-run" / "run.lock"
     lock_path.parent.mkdir(parents=True)
 
     with runguard._stale_recovery_gate(lock_path) as first:

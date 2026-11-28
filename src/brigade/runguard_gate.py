@@ -16,11 +16,10 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from .worktree_lease import brigade_worktree_root
+
 if TYPE_CHECKING:
     from .runguard import RunLockError
-
-
-_LEASE_ROOT_NAME = ".run-locks"
 
 
 def _recovery_gate_path(path: Path) -> Path:
@@ -32,7 +31,7 @@ def _recovery_gate_path(path: Path) -> Path:
     exactly one file per lock. Everywhere else the gate sits beside the lock.
     """
     parent = path.parent
-    if parent.parent.name == _LEASE_ROOT_NAME:
+    if parent.parent.resolve() == brigade_worktree_root().resolve() / ".run-locks":
         return parent.parent / f".{parent.name}.{path.name}.recovery-gate"
     return path.with_name(f".{path.name}.recovery-gate")
 
