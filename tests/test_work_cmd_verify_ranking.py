@@ -408,6 +408,7 @@ def test_command_prefix_detects_brigadestack_layout():
         ("pyproject.toml", '[dependency-groups]\ntest = [{{include-group = "base"}}, "{dependency}>=9"]\n'),
         ("pyproject.toml", '[tool.poetry.dependencies]\n"{dependency}" = "^9"\n'),
         ("pyproject.toml", '[tool.poetry.group.test.dependencies]\n"{dependency}" = {{version = "^9"}}\n'),
+        ("pyproject.toml", '[tool.poetry.dev-dependencies]\n"{dependency}" = "^9"\n'),
         ("pyproject.toml", '[tool.pdm.dev-dependencies]\ntest = ["{dependency}>=9"]\n'),
         ("requirements-dev.txt", '# Development tools\n{dependency}[extra]>=9 ; python_version >= "3.11"\n'),
     ],

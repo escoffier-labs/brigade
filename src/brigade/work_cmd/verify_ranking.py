@@ -246,6 +246,8 @@ def _has_pytest_evidence(target: Path) -> bool:
         poetry = tool.get("poetry")
         if isinstance(poetry, dict):
             dependency_groups.append(poetry.get("dependencies"))
+            # Poetry before 1.2 declares test tools here instead of in groups.
+            dependency_groups.append(poetry.get("dev-dependencies"))
             for group in _table_values(poetry.get("group")):
                 if isinstance(group, dict):
                     dependency_groups.append(group.get("dependencies"))
