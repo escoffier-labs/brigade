@@ -39,8 +39,13 @@ class Node:
     def get_campaign(self, campaign_key):
         return self._send("GET", f"/work/campaigns/{quote(campaign_key, safe='')}")
 
-    def get_item(self, work_id):
-        return self._send("GET", f"/work/items/{work_id}")
+    def get_item(self, work_id, *, links_cursor=None):
+        query = "" if links_cursor is None else f"?links_cursor={quote(links_cursor, safe='')}"
+        return self._send("GET", f"/work/items/{work_id}{query}")
+
+    def list_events(self, work_id, *, cursor=None):
+        query = "" if cursor is None else f"?cursor={quote(cursor, safe='')}"
+        return self._send("GET", f"/work/items/{work_id}/events{query}")
 
     def get_ownership(self, work_id):
         return self._send("GET", f"/work/items/{work_id}/ownership")
@@ -407,6 +412,76 @@ def test_reclaimed_member_whose_previous_generation_linked_a_run_is_not_launched
     assert [p.outcome for p in run(conn, "node-b", now, again)[0]] == ["idle"]
 
 
+def test_reclaimed_member_uses_attempt_events_after_operator_reset(hub):
+    conn, _, clock, now = hub
+    work_id = member_ids(conn)["acme/one"]
+    first = Runs(conn, "node-a", state="failed")
+    assert [p.outcome for p in run(conn, "node-a", now, first, watch=False)[0]] == ["failed"]
+    item = Node(conn, "node-a").get_item(work_id)["item"]
+    status, reset = call(
+        conn,
+        f"/work/items/{work_id}/attempts",
+        {"action": "reset"},
+        admin=True,
+        headers={"If-Match": str(item["version"])},
+        method="POST",
+    )
+    assert status == 200 and reset["item"]["attempt_count"] == 0
+    owner = Node(conn, "node-a")
+    ownership = owner.get_ownership(work_id)["ownership"]
+    owner.ownership_action(
+        work_id,
+        {"action": "take", "generation": ownership["generation"]},
+        if_match=ownership["revision"],
+        idempotency_key="operator-reset-reclaim",
+        holder_nonce=consumer.new_ownership_nonce(),
+    )
+    other_ids = [member_id for member_id in member_ids(conn).values() if member_id != work_id]
+    conn.execute("UPDATE work_items SET status='completed' WHERE work_id IN (?, ?)", other_ids)
+    conn.commit()
+    clock[0] = "2026-01-01T00:02:00+00:00"
+    later = Runs(conn, "node-b")
+    passes, _ = run(conn, "node-b", now, later, watch=False)
+    assert [p.outcome for p in passes] == ["parked"] and later.launched == ["acme/one"]
+
+
+def test_launcher_that_links_a_run_then_raises_is_reported_and_not_relaunched(hub, tmp_path):
+    conn, _, clock, now = hub
+    work_id = member_ids(conn)["acme/one"]
+    node = Node(conn, "node-a")
+    holds_path = tmp_path / "holds.json"
+
+    def launch_then_raise(*args, **kwargs):
+        run_id = "run-node-a-created"
+        conn.execute(
+            "INSERT INTO events (node_id, run_id, sequence, digest, state, ts, received_at) "
+            "VALUES ('node-a', ?, 1, 'd', 'running', 'now', 'now')",
+            (run_id,),
+        )
+        conn.commit()
+        node.link_execution(
+            work_id, {"node_id": "node-a", "run_id": run_id}, generation=1, holder_nonce=node.nonces[-1]
+        )
+        raise RuntimeError("receipt failed")
+
+    passes, events = run(
+        conn,
+        "node-a",
+        now,
+        launch_then_raise,
+        watch=False,
+        hub_override=node,
+        holds=consumer.Holds(holds_path),
+    )
+    assert [(p.outcome, p.run_id, p.detail) for p in passes] == [("error", "run-node-a-created", "RuntimeError")]
+    assert events[-1]["event"] == "error"
+    assert Node(conn, "node-a").get_ownership(work_id)["ownership"]["next_action"]["kind"] == "blocked"
+    clock[0] = "2026-01-01T00:10:00+00:00"
+    later = Runs(conn, "node-b")
+    run(conn, "node-b", now, later, holds=consumer.Holds(holds_path))
+    assert "acme/one" not in later.launched
+
+
 @pytest.mark.parametrize("state", ["failed", "lost_race"])
 def test_failed_intent_with_no_run_id_counts_an_attempt_and_is_not_repeated(hub, tmp_path, state):
     conn, _, _, now = hub
@@ -692,3 +767,147 @@ def test_a_failing_task_cleanup_never_hides_the_run(tmp_path, monkeypatch):
 
     monkeypatch.setattr(consumer, "_retire_task", fail)
     consumer._retire_quietly(tmp_path, "task-1", "coder")
+
+
+def seed_link(conn, work_id, index, *, fleet=True):
+    """Insert synthetic historical evidence without dispatching a real run."""
+    conn.execute(
+        "INSERT INTO work_links (link_id, work_id, link_type, external_key, source_policy, "
+        "source_acceptance_json, synced_at) VALUES (?, ?, ?, ?, 'context', '[]', ?)",
+        (
+            f"synthetic-{index:03}",
+            work_id,
+            "fleet-run" if fleet else "url",
+            f"node-a/history-{index}" if fleet else f"fixture-{index}",
+            "2025-01-01T00:00:00+00:00",
+        ),
+    )
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_reclaim_matches_distinct_runs_against_complete_started_history(hub, missing):
+    from brigade import worklore_store as store
+
+    conn, _, clock, now = hub
+    work_id = member_ids(conn)["acme/one"]
+    node = Node(conn, "node-a")
+    with pytest.raises(Killed):
+        run(conn, "node-a", now, Runs(conn, "node-a", die=True), watch=False, hub_override=node)
+    for index in range(30):
+        seed_link(conn, work_id, index)
+        # Failed and duplicate started events must never stand in for another run's start.
+        for event_type in ("attempt-started", "attempt-started", "attempt-failed"):
+            if missing and index == 29 and event_type == "attempt-started":
+                continue
+            store._append_event(
+                conn,
+                work_id=work_id,
+                event_type=event_type,
+                from_status=None,
+                to_status=None,
+                actor_type="node",
+                actor_id="node-a",
+                node_id="node-a",
+                run_id=f"history-{index}",
+                now=clock[0],
+            )
+    conn.commit()
+    assert len(node.get_item(work_id)["recent_events"]) == 20
+    assert node.list_events(work_id)["next_cursor"]
+    clock[0] = "2026-01-01T00:02:00+00:00"
+    later = Runs(conn, "node-b", state="refused")
+    passes, _ = run(conn, "node-b", now, later, watch=False, repos={"acme/one": REPOS["acme/one"]})
+    assert [p.outcome for p in passes] == (["previous-run"] if missing else ["refused"])
+    assert later.launched == ([] if missing else ["acme/one"])
+
+
+def test_launcher_link_beyond_first_page_is_not_released(hub, tmp_path):
+    conn, _, _, now = hub
+    work_id = member_ids(conn)["acme/one"]
+    node = Node(conn, "node-a")
+    for index in range(55):
+        seed_link(conn, work_id, index, fleet=False)
+    conn.commit()
+
+    def launch(*args, **kwargs):
+        launched = Runs(conn, "node-a")(*args, **kwargs)
+        node.link_execution(
+            work_id,
+            {"node_id": "node-a", "run_id": launched.run_id},
+            generation=1,
+            holder_nonce=node.nonces[-1],
+        )
+        assert all(link["link_type"] != "fleet-run" for link in node.get_item(work_id)["links"])
+        raise ValueError("synthetic launcher failure")
+
+    holds = consumer.Holds(tmp_path / "holds.json")
+    passes, _ = run(conn, "node-a", now, launch, watch=False, hub_override=node, holds=holds)
+    assert passes[0].outcome == "error" and passes[0].run_id
+    assert work_id in holds
+    assert node.get_ownership(work_id)["ownership"]["next_action"]["kind"] == "blocked"
+
+
+def test_nested_evidence_read_failure_preserves_launch_error(hub, monkeypatch, tmp_path):
+    conn, _, _, now = hub
+    work_id = member_ids(conn)["acme/one"]
+    node = Node(conn, "node-a")
+
+    def unreadable(*args, **kwargs):
+        raise OSError("synthetic evidence failure")
+
+    def launch(*args, **kwargs):
+        monkeypatch.setattr(node, "get_item", unreadable)
+        raise RuntimeError("synthetic launcher failure")
+
+    holds = consumer.Holds(tmp_path / "holds.json")
+    passes, _ = run(conn, "node-a", now, launch, watch=False, hub_override=node, holds=holds)
+    assert passes[0].outcome == "error" and passes[0].detail == "RuntimeError"
+    assert work_id in holds
+    assert node.get_ownership(work_id)["ownership"]["next_action"]["kind"] == "blocked"
+
+
+def test_fresh_take_with_unreadable_item_is_released_not_held(hub, monkeypatch, tmp_path):
+    conn, _, _, now = hub
+    work_id = member_ids(conn)["acme/one"]
+    node = Node(conn, "node-a")
+
+    def unreadable(*args, **kwargs):
+        raise OSError("synthetic item read failure")
+
+    monkeypatch.setattr(node, "get_item", unreadable)
+    launched = []
+    holds = consumer.Holds(tmp_path / "holds.json")
+    run(conn, "node-a", now, lambda *a, **k: launched.append(a), watch=False, hub_override=node, holds=holds)
+    assert launched == []
+    assert work_id not in holds
+
+
+@pytest.mark.parametrize("evidence", ["events", "links"])
+def test_unreadable_reclaim_evidence_holds_member(hub, monkeypatch, tmp_path, evidence):
+    conn, _, clock, now = hub
+    node = Node(conn, "node-a")
+    work_id = member_ids(conn)["acme/one"]
+    with pytest.raises(Killed):
+        run(conn, "node-a", now, Runs(conn, "node-a", die=True), watch=False, hub_override=node)
+    clock[0] = "2026-01-01T00:02:00+00:00"
+    later = Node(conn, "node-b")
+
+    def unreadable(*args, **kwargs):
+        raise WorkloreClientError("synthetic evidence unavailable", code="forbidden")
+
+    monkeypatch.setattr(later, "list_events" if evidence == "events" else "get_item", unreadable)
+    holds = consumer.Holds(tmp_path / "holds.json")
+    launch = Runs(conn, "node-b")
+    passes, _ = run(
+        conn,
+        "node-b",
+        now,
+        launch,
+        watch=False,
+        hub_override=later,
+        holds=holds,
+        repos={"acme/one": REPOS["acme/one"]},
+    )
+    assert passes[0].outcome == "error" and not launch.launched
+    assert work_id in holds
+    assert later.get_ownership(work_id)["ownership"]["next_action"]["kind"] == "blocked"

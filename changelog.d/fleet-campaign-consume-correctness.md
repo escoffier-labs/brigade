@@ -1,0 +1,5 @@
+- Prevent fleet campaign members from being launched again when a launcher links a run before reporting an error.
+- Use durable started and failed attempt events when deciding whether a reclaimed campaign member has an unaccounted run.
+- Match distinct linked run IDs against complete item-scoped attempt-started history before reclaiming a member.
+- Read every link page after launcher errors and retain the original launch error when evidence reads fail.
+- A fresh campaign take whose item read fails before launch is handed back instead of held, because no previous holder can have linked a run.
