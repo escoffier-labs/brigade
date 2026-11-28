@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sqlite3
 from datetime import datetime
 from typing import Any, Mapping
@@ -15,7 +16,9 @@ from . import fleet_project_board_page as board_page
 from . import fleet_projects_prs as pull_requests
 from . import fleet_command_deck as deck
 from . import fleet_deck_activity as activity
+from . import fleet_deck_disclosure as disclosure
 from . import fleet_deck_overview as overview
+from .fleet_hub_placement import DEFAULT_THRESHOLD
 from .fleet_machine_label import status_label
 from . import worklore_campaigns as campaigns
 from .fleet_campaign import MAX_MEMBERS
@@ -485,13 +488,59 @@ def render_capacity(
     return document(content, view, now, nonce=nonce, title="Capacity", active=tab, worklore_enabled=worklore_enabled)
 
 
+def _overview_live_work(view: deck.DeckView, station: deck.StationView) -> str:
+    capacity = station.station.capacity
+    total = station.sessions + station.busy
+    groups = view.session_breakdown.get(station.station.node_id, ())
+    details = ""
+    if groups:
+        harnesses = " · ".join(f"{harness} {count}" for harness, count, _, _ in groups)
+        linked = sum(group[2] for group in groups)
+        cloud = sum(group[3] for group in groups)
+        overlap = " (may overlap)" if linked and cloud else ""
+        details = f"<small>{_esc(harnesses)} ({linked} T3-linked, {cloud} cloud){overlap}</small>"
+    managed = f"<small>brigade run {station.busy}/{capacity}</small>" if station.busy else ""
+    headline = f"<span>Agent sessions</span><b>{station.sessions}</b>" if total else "<span>No live work</span>"
+    return (
+        f'<div class="overview-machine-capacity"><div>{headline}</div>'
+        f'<progress class="overview-use-bar" value="{total}" max="{max(1, capacity)}" aria-label="Live work"></progress>'
+        f"<small>{capacity} configured Deck slots</small>{details}{managed}</div>"
+    )
+
+
+def _overview_machine_load(
+    view: deck.DeckView, station: deck.StationView, machine: deck.MachineState | None, status: str
+) -> str:
+    if machine is None:
+        return "Load unknown"
+    try:
+        cpu = float(machine.load)
+    except ValueError:
+        cpu = math.nan
+    memory, sessions = view.machine_pressure.get(machine.node_id, (None, None))
+    inputs = [
+        (label, value)
+        for label, value in (("CPU", cpu), ("memory", memory), ("placement session load", sessions))
+        if value is not None and math.isfinite(value)
+    ]
+    high = [(label, value) for label, value in inputs if value >= DEFAULT_THRESHOLD]
+    signals = [f"{label} {value:.0%}" for label, value in sorted(high, key=lambda item: item[1], reverse=True)]
+    node_busy = machine.state == "busy" or machine.unused_reason == "machine-busy"
+    if node_busy:
+        signals.append("node reports busy")
+    if status in {"offline", "stale"}:
+        return "Load unknown"
+    if signals and (node_busy or station.busy or station.sessions):
+        return "Busy because: " + ", ".join(signals)
+    return ", ".join(f"{label} {value:.0%}" for label, value in inputs if label in {"CPU", "memory"}) or "Load unknown"
+
+
 def render_overview_machines(view: deck.DeckView, now: datetime) -> str:
     """Compact machine scan using only the overview's existing projection."""
     rows = []
     for station in view.stations:
         machine = overview.machine_for(view, station)
         status = overview.station_status(station, machine)
-        capacity = station.station.capacity
         age = overview.format_age(overview.seconds_since(machine.last_observed_at, now)) if machine else "unknown"
         last_report = ""
         if status == "idle":
@@ -507,9 +556,6 @@ def render_overview_machines(view: deck.DeckView, now: datetime) -> str:
             state = "telemetry unknown" if machine is None else status_label(station, machine, status)
         else:
             state = status_label(station, machine, status)
-        load_cell = overview._load_cell(machine)
-        load = load_cell.split("<", 1)[0]
-        load_bar = load_cell[len(load) :] if load != overview.UNKNOWN else ""
         rows.append(
             '<div class="overview-machine-row">'
             '<div class="overview-machine-name"><a href="/deck/capacity'
@@ -521,31 +567,10 @@ def render_overview_machines(view: deck.DeckView, now: datetime) -> str:
             + "</span><small>"
             + explorer.pill(state, "warn" if status == "limited" else "")
             + "</small></div>"
-            '<div class="overview-machine-capacity"><div><span>Configured capacity</span><b>'
-            + _esc(f"{capacity} slots")
-            + '</b></div><progress class="overview-capacity-bar" value="'
-            + str(capacity)
-            + '" max="'
-            + str(max(1, capacity))
-            + '" aria-label="Configured capacity"></progress><div><span>Managed runs</span><b>'
-            + _esc(f"{station.busy}/{capacity} slots")
-            + '</b></div><progress class="overview-use-bar" value="'
-            + str(station.busy)
-            + '" max="'
-            + str(max(1, capacity))
-            + '" aria-label="Managed runs"></progress>'
-            + (
-                '<small class="overview-managed-hint">No managed runs. Agent sessions do not use slots.</small>'
-                if not station.busy and station.sessions
-                else ""
-            )
-            + (f"<div><span>Agent sessions</span><b>{station.sessions}</b></div>" if station.sessions else "")
-            + "</div>"
-            '<div class="overview-machine-load"><span>Reported load</span><b>'
-            + _esc(load)
-            + "</b>"
-            + load_bar
-            + '</div><div class="overview-machine-age"><span>Telemetry</span><b>'
+            + _overview_live_work(view, station)
+            + '<div class="overview-machine-load"><b>'
+            + _esc(_overview_machine_load(view, station, machine, status))
+            + '</b></div><div class="overview-machine-age"><span>Telemetry</span><b>'
             + _esc(age)
             + "</b>"
             + last_report
@@ -554,9 +579,10 @@ def render_overview_machines(view: deck.DeckView, now: datetime) -> str:
     body = "".join(rows) or '<p class="overview-machines-empty">No machines configured.</p>'
     return (
         '<section class="overview-machines" aria-labelledby="overview-machines-title"><header>'
-        f'<h2 id="overview-machines-title">Machines ({len(view.stations)})</h2>'
+        f"{disclosure.heading('overview-machines-title', f'Machines ({len(view.stations)})')}"
         '<a class="card-link" href="/deck/capacity">View capacity</a></header>'
-        f'<div class="overview-machine-rows">{body}</div></section>'
+        + disclosure.body("overview-machines-title", f'<div class="overview-machine-rows">{body}</div>')
+        + "</section>"
     )
 
 
@@ -842,10 +868,11 @@ def render_reporting(
     )
 
 
-def overview_attention(view: deck.DeckView, now: datetime) -> str:
+def overview_attention(view: deck.DeckView, now: datetime, *, alerts: tuple[overview.Alert, ...] | None = None) -> str:
     from . import fleet_deck_alerts
 
-    alerts = overview.page_alerts(view, now)
+    if alerts is None:
+        alerts = overview.page_alerts(view, now)
     ids = explorer.identifiers([fleet_deck_alerts.entry_key(alert) for alert in alerts])
     rows = "".join(
         f'<li><a href="/deck/alerts#{identifier}">{_esc(alert.title[:120])}</a>{explorer.pill(alert.kind)}</li>'

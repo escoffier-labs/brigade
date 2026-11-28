@@ -76,6 +76,17 @@ def _parse(body: Any) -> tuple[str, float]:
     return key, threshold
 
 
+def session_load_ratio(sessions: int | None, agent_sessions: int, capacity: int, weight: float) -> float | None:
+    """Replace the standalone share of the live session floor with its weighted share."""
+    if sessions is None:
+        return None
+    if capacity <= 0:
+        return 1.0
+    if not weight:
+        return sessions / capacity
+    return min(float_info.max, (sessions - agent_sessions) / capacity + weight * (agent_sessions / capacity))
+
+
 def _telemetry_expiry(telemetry: Mapping[str, Any] | None, routing: Mapping[str, Any]) -> datetime | None:
     """When this telemetry row stops counting, by the same TTL rule the evaluator applies."""
     if telemetry is None:
@@ -274,13 +285,7 @@ def _place(
             reasons.append(unknown)
         else:
             sessions = int(live.get(node, 0))
-        # Keep sessions as the total live count. At positive weight, replace
-        # the standalone share of the legacy floor with its weighted share.
-        session_ratio = None if sessions is None else (sessions / capacity if capacity > 0 else 1.0)
-        if sessions is not None and capacity > 0 and weight:
-            session_ratio = min(
-                float_info.max, (sessions - agent_sessions) / capacity + weight * (agent_sessions / capacity)
-            )
+        session_ratio = session_load_ratio(sessions, agent_sessions, capacity, weight)
         memory = None if memory_readings is None else memory_readings.get(node)
         fresh = expiry is not None and now < expiry
         effective = None

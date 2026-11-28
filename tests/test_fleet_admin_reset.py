@@ -53,7 +53,7 @@ def test_overview_keeps_machine_capacity_in_a_short_scan_without_diagnostic_fold
     assert all(f'href="{href}"' in page for href in ("/deck/alerts", "/deck/activity", "/deck/capacity"))
     assert f"/deck/capacity{explorer.selection_href('11111111-1111-4111-8111-111111111111')}" in page
     assert "linux-a" in page and "windows" in page
-    assert "10 slots" in page and "2/10 slots" in page and "Reported load" in page and "44%" in page
+    assert "10 configured Deck slots" in page and "brigade run 2/10" in page and "CPU 44%" in page
     assert "stale" in page and "2h 0m" in page
     assert 'id="fleet-title"' not in page and "Capacity telemetry unavailable" not in page
     assert "Ready to run: 3" in page
@@ -63,7 +63,7 @@ def test_overview_unknown_machine_data_stays_explicit_and_labels_are_escaped():
     view = replace(_mixed_view(), stations=(replace(_mixed_view().stations[0], label=HOSTILE),), control_plane=None)
     page = overview.render_overview(view, NOW, worklore_enabled=True)
     assert HOSTILE not in page and "&lt;script&gt;" in page
-    assert "unknown" in page and "Reported load</span><b>unknown</b>" in page
+    assert "unknown" in page and "Load unknown" in page
     assert "Capacity telemetry unavailable" not in page
     assert ">0%</b>" not in page
 
@@ -180,7 +180,7 @@ def test_reporting_default_is_concise_and_keeps_history_separate(tmp_path):
 
 def test_overview_missing_telemetry_stays_unknown_without_duplicate_fleet_card():
     page = overview.render_overview(replace(_mixed_view(), control_plane=None), NOW, worklore_enabled=True)
-    assert "telemetry unknown" in page and "Reported load</span><b>unknown</b>" in page
+    assert "telemetry unknown" in page and "Load unknown" in page
     assert 'id="fleet-title"' not in page and "Capacity is reported" not in page
 
 

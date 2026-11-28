@@ -1,0 +1,2 @@
+- Lead the Deck Machines panel with live agent sessions and their harness breakdown, and explain busy machines using reported load and placement inputs.
+- Collapse individual Deck Overview sections and keep those choices across reloads in the same browser.

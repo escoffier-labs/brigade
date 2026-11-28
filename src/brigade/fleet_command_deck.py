@@ -318,8 +318,6 @@ class MachineState:
     available_slots: str = UNKNOWN
     eligible_queued_work: str = UNKNOWN
     unused_reason: str = UNKNOWN
-    # The enrolled node this policy machine runs on. Additive: snapshots from
-    # before the key existed parse with ``unknown`` and join to no station.
     node_id: str = UNKNOWN
 
 
@@ -490,6 +488,8 @@ class DeckView:
     observed_work_groups: tuple[ObservedWorkGroup, ...] = ()
     stale_after_seconds: int = 1800
     octopool_observation: OctopoolObservation | Mapping[str, object] | None = None
+    session_breakdown: Mapping[str, tuple[tuple[str, int, int, int], ...]] = field(default_factory=dict)
+    machine_pressure: Mapping[str, tuple[float | None, float | None]] = field(default_factory=dict)
 
 
 def resolve_config_path(flag_value: str | Path | None, environ: Mapping[str, str]) -> Path | None:
@@ -1828,7 +1828,7 @@ def render_deck(
     routing: fleet_live_routing.Routing | None = None,
 ) -> str:
     # Imported here because fleet_deck_overview imports this module for its types.
-    from . import fleet_deck_overview, fleet_admin_explorer
+    from . import fleet_deck_overview, fleet_admin_explorer, fleet_deck_disclosure
 
     body = fleet_deck_overview.render_overview(
         view, now, worklore_enabled=worklore_enabled, action_sources=action_sources, routing=routing
@@ -1840,7 +1840,8 @@ def render_deck(
         active="overview",
         view=view,
         worklore_enabled=worklore_enabled,
-        extra_css=ui_theme.OVERVIEW_CSS + fleet_admin_explorer.CSS + fleet_live_routing.CSS,
+        extra_css=ui_theme.OVERVIEW_CSS + fleet_admin_explorer.CSS + fleet_live_routing.CSS + fleet_deck_disclosure.CSS,
+        script=fleet_deck_disclosure.SCRIPT,
     )
 
 
