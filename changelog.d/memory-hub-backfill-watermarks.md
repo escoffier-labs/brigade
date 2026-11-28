@@ -1,1 +1,3 @@
 - Resume interrupted memory Hub cold rebuilds from each scope's saved backfill position while starting newly readable scopes from the beginning.
+- Clear refused scopes from saved backfill progress so restoring a read grant replays their dropped cards.
+- Format the per-scope watermark initialization to pass the repository formatting check.

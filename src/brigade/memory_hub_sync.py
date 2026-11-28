@@ -458,9 +458,7 @@ def _follow(
     """
     watermark = int(replica.meta.get("seq") or 0)
     covered = set(replica.meta.get("read_scopes") or [])
-    scope_watermarks = {
-        scope: replica.backfill_watermark(scope, covered=scope in covered) for scope in readable
-    }
+    scope_watermarks = {scope: replica.backfill_watermark(scope, covered=scope in covered) for scope in readable}
     after = min(scope_watermarks.values(), default=watermark)
     used = replica.bytes()
     pages = 0
@@ -513,7 +511,9 @@ def _follow(
         replica.meta["seq"] = max(after, watermark)
         for scope in readable:
             scope_watermarks[scope] = max(after, scope_watermarks[scope])
-        replica.set_backfill_watermarks(scope_watermarks)
+        replica.set_backfill_watermarks(
+            {scope: value for scope, value in scope_watermarks.items() if scope in readable}
+        )
         if pages % SAVE_EVERY_PAGES == 0:
             # Bounded progress for a long rebuild; the full write happens once at the end.
             save()
@@ -538,7 +538,9 @@ def _follow(
             replica.meta["seq"] = max(after, watermark)
             for scope in readable:
                 scope_watermarks[scope] = max(after, scope_watermarks[scope])
-            replica.set_backfill_watermarks(scope_watermarks)
+            replica.set_backfill_watermarks(
+                {scope: value for scope, value in scope_watermarks.items() if scope in readable}
+            )
     _refill(client, replica, settings, epoch=epoch, used=used, readable=readable, report=report, save=save)
 
 
@@ -644,6 +646,9 @@ def _refuse_scope(
     """Take a scope the hub refused out of `readable` and drop its heads, saving the narrowed replica at once."""
     readable.discard(scope)
     replica.retain_scopes(readable)
+    watermarks = replica.meta.get("backfill_watermarks")
+    if isinstance(watermarks, dict):
+        watermarks.pop(scope, None)
     replica.meta["read_scopes"] = sorted(set(replica.meta.get("read_scopes") or []) & readable)
     save()
     report["warnings"].append(
