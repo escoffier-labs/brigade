@@ -1468,11 +1468,9 @@ def run(
                 allocate_attempt=lambda: run_lifecycle.allocate_next_dispatch_attempt(output_dir, agent.name),
                 record_requested=run_batch_launch.recorder_for(batch_execution, agent, assignment, dispatch_fact),
                 reclaim_pending=batch_execution is None,
-                task_attempt=(assignment.task_id, assignment.attempt_id)
-                if batch_execution is not None
-                and assignment is not None
-                and assignment.task_id is not None
-                and assignment.attempt_id is not None
+                task_attempt=run_batch_launch.task_attempt(batch_execution, assignment),
+                durable_write_exists=(run_batch_launch.durable_write_probe(output_dir, agent.name, assignment))
+                if batch_execution is not None and assignment is not None
                 else None,
             )
         except run_budget.BudgetPolicyError as exc:

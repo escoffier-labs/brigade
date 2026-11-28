@@ -333,6 +333,18 @@ class Replica:
             return None
         return int(self.meta["seq"])
 
+    def backfill_watermark(self, scope: str, *, covered: bool) -> int:
+        """Progress for one scope, with the legacy replica fallback."""
+        watermarks = self.meta.get("backfill_watermarks")
+        value = watermarks.get(scope) if isinstance(watermarks, dict) else None
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            return value
+        return int(self.meta.get("seq") or 0) if covered else 0
+
+    def set_backfill_watermarks(self, values: dict[str, int]) -> None:
+        """Record validated per-scope log progress without changing the global watermark."""
+        self.meta["backfill_watermarks"] = dict(sorted(values.items()))
+
     def belongs_to(self, hub: str, principal: object) -> bool:
         """Pulled from `hub` as `principal`, the identity the hub reported for this credential."""
         return (
@@ -623,7 +635,7 @@ def refused_scopes(target: Path, *, now: float) -> dict[str, float]:
 def remember_refused_scopes(
     target: Path, scopes: tuple[str, ...], *, now: float, ttl: float = REFUSED_SCOPES_TTL_SECONDS
 ) -> None:
-    """Remember `scopes` as refused for `ttl`, bounded to the newest entries."""
+    """Remember `scopes` as refused for `ttl`, bounded to the newest entries. Hold `locked`."""
     expires = now + ttl
     remembered = refused_scopes(target, now=now)
     for name in scopes:
@@ -634,7 +646,7 @@ def remember_refused_scopes(
 
 
 def forget_refused_scopes(target: Path, scopes: tuple[str, ...], *, now: float) -> None:
-    """Drop remembered refusals for scopes the hub has just answered."""
+    """Drop remembered refusals for scopes the hub has just answered. Hold `locked`."""
     remembered = refused_scopes(target, now=now)
     kept = {name: expires for name, expires in remembered.items() if name not in scopes}
     if kept == remembered:

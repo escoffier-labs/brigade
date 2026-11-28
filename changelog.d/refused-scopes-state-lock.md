@@ -1,0 +1,3 @@
+- Preserve concurrent refused-scope updates by writing them under the bounded hub state lock.
+- Keep search refusal cache writes within the search budget under state lock contention, so remaining readable scopes can still answer.
+- Avoid state locks and hub directory creation when successful searches or pulls have no remembered refusal to clear.

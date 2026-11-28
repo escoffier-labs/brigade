@@ -39,12 +39,16 @@ def flush_spool(
     for network failures.
     """
     from . import fleet_client as client
+    from .fleet_client_flush import stuck_path
 
     config = client.load_fleet_config()
     hub = hub_url or config["hub_url"]
     tok = token or config["token"]
     path = client.spool_path(node_id)
-    if not hub or not _has_regular_spool(path):
+
+    # A stale marker still needs locked cleanup, but absent state must not
+    # create a spool directory or lock file. Re-read state after acquiring it.
+    if not hub or (not _has_regular_spool(path) and not stuck_path(path).is_file()):
         return 0
     with client._spool_lock(path) as dir_fd:
         return client._flush_locked(path, hub, tok, max_batches=max_batches, timeout=timeout, dir_fd=dir_fd)

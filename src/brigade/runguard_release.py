@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import threading
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
@@ -50,6 +51,22 @@ _LOCK_METADATA_NAMES = ("pid", "owner.json")
 # Only Windows has to move the metadata names out of the way first; POSIX renames
 # a directory with readers inside it, and that release is unchanged.
 _WINDOWS = os.name == "nt"
+
+# Process-local evidence, scoped to the gated metadata-removal transaction.
+# Never retain a pathname after the rename: NTFS may immediately reuse its inode.
+_RELEASING: set[tuple[Path, int, int]] = set()
+_RELEASING_LOCK = threading.RLock()
+
+
+def snapshot_is_releasing(path: Path, info: os.stat_result) -> bool:
+    """Whether this process is emptying exactly the directory a snapshot saw.
+
+    The release holds the recovery gate until metadata is restored or the
+    directory moves. A stale verdict during this interval cannot claim it.
+    Unknown access denial, including from another process, stays fail-closed.
+    """
+    with _RELEASING_LOCK:
+        return (path.absolute(), info.st_dev, info.st_ino) in _RELEASING
 
 
 class _Clock(Protocol):
@@ -119,8 +136,17 @@ def _release_once(path: Path, release_path: Path, ownership: _LockOwnership) -> 
         # lock that replaced it, and a released inode is reused at once.
         if not _still_our_lock(path, ownership):
             return
-        withheld = _withhold_metadata(path)
-        _rename_and_remove(path, release_path, ownership, withheld=withheld)
+        key = (path.absolute(), ownership.device, ownership.inode)
+        try:
+            with _RELEASING_LOCK:
+                _RELEASING.add(key)
+            withheld = _withhold_metadata(path)
+            moved = _rename_lock(path, release_path, ownership, withheld=withheld)
+        finally:
+            with _RELEASING_LOCK:
+                _RELEASING.discard(key)
+        if moved:
+            _remove_released(path, release_path, ownership)
 
 
 def _release_posix_lock(path: Path, release_path: Path, ownership: _LockOwnership) -> None:
@@ -131,7 +157,8 @@ def _release_posix_lock(path: Path, release_path: Path, ownership: _LockOwnershi
         return
     if visible.st_dev != ownership.device or visible.st_ino != ownership.inode:
         return
-    _rename_and_remove(path, release_path, ownership, withheld=None)
+    if _rename_lock(path, release_path, ownership, withheld=None):
+        _remove_released(path, release_path, ownership)
 
 
 def _still_our_lock(path: Path, ownership: _LockOwnership) -> bool:
@@ -192,13 +219,15 @@ def _metadata_bytes(path: Path) -> list[tuple[Path, bytes]]:
     The read shares delete access for the same reason every other reader does: a
     plain open would refuse the unlink this release is about to attempt. A name
     that is already gone is skipped; one that cannot be read could not be
-    restored, so nothing may be removed.
+    restored, so nothing may be removed. Only this release capture opts into
+    treating a persistent Windows access denial as a missing name. Snapshot and
+    lane owner readers must keep that denial visible to avoid stale reclamation.
     """
     captured: list[tuple[Path, bytes]] = []
     for name in _LOCK_METADATA_NAMES:
         target = path / name
         try:
-            captured.append((target, nt_process.read_bytes_sharing_delete(target)))
+            captured.append((target, nt_process.read_bytes_sharing_delete(target, missing_if_access_denied=True)))
         except FileNotFoundError:
             continue
         except OSError:
@@ -206,17 +235,15 @@ def _metadata_bytes(path: Path) -> list[tuple[Path, bytes]]:
     return captured
 
 
-def _rename_and_remove(
-    path: Path, release_path: Path, ownership: _LockOwnership, *, withheld: _Metadata | None
-) -> None:
+def _rename_lock(path: Path, release_path: Path, ownership: _LockOwnership, *, withheld: _Metadata | None) -> bool:
     try:
         path.rename(release_path)
     except FileNotFoundError:
-        return
+        return False
     except BaseException:
         _restore_metadata(path, ownership, withheld)
         raise
-    _remove_released(path, release_path, ownership)
+    return True
 
 
 def _put_back(files: Iterable[tuple[Path, bytes]]) -> None:

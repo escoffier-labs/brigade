@@ -12,6 +12,7 @@ refuses an admin credential (`memory_hub_client.refuse_admin`).
 from __future__ import annotations
 
 import contextlib
+import logging
 import re
 import time
 from datetime import datetime, timezone
@@ -21,6 +22,8 @@ from typing import Any, Callable, Iterator
 from . import memory_hub_client as hubc
 from . import memory_hub_store as store
 from .inbox_lock import InboxLockTimeout
+
+_LOG = logging.getLogger(__name__)
 
 SPOOL_MAX_AGE_MS = 28 * 24 * 3600 * 1000
 CLOCK_SKEW_WARN_SECONDS = 60
@@ -203,8 +206,14 @@ def _forget_search_refusals(target: Path, readable: set[str]) -> None:
     """
     if not readable:
         return
+    now = time.time()
+    if not readable.intersection(store.refused_scopes(target, now=now)):
+        return
     try:
-        store.forget_refused_scopes(target, tuple(sorted(readable)), now=time.time())
+        with _state_lock(target):
+            store.forget_refused_scopes(target, tuple(sorted(readable)), now=time.time())
+    except InboxLockTimeout:
+        _LOG.debug("hub state lock timed out; skipped forgetting refused scopes")
     except OSError:
         pass
 
@@ -377,6 +386,10 @@ def _drop_revoked_scope(target: Path, hub: str, principal: object, epoch: str, s
         kept = {name for name in live.meta.get("read_scopes") or [] if name != scope}
         live.retain_scopes(kept)
         live.meta["read_scopes"] = sorted(kept)
+        watermarks = live.meta.get("backfill_watermarks")
+        if isinstance(watermarks, dict):
+            # Its heads are gone, so a restored grant must replay this scope from 0.
+            watermarks.pop(scope, None)
         live.save()
 
 
@@ -415,7 +428,17 @@ def _prepare(
     # arrive for its heads: drop them now.
     dropped = replica.retain_scopes(readable)
     covered = sorted(set(replica.meta.get("read_scopes") or []) & readable)
-    if dropped or covered != sorted(replica.meta.get("read_scopes") or []):
+    stored = replica.meta.get("backfill_watermarks")
+    watermarks_changed = False
+    if isinstance(stored, dict):
+        kept_watermarks = {
+            scope: value
+            for scope, value in stored.items()
+            if scope in readable and isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        }
+        watermarks_changed = kept_watermarks != stored
+        replica.set_backfill_watermarks(kept_watermarks)
+    if dropped or watermarks_changed or covered != sorted(replica.meta.get("read_scopes") or []):
         # Saved now, so fallback search stops serving those scopes even if
         # the rest of this pull fails.
         replica.meta["read_scopes"] = covered
@@ -447,8 +470,9 @@ def _follow(
     any full body is read, and the watermark moves only after the bodies land.
     """
     watermark = int(replica.meta.get("seq") or 0)
-    new_scopes = readable - set(replica.meta.get("read_scopes") or [])
-    after = 0 if new_scopes else watermark
+    covered = set(replica.meta.get("read_scopes") or [])
+    scope_watermarks = {scope: replica.backfill_watermark(scope, covered=scope in covered) for scope in readable}
+    after = min(scope_watermarks.values(), default=watermark)
     used = replica.bytes()
     pages = 0
     deferred = _Deferred(replica) if store.limits.active() else None
@@ -469,7 +493,7 @@ def _follow(
             ):
                 continue
             seq = event.get("seq")
-            if event["scope"] in new_scopes or not isinstance(seq, int) or seq > watermark:
+            if not isinstance(seq, int) or seq > scope_watermarks[event["scope"]]:
                 latest[store.Replica.key(event["scope"], event["card_id"])] = event
         for key, event in latest.items():
             if event["scope"] not in readable:
@@ -498,6 +522,11 @@ def _follow(
         if deferred is not None:
             continue  # no watermark or save until the deferred bodies are applied
         replica.meta["seq"] = max(after, watermark)
+        for scope in readable:
+            scope_watermarks[scope] = max(after, scope_watermarks[scope])
+        replica.set_backfill_watermarks(
+            {scope: value for scope, value in scope_watermarks.items() if scope in readable}
+        )
         if pages % SAVE_EVERY_PAGES == 0:
             # Bounded progress for a long rebuild; the full write happens once at the end.
             save()
@@ -520,6 +549,11 @@ def _follow(
             )
         if pages:
             replica.meta["seq"] = max(after, watermark)
+            for scope in readable:
+                scope_watermarks[scope] = max(after, scope_watermarks[scope])
+            replica.set_backfill_watermarks(
+                {scope: value for scope, value in scope_watermarks.items() if scope in readable}
+            )
     _refill(client, replica, settings, epoch=epoch, used=used, readable=readable, report=report, save=save)
 
 
@@ -625,6 +659,9 @@ def _refuse_scope(
     """Take a scope the hub refused out of `readable` and drop its heads, saving the narrowed replica at once."""
     readable.discard(scope)
     replica.retain_scopes(readable)
+    watermarks = replica.meta.get("backfill_watermarks")
+    if isinstance(watermarks, dict):
+        watermarks.pop(scope, None)
     replica.meta["read_scopes"] = sorted(set(replica.meta.get("read_scopes") or []) & readable)
     save()
     report["warnings"].append(
@@ -917,6 +954,7 @@ def _publishable(
             # Published under another log_epoch: the restored hub may not hold
             # this card, so the old base proves nothing. Adopt a current head
             # or send the card again; a base the hub rejects becomes a proposal.
+            card["published_in_other_epoch"] = True
             last = None
         if isinstance(last, dict) and last.get("content_hash") == card["content_hash"]:
             continue
@@ -965,7 +1003,9 @@ def _replay_refusal(target: Path, entry: dict[str, Any], local: list[dict[str, A
     return "card-gone"
 
 
-def _record_published(target: Path, hub: str, entry: dict[str, Any], event: dict[str, Any], epoch: str) -> None:
+def _record_published(
+    target: Path, hub: str, entry: dict[str, Any], event: dict[str, Any], epoch: str, *, written: bool = True
+) -> None:
     """Read-modify-write of published.json. Callers hold `store.locked`."""
     state = store.published(target)
     cards = state.setdefault(hub, {}).setdefault(entry["scope"], {})
@@ -975,7 +1015,7 @@ def _record_published(target: Path, hub: str, entry: dict[str, Any], event: dict
         "log_epoch": epoch,
         "path": entry.get("path"),
         # Adopted and rebased heads do not prove an acknowledged local write.
-        "written": True,
+        "written": written,
     }
     store.save_published(target, state)
 
@@ -993,6 +1033,7 @@ def _entry(scope: str, card: dict[str, Any], hub: str) -> dict[str, Any]:
         "origin": "interactive",
         "path": card["rel"],
         "derived_id": card.get("derived_id", False),
+        "published_in_other_epoch": card.get("published_in_other_epoch", False),
     }
     if base:
         entry["base_epoch"] = base.get("log_epoch")
@@ -1005,6 +1046,23 @@ def _request(entry: dict[str, Any]) -> dict[str, Any]:
     if entry.get("base_revision") is not None:
         body["base_epoch"] = entry.get("base_epoch")
     return body
+
+
+def _matching_live_head(client: hubc.MemoryHubClient, entry: dict[str, Any], head: dict[str, Any], epoch: str) -> bool:
+    """A matching conflict hash can still belong to a retired or superseded head."""
+    try:
+        body = client.call("card", scope=entry["scope"], card_id=entry["card_id"], offset=0)
+    except (hubc.HubConfigError, hubc.HubRefusal, hubc.HubUnavailable):
+        return False
+    card = hubc.obj(body.get("card"))
+    return (
+        body.get("log_epoch") == epoch
+        and card.get("scope") == entry["scope"]
+        and card.get("card_id") == entry["card_id"]
+        and card.get("state") == "live"
+        and card.get("revision") == head["revision"]
+        and card.get("content_hash") == head["content_hash"]
+    )
 
 
 class _Push:
@@ -1051,13 +1109,35 @@ class _Push:
                 self._spool(entry, spooled=spooled)
                 return
             reason = exc.code or f"http-{exc.status}"
+            current_revision = exc.body.get("current_revision")
+            current_hash = exc.body.get("current_hash")
+            sent_hash = hubc.content_hash(entry["text"])
+            if (
+                exc.code == "memory_base_mismatch"
+                and entry.get("published_in_other_epoch") is True
+                and isinstance(current_hash, str)
+                and current_hash == sent_hash
+                and isinstance(current_revision, int)
+                and not isinstance(current_revision, bool)
+                and current_revision > 0
+                and isinstance(self.epoch, str)
+                and bool(self.epoch)
+                and _matching_live_head(
+                    self.client, entry, {"revision": current_revision, "content_hash": current_hash}, self.epoch
+                )
+            ):
+                event = {"revision": current_revision, "content_hash": current_hash}
+                _record_published(self.target, self.client.identity, entry, event, self.epoch, written=False)
+                store.spool_remove(self.target, entry["hub"], entry["client_event_id"])
+                self.report["published"].append({"card_id": entry["card_id"], "revision": current_revision})
+                return
             # A new derived key must never replace a hub card that already
             # owns it. CAS is authoritative even without a readable replica.
             if (
                 entry.get("derived_id")
                 and entry.get("base_revision") is None
                 and exc.code == "memory_base_mismatch"
-                and exc.body.get("current_hash") != hubc.content_hash(entry["text"])
+                and current_hash != sent_hash
             ):
                 reason = "card-id-collision"
             if exc.code not in CONFLICT_CODES or reason == "card-id-collision":
