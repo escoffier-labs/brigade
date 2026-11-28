@@ -884,6 +884,22 @@ async fn compensation_stale_watch_skips_the_manifest_rescan_until_a_distinct_tri
         0,
         "a known stale watch must not re-scan unchanged manifests"
     );
+    // A new evaluation advances the retrieval cursor even when it leaves the
+    // same verifier trip stale. Cache the inputs after that cursor advance.
+    retrieval_eval_tests::record_current(&h).await;
+    scans.store(0, Ordering::SeqCst);
+    assert_eq!(watch(&h).await.body["results"], json!([]));
+    assert!(
+        scans.load(Ordering::SeqCst) > 0,
+        "a new retrieval evaluation must recheck the stale trip"
+    );
+    scans.store(0, Ordering::SeqCst);
+    assert_eq!(watch(&h).await.body["results"], json!([]));
+    assert_eq!(
+        scans.load(Ordering::SeqCst),
+        0,
+        "the second poll must skip after consuming the retrieval evaluation"
+    );
     let one = verifier_signal(&h, AGENT_TOKEN, "negative-one", "active", true, "").await;
     let two = verifier_signal(&h, NODE_TOKEN, "negative-two", "active", true, "").await;
     scans.store(0, Ordering::SeqCst);

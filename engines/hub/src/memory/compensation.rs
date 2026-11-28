@@ -686,9 +686,9 @@ fn remember_stale_inputs(
     save_journal(tx, key, journal)
 }
 
-/// A suppressed outcome is not a completed stale verdict. Forget the cached
-/// fingerprint so the next poll re-runs the scan and can report the trip once
-/// the blocking referral is decided.
+/// Suppressed outcomes and retryable failures are not completed stale verdicts.
+/// Forget the cached fingerprint so the next poll re-runs the scan once a
+/// blocking referral is decided or a retry becomes possible.
 fn clear_stale_inputs(tx: &dyn WriteTx, key: &str, journal: &mut Json) -> rusqlite::Result<()> {
     let removed = journal
         .as_object_mut()
@@ -819,7 +819,18 @@ pub fn watch(
                 polled_inputs = Some(inputs);
             }
         }
-        let Some(trip) = trigger(tx, &body, applied, p.now_ms, request, a, scanner)? else {
+        let trip = trigger(tx, &body, applied, p.now_ms, request, a, scanner)?;
+        // The trigger can consume retrieval rows. A fingerprint from before
+        // that cursor advance cannot describe the completed scan's inputs.
+        if polled_inputs.is_some()
+            && tx.query(
+                "SELECT value FROM memory_meta WHERE key=?1",
+                &[t(&cursor_key)],
+            )? != cursor
+        {
+            polled_inputs = None;
+        }
+        let Some(trip) = trip else {
             if journal["result"] == "stale" {
                 let inputs = match polled_inputs.take() {
                     Some(inputs) => inputs,

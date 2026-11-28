@@ -1,1 +1,3 @@
 - Retry memory compensation watches after retryable failures even when their inputs revert, and fingerprint changed poll inputs only once.
+- Cache stale compensation watch inputs after retrieval cursor advances so unchanged polls skip redundant scans while fresh evaluations remain discoverable.
+- Cover retrieval evaluation cursor advances in the stale watch regression and document cache clearing for retryable failures.
