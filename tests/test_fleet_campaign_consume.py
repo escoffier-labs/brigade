@@ -753,6 +753,22 @@ def test_nested_evidence_read_failure_preserves_launch_error(hub, monkeypatch, t
     assert node.get_ownership(work_id)["ownership"]["next_action"]["kind"] == "blocked"
 
 
+def test_fresh_take_with_unreadable_item_is_released_not_held(hub, monkeypatch, tmp_path):
+    conn, _, _, now = hub
+    work_id = member_ids(conn)["acme/one"]
+    node = Node(conn, "node-a")
+
+    def unreadable(*args, **kwargs):
+        raise OSError("synthetic item read failure")
+
+    monkeypatch.setattr(node, "get_item", unreadable)
+    launched = []
+    holds = consumer.Holds(tmp_path / "holds.json")
+    run(conn, "node-a", now, lambda *a, **k: launched.append(a), watch=False, hub_override=node, holds=holds)
+    assert launched == []
+    assert work_id not in holds
+
+
 @pytest.mark.parametrize("evidence", ["events", "links"])
 def test_unreadable_reclaim_evidence_holds_member(hub, monkeypatch, tmp_path, evidence):
     conn, _, clock, now = hub

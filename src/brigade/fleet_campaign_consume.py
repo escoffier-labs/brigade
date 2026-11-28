@@ -342,7 +342,10 @@ def _work(
     now: Callable[[], datetime],
 ) -> Pass:
     work_id, repo, generation = str(member["work_id"]), str(member["repo"]), int(grant["generation"])
-    progress["launch"] = Launch("started")  # Unread evidence cannot prove that a prior run is safe.
+    if reclaim:
+        # A previous holder may have linked a run; until its evidence is read, nothing proves none
+        # is running. A fresh take has no previous holder, so an early Hub error releases it.
+        progress["launch"] = Launch("started")
     payload = hub.get_item(work_id)
     item = payload["item"]
     runs = _fleet_runs(hub, work_id, payload)
