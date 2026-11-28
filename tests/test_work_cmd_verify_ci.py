@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -11,6 +12,7 @@ from brigade import cli, localio, work_cmd
 from tests.work_cmd_test_helpers import _init_git_repo
 
 _GITHUB_HOST = "github.com"
+_FIXTURES = Path(__file__).parent / "fixtures"
 
 
 def _git(target, *args):
@@ -50,6 +52,7 @@ def _check(head, *, run_id=101, name="ci-gate", status="completed", conclusion="
         "status": status,
         "conclusion": conclusion,
         "html_url": "https://example.invalid/check",
+        "app": {"slug": "github-actions"},
     }
 
 
@@ -151,6 +154,61 @@ def test_ci_selects_newest_named_run_across_pages(checkout, monkeypatch, capsys)
     )
     assert _ci(target) == 2
     assert json.loads(capsys.readouterr().out)["check_run_id"] == 103
+
+
+def _recorded_check_runs(head):
+    payload = json.loads((_FIXTURES / "verify_ci_check_runs.json").read_text())
+    for run in payload["check_runs"]:
+        run["head_sha"] = head
+    return payload["check_runs"]
+
+
+def test_ci_accepts_recorded_actions_gate(checkout, monkeypatch, capsys):
+    target, head, _ = checkout
+    actions, _ = _recorded_check_runs(head)
+    _fake_gh(monkeypatch, head, actions)
+
+    assert _ci(target) == 0
+    assert json.loads(capsys.readouterr().out)["check_run_id"] == actions["id"]
+
+
+def test_ci_refuses_recorded_gate_from_another_app(checkout, monkeypatch, capsys):
+    target, head, _ = checkout
+    _, other = _recorded_check_runs(head)
+    _fake_gh(monkeypatch, head, other)
+
+    assert _ci(target) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "unknown"
+    assert payload["reason"] == (
+        "The ci-gate check runs for HEAD are untrusted: none came from the GitHub Actions app."
+    )
+
+
+@pytest.mark.parametrize("app", [None, "github-actions", {}, {"slug": "example-ci"}])
+def test_ci_refuses_gate_without_actions_app_identity(checkout, monkeypatch, capsys, app):
+    target, head, _ = checkout
+    run = _check(head)
+    if app is None:
+        run.pop("app")
+    else:
+        run["app"] = app
+    _fake_gh(monkeypatch, head, run)
+
+    assert _ci(target) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "unknown"
+    assert "none came from the GitHub Actions app." in payload["reason"]
+
+
+def test_ci_prefers_older_recorded_actions_gate(checkout, monkeypatch, capsys):
+    target, head, _ = checkout
+    actions, other = _recorded_check_runs(head)
+    assert actions["id"] < other["id"]
+    _fake_gh(monkeypatch, head, actions, other)
+
+    assert _ci(target) == 0
+    assert json.loads(capsys.readouterr().out)["check_run_id"] == actions["id"]
 
 
 @pytest.mark.parametrize(

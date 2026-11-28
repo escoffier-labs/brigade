@@ -1,0 +1,30 @@
+{
+  "check_runs": [
+    {
+      "id": 4101,
+      "name": "ci-gate",
+      "head_sha": "0000000000000000000000000000000000000000",
+      "status": "completed",
+      "conclusion": "success",
+      "html_url": "https://example.invalid/actions/runs/4101/job/1",
+      "app": {
+        "id": 15368,
+        "slug": "github-actions",
+        "name": "GitHub Actions"
+      }
+    },
+    {
+      "id": 4102,
+      "name": "ci-gate",
+      "head_sha": "0000000000000000000000000000000000000000",
+      "status": "completed",
+      "conclusion": "success",
+      "html_url": "https://example.invalid/checks/4102",
+      "app": {
+        "id": 90001,
+        "slug": "example-ci",
+        "name": "Example CI"
+      }
+    }
+  ]
+}
