@@ -165,6 +165,35 @@ def test_verify_base_scope_is_repo_keyed_and_discarded(tmp_path):
     assert verify_manifest_git.VerifyGitFacts(original).base.source == "no_remote"
 
 
+def test_scoreability_reports_unresolved_manifest_base_in_json_and_text(tmp_path, isolated_verify, capsys):
+    target = _initialize(tmp_path / "repo")
+    manifests = target / "verify" / "manifests"
+    manifests.mkdir(parents=True)
+    (manifests / "local.json").write_text('{"manifest_id":"local"}\n', encoding="utf-8")
+    _git(target, "remote", "add", "origin", "https://example.invalid/project.git")
+
+    payload = _verify(target, capsys, reuse=False, capture="brigade-work")
+    unresolved = payload["outcome_scoreability"]["manifest_base_unresolved"]
+    assert unresolved["status"] == "unresolved_default_branch"
+    assert unresolved["tried"] == "origin/HEAD, origin/main, and origin/master"
+    assert "git remote set-head origin -a" in unresolved["remediation"]
+
+    assert (
+        verification.verify_run(
+            target=target,
+            commands=[["python", "-V"]],
+            json_output=False,
+            capture="brigade-work",
+            reuse=False,
+        )
+        == 0
+    )
+    output = capsys.readouterr().out
+    assert "registered manifests: base unresolved" in output
+    assert "tried origin/HEAD, origin/main, and origin/master" in output
+    assert "none tracked under verify/manifests/" not in output
+
+
 @pytest.mark.parametrize("state", ["clean", "dirty", "rename", "merge", "sparse", "crlf"])
 def test_fresh_and_reused_receipt_bytes_match_unbatched_shim(tmp_path, isolated_verify, monkeypatch, capsys, state):
     target = _initialize(tmp_path / "repo")
