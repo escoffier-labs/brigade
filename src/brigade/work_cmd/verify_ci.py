@@ -60,6 +60,12 @@ def _missing_origin_reason(target: Path) -> str:
     if remotes:
         prefix += f"Existing remotes: {', '.join(remotes)}. "
     if source is None:
+        if "origin" in remotes:
+            # origin exists but is not GitHub, so `remote add` would fail with "already exists".
+            return (
+                prefix
+                + "Point origin at GitHub with: git remote set-url origin https://github.com/OWNER/REPOSITORY.git"
+            )
         return prefix + "Add one with: git remote add origin https://github.com/OWNER/REPOSITORY.git"
     if "origin" in remotes:
         url = helpers._git_value(target, "remote", "get-url", source) or ""

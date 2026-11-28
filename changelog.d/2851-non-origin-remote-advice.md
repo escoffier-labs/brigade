@@ -1,2 +1,3 @@
 - Make CI verification name existing Git remotes and show an actionable command when the required `origin` remote is missing.
 - Select the first recognized GitHub remote for origin repair advice, and suggest adding a GitHub origin when no remote qualifies.
+- When origin exists but is not GitHub and no other remote is, the advice is `git remote set-url origin` instead of a `git remote add` that would fail.
