@@ -11,9 +11,6 @@
         "id": 15368,
         "slug": "github-actions",
         "name": "GitHub Actions"
-      },
-      "workflow": {
-        "path": ".github/workflows/ci.yml"
       }
     },
     {

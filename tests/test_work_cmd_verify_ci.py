@@ -181,9 +181,24 @@ def test_ci_refuses_recorded_gate_from_another_app(checkout, monkeypatch, capsys
     payload = json.loads(capsys.readouterr().out)
     assert payload["state"] == "unknown"
     assert payload["reason"] == (
-        "The ci-gate check runs for HEAD are untrusted: none came from the "
-        "GitHub Actions app and .github/workflows/ci.yml."
+        "The ci-gate check runs for HEAD are untrusted: none came from the GitHub Actions app."
     )
+
+
+@pytest.mark.parametrize("app", [None, "github-actions", {}, {"slug": "example-ci"}])
+def test_ci_refuses_gate_without_actions_app_identity(checkout, monkeypatch, capsys, app):
+    target, head, _ = checkout
+    run = _check(head)
+    if app is None:
+        run.pop("app")
+    else:
+        run["app"] = app
+    _fake_gh(monkeypatch, head, run)
+
+    assert _ci(target) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["state"] == "unknown"
+    assert "none came from the GitHub Actions app." in payload["reason"]
 
 
 def test_ci_prefers_older_recorded_actions_gate(checkout, monkeypatch, capsys):

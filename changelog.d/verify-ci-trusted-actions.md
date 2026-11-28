@@ -1,1 +1,3 @@
-- Require `brigade work verify ci` to use the `ci-gate` check from GitHub Actions and the CI workflow when workflow metadata is available.
+- Require `brigade work verify ci` to use the `ci-gate` check from the GitHub Actions app.
+- Describe refused `ci-gate` checks using the verified GitHub Actions app identity only.
+- Remove unsupported workflow metadata handling from CI evidence and its check-run fixture.
