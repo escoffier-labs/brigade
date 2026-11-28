@@ -1108,29 +1108,60 @@ def test_windows_job_stops_a_descendant_that_inherits_both_arm_output_pipes(tmp_
     assert (run.code, run.timed_out, run.cleanup_failed) == (0, False, False)
 
 
-@pytest.mark.skipif(not hasattr(os, "setsid"), reason="requires os.setsid")
-def test_stderr_reader_stops_at_the_cell_deadline_when_a_setsid_child_holds_the_pipe(tmp_path):
-    pid_file = tmp_path / "holder.pid"
-    script = (
+def _stderr_holder_script(pid_file, output):
+    return (
         "import os, pathlib, sys, time\n"
         "if os.fork() == 0:\n"
         "    os.setsid()\n"
         "    sys.stdout.close()\n"
-        f"    pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
         "    print('diagnostic', file=sys.stderr, flush=True)\n"
+        f"    pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
         "    time.sleep(30)\n"
         "    os._exit(0)\n"
-        "print('complete output', flush=True)\n"
+        "ready_deadline = time.monotonic() + 1\n"
+        f"while not pathlib.Path({str(pid_file)!r}).exists():\n"
+        "    if time.monotonic() >= ready_deadline:\n"
+        "        raise RuntimeError('child setup timed out')\n"
+        "    time.sleep(0.01)\n"
+        f"print({output!r}, flush=True)\n"
     )
+
+
+@pytest.mark.skipif(not hasattr(os, "setsid"), reason="requires os.setsid")
+def test_stderr_reader_stops_at_the_cell_deadline_when_a_setsid_child_holds_the_pipe(tmp_path):
+    pid_file = tmp_path / "holder.pid"
+    # Whitespace keeps the observer reading until the deadline; malformed output starts teardown.
+    script = _stderr_holder_script(pid_file, "  ")
     observer = _Observer(expected_model="m", session_id="s", version="v", cwd=tmp_path)
     env = {key: os.environ[key] for key in ENV_PASSTHROUGH if key in os.environ}
     started = time.monotonic()
     try:
-        run = _run_process([sys.executable, "-c", script], env, tmp_path, "", 0.5, observer, "tok")
+        run = _run_process([sys.executable, "-c", script], env, tmp_path, "", 1.2, observer, "tok")
         assert time.monotonic() - started < 2
-        assert run.stream == b"complete output\n"
+        assert run.stream == b"  \n"
         assert run.stderr == b"diagnostic\n"
         assert run.held_pipes and not run.timed_out
+    finally:
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except OSError:
+                pass
+
+
+@pytest.mark.skipif(not hasattr(os, "setsid"), reason="requires os.setsid")
+def test_stderr_reader_stops_promptly_on_early_teardown_with_an_inherited_pipe(tmp_path):
+    pid_file = tmp_path / "holder.pid"
+    script = _stderr_holder_script(pid_file, "complete output")
+    observer = _Observer(expected_model="m", session_id="s", version="v", cwd=tmp_path)
+    env = {key: os.environ[key] for key in ENV_PASSTHROUGH if key in os.environ}
+    started = time.monotonic()
+    try:
+        run = _run_process([sys.executable, "-c", script], env, tmp_path, "", 30, observer, "tok")
+        assert time.monotonic() - started < 2
+        assert observer.failure == "malformed_stream"
+        assert run.stderr == b"diagnostic\n"
+        assert not run.timed_out and not run.cleanup_failed and not run.held_pipes
     finally:
         if pid_file.exists():
             try:
@@ -1360,6 +1391,124 @@ def test_stderr_keeps_only_a_bounded_redacted_tail_and_flags_overflow(monkeypatc
     capture = _StderrCapture("tok")
     capture.drain(_Pipe([b"a" * 600, b"b" * 600]), lambda: flagged.append(1))
     assert capture.overflow and flagged == [1] and len(capture.tail) == 100 and capture.tail.endswith(b"b" * 100)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX poll and descriptor duplication")
+def test_stderr_deadline_supports_descriptors_above_select_limit():
+    import fcntl
+
+    read_fd, write_fd = os.pipe()
+    try:
+        high_fd = fcntl.fcntl(read_fd, fcntl.F_DUPFD, 1024)
+        with os.fdopen(high_fd, "rb") as pipe:
+            os.write(write_fd, b"diagnostic")
+            capture = _StderrCapture("tok")
+            capture.deadline = time.monotonic() + 0.1
+            capture.drain(pipe, lambda: None)
+        assert bytes(capture.tail) == b"diagnostic"
+        assert capture.expired and not capture.failed
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX poll")
+@pytest.mark.parametrize("operation", ["register", "poll"])
+@pytest.mark.parametrize("error", [OSError, ValueError])
+def test_stderr_wait_failures_are_distinct_from_expiry(monkeypatch, operation, error):
+    class FailedPoll:
+        def register(self, *args):
+            if operation == "register":
+                raise error("wait failed")
+
+        def poll(self, *args):
+            raise error("wait failed")
+
+    monkeypatch.setattr(model_trial_claude.select, "poll", FailedPoll)
+    with tempfile.TemporaryFile() as pipe:
+        capture = _StderrCapture("tok")
+        capture.deadline = time.monotonic() + 30
+        capture.drain(pipe, lambda: None)
+    assert capture.failed and not capture.expired
+
+
+def test_stderr_deadline_does_not_poll_on_windows(monkeypatch):
+    monkeypatch.setattr(model_trial_claude, "os", types.SimpleNamespace(name="nt"))
+    capture = _StderrCapture("tok")
+    capture.deadline = time.monotonic() - 1
+    capture.drain(_Pipe([b"diagnostic"]), lambda: None)
+    assert bytes(capture.tail) == b"diagnostic"
+    assert not capture.expired and not capture.failed
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX poll")
+def test_stderr_teardown_interrupts_poll_and_flushes_final_redacted_carry(monkeypatch):
+    read_fd, write_fd = os.pipe()
+    capture = _StderrCapture(SECRET_TOKEN)
+    capture.deadline = time.monotonic() + 30
+    kept = threading.Event()
+    real_keep = capture._keep
+
+    def keep(data):
+        real_keep(data)
+        kept.set()
+
+    monkeypatch.setattr(capture, "_keep", keep)
+    with os.fdopen(read_fd, "rb") as pipe:
+        worker = start_thread(lambda: capture.drain(pipe, lambda: None))
+        try:
+            os.write(write_fd, f"before {SECRET_TOKEN} after".encode())
+            assert kept.wait(2)
+            started = time.monotonic()
+            capture.stopping.set()
+            join_thread(worker, description="stderr teardown", hard_timeout=2)
+            assert time.monotonic() - started < 1
+            assert bytes(capture.tail) == b"before [redacted] after"
+            assert not capture.expired and not capture.failed
+        finally:
+            capture.stopping.set()
+            os.close(write_fd)
+            join_thread(worker, description="stderr cleanup")
+
+
+@requires_process_groups
+def test_stderr_wait_failure_fails_the_cell_through_the_cli_entry_point(tmp_path, monkeypatch, capsys, cli_launcher):
+    class FailedCapture(_StderrCapture):
+        def drain(self, pipe, on_overflow):
+            pipe.close()
+            super().drain(pipe, on_overflow)
+
+    monkeypatch.setattr(model_trial_claude, "_StderrCapture", FailedCapture)
+    monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", SECRET_TOKEN)
+    exe = make_fake(tmp_path / "fake", steps=GOOD_STEPS)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "brigade",
+            "model",
+            "trial",
+            "paired-live",
+            str(LIVE),
+            "--output-dir",
+            str(tmp_path / "output"),
+            "--claude-bin",
+            str(exe),
+            "--timeout",
+            str(LIVE_TEST_TIMEOUT),
+        ],
+    )
+    work_dirs = _track_work_dirs(monkeypatch)
+    try:
+        with pytest.raises(SystemExit) as exited:
+            cli.process_main()
+        assert exited.value.code == 0
+        result = json.loads(capsys.readouterr().out)
+        assert _failures(result) == ["process_group_drain_failed"]
+        assert len(work_dirs) == 2 and all(path.is_dir() for path in work_dirs)
+    finally:
+        for path in work_dirs:
+            shutil.rmtree(path, ignore_errors=True)
 
 
 # ---- Daybreak review: size caps before buffering ----------------------------------------------
@@ -1909,10 +2058,13 @@ def test_a_drainer_that_outlives_the_join_keeps_the_work_dir(tmp_path, monkeypat
 
     class BlockedCapture:
         overflow = False
+        expired = False
+        failed = False
+        deadline = None
         tail = b""
 
         def __init__(self, token):
-            pass
+            self.stopping = threading.Event()
 
         def drain(self, pipe, on_overflow):
             release.wait(30)

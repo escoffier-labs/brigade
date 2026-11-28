@@ -699,7 +699,9 @@ class _StderrCapture:
     """Drain the child's stderr into memory, removing the token before any byte is kept or saved.
 
     Only the last ``STDERR_TAIL`` redacted bytes survive. Total output past ``MAX_STDERR_BYTES`` is
-    an overflow the caller turns into a failed cell.
+    an overflow the caller turns into a failed cell. On POSIX, ``deadline`` bounds the drain with
+    a monotonic timestamp; ``expired`` records when that deadline ended it. ``failed`` records an
+    I/O or wait failure. ``stopping`` interrupts the polling wait during teardown.
     """
 
     def __init__(self, token: str) -> None:
@@ -709,7 +711,9 @@ class _StderrCapture:
         self.total = 0
         self.overflow = False
         self.expired = False
+        self.failed = False
         self.deadline: float | None = None
+        self.stopping = threading.Event()
 
     def _keep(self, data: bytes) -> None:
         self.tail += data
@@ -719,16 +723,18 @@ class _StderrCapture:
     def drain(self, pipe: BinaryIO, on_overflow: Any) -> None:
         carry = b""  # The last bytes of the previous read, in case the token straddles two reads.
         try:
-            while True:
-                if self.deadline is not None:
+            poller = None
+            if os.name == "posix" and self.deadline is not None:
+                poller = select.poll()
+                poller.register(pipe.fileno(), select.POLLIN | select.POLLHUP | select.POLLERR)
+            while not self.stopping.is_set():
+                if poller is not None and self.deadline is not None:
                     remaining = self.deadline - time.monotonic()
                     if remaining <= 0:
                         self.expired = True
                         break
-                    ready, _, _ = select.select((pipe,), (), (), remaining)
-                    if not ready:
-                        self.expired = True
-                        break
+                    if not poller.poll(max(1, int(min(remaining, 0.05) * 1000) + 1)):
+                        continue
                 chunk = pipe.read1(65536)  # type: ignore[attr-defined]
                 if not chunk:
                     break
@@ -741,7 +747,7 @@ class _StderrCapture:
                 self._keep(data[:cut])
                 carry = data[cut:]
         except (OSError, ValueError):
-            pass
+            self.failed = True
         self._keep(redact(carry, self.token))
 
 
@@ -1056,6 +1062,7 @@ def _run_windows_process(
             worker.join(timeout=max(0.0, drain_deadline - time.monotonic()))
             if worker.is_alive():
                 cleanup_failed = True
+        cleanup_failed = cleanup_failed or capture.failed
         code = child.poll()
         if code is None:
             try:
@@ -1223,10 +1230,13 @@ def _run_process(
             # No process table to scan: the cell cannot prove a quiet cleanup, so it must not pass.
             cleanup_failed = True
         try:
+            # Let an EOF flush normal output first, then interrupt an idle inherited pipe.
+            drainer.join(timeout=0.05)
+            capture.stopping.set()
             drainer.join(timeout=EXIT_GRACE)
         finally:
-            held_pipes = held_pipes or (getattr(capture, "expired", False) and not timed_out.is_set())
-            if drainer.is_alive():
+            held_pipes = held_pipes or (capture.expired and not timed_out.is_set())
+            if drainer.is_alive() or capture.failed:
                 cleanup_failed = True
             for pipe in (child.stdout, child.stderr):
                 if pipe is not None:
