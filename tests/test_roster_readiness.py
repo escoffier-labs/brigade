@@ -645,7 +645,11 @@ def _enrolled_hub_env(monkeypatch, *, concurrency: int = 1) -> dict:
         lambda **kw: fleet_model_admission.ModelAdmissionDecision(True, 0, "authoritative", enrolled_payload),
     )
     policy_doc = _enrolled_policy_document(concurrency)
-    monkeypatch.setattr(fleet_client_policy, "show_policy", lambda **kw: {"document": policy_doc})
+    monkeypatch.setattr(
+        fleet_client_policy,
+        "show_policy",
+        lambda **kw: {"version": 3, "digest": ENROLLED_DIGEST, "document": policy_doc},
+    )
     return policy_doc
 
 
@@ -1223,6 +1227,39 @@ def test_brigade_hub_seat_usage_free_capacity_is_ready(declared, tmp_path, monke
     assert result["admitted_capacity"] == 1
 
 
+@pytest.mark.parametrize(
+    ("version", "digest", "expected_status"),
+    [
+        (3, ENROLLED_DIGEST, "passed"),
+        (2, ENROLLED_DIGEST, "unknown"),
+        (3, "sha256:" + ("c" * 64), "unknown"),
+    ],
+    ids=["matching", "different-version", "different-digest"],
+)
+def test_brigade_hub_policy_limit_matches_readiness_snapshot(
+    declared, tmp_path, monkeypatch, version, digest, expected_status
+):
+    from brigade import fleet_client_policy
+
+    policy_doc = _enrolled_hub_env(monkeypatch, concurrency=2)
+    monkeypatch.setattr(
+        fleet_client_policy,
+        "show_policy",
+        lambda **kw: {"version": version, "digest": digest, "document": policy_doc},
+    )
+    _stub_seat_usage(monkeypatch, occupied=1)
+
+    result = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
+
+    capacity_row = next(item for item in result["evidence"] if item["category"] == "capacity")
+    assert capacity_row["status"] == expected_status
+    if expected_status == "passed":
+        assert result["admitted_capacity"] == 1
+    else:
+        assert capacity_row["reason"] == "hub-policy-changed"
+        assert result["status"] == "unverified"
+
+
 def test_brigade_hub_seat_usage_full_seat_is_blocked(declared, tmp_path, monkeypatch):
     _enrolled_hub_env(monkeypatch, concurrency=1)
     _stub_seat_usage(monkeypatch, occupied=1)
@@ -1556,7 +1593,11 @@ def test_brigade_hub_enrolled_with_lkg_reports_admission_unknown(declared, tmp_p
         "consumers": {"brigade-run": {"reload": "none", "coverage": "verified"}},
         "repositories": {},
     }
-    monkeypatch.setattr(fleet_client_policy, "show_policy", lambda **kw: {"document": policy_doc})
+    monkeypatch.setattr(
+        fleet_client_policy,
+        "show_policy",
+        lambda **kw: {"version": 3, "digest": ENROLLED_DIGEST, "document": policy_doc},
+    )
 
     result = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
     assert result["status"] == "unverified"

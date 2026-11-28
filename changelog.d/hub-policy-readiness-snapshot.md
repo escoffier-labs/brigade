@@ -1,0 +1,1 @@
+- Return unknown Hub capacity when the enrolled policy version or digest differs from the readiness snapshot.
