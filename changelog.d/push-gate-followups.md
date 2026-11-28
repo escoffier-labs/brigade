@@ -1,0 +1,3 @@
+- Ignore well-formed verification receipts that refused every command before execution when checking a pushed tree.
+- Recheck a passing receipt's test coverage against the push base when the receipt used an ancestor of that base.
+- Report direct, line-continued, and indirect push-gate calls outside the marked hook block during block-only installation and status.

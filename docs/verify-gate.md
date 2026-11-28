@@ -153,6 +153,20 @@ earlier pass in place. When such an invocation affects the verdict, the
 gate names the wrapper, variable, or executable spelling and prints the
 plain policy command to run again.
 
+When verify refuses every command at intake and starts none of them, the
+receipt provides no evidence about the pushed tree. This needs the receipt's
+run directory name and start time to agree, like any other receipt. An
+earlier passing receipt can still count.
+
+After a merge from the default branch, a passing receipt for the exact
+merged tree can still count if its plan base is an ancestor of the push
+base and the required-check declaration still matches. The gate plans
+against the push base and checks that the receipt covers the selected
+test files. If ancestry or coverage cannot be established within the
+push check deadline, the gate rejects the receipt and prints the
+verification command to run again after the merge. When it can calculate
+the new plan, the command includes the new required test files.
+
 A newer matching failure
 takes precedence over an older pass regardless of the policy declaration
 or base recorded in the receipt. A command that failed or timed out, or
@@ -314,10 +328,14 @@ configuration. It saves a timestamped backup beside the hook and prints a
 Bash command to restore it. If the hook has no block, pass
 `--confirm-insert` to insert it immediately after its single
 `STDIN_REFS="$(cat)"` line. An upgrade requires exactly one gate invocation
-inside the markers. If the hook invokes the gate outside the block, the
-installer reports its line number. Move the invocation inside the markers or
-remove it before trying again.
-Status reports the block version and identifies a customised hook as unverified.
+inside the markers. Install and dry run refuse to change the hook if a
+line outside the block contains the `push-gate` token. A shell line
+continuation joins its physical lines for this check, and the report names
+the line where the joined line starts. Comment lines are skipped and do not
+continue onto the next line. Both report the line numbers. Move or remove
+the calls before running the command again.
+Status reports the block version, identifies a customised hook as
+unverified, and lists any lines with the token outside the block.
 
 ### Known limits
 

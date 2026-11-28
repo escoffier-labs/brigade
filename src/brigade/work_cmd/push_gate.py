@@ -184,6 +184,7 @@ def status(repo: Repository) -> dict[str, Any]:
         "hook_version": int(match[1]) if match else None,
         "current": current,
         "hook_verified": hook_verified,
+        "outside_gate_lines": _outside_gate_lines(normalized, list(_BLOCK_MARKER.finditer(normalized))),
         "wired": wired,
         "brigade_on_path": brigade_on_path,
         "timeout_on_path": timeout_on_path,
@@ -227,6 +228,8 @@ def describe(info: dict[str, Any], *, include_issue: bool = True) -> str:
         description += (
             ". Block present, hook not verified. Enforcement cannot be confirmed because the hook has other content."
         )
+    if lines := info["outside_gate_lines"]:
+        description += f". {_outside_gate_message(lines)}"
     if include_issue and mode == "enforce" and (issue := _enforce_issue(info)):
         description += f". {issue}"
     return push_gate_display.terminal_text(description)
@@ -298,27 +301,60 @@ _GATE_INVOCATION = re.compile(
     )
     + rb"""(?![\w./'"-])"""
 )
+_GATE_TOKEN = re.compile(rb"(?<![\w-])push-gate(?![\w-])")
 _CAPTURE_REFS = re.compile(rb'^STDIN_REFS="\$\(cat\)"(\r?\n)', re.M)
+
+
+def _outside_gate_lines(raw: bytes, markers: list[re.Match[bytes]]) -> list[int]:
+    if len(markers) not in {0, 2}:
+        return []
+    start, end = (markers[0].start(), markers[1].end()) if markers else (0, 0)
+    physical = raw.split(b"\n")
+    lines = []
+    offset = 0
+    index = 0
+    while index < len(physical):
+        number = index + 1
+        line_start = offset
+        line = physical[index]
+        offset += len(line) + 1
+        index += 1
+        if start <= line_start < end or line.lstrip().startswith(b"#"):
+            # A comment line does not continue in the shell, so never join after it.
+            continue
+        logical = line
+        while logical.endswith((b"\\", b"\\\r")) and index < len(physical):
+            logical = logical.removesuffix(b"\r").removesuffix(b"\\")
+            line = physical[index]
+            offset += len(line) + 1
+            index += 1
+            logical += line
+        if _GATE_TOKEN.search(logical):
+            lines.append(number)
+    return lines
+
+
+def _outside_gate_message(lines: list[int]) -> str:
+    if len(lines) == 1:
+        return f"Brigade gate invocation on line {lines[0]} is outside the marked block."
+    return f"Brigade gate invocations on lines {', '.join(map(str, lines))} are outside the marked block."
 
 
 def _block_replacement(raw: bytes, *, insert: bool, preview: bool) -> tuple[bytes, str]:
     if not _BASH_SHEBANG.fullmatch(raw.partition(b"\n")[0]):
         raise ValueError("The effective pre-push hook must start with a Bash interpreter line.")
     markers = list(_BLOCK_MARKER.finditer(raw))
+    if lines := _outside_gate_lines(raw, markers):
+        pronoun = "it" if len(lines) == 1 else "them"
+        raise ValueError(
+            f"{_outside_gate_message(lines)} Move {pronoun} inside the markers or remove {pronoun}. "
+            "Then run the command again."
+        )
     calls = [
         match
         for match in _GATE_INVOCATION.finditer(raw)
         if not raw[raw.rfind(b"\n", 0, match.start()) + 1 : match.start()].lstrip().startswith(b"#")
     ]
-    block_start, block_end = (markers[0].start(), markers[1].end()) if len(markers) == 2 else (0, 0)
-    if len(markers) in {0, 2}:
-        for call in calls:
-            if not block_start <= call.start() < block_end:
-                line = raw.count(b"\n", 0, call.start()) + 1
-                raise ValueError(
-                    f"Brigade gate invocation on line {line} is outside the marked block. "
-                    "Move it inside the markers or remove it."
-                )
     if not markers:
         if not (insert or preview):
             raise ValueError("No Brigade block found. Pass --confirm-insert to insert it.")
@@ -348,7 +384,7 @@ def _block_replacement(raw: bytes, *, insert: bool, preview: bool) -> tuple[byte
             raise ValueError("The hook contains damaged Brigade push gate block markers.")
         if len(calls) != 1:
             raise ValueError("The marked Brigade block must contain exactly one gate invocation.")
-        start, end = block_start, block_end
+        start, end = markers[0].start(), markers[1].end()
         end += raw[end : end + 1] == b"\n"
         newline = b"\r\n" if markers[0].group().endswith(b"\r") else b"\n"
         action = f"Replace the Brigade push gate block v{begin[2].decode('ascii')}"
