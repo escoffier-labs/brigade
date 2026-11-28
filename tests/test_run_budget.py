@@ -1672,6 +1672,59 @@ def test_exact_dispatch_binding_rejects_substitution_without_refund(returned):
     assert supplied == [1]
 
 
+def test_refusal_without_durable_write_releases_dispatch_unit():
+    coordinator = run_budget.BudgetCoordinator(
+        declaration=run_budget.RunBudgetDeclaration(worker_dispatch_count=1),
+        append_event=lambda *args: None,
+    )
+
+    with pytest.raises(RuntimeError, match="refused before claim"):
+        coordinator.reserve_and_record_dispatch(
+            seat="worker",
+            allocate_attempt=lambda: 1,
+            record_requested=lambda _attempt: (_ for _ in ()).throw(RuntimeError("refused before claim")),
+            reclaim_pending=False,
+            durable_write_exists=lambda _attempt: False,
+        )
+
+    assert coordinator.projection.used["worker_dispatch_count"] == 0
+    assert (
+        coordinator.reserve_and_record_dispatch(
+            seat="worker",
+            allocate_attempt=lambda: 2,
+            record_requested=lambda attempt: attempt,
+            reclaim_pending=False,
+        )
+        == 2
+    )
+
+
+def test_failure_after_durable_write_keeps_dispatch_unit():
+    coordinator = run_budget.BudgetCoordinator(
+        declaration=run_budget.RunBudgetDeclaration(worker_dispatch_count=1),
+        append_event=lambda *args: None,
+    )
+
+    with pytest.raises(RuntimeError, match="failed after claim"):
+        coordinator.reserve_and_record_dispatch(
+            seat="worker",
+            allocate_attempt=lambda: 1,
+            record_requested=lambda _attempt: (_ for _ in ()).throw(RuntimeError("failed after claim")),
+            reclaim_pending=False,
+            durable_write_exists=lambda _attempt: True,
+        )
+
+    assert coordinator.projection.used["worker_dispatch_count"] == 1
+    with pytest.raises(run_budget.BudgetPolicyError) as exc:
+        coordinator.reserve_and_record_dispatch(
+            seat="worker",
+            allocate_attempt=lambda: 2,
+            record_requested=lambda attempt: attempt,
+            reclaim_pending=False,
+        )
+    assert exc.value.code == "budget_exhausted"
+
+
 def test_exact_dispatch_binding_reload_allocates_fresh_candidate():
     coordinator = run_budget.BudgetCoordinator(
         declaration=run_budget.RunBudgetDeclaration(worker_dispatch_count=2),

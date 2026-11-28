@@ -1,0 +1,1 @@
+- Release a batch dispatch budget reservation when launch refusal writes no durable claim or request fact.
