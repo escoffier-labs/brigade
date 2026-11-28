@@ -1,5 +1,6 @@
 """Security regressions for unused-card evidence and reference protection."""
 
+from tests._fifo import make_fifo
 from tests.memory_read_fixtures import automatic_archive_test_mode as automatic_archive_test_mode
 from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
 
@@ -310,7 +311,7 @@ def test_unsafe_coverage_storage_cannot_authorize_transitions(tmp_path, kind):
     outside = tmp_path / "outside.json"
     outside.write_bytes(saved)
     if kind == "fifo":
-        os.mkfifo(ledger)
+        make_fifo(ledger)
     elif kind == "symlink":
         ledger.symlink_to(outside)
     else:

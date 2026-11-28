@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -106,6 +107,34 @@ def test_list_shows_every_task_and_hides_task_text(populated, capsys):
     # Acknowledgement and terminality are separate visible columns.
     assert "yes" in output
     assert SENTINEL not in output
+
+
+@pytest.mark.skipif(hasattr(os, "geteuid") and os.geteuid() == 0, reason="root ignores read-only modes")
+def test_list_and_show_read_a_read_only_run_directory(populated, capsys):
+    run_dir, _workspace = populated
+    paths = [run_dir, *run_dir.rglob("*")]
+    modes = {path: path.stat().st_mode for path in paths}
+    try:
+        for path in reversed(paths):
+            path.chmod(0o555 if path.is_dir() else 0o444)
+        assert cli.main(["runs", "tasks", "list", str(run_dir)]) == 0
+        capsys.readouterr()
+        assert cli.main(["runs", "tasks", "show", str(run_dir), "done"]) == 0
+    finally:
+        for path in paths:
+            path.chmod(modes[path])
+
+
+def test_list_ignores_a_torn_tail_without_modifying_the_journal(populated, capsys):
+    run_dir, _workspace = populated
+    journal_path = run_dir / "events" / "lifecycle.jsonl"
+    with journal_path.open("ab") as handle:
+        handle.write(b'{"event_type":"task.observed"')
+    before = journal_path.read_bytes()
+
+    assert cli.main(["runs", "tasks", "list", str(run_dir)]) == 0
+    assert journal_path.read_bytes() == before
+    assert "done" in capsys.readouterr().out
 
 
 def test_list_json_contract_has_schema_and_stable_keys(populated, capsys):
@@ -233,6 +262,16 @@ def test_wait_returns_zero_when_terminal(populated, capsys):
     assert [row["task_id"] for row in payload["tasks"]] == ["done", "failed"]
 
 
+def test_wait_does_not_create_a_journal_lock_file(populated, capsys):
+    run_dir, _workspace = populated
+    lock_path = run_dir / "events" / "lifecycle.jsonl.lock"
+    lock_path.unlink(missing_ok=True)
+
+    assert cli.main(["runs", "tasks", "wait", str(run_dir), "done", "--timeout", "0"]) == 0
+    assert not lock_path.exists()
+    capsys.readouterr()
+
+
 def test_wait_timeout_exits_3_without_changing_the_journal(populated, capsys):
     run_dir, _workspace = populated
     journal_path = run_dir / "events" / "lifecycle.jsonl"
@@ -316,7 +355,7 @@ def test_show_refuses_a_symlinked_result_sidecar(populated, tmp_path, capsys):
 def test_wait_with_no_accepted_tasks_refuses_instead_of_succeeding(task_run, monkeypatch, capsys):
     run_dir, workspace = task_run
     _accept(run_dir, workspace, "only")
-    monkeypatch.setattr(tasks, "read_tasks", lambda _run_dir: ())
+    monkeypatch.setattr(tasks, "read_tasks_read_only", lambda _run_dir, **_kwargs: ())
     assert cli.main(["runs", "tasks", "wait", str(run_dir), "--timeout", "0"]) == 2
     assert "no-tasks" in _output(capsys.readouterr())
 
@@ -332,11 +371,11 @@ def test_wait_without_timeout_reports_a_persistent_journal_refusal(populated, mo
     run_dir, _workspace = populated
     calls = []
 
-    def refuse(_run_dir):
+    def refuse(_run_dir, **_kwargs):
         calls.append(1)
         raise tasks.TaskJournalError("task journal has no recovery checkpoint")
 
-    monkeypatch.setattr(tasks, "read_tasks", refuse)
+    monkeypatch.setattr(tasks, "read_tasks_read_only", refuse)
     code = runs_cmd_tasks.wait_tasks(str(run_dir), ["queued"], cwd=run_dir, sleep=lambda _s: None)
     assert code == 2
     assert len(calls) == runs_cmd_tasks.MAX_CONSECUTIVE_READ_ERRORS
@@ -350,3 +389,56 @@ def test_missing_journal_message_names_the_run_not_its_path(populated, capsys):
     output = _output(capsys.readouterr())
     assert run_dir.name in output
     assert str(run_dir.parent) not in output
+
+
+def test_wait_without_timeout_refuses_a_stable_partial_tail(populated, capsys):
+    run_dir, _workspace = populated
+    path = run_dir / "events" / "lifecycle.jsonl"
+    with path.open("ab") as stream:
+        stream.write(b'{"torn":')
+    before = path.read_bytes()
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        assert len(sleeps) < runs_cmd_tasks.MAX_CONSECUTIVE_READ_ERRORS
+
+    metadata = task_journal.ReadMetadata()
+    tasks.read_tasks_read_only(run_dir, metadata=metadata)
+    assert metadata.partial_tail_digest == hashlib.sha256(b'{"torn":').hexdigest()
+    assert runs_cmd_tasks.wait_tasks(str(run_dir), ["queued"], cwd=run_dir, sleep=sleep) == 2
+    assert len(sleeps) == runs_cmd_tasks.MAX_CONSECUTIVE_READ_ERRORS - 1
+    assert "task-journal-unreadable" in _output(capsys.readouterr())
+    assert path.read_bytes() == before
+    assert cli.main(["runs", "tasks", "list", str(run_dir)]) == 0
+    assert cli.main(["runs", "tasks", "show", str(run_dir), "queued"]) == 0
+
+
+@pytest.mark.parametrize("repair", [False, True])
+def test_wait_resets_partial_tail_threshold_when_tail_changes(populated, repair):
+    run_dir, _workspace = populated
+    path = run_dir / "events" / "lifecycle.jsonl"
+    clean = path.read_bytes()
+    path.write_bytes(clean + b'{"torn":')
+    sleeps = []
+    limit = runs_cmd_tasks.MAX_CONSECUTIVE_READ_ERRORS
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        assert len(sleeps) <= limit
+        if len(sleeps) == limit - 1:
+            path.write_bytes(clean if repair else clean + b'{"torn":1')
+
+    assert (
+        runs_cmd_tasks.wait_tasks(
+            str(run_dir),
+            ["queued"],
+            cwd=run_dir,
+            timeout=float(limit),
+            interval=1,
+            monotonic=lambda: float(len(sleeps)),
+            sleep=sleep,
+        )
+        == 3
+    )
+    assert len(sleeps) == limit

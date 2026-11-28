@@ -12,6 +12,7 @@ from urllib.parse import quote
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import (
     aboyeur,
     cli,
@@ -1317,7 +1318,7 @@ def test_native_json_refuses_pipes_and_symlinks(tmp_path, capsys):
 
     fifo = tmp_path / "native.fifo"
     try:
-        os.mkfifo(fifo)
+        make_fifo(fifo)
     except (AttributeError, OSError, NotImplementedError):
         pytest.skip("named pipes are unavailable on this platform")
     assert cli.main(argv(str(fifo))) == 2

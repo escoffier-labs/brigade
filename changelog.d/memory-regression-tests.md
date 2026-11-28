@@ -1,0 +1,1 @@
+- Add regression coverage for compensation byte quotas and lifecycle-wide memory care conflicts.

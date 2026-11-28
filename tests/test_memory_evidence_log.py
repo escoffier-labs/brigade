@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import memory_proposal_io as io
 
 POSIX_IO = os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW")
@@ -56,7 +57,7 @@ def test_log_refuses_nonregular_or_linked_storage(tmp_path, unsafe):
     elif unsafe == "hardlink":
         os.link(outside, log)
     elif unsafe == "fifo":
-        os.mkfifo(log)
+        make_fifo(log)
     elif unsafe == "directory":
         log.mkdir()
     else:

@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import cli
 from brigade import doctor
 from brigade import dogfood_cmd
@@ -1044,7 +1045,7 @@ def test_reap_refuses_fifo_run_json_without_claiming_the_stale_lock(tmp_path, ca
     repo = _repo(tmp_path)
     run_dir = _write_run(repo, "20260820-120000-fifo0001")
     (run_dir / "run.json").unlink()
-    os.mkfifo(run_dir / "run.json")
+    make_fifo(run_dir / "run.json")
     _write_stale_lock(repo, run_dir)
     lock_before = (repo / ".brigade" / "run.lock" / "owner.json").read_bytes()
 
