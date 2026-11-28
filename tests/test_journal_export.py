@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from brigade import cli, dirfd, run_checkpoint, run_dirfd, run_events, run_journal
+from tests._fifo import make_fifo
 from tests.support import PRIVATE_FILE_MODE, assert_private_mode
 
 RUN_ID = "20260727-153045-a1b2c3d4"
@@ -292,6 +293,9 @@ def test_events_directory_replacement_is_rejected(tmp_path, capsys, monkeypatch,
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX FIFO race")
 def test_raced_fifo_is_rejected_without_blocking(tmp_path):
+    probe = tmp_path / "fifo-support-probe"
+    make_fifo(probe)
+    probe.unlink()
     source, _ = _journal(tmp_path)
     original = source.read_bytes()
     output = tmp_path / "export.jsonl"
@@ -300,6 +304,7 @@ import os
 import sys
 from pathlib import Path
 from brigade import cli, run_dirfd
+from tests._fifo import make_fifo
 
 target, run_id, output = sys.argv[1:]
 source = Path(target) / '.brigade' / 'runs' / run_id / 'events' / 'lifecycle.jsonl'
@@ -307,7 +312,7 @@ real_open = run_dirfd.BoundRunDir.open_file
 def swap_before_open(bound, components, name, flags, mode=0o600):
     if components == ('events',) and name == 'lifecycle.jsonl':
         source.rename(source.with_name('held.jsonl'))
-        os.mkfifo(source, 0o600)
+        make_fifo(source, 0o600)
         print('FIFO_SWAP_OBSERVED', file=sys.stderr, flush=True)
     return real_open(bound, components, name, flags, mode)
 run_dirfd.BoundRunDir.open_file = swap_before_open

@@ -8,6 +8,7 @@ import subprocess
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import cli
 from brigade.work_cmd import helpers
 from brigade.work_cmd.ledger import import_model, tasks_plans
@@ -476,7 +477,7 @@ def test_inspect_rejects_links_and_nonregular_ledgers(lineage, capsys, kind):
         elif kind == "directory":
             actions.mkdir()
         else:
-            os.mkfifo(actions)
+            make_fifo(actions)
     assert invoke(target, refs) == 0
     member = json.loads(capsys.readouterr().out)["members"][0]
     assert member["reason"] == "ledger_refused"

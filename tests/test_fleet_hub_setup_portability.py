@@ -7,6 +7,7 @@ import sys
 
 import pytest
 
+from tests._fifo import make_fifo
 from tests import test_fleet_hub_dogfood_recipe as recipe
 from tests.test_fleet_hub_dogfood_recipe import no_gpu_host
 from tests.test_fleet_hub_setup_overrides import (  # noqa: F401
@@ -72,11 +73,11 @@ def test_unsafe_compose_path_refused_before_writes(project, tmp_path, name, kind
     path = project / name
     path.unlink(missing_ok=True)
     if kind == "fifo":
-        os.mkfifo(path)
+        make_fifo(path)
     else:
         target = tmp_path / "operator-file"
         if kind == "symlink-fifo":
-            os.mkfifo(target)
+            make_fifo(target)
         else:
             target.write_bytes(b"services: {}\n")
         try:

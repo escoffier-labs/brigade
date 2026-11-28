@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import instruction_inventory
 from brigade.install import install_selection
 from brigade.instruction_inventory import (
@@ -418,7 +419,7 @@ def test_hard_links_to_one_file_are_one_row(tmp_path):
 @pytest.mark.skipif(not HAS_FIFO, reason="POSIX FIFOs")
 def test_a_file_swapped_for_a_fifo_after_discovery_does_not_block(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
-    os.mkfifo(ws / "SOUL.md")
+    make_fifo(ws / "SOUL.md")
     original = Path.is_file
     monkeypatch.setattr(Path, "is_file", lambda self: True if self.name == "SOUL.md" else original(self))
     with deadline():
@@ -430,7 +431,7 @@ def test_a_file_swapped_for_a_fifo_after_discovery_does_not_block(tmp_path, monk
 @pytest.mark.skipif(not HAS_FIFO, reason="POSIX FIFOs")
 def test_a_fifo_at_a_candidate_path_is_not_a_row(tmp_path):
     ws, home, env = field_workspace(tmp_path)
-    os.mkfifo(ws / "SOUL.md")
+    make_fifo(ws / "SOUL.md")
     with deadline():
         assert find(discover(ws, InstructionsConfig(), home=home, environ=env), "SOUL.md") is None
 
@@ -477,7 +478,7 @@ def test_an_unreadable_instructions_config_is_the_documented_error(tmp_path):
 @pytest.mark.skipif(not HAS_FIFO, reason="POSIX FIFOs")
 def test_a_fifo_or_swapped_instructions_config_does_not_block(tmp_path, monkeypatch):
     path = _care_config(tmp_path)
-    os.mkfifo(path)
+    make_fifo(path)
     original = Path.is_file
     monkeypatch.setattr(Path, "is_file", lambda self: True if self.name == "memory-care.toml" else original(self))
     with deadline(), pytest.raises(ValueError, match="invalid instructions: .*not a regular file"):
@@ -543,7 +544,7 @@ def test_the_care_config_is_not_reopened_after_the_bounded_read(tmp_path, monkey
         got = real_read(path, **kwargs)
         if Path(path).name == "memory-care.toml":
             Path(path).unlink()
-            os.mkfifo(path)  # swapped after the bounded read, before any second open
+            make_fifo(path)  # swapped after the bounded read, before any second open
         return got
 
     original = Path.is_file
@@ -602,7 +603,7 @@ def test_an_oversized_repository_config_is_not_read_whole(tmp_path):
 def test_a_repository_config_swapped_for_a_fifo_does_not_block(tmp_path, monkeypatch):
     ws, home, env = field_workspace(tmp_path)
     (ws / ".brigade").mkdir()
-    os.mkfifo(ws / ".brigade" / "config.json")
+    make_fifo(ws / ".brigade" / "config.json")
     original = Path.is_file
     monkeypatch.setattr(Path, "is_file", lambda self: True if self.name == "config.json" else original(self))
     with deadline():

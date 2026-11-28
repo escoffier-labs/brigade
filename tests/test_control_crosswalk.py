@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import attestation, attestation_input, cli, control_crosswalk, cosign_attestation, localio
 from brigade.control_crosswalk import (
     EVIDENCE_CONTROLS_SCHEMA,
@@ -4643,7 +4644,6 @@ def test_approval_dependency_refusals_cannot_validate_a_signed_claim(tmp_path, m
 
 @pytest.mark.skipif(__import__("os").name != "posix", reason="POSIX FIFO safety")
 def test_assessment_refuses_nonregular_trust_without_reading_private_keys(tmp_path, monkeypatch):
-    import os
 
     from brigade import dirfd
     from tests import test_approval as fixtures
@@ -4663,7 +4663,7 @@ def test_assessment_refuses_nonregular_trust_without_reading_private_keys(tmp_pa
     assert "signing-key.pub" in opened
     signers = target / ".brigade/attestation/allowed_signers"
     signers.unlink()
-    os.mkfifo(signers)
+    make_fifo(signers)
     assert _assess(target, "EC-05")["outcome"] == "unavailable"
 
 

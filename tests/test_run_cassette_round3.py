@@ -13,6 +13,7 @@ from threading import Barrier, Event
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import agents, proc, run_journal, run_redaction, run_transport, runguard
 from brigade import run_cassette_store as store
 from brigade.roster import Agent, Roster
@@ -234,7 +235,7 @@ def test_direct_read_rejects_links_and_fifos_without_blocking(tmp_path, kind):
     path = run / "events" / "cassettes" / "input"
     outside = tmp_path / "outside"
     if "fifo" in kind:
-        os.mkfifo(outside if kind == "symlink-fifo" else path)
+        make_fifo(outside if kind == "symlink-fifo" else path)
     else:
         outside.write_bytes(b"outside payload")
         outside.chmod(0o600)
