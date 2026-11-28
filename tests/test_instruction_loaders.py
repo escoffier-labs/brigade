@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade.instruction_loaders import (
     codex_project_cap,
     openclaw_config_path,
@@ -307,7 +308,7 @@ def test_a_fifo_install_state_does_not_block(tmp_path):
     home, env = openclaw_home(tmp_path, "{ ,}")
     state = openclaw_install_state_path(home)
     state.parent.mkdir(parents=True)
-    os.mkfifo(state)
+    make_fifo(state)
     with deadline():
         found = openclaw_loaders(ws, home=home, environ=env)
     assert (found.per_file, found.reason) == ((), "config-not-strict-json")
@@ -320,7 +321,7 @@ def test_a_config_swapped_for_a_fifo_after_the_stat_does_not_block(tmp_path, mon
     home, env = openclaw_home(tmp_path, None)
     config = home / ".openclaw" / "openclaw.json"
     config.parent.mkdir(parents=True)
-    os.mkfifo(config)
+    make_fifo(config)
     regular = os.stat_result((stat.S_IFREG | 0o644, 1, 1, 1, 0, 0, 10, 0, 0, 0))
     original = Path.stat
     monkeypatch.setattr(Path, "stat", lambda self, **kw: regular if self == config else original(self, **kw))

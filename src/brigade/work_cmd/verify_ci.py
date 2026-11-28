@@ -15,9 +15,10 @@ from .. import localio
 from . import helpers
 
 DEFAULT_CHECK_NAME = "ci-gate"
+_CI_APP_SLUG = "github-actions"
 _SCHEMA = "brigade.verify_ci.v1"
 _RECORD_DIR = ".brigade/work/verify-ci"
-# Brigade runtime state is never the work product, so it does not make a tree dirty.
+# Untracked Brigade runtime state is never the work product, so it does not make a tree dirty.
 _STATE_DIR = ".brigade/work"
 _SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _EXIT_CODES = {"passed": 0, "failed": 1, "pending": 2, "unknown": 2}
@@ -70,6 +71,14 @@ def _named_runs(output: str, check_name: str) -> list[dict[str, Any]]:
     return runs
 
 
+def _trusted_ci_run(run: dict[str, Any]) -> bool:
+    # The commits check-runs response identifies the app, not the workflow.
+    # Another workflow in this repo using the Actions app can still post ci-gate;
+    # verifying the workflow origin is the remaining half of #2851.
+    app = run.get("app")
+    return isinstance(app, dict) and app.get("slug") == _CI_APP_SLUG
+
+
 def _fetch_check(target: Path, repository: str, head: str, check_name: str) -> dict[str, Any]:
     try:
         result = subprocess.run(
@@ -112,6 +121,12 @@ def _fetch_check(target: Path, repository: str, head: str, check_name: str) -> d
         return {"reason": "GitHub returned an unreadable check-run response."}
     if not runs:
         return {"reason": "No check run with that name was found for HEAD."}
+
+    if check_name == DEFAULT_CHECK_NAME:
+        trusted_runs = [run for run in runs if _trusted_ci_run(run)]
+        if not trusted_runs:
+            return {"reason": ("The ci-gate check runs for HEAD are untrusted: none came from the GitHub Actions app.")}
+        runs = trusted_runs
 
     # A cancelled run says nothing about the commit. A push to main, for example,
     # often starts a second run for a commit the merge queue already tested, and
@@ -160,7 +175,7 @@ def _record_path(target: Path, head: str, check_name: str = DEFAULT_CHECK_NAME) 
 
 def _tree_state(target: Path, head: str, tree: str) -> str:
     """Return ``clean``, ``dirty`` or ``unreadable`` for the working tree against HEAD."""
-    live = localio.tree_fingerprint_with_head(target, extra_evidence_paths=(_STATE_DIR,))
+    live = localio.tree_fingerprint_with_head(target, extra_untracked_paths=(_STATE_DIR,))
     if None in live:
         return "unreadable"
     return "clean" if live == (tree, head) else "dirty"

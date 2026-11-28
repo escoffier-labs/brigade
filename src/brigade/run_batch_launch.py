@@ -12,8 +12,32 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from . import run_tasks
+from . import run_budget, run_journal, run_tasks
 from .run_transport import Assignment, LaunchRefused
+
+
+def durable_write_probe(run_dir: Path, seat: str, assignment: Assignment) -> Callable[[int], bool]:
+    """Build a probe for claim and request facts written by a batch launch."""
+    identity = (assignment.task_id, assignment.attempt_id) if assignment.task_id is not None else None
+
+    def probe(attempt: int) -> bool:
+        try:
+            report = run_journal.read_journal_bounded(run_dir / "events/lifecycle.jsonl")
+        except Exception:
+            return True
+        if report.partial_tail is not None or report.chain_errors:
+            return True
+        # prepare_attempt facts do not count as durable launch permission.
+        return run_budget.has_durable_dispatch_write(report.events, seat=seat, attempt=attempt, task_attempt=identity)
+
+    return probe
+
+
+def task_attempt(batch: Any, assignment: Assignment | None) -> tuple[str, str] | None:
+    """Return a complete batch task identity, if this is a batch dispatch."""
+    if batch is None or assignment is None or assignment.task_id is None or assignment.attempt_id is None:
+        return None
+    return assignment.task_id, assignment.attempt_id
 
 
 def launch_recorder(

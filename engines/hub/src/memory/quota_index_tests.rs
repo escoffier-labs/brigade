@@ -161,6 +161,21 @@ fn version_fifteen_gains_the_quota_indexes_on_open() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+#[test]
+fn current_schema_requires_the_quota_indexes_on_open() {
+    for index in [
+        "memory_proposals_principal_quota",
+        "memory_proposals_scope_quota",
+    ] {
+        let db = Connection::open_in_memory().unwrap();
+        schema::migrate(&db, 1_800_000_000_000).unwrap();
+        db.execute(&format!("DROP INDEX {index}"), []).unwrap();
+
+        let error = schema::migrate(&db, 1_800_000_000_000).unwrap_err();
+        assert_eq!(error, format!("memory schema is missing {index}"));
+    }
+}
+
 /// The issue's regression: a rollback on a scope holding 5,000 automatic
 /// applies completes inside the production 50 ms writer deadline. Before the
 /// covering indexes the two quota calls walked every proposal body and the

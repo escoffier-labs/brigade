@@ -60,6 +60,7 @@ def tree_fingerprint_with_head(
     target: Path,
     *,
     extra_evidence_paths: tuple[str, ...] = (),
+    extra_untracked_paths: tuple[str, ...] = (),
     git_env: dict[str, str] | None = None,
     deadline: float | None = None,
 ) -> tuple[str | None, str | None]:
@@ -69,8 +70,9 @@ def tree_fingerprint_with_head(
     over the excluded evidence paths, and ``write-tree``. The excluded paths
     therefore carry the content of the HEAD commit that was checked out when the
     fingerprint was taken; returning that HEAD makes the normalization base
-    provable later. Callers can also exclude their own generated evidence or
-    supply the environment for Git. The fingerprint always uses its own index.
+    provable later. Callers can also exclude their own generated evidence,
+    exclude only untracked files at selected paths, or supply the environment
+    for Git. The fingerprint always uses its own index.
     """
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -104,6 +106,16 @@ def tree_fingerprint_with_head(
                 != 0
             ):
                 return None, None
+            if extra_untracked_paths:
+                if git("rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", *extra_untracked_paths).returncode != 0:
+                    return None, None
+                if git("reset", "-q", "HEAD", "--", *extra_untracked_paths).returncode != 0:
+                    return None, None
+                tracked = git("ls-files", "--", *extra_untracked_paths)
+                if tracked.returncode != 0:
+                    return None, None
+                if tracked.stdout and git("add", "-u", "--", *extra_untracked_paths).returncode != 0:
+                    return None, None
             value = git("write-tree")
             tree_sha = value.stdout.strip() if value.returncode == 0 and value.stdout.strip() else None
             if tree_sha is None:

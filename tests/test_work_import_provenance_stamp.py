@@ -11,6 +11,7 @@ from typing import Any
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import dirfd, provenance
 from brigade.security_cmd import AUTHORITY_STORE_ISOLATION_EXTERNAL_KEY
 from brigade.work_cmd import constants, helpers, ledger
@@ -1526,7 +1527,7 @@ def test_persisted_import_proof_rejects_fifo_without_blocking(tmp_path: Path):
     assert proof_name is not None
     proof_path = tmp_path / ".brigade" / "work" / "imports" / "proofs" / proof_name
     proof_path.parent.mkdir(parents=True)
-    os.mkfifo(proof_path)
+    make_fifo(proof_path)
 
     assert not ledger._has_persisted_import_proof(item, target=tmp_path)
 
@@ -1691,7 +1692,7 @@ def test_read_imports_rejects_symlinks_and_fifos_without_blocking(tmp_path: Path
     assert ledger._read_imports(tmp_path) == []
 
     inbox.unlink()
-    os.mkfifo(inbox)
+    make_fifo(inbox)
     child = multiprocessing.Process(target=_read_imports_in_child, args=(str(tmp_path),))
     child.start()
     child.join(0.5)

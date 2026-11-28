@@ -1,0 +1,1 @@
+- Skip FIFO-based tests when the current filesystem does not support named pipes.

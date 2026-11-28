@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import handoff_origin as origin, ingest, receipt_signing
 from brigade.handoff_cmd import drafts
 
@@ -286,7 +287,7 @@ def test_unsafe_key_cannot_authorize_ingest(tmp_path, monkeypatch, attack):
         if attack == "directory":
             key.mkdir()
         else:
-            os.mkfifo(key)
+            make_fifo(key)
     stats = ingest.IngestStats()
     ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=stats, promote_cards=True)
     assert stats.promoted == 0

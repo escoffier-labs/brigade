@@ -14,6 +14,7 @@ import sys
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import context_preview as cp
 from brigade.cli import main
 from tests._home import set_home
@@ -188,7 +189,7 @@ def test_explicit_settings_and_duplicates(repo):
 
 def test_selection_trace_includes_empty_directories_and_nonregulars(repo):
     (repo / "AGENTS.md").unlink()
-    os.mkfifo(repo / "AGENTS.override.md")
+    make_fifo(repo / "AGENTS.override.md")
     (repo / "AGENTS.md").mkdir()
     cwd = repo / "sub"
     cwd.mkdir()
@@ -715,7 +716,7 @@ def test_absent_marker_becomes_nonregular_boundary(repo):
     cwd = repo / "sub"
     cwd.mkdir()
     original = export(repo, cwd)
-    os.mkfifo(cwd / ".git")
+    make_fifo(cwd / ".git")
     changed = export(repo, cwd)
     assert original["root_marker_observations"][0]["state"] == "absent"
     assert changed["root_marker_observations"][0]["state"] == "fifo"

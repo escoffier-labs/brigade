@@ -1,0 +1,2 @@
+- Fail closed when stored campaign authorization offers are malformed, while preserving selection of members with valid offers.
+- Return HTTP 400 when campaign self-assignment encounters malformed stored offer detail or invalid authorization bounds.

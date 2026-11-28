@@ -1,0 +1,1 @@
+- Keep task identifiers on held, skipped, and failed synthetic DAG scheduler results.

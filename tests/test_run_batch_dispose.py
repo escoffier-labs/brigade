@@ -131,7 +131,71 @@ def test_delete_branch_after_integrate_deletes_only_the_task_branch(site, capsys
     assert branch_tip(site) is None
     # The integration ref holds the work, so it survives; Brigade never deletes it.
     assert ref_or_none(site.repo, integrated["ref"]) == integrated["integration_commit"]
-    assert facts(site, "task.disposed")[0].payload["branch_kept"] == "deleted"
+    # The durable fact precedes the optional delete so an interruption cannot
+    # strand an unrecorded disposal.
+    assert facts(site, "task.disposed")[0].payload["branch_kept"] == "kept"
+
+
+@pytest.mark.parametrize("confirm", [False, True])
+@pytest.mark.parametrize("delete_branch", [False, True])
+def test_successful_branch_delete_is_reported_on_later_runs(site, capsys, monkeypatch, confirm, delete_branch):
+    run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}})
+    rc, integrated = integrate(site, capsys, "a")
+    assert rc == 0, integrated
+    rc, first = dispose(site, capsys, "a", confirm=True, delete_branch=True)
+    assert rc == 0, first
+    assert branch_tip(site) is None
+    journal = run_lifecycle._journal_path(site.run_dir())
+    before = journal.read_bytes()
+
+    rc, payload = dispose(site, capsys, "a", confirm=confirm, delete_branch=delete_branch)
+    assert rc == 0, payload
+    assert task_row(payload, "a")["status"] == "already-disposed"
+    assert task_row(payload, "a")["branch_kept"] == "deleted"
+    assert journal.read_bytes() == before
+    assert facts(site, "task.disposed")[0].payload["branch_kept"] == "kept"
+
+
+def test_crash_during_branch_delete_leaves_disposal_for_retry(site, capsys, monkeypatch):
+    run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}})
+    rc, integrated = integrate(site, capsys, "a")
+    assert rc == 0, integrated
+
+    class SimulatedCrash(BaseException):
+        pass
+
+    real_delete = dispose_module._delete_branch
+
+    def crash(_workspace_path, _plan):
+        raise SimulatedCrash
+
+    monkeypatch.setattr(dispose_module, "_delete_branch", crash)
+    with pytest.raises(SimulatedCrash):
+        dispose(site, capsys, "a", confirm=True, delete_branch=True)
+
+    assert not site.path_for("a").exists()
+    assert branch_tip(site) == integrated["candidate_commits"][0]["candidate_commit"]
+    assert facts(site, "task.disposed")[0].payload["branch_kept"] == "kept"
+
+    monkeypatch.setattr(dispose_module, "_delete_branch", real_delete)
+    rc, payload = dispose(site, capsys, "a", confirm=True, delete_branch=True)
+    assert rc == 0, payload
+    assert task_row(payload, "a")["status"] == "already-disposed"
+    assert task_row(payload, "a")["branch_kept"] == "deleted"
+    assert branch_tip(site) is None
+    assert len(facts(site, "task.disposed")) == 1
+
+
+def test_absent_unpreserved_branch_is_still_refused(site, capsys, monkeypatch):
+    run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}})
+    branch = workspace.branch_name(site.run_dir().name, "a")
+    _git(site.repo, "update-ref", "-d", f"refs/heads/{branch}")
+
+    rc, payload = dispose(site, capsys, "a", confirm=True)
+    assert rc == 2
+    assert task_row(payload, "a")["refusal"]["code"] == "branch-moved"
+    assert site.path_for("a").is_dir()
+    assert facts(site, "task.disposed") == []
 
 
 def test_branch_delete_failure_after_removal_records_the_disposal_and_can_be_retried(site, capsys, monkeypatch):

@@ -18,6 +18,7 @@ from tests.test_worklore_ownership import (
     NONCE_A,
     NONCE_B,
     NONCE_C,
+    OFFER,
     event_count,
     ledger as ledger,  # shared real SQLite fixture
     owned,
@@ -79,7 +80,16 @@ def test_stale_holder_capability_is_refused_after_a_new_holder_accepts(ledger):
     owned(conn, work_id)
     release = {"action": "release", "generation": 1}
     assert request(conn, work_id, release, revision=2, key="release", nonce=NONCE_A)[0] == 200
-    assert ownership_get(conn, work_id, nonce=NONCE_A)[0] == 403
+    offer = {**OFFER, "target_node": "node-b"}
+    assert request(conn, work_id, offer, admin=True, revision=3, key="offer-2")[0] == 200
+    accept = {"action": "accept", "generation": 1}
+    assert request(conn, work_id, accept, node="node-b", revision=4, key="accept-2", nonce=NONCE_B)[0] == 200
+    status, reply = ownership_get(conn, work_id, node="node-b", nonce=NONCE_B)
+    assert status == 200
+    assert reply["ownership"]["owner_node"] == "node-b"
+    assert reply["ownership"]["generation"] == 2
+    status, reply = ownership_get(conn, work_id, nonce=NONCE_A)
+    assert status == 403 and reply["code"] == "holder-mismatch"
 
 
 def test_malformed_capability_is_refused_without_a_read(ledger):

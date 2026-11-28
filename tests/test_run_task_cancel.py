@@ -13,6 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from tests._fifo import make_fifo
 from tests._home import set_home
 from tests.test_run_batch_worktrees import Site, invoke
 from tests.test_run_batch_worktrees import site as worktree_site  # noqa: F401  (fixture for getfixturevalue)
@@ -431,7 +432,7 @@ def test_request_swapped_for_a_fifo_after_inspection_is_refused_without_crashing
         if child == name:
             target = run_dir / "task-inbox" / name
             target.unlink()
-            os.mkfifo(target, 0o600)
+            make_fifo(target, 0o600)
         return info
 
     monkeypatch.setattr(inbox.dirfd, "stat_child", swap_then_stat)

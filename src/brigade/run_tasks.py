@@ -838,6 +838,12 @@ def read_tasks(run_dir: Path) -> tuple[TaskResult, ...]:
         return tuple(_fold(run_dir.name, events).values())
 
 
+def read_tasks_read_only(run_dir: Path, *, metadata: journal.ReadMetadata | None = None) -> tuple[TaskResult, ...]:
+    """Read a verified prefix without taking a writer lock or changing files."""
+    run_dir, events = journal.read_only(run_dir, metadata=metadata)
+    return tuple(_fold(run_dir.name, events).values())
+
+
 def batch_accepted(run_dir: Path) -> bool:
     """True when any journal line records an explicit batch acceptance.
 

@@ -72,7 +72,14 @@ class _BriefSections:
         self.checks: list[dict[str, Any]] = []
         self.unavailable_keys: set[str] = set()
 
-    def call(self, label: str, func, fallback: Any, *, key: str | None = None) -> Any:
+    def call(
+        self,
+        label: str,
+        func,
+        fallback: Any,
+        *,
+        key: str | tuple[str, ...] | None = None,
+    ) -> Any:
         """Return the section value, its fallback, or a skip once the budget is spent."""
         from ...daily_cmd.config import _bounded_status_call
 
@@ -98,7 +105,7 @@ class _BriefSections:
             )
         self.checks.append(check)
         if check.get("status") != "ok" and key:
-            self.unavailable_keys.add(key)
+            self.unavailable_keys.update((key,) if isinstance(key, str) else key)
         return value
 
     @property
@@ -385,7 +392,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
         "sessions",
         lambda: helpers._collect_sessions(helpers._work_root(target)),
         ([], 0),
-        key="recent_sessions",
+        key=("latest_session", "recent_sessions", "skipped_sessions"),
     )
     sessions, skipped = session_rows
     latest_session = helpers._session_info(sessions[0][0], sessions[0][1]) if sessions else None
@@ -394,6 +401,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
         "next-task",
         lambda: _resolve_next_task(target),
         {"task": "", "source": "default_review", "dogfood": {}, "ledger_task": None},
+        key="next_source",
     )
     task_text = str(resolved.get("task") or "").strip()
     code_graph = (
