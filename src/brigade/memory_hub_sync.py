@@ -200,7 +200,7 @@ def pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings)
                 # from it may be served by fallback search later. (A `card`
                 # refusal is scope-wide only and is handled inside the pull.)
                 try:
-                    forget_hub_replica(target, client.identity)
+                    forget_hub_replica(target, client.identity, lock_budget=lock_budget)
                 except OSError as cleanup_error:
                     raise exc from cleanup_error
             raise

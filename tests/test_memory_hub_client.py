@@ -1943,6 +1943,22 @@ def test_refusal_is_preserved_when_discard_lock_is_busy(hub, tmp_path, monkeypat
     assert isinstance(caught.value.__cause__, sync.InboxLockTimeout)
 
 
+def test_refusal_discard_shares_the_pull_wait_budget(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="read")
+    hub.status_reply = (403, {"error": "no read grant", "code": "memory_grant_missing"})
+    budgets = []
+    real_forget = sync.forget_hub_replica
+
+    def recording_forget(target_arg, hub_arg, *, lock_budget=None):
+        budgets.append(lock_budget)
+        return real_forget(target_arg, hub_arg, lock_budget=lock_budget)
+
+    monkeypatch.setattr(sync, "forget_hub_replica", recording_forget)
+    with pytest.raises(hubc.HubRefusal):
+        sync.pull(target, client(hub), settings(target))
+    assert len(budgets) == 1 and isinstance(budgets[0], sync._StateLockBudget)
+
+
 def test_a_pull_reports_busy_when_the_state_lock_outlasts_its_wait(hub, tmp_path, monkeypatch, capsys):
     target = workspace(tmp_path, mode="read")
     _put(hub, "repo:test/app", "theirs", "theirs")
