@@ -386,6 +386,10 @@ def _drop_revoked_scope(target: Path, hub: str, principal: object, epoch: str, s
         kept = {name for name in live.meta.get("read_scopes") or [] if name != scope}
         live.retain_scopes(kept)
         live.meta["read_scopes"] = sorted(kept)
+        watermarks = live.meta.get("backfill_watermarks")
+        if isinstance(watermarks, dict):
+            # Its heads are gone, so a restored grant must replay this scope from 0.
+            watermarks.pop(scope, None)
         live.save()
 
 
@@ -424,7 +428,17 @@ def _prepare(
     # arrive for its heads: drop them now.
     dropped = replica.retain_scopes(readable)
     covered = sorted(set(replica.meta.get("read_scopes") or []) & readable)
-    if dropped or covered != sorted(replica.meta.get("read_scopes") or []):
+    stored = replica.meta.get("backfill_watermarks")
+    watermarks_changed = False
+    if isinstance(stored, dict):
+        kept_watermarks = {
+            scope: value
+            for scope, value in stored.items()
+            if scope in readable and isinstance(value, int) and not isinstance(value, bool) and value >= 0
+        }
+        watermarks_changed = kept_watermarks != stored
+        replica.set_backfill_watermarks(kept_watermarks)
+    if dropped or watermarks_changed or covered != sorted(replica.meta.get("read_scopes") or []):
         # Saved now, so fallback search stops serving those scopes even if
         # the rest of this pull fails.
         replica.meta["read_scopes"] = covered
@@ -456,8 +470,9 @@ def _follow(
     any full body is read, and the watermark moves only after the bodies land.
     """
     watermark = int(replica.meta.get("seq") or 0)
-    new_scopes = readable - set(replica.meta.get("read_scopes") or [])
-    after = 0 if new_scopes else watermark
+    covered = set(replica.meta.get("read_scopes") or [])
+    scope_watermarks = {scope: replica.backfill_watermark(scope, covered=scope in covered) for scope in readable}
+    after = min(scope_watermarks.values(), default=watermark)
     used = replica.bytes()
     pages = 0
     deferred = _Deferred(replica) if store.limits.active() else None
@@ -478,7 +493,7 @@ def _follow(
             ):
                 continue
             seq = event.get("seq")
-            if event["scope"] in new_scopes or not isinstance(seq, int) or seq > watermark:
+            if not isinstance(seq, int) or seq > scope_watermarks[event["scope"]]:
                 latest[store.Replica.key(event["scope"], event["card_id"])] = event
         for key, event in latest.items():
             if event["scope"] not in readable:
@@ -507,6 +522,11 @@ def _follow(
         if deferred is not None:
             continue  # no watermark or save until the deferred bodies are applied
         replica.meta["seq"] = max(after, watermark)
+        for scope in readable:
+            scope_watermarks[scope] = max(after, scope_watermarks[scope])
+        replica.set_backfill_watermarks(
+            {scope: value for scope, value in scope_watermarks.items() if scope in readable}
+        )
         if pages % SAVE_EVERY_PAGES == 0:
             # Bounded progress for a long rebuild; the full write happens once at the end.
             save()
@@ -529,6 +549,11 @@ def _follow(
             )
         if pages:
             replica.meta["seq"] = max(after, watermark)
+            for scope in readable:
+                scope_watermarks[scope] = max(after, scope_watermarks[scope])
+            replica.set_backfill_watermarks(
+                {scope: value for scope, value in scope_watermarks.items() if scope in readable}
+            )
     _refill(client, replica, settings, epoch=epoch, used=used, readable=readable, report=report, save=save)
 
 
@@ -634,6 +659,9 @@ def _refuse_scope(
     """Take a scope the hub refused out of `readable` and drop its heads, saving the narrowed replica at once."""
     readable.discard(scope)
     replica.retain_scopes(readable)
+    watermarks = replica.meta.get("backfill_watermarks")
+    if isinstance(watermarks, dict):
+        watermarks.pop(scope, None)
     replica.meta["read_scopes"] = sorted(set(replica.meta.get("read_scopes") or []) & readable)
     save()
     report["warnings"].append(

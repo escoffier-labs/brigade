@@ -514,6 +514,53 @@ def test_put_and_pull_round_trip_with_chunked_cards(hub, tmp_path):
     assert [c["action"] for c in hub.calls[before:]] == ["status", "log", "status"]
 
 
+def test_interrupted_cold_rebuild_resumes_each_scope_from_its_watermark(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "fleet", "first", "first fleet card")
+    _put(hub, "fleet", "second", "second fleet card")
+    _put(hub, "repo:test/app", "new", "newly readable card")
+    fleet_only = dataclasses.replace(settings(target), read_scopes=("fleet",))
+    monkeypatch.setattr(sync, "LOG_PAGE", 1)
+    monkeypatch.setattr(sync, "SAVE_EVERY_PAGES", 1)
+    original_log = hub.do_log
+    log_calls = 0
+
+    def interrupt_second_page(body):
+        nonlocal log_calls
+        log_calls += 1
+        if log_calls == 2:
+            raise ConnectionRefusedError("interrupted rebuild")
+        return original_log(body)
+
+    hub.do_log = interrupt_second_page
+    with pytest.raises(hubc.HubUnavailable):
+        sync.pull(target, client(hub), fleet_only)
+    building = store.building(target)
+    assert building.meta["seq"] == 1
+    assert building.meta["backfill_watermarks"] == {"fleet": 1}
+
+    hub.do_log = original_log
+    before = len(hub.calls)
+    sync.pull(target, client(hub), settings(target))
+    resumed = hub.calls[before:]
+    assert [call["after_seq"] for call in resumed if call["action"] == "log"][:2] == [0, 1]
+    card_reads = [(call["scope"], call["card_id"]) for call in resumed if call["action"] == "card"]
+    assert ("fleet", "first") not in card_reads
+    assert {("fleet", "second"), ("repo:test/app", "new")} <= set(card_reads)
+
+
+def test_old_format_replica_without_backfill_watermarks_still_loads(hub, tmp_path):
+    target = workspace(tmp_path, mode="read")
+    replica = store.start_building(target, hub=client(hub).identity, log_epoch=hub.epoch, principal="node-1")
+    replica.meta.update(seq=7, read_scopes=["fleet"])
+    replica.save()
+
+    loaded = store.building(target)
+    assert "backfill_watermarks" not in loaded.meta
+    assert loaded.backfill_watermark("fleet", covered=True) == 7
+    assert loaded.backfill_watermark("repo:test/app", covered=False) == 0
+
+
 def test_replica_and_spool_are_private(hub, tmp_path):
     target = workspace(tmp_path, mode="sync", one="# One\n")
     hub.mode = "down"
