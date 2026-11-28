@@ -8,6 +8,7 @@ import os
 import re
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 from contextlib import closing
@@ -15,7 +16,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import code_graph_background, code_references, component_bins, engine_paths
+from . import code_graph_background, code_references, component_bins, engine_paths, proc
 
 SNAPSHOT_NAME = "code-graph-before.db"
 SNAPSHOT_AFTER_NAME = "code-graph-after.db"
@@ -65,12 +66,18 @@ def capture_before(
     digest_shortcut: bool = False,
 ) -> dict[str, Any]:
     """Sync and snapshot the index, retaining a stale baseline when possible."""
+    platform_details: dict[str, str] = {}
     try:
         target = target.expanduser().resolve()
         run_dir = run_dir.expanduser().resolve()
         binary = _graphtrail_bin()
+        policy = code_graph_background.windows_foreground_sync(binary)
+        if policy is not None:
+            platform_details["windows_foreground_sync"] = policy
         if binary is None:
-            return _status("unavailable", "code graph delta unavailable: graphtrail binary not found")
+            return _status(
+                "unavailable", "code graph delta unavailable: graphtrail binary not found", **platform_details
+            )
         db_path = engine_paths.code_graph_db(target).path
         backup_budget = timeout if snapshot_timeout is None else snapshot_timeout
         details: dict[str, Any] = {
@@ -78,8 +85,9 @@ def capture_before(
             "db_path": str(db_path),
             "graphtrail_timeout_seconds": backup_budget,
             "snapshots": {},
+            **platform_details,
         }
-        defer_windows = not code_graph_background.may_run_killable_foreground_sync()
+        defer_windows = policy not in (None, "enabled")
         sync_budget = timeout
         if defer_windows:
             refresh = code_graph_background.status_or_start(target, db_path, binary, initial_wait=backup_budget)
@@ -123,7 +131,9 @@ def capture_before(
         busy = bool(refresh and refresh["status"] == "busy")
         if not busy and not defer_windows:
             stage = "initial-index" if "foreground_fallback" in details or not db_path.is_file() else "incremental-sync"
-            sync = _run_graphtrail(binary, db_path, "sync", timeout=sync_budget, stage=stage, cwd=target)
+            sync = _run_graphtrail(
+                binary, db_path, "sync", timeout=sync_budget, stage=stage, cwd=target, killable_sync=True
+            )
             if sync["returncode"] != 0 and not sync.get("timed_out"):
                 refresh = code_graph_background.status_or_start(target, db_path) if defer_sync else None
                 busy = bool(refresh and refresh["status"] == "busy")
@@ -146,11 +156,18 @@ def capture_before(
         snapshot_path = run_dir / SNAPSHOT_NAME
         try:
             digest = _timed_snapshot(db_path, snapshot_path, backup_budget, details["snapshots"], "before")
-        except TimeoutError:
+        except (TimeoutError, sqlite3.Error) as exc:
             if sync and sync.get("timed_out"):
                 if defer_sync and (refresh := _request_background_refresh(target, db_path, binary, details)):
                     details["background_refresh"] = refresh
-                return _status("sync_timed_out", f"code graph sync timed out after {sync_budget:g}s", **details)
+                return _status(
+                    "sync_timed_out",
+                    f"code graph sync timed out after {sync_budget:g}s",
+                    stale_graph_used=True,
+                    **details,
+                )
+            if not isinstance(exc, TimeoutError):
+                raise
             return _status("capture_failed", "code graph baseline snapshot timed out", **details)
         if defer_sync and sync and sync.get("timed_out"):
             if refresh := _request_background_refresh(target, db_path, binary, details):
@@ -178,7 +195,9 @@ def capture_before(
             "stale_graph_used": stale,
         }
     except Exception as exc:
-        return _status("capture_failed", f"code graph delta unavailable: {type(exc).__name__}: {exc}")
+        return _status(
+            "capture_failed", f"code graph delta unavailable: {type(exc).__name__}: {exc}", **platform_details
+        )
 
 
 def _snapshot_signature(path: Path) -> tuple[int, ...] | None:
@@ -278,8 +297,9 @@ def capture_after_and_diff(
         run_dir = run_dir.expanduser().resolve()
         before = before if isinstance(before, dict) else {}
         if before.get("status") == "unavailable":
-            return _compact(_status("unavailable", str(before.get("summary") or "code graph delta unavailable")))
-        defer_windows = not code_graph_background.may_run_killable_foreground_sync()
+            return _compact(before)
+        binary = str(before.get("binary") or "")
+        defer_windows = before.get("windows_foreground_sync") not in (None, "enabled")
         if defer_windows and (db_path_value := before.get("db_path")):
             _observe_windows_refresh(target, Path(db_path_value), before)
         if before.get("ok") is not True:
@@ -302,7 +322,6 @@ def capture_after_and_diff(
             )
             return _write_and_compact(run_dir, payload)
 
-        binary = str(before.get("binary") or "")
         db_path = Path(str(before.get("db_path") or engine_paths.code_graph_db(target).path))
         snapshot_path = Path(str(before.get("before_snapshot_path") or run_dir / SNAPSHOT_NAME))
         # A live refresh owns the write path. Read the last committed index instead.
@@ -315,7 +334,9 @@ def capture_after_and_diff(
         sync = None
         if not stale_after:
             sync_budget = timeout if sync_timeout is None else sync_timeout
-            sync = _run_graphtrail(binary, db_path, "sync", timeout=sync_budget, stage="incremental-sync", cwd=target)
+            sync = _run_graphtrail(
+                binary, db_path, "sync", timeout=sync_budget, stage="incremental-sync", cwd=target, killable_sync=True
+            )
             if sync.get("timed_out") and sync_timeout is not None:
                 stale_after = True
                 refresh = _request_background_refresh(target, db_path, binary, before)
@@ -395,10 +416,21 @@ def capture_after_and_diff(
             after_snapshot_sha256 = _timed_snapshot(
                 db_path, after_snapshot_path, timeout, before.setdefault("snapshots", {}), "after"
             )
-        except TimeoutError:
-            payload = _failure_payload(
-                target, before, "capture_failed", summary="code graph final snapshot timed out", after_sync=sync
-            )
+        except (TimeoutError, sqlite3.Error) as exc:
+            if (sync or {}).get("timed_out") or (before.get("sync") or {}).get("timed_out"):
+                payload = _failure_payload(
+                    target,
+                    before,
+                    "sync_timed_out",
+                    summary="code graph snapshot unavailable after sync timed out",
+                    after_sync=sync,
+                )
+            elif isinstance(exc, TimeoutError):
+                payload = _failure_payload(
+                    target, before, "capture_failed", summary="code graph final snapshot timed out", after_sync=sync
+                )
+            else:
+                raise
             return _write_and_compact(run_dir, payload, snapshot_path=snapshot_path)
         diff = _run_graphtrail(
             binary,
@@ -481,8 +513,10 @@ def capture_after_and_diff(
         )
     except Exception as exc:
         payload = _status("capture_failed", f"code graph delta unavailable: {type(exc).__name__}: {exc}")
-        if isinstance(before, dict) and "digest_probe" in before:
-            payload["digest_probe"] = before["digest_probe"]
+        if isinstance(before, dict):
+            for key in ("digest_probe", "windows_foreground_sync"):
+                if key in before:
+                    payload[key] = before[key]
         try:
             return _write_and_compact(run_dir, payload)
         except Exception:
@@ -512,6 +546,7 @@ def _run_graphtrail(
     json_output: bool = False,
     stage: str | None = None,
     cwd: Path | None = None,
+    killable_sync: bool = False,
 ) -> dict[str, Any]:
     """Run one engine command. ``cwd`` is the repository it indexes.
 
@@ -528,8 +563,13 @@ def _run_graphtrail(
         argv.append("--json")
     started = time.monotonic()
     engine_cwd = cwd or engine_paths.code_graph_repo_root(db_path)
-    if command == "sync" and not code_graph_background.may_run_killable_foreground_sync():
-        result = code_graph_background.run_windows_sync(argv, timeout=timeout, cwd=engine_cwd)
+    runner = None
+    if command == "sync" and not (killable_sync or code_graph_background.may_run_killable_foreground_sync()):
+        runner = code_graph_background.run_windows_sync
+    elif sys.platform == "win32" and command in ("sync", "digest"):
+        runner = proc.run
+    if runner is not None:
+        result = runner(argv, timeout=timeout, cwd=engine_cwd)
         return _command_result(
             argv=argv,
             returncode=result.code,
@@ -540,6 +580,7 @@ def _run_graphtrail(
             timeout=timeout,
             stage=stage,
         )
+    windows_diff = sys.platform == "win32" and command == "diff"
     try:
         completed = subprocess.run(
             argv,
@@ -550,6 +591,8 @@ def _run_graphtrail(
             stdin=subprocess.DEVNULL,
             text=True,
             timeout=timeout,
+            encoding="utf-8" if windows_diff else None,
+            errors="replace" if windows_diff else None,
         )
         return _command_result(
             argv=argv,
@@ -771,6 +814,7 @@ def _capture_metadata(payload: dict[str, Any]) -> dict[str, Any]:
             "background_refresh",
             "background_refresh_last_exit",
             "graph_sync_reason",
+            "windows_foreground_sync",
             "foreground_fallback",
             "stale_after",
             "delta_source",

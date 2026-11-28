@@ -8,13 +8,14 @@ import sqlite3
 import subprocess
 import sys
 import time
+from collections.abc import Mapping
 from contextlib import closing, suppress
 from pathlib import Path
 from tempfile import TemporaryFile, gettempdir
 from threading import Thread
-from typing import IO, Any
+from typing import IO, Any, Literal
 
-from . import engine_paths, inbox_lock, localio, nt_process, proc, proc_group, runguard
+from . import component_bins, engine_paths, inbox_lock, localio, nt_process, proc, proc_group, runguard
 
 _START_LOCK_TIMEOUT = 5.0
 # Cold interpreter startup on Windows can be delayed by antivirus scanning.
@@ -30,10 +31,31 @@ _WORKER = (
 )
 
 
-def may_run_killable_foreground_sync() -> bool:
-    # Engines up to v0.32.0 cannot recover a killed writer's lock on Windows.
-    # Drop this workaround once Brigade requires a minimum engine release containing PR #2963.
-    return sys.platform != "win32"
+_WINDOWS_LOCK_FIX_RELEASE = (0, 32, 1)  # PR #2963
+WindowsForegroundSync = Literal["enabled", "deferred_engine_older", "deferred_engine_unknown", "deferred_override"]
+
+
+def windows_foreground_sync(
+    binary: str | None, *, env: Mapping[str, str] | None = None
+) -> WindowsForegroundSync | None:
+    """Classify a selected executable on Windows. Other hosts need no install metadata."""
+    if sys.platform != "win32":
+        return None
+    name = "brigade-code-graph"
+    if component_bins.has_explicit_override(name, env=env):
+        return "deferred_override"
+    if not binary or (release := component_bins.managed_release(name, binary, env=env)) is None:
+        return "deferred_engine_unknown"
+    from .component_install import release_version_tuple
+
+    version = release_version_tuple(release)
+    if version is None:
+        return "deferred_engine_unknown"
+    return "enabled" if version >= _WINDOWS_LOCK_FIX_RELEASE else "deferred_engine_older"
+
+
+def may_run_killable_foreground_sync(binary: str | None = None) -> bool:
+    return windows_foreground_sync(binary) in (None, "enabled")
 
 
 def run_windows_sync(argv: list[str], *, timeout: float, cwd: Path | None = None) -> proc.Result:

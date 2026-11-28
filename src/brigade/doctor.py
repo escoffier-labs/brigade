@@ -31,6 +31,7 @@ INFO = "INFO"
 SCOPE_TARGET = "target"
 SCOPE_OPERATOR = "operator"
 ACTIONABLE_STATUSES = frozenset({FAIL, WARN, MANUAL})
+WINDOWS_FOREGROUND_SYNC_CHECK = "Windows foreground graph sync"
 ADAPTER_CHECK_PREFIX = "adapter: "
 # Wired workspaces with no ledger append for this many days are dormant (#734).
 OUTCOME_LEDGER_STALE_DAYS = 7
@@ -1893,10 +1894,12 @@ def _report(
     )
 
     visible_statuses = set(_SEVERITY_ORDER) if full else ACTIONABLE_STATUSES
-    visible_checks = [check for check in scoped_checks if check[0] in visible_statuses]
+    visible_checks = [
+        check for check in scoped_checks if check[0] in visible_statuses or check[1] == WINDOWS_FOREGROUND_SYNC_CHECK
+    ]
     target_checks = [check for check in visible_checks if _check_scope(check) == SCOPE_TARGET]
     operator_checks = [check for check in visible_checks if _check_scope(check) == SCOPE_OPERATOR]
-    hidden_detail = not full and any(check[0] not in ACTIONABLE_STATUSES for check in scoped_checks)
+    hidden_detail = len(visible_checks) < len(scoped_checks)
 
     def _emit(items: List[ScopedCheckResult]) -> None:
         for status, name, detail, scope in items:
@@ -1908,8 +1911,6 @@ def _report(
     def _emit_grouped(items: List[ScopedCheckResult]) -> bool:
         emitted = False
         for status in _SEVERITY_ORDER:
-            if status not in visible_statuses:
-                continue
             group = [check for check in items if check[0] == status]
             if not group:
                 continue
@@ -1931,7 +1932,8 @@ def _report(
 
     if hidden_detail:
         print()
-        print(f"showing {len(visible_checks)} actionable checks; run `brigade doctor --full` to show all checks")
+        actionable_count = sum(check[0] in ACTIONABLE_STATUSES for check in visible_checks)
+        print(f"showing {actionable_count} actionable checks; run `brigade doctor --full` to show all checks")
 
     print()
     print(f"summary: {len(scoped_checks)} checks, {counts[FAIL]} failed, {counts[MANUAL]} manual")

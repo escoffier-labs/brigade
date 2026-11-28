@@ -8,6 +8,7 @@ import sys
 import time
 from contextlib import closing
 from io import BytesIO
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +18,8 @@ from brigade import (
     code_graph_background,
     code_graph_delta,
     component_bins,
+    component_paths,
+    component_state,
     engine_paths,
     inbox_lock,
     localio,
@@ -364,8 +367,8 @@ def graph_sync_platform(monkeypatch):
     def select(platform):
         monkeypatch.setattr(
             code_graph_background,
-            "may_run_killable_foreground_sync",
-            lambda: platform != "win32",
+            "windows_foreground_sync",
+            lambda *args: "deferred_engine_unknown" if platform == "win32" else None,
         )
 
     return select
@@ -379,6 +382,7 @@ def test_verify_existing_graph_sync_policy(
     tmp_path, monkeypatch, capsys, graph_sync_platform, platform, detach_refused
 ):
     graph_sync_platform(platform)
+    monkeypatch.setattr(code_graph_delta, "sys", SimpleNamespace(platform="linux"))
     subprocess.run(["git", "init", "--quiet", str(tmp_path)], check=True)
     (tmp_path / ".gitignore").write_text(".brigade/\n")
     db = engine_paths.code_graph_db(tmp_path).path
@@ -679,22 +683,32 @@ def test_run_windows_sync_maps_popen_fallback_launch_oserror(tmp_path, monkeypat
     assert (result.code, result.stdout, result.stderr) == (127, "", "command not found: engine\n")
 
 
-def test_windows_dependency_hook_sync_does_not_kill_writer(tmp_path, monkeypatch, graph_sync_platform):
+def test_windows_dependency_hook_sync_does_not_kill_writer(tmp_path, monkeypatch):
     from brigade.claude_hooks import dependencies
 
-    graph_sync_platform("win32")
+    binary, _ = _fake_managed_graph(tmp_path, monkeypatch, "v0.32.1")
+    monkeypatch.setattr(code_graph_background, "sys", SimpleNamespace(platform="win32", executable=sys.executable))
+    monkeypatch.setattr(code_graph_delta, "sys", SimpleNamespace(platform="win32"))
+    assert code_graph_background.may_run_killable_foreground_sync(str(binary))
     db = engine_paths.code_graph_db(tmp_path).path
     db.parent.mkdir(parents=True)
     db.touch()
-    monkeypatch.setattr(component_bins, "resolve", lambda name: "engine")
-    monkeypatch.setattr(subprocess, "run", lambda *args, **kwargs: pytest.fail("killable hook sync"))
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("killable hook sync")
 
     def wait(*, timeout=None):
         if timeout is not None:
-            raise subprocess.TimeoutExpired("engine", timeout)
+            raise subprocess.TimeoutExpired(str(binary), timeout)
         return 0
 
-    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: SimpleNamespace(pid=12345, wait=wait))
+    def spawn(argv, **kwargs):
+        assert argv[:1] == [str(binary)]
+        return SimpleNamespace(pid=12345, wait=wait), "detached"
+
+    monkeypatch.setattr(subprocess, "run", unexpected)
+    monkeypatch.setattr(proc, "run", unexpected)
+    monkeypatch.setattr(proc, "spawn_detached", spawn)
     assert dependencies._dependents(tmp_path, "source.py") == (None, "sync_timed_out")
 
 
@@ -726,3 +740,259 @@ def test_windows_aboyeur_snapshot_defaults_defer_to_one_refresh(tmp_path, monkey
     assert result["status"] == "ok" and result["stale_graph_used"]
     assert launches == ["engine"]
     assert result["background_refresh"]["status"] == "busy"
+
+
+def _fake_managed_graph(tmp_path, monkeypatch, release):
+    name = "brigade-code-graph"
+    binary = tmp_path / name
+    binary.write_bytes(b"test engine")
+    binary.chmod(0o755)
+    state_path = Path(component_paths.installed_state_path(component_paths.data_root()))
+    real_resolve = component_bins.resolve
+    # The default test resolver hides managed installs, including our sandboxed one.
+    monkeypatch.setattr(component_bins, "resolve", lambda key: component_bins.managed_path(key) or real_resolve(key))
+    if release is not None:
+        record = component_state.InstalledComponentRecord(
+            "0" * 40,
+            binary.name,
+            binary.stat().st_size,
+            localio.file_sha256(binary),
+            "https://example.invalid/engine",
+            str(binary),
+        )
+        state = component_state.InstalledState(
+            1,
+            "0.99.0",
+            release,
+            "windows-amd64",
+            "2026-01-01T00:00:00Z",
+            {name: record},
+        )
+        component_state.write_installed_state(state_path, state)
+    return binary, state_path
+
+
+@pytest.mark.parametrize(
+    ("release", "expected"),
+    [
+        ("v0.32.0", False),
+        ("v0.32.1", True),
+        ("v0.32.10", True),
+        ("v0.33.0", True),
+        ("v0.32.1+" + "a" * 40, True),
+        ("v0.33.0.dev0", False),
+        ("v0.32.1rc1+abcdef", False),
+        ("0.32.1.dev0", False),
+        ("2026.07.19", False),
+        ("v2026.07.19", False),
+        ("v0.32.1.post1", False),
+        ("0.32.1.0", False),
+        ("v0.32.1.0", False),
+        ("unparseable", False),
+        (None, False),
+    ],
+)
+def test_windows_foreground_sync_uses_recorded_managed_release(tmp_path, monkeypatch, release, expected):
+    binary, _ = _fake_managed_graph(tmp_path, monkeypatch, release)
+    monkeypatch.setattr(code_graph_background, "sys", SimpleNamespace(platform="win32"))
+    assert code_graph_background.may_run_killable_foreground_sync(str(binary)) is expected
+
+
+@pytest.mark.parametrize("problem", ["malformed", "unreadable", "different_path", "replaced", "override", "path"])
+def test_windows_foreground_sync_refuses_unproven_binary(tmp_path, monkeypatch, problem):
+    binary, state = _fake_managed_graph(tmp_path, monkeypatch, "v0.32.1")
+    monkeypatch.setattr(code_graph_background, "sys", SimpleNamespace(platform="win32"))
+    selected = binary
+    if problem == "malformed":
+        state.write_bytes(b"{")
+    elif problem == "unreadable":
+        state.unlink()
+        state.mkdir()
+    elif problem == "different_path":
+        selected = binary.with_name("different.exe")
+        selected.write_bytes(binary.read_bytes())
+    elif problem == "replaced":
+        binary.write_bytes(b"dev binary?")
+    elif problem == "override":
+        # Even pointing the override at the managed path takes the override channel.
+        monkeypatch.setenv("BRIGADE_CODE_GRAPH_BIN", str(binary))
+    else:
+        state.unlink()
+        monkeypatch.setenv("PATH", str(binary.parent))
+    assert not code_graph_background.may_run_killable_foreground_sync(str(selected))
+
+
+def test_non_windows_foreground_sync_does_not_need_a_resolved_binary(monkeypatch):
+    monkeypatch.setattr(code_graph_background, "sys", SimpleNamespace(platform="linux"))
+
+    def unexpected_io(*args, **kwargs):
+        raise AssertionError("non-Windows policy must not access files")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(Path, "open", unexpected_io)
+        scoped.setattr(Path, "stat", unexpected_io)
+        assert code_graph_background.may_run_killable_foreground_sync(None)
+        assert code_graph_background.may_run_killable_foreground_sync("unknown")
+
+
+@pytest.mark.parametrize(
+    ("platform", "release", "timeout"),
+    [("win32", "v0.32.0", False), ("win32", "v0.32.1", False), ("win32", "v0.32.1", True), ("linux", "v0.32.0", True)],
+)
+def test_verify_uses_managed_graph_release(tmp_path, monkeypatch, capsys, platform, release, timeout):
+    binary, _ = _fake_managed_graph(tmp_path, monkeypatch, release)
+    monkeypatch.setattr(code_graph_background, "sys", SimpleNamespace(platform=platform, executable=sys.executable))
+    monkeypatch.setattr(code_graph_delta, "sys", SimpleNamespace(platform=platform))
+    subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+    db = engine_paths.code_graph_db(tmp_path).path
+    db.parent.mkdir(parents=True)
+    with closing(sqlite3.connect(db)) as connection, connection:
+        connection.execute("CREATE TABLE meta (key TEXT, value TEXT)")
+        connection.execute("INSERT INTO meta VALUES ('synced_at', '1')")
+
+    launches = []
+    policy_calls = []
+    managed_release = component_bins.managed_release
+
+    def check_release(*args, **kwargs):
+        policy_calls.append(args)
+        return managed_release(*args, **kwargs)
+
+    def refresh(target, db, candidate=None, **kwargs):
+        if candidate is not None:
+            launches.append(candidate)
+            return {"status": "started"}
+        return None
+
+    monkeypatch.setattr(code_graph_background, "status_or_start", refresh)
+    monkeypatch.setattr(component_bins, "managed_release", check_release)
+    calls = []
+
+    def engine(argv, **kwargs):
+        command = argv[3]
+        calls.append(command)
+        if command == "sync" and timeout:
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        if command == "digest":
+            return json.dumps({"format_version": 2, "schema_version": 9, "sha256": "f" * 64})
+        return "{}"
+
+    real_subprocess_run, real_proc_run = subprocess.run, proc.run
+
+    def run(argv, *args, **kwargs):
+        if isinstance(argv, list) and argv[:1] == [str(binary)]:
+            if platform == "win32":
+                assert argv[3] == "diff"
+                assert (kwargs["encoding"], kwargs["errors"]) == ("utf-8", "replace")
+            return subprocess.CompletedProcess(argv, 0, engine(argv, **kwargs), "")
+        return real_subprocess_run(argv, *args, **kwargs)
+
+    def run_owned(argv, *args, **kwargs):
+        if argv[:1] == [str(binary)]:
+            assert platform == "win32"
+            try:
+                return proc.Result(code=0, stdout=engine(argv, **kwargs), stderr="")
+            except subprocess.TimeoutExpired:
+                return proc.Result(code=124, stdout="", stderr="timeout", timed_out=True)
+        return real_proc_run(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    monkeypatch.setattr(proc, "run", run_owned)
+    assert work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True, reuse=False) == 0
+    receipt = json.loads(capsys.readouterr().out)["code_graph_delta"]
+    assert receipt["status"] == "ok"
+    sidecar = json.loads(Path(receipt["sidecar_path"]).read_text(encoding="utf-8"))
+    if platform == "win32":
+        decision = "enabled" if release == "v0.32.1" else "deferred_engine_older"
+        assert receipt["windows_foreground_sync"] == sidecar["windows_foreground_sync"] == decision
+        assert len(policy_calls) == 1
+    else:
+        assert "windows_foreground_sync" not in receipt and "windows_foreground_sync" not in sidecar
+        assert not policy_calls
+    if timeout:
+        assert launches == [str(binary)]
+        assert calls == ["sync", "sync", "diff"]
+        assert receipt["stale_graph_used"] and receipt["stale_after"]
+        for stage in ("before_sync", "after_sync"):
+            result = receipt["commands"][stage]
+            assert result["returncode"] == 124 and result["timed_out"]
+            assert result["stage"] == "incremental-sync"
+        # Simulate the background worker committing the edit before the retry.
+        with closing(sqlite3.connect(db)) as connection, connection:
+            connection.execute("UPDATE meta SET value = '2' WHERE key = 'synced_at'")
+        timeout = False
+        calls.clear()
+        assert (
+            work_cmd.verify_run(target=tmp_path, commands=[[sys.executable, "-V"]], json_output=True, reuse=False) == 0
+        )
+        retry = json.loads(capsys.readouterr().out)["code_graph_delta"]
+        assert not retry["stale_graph_used"]
+        assert retry["delta_source"] == "digest_equal"
+        assert calls == ["sync", "digest", "sync", "digest"]
+        assert launches == [str(binary)]
+    elif release == "v0.32.1":
+        assert calls == ["sync", "digest", "sync", "digest"]
+        assert receipt["delta_source"] == "digest_equal"
+        assert not receipt["stale_graph_used"]
+    else:
+        assert calls == ["diff"]
+        assert receipt["stale_graph_used"] and receipt["stale_after"]
+        assert receipt["commands"]["before_sync"] is None
+        assert receipt["commands"]["after_sync"] is None
+
+
+@pytest.mark.parametrize("platform", ["linux", "win32"])
+@pytest.mark.parametrize("snapshot", ["before", "after"])
+def test_verify_snapshot_sqlite_error_after_sync_timeout(tmp_path, monkeypatch, platform, snapshot):
+    binary, _ = _fake_managed_graph(tmp_path, monkeypatch, "v0.32.1")
+    monkeypatch.setattr(code_graph_background, "sys", SimpleNamespace(platform=platform))
+    db = engine_paths.code_graph_db(tmp_path).path
+    db.parent.mkdir(parents=True)
+    with closing(sqlite3.connect(db)) as connection, connection:
+        connection.execute("CREATE TABLE meta (key TEXT, value TEXT)")
+        connection.execute("INSERT INTO meta VALUES ('synced_at', '1')")
+
+    backup = code_graph_delta._backup_sqlite
+    broken_snapshot = code_graph_delta.SNAPSHOT_NAME if snapshot == "before" else code_graph_delta.SNAPSHOT_AFTER_NAME
+
+    def recovery_needed(source, destination, **kwargs):
+        if destination.name == broken_snapshot:
+            raise sqlite3.OperationalError("database needs recovery")
+        backup(source, destination, **kwargs)
+
+    launches = []
+
+    def refresh(target, db, candidate=None, **kwargs):
+        if candidate is not None:
+            launches.append(candidate)
+            return {"status": "started"}
+        return None
+
+    monkeypatch.setattr(code_graph_background, "status_or_start", refresh)
+    monkeypatch.setattr(code_graph_delta, "_backup_sqlite", recovery_needed)
+
+    sync_count = 0
+
+    def timed_out():
+        nonlocal sync_count
+        sync_count += 1
+        return (sync_count == 1) == (snapshot == "before")
+
+    def expire(argv, **kwargs):
+        if timed_out():
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    def expire_owned(argv, **kwargs):
+        expired = timed_out()
+        return proc.Result(124 if expired else 0, "", "", timed_out=expired)
+
+    monkeypatch.setattr(code_graph_delta, "sys", SimpleNamespace(platform=platform))
+    monkeypatch.setattr(subprocess, "run", expire)
+    monkeypatch.setattr(proc, "run", expire_owned)
+    run = tmp_path / "receipt"
+    before = code_graph_delta.capture_before(tmp_path, run, defer_sync=True)
+    result = code_graph_delta.capture_after_and_diff(tmp_path, run, before, sync_timeout=0.5)
+    assert result["status"] == "sync_timed_out"
+    assert result["stale_graph_used"]
+    assert launches == [str(binary)]

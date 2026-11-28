@@ -1,0 +1,1 @@
+- Restore foreground code graph sync and fresh verification deltas on Windows when the managed engine includes the v0.32.1 writer lock fix.
