@@ -917,6 +917,7 @@ def _publishable(
             # Published under another log_epoch: the restored hub may not hold
             # this card, so the old base proves nothing. Adopt a current head
             # or send the card again; a base the hub rejects becomes a proposal.
+            card["published_in_other_epoch"] = True
             last = None
         if isinstance(last, dict) and last.get("content_hash") == card["content_hash"]:
             continue
@@ -993,6 +994,7 @@ def _entry(scope: str, card: dict[str, Any], hub: str) -> dict[str, Any]:
         "origin": "interactive",
         "path": card["rel"],
         "derived_id": card.get("derived_id", False),
+        "published_in_other_epoch": card.get("published_in_other_epoch", False),
     }
     if base:
         entry["base_epoch"] = base.get("log_epoch")
@@ -1051,13 +1053,32 @@ class _Push:
                 self._spool(entry, spooled=spooled)
                 return
             reason = exc.code or f"http-{exc.status}"
+            current_revision = exc.body.get("current_revision")
+            current_hash = exc.body.get("current_hash")
+            sent_hash = hubc.content_hash(entry["text"])
+            if (
+                exc.code == "memory_base_mismatch"
+                and entry.get("published_in_other_epoch") is True
+                and isinstance(current_hash, str)
+                and current_hash == sent_hash
+                and isinstance(current_revision, int)
+                and not isinstance(current_revision, bool)
+                and current_revision > 0
+                and isinstance(self.epoch, str)
+                and bool(self.epoch)
+            ):
+                event = {"revision": current_revision, "content_hash": current_hash}
+                _record_published(self.target, self.client.identity, entry, event, self.epoch)
+                store.spool_remove(self.target, entry["hub"], entry["client_event_id"])
+                self.report["published"].append({"card_id": entry["card_id"], "revision": current_revision})
+                return
             # A new derived key must never replace a hub card that already
             # owns it. CAS is authoritative even without a readable replica.
             if (
                 entry.get("derived_id")
                 and entry.get("base_revision") is None
                 and exc.code == "memory_base_mismatch"
-                and exc.body.get("current_hash") != hubc.content_hash(entry["text"])
+                and current_hash != sent_hash
             ):
                 reason = "card-id-collision"
             if exc.code not in CONFLICT_CODES or reason == "card-id-collision":

@@ -1,0 +1,1 @@
+- Avoid opening a memory proposal when a restored Hub already holds the exact card text being pushed.

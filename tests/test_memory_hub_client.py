@@ -581,6 +581,49 @@ def test_conflicting_offline_edit_becomes_a_proposal(hub, tmp_path):
     assert sync.push(target, client(hub), settings(target))["published"] == []
 
 
+def test_base_mismatch_with_matching_current_hash_records_publication(hub, tmp_path):
+    text = "# One\nunchanged\n"
+    target = workspace(tmp_path, mode="sync", one=text)
+    sync.push(target, client(hub), settings(target), yes=True)
+    hub.epoch = hubc.event_id()
+
+    report = sync.push(target, client(hub), settings(target), yes=True)
+
+    assert report["published"] == [{"card_id": "one", "revision": 1}]
+    assert report["proposals"] == []
+    assert not list(store.proposals(target))
+    published = store.published(target)[client(hub).identity]["repo:test/app"]["one"]
+    assert (published["revision"], published["content_hash"], published["log_epoch"]) == (
+        1,
+        hubc.content_hash(text),
+        hub.epoch,
+    )
+
+
+def test_base_mismatch_with_different_current_hash_opens_proposal(hub, tmp_path):
+    target = workspace(tmp_path, mode="sync", one="# One\nlocal\n")
+    sync.push(target, client(hub), settings(target), yes=True)
+    hub.epoch = hubc.event_id()
+    (target / "memory" / "cards" / "one.md").write_text("# One\nchanged\n", encoding="utf-8")
+
+    report = sync.push(target, client(hub), settings(target), yes=True)
+
+    assert report["published"] == []
+    assert [proposal["reason"] for proposal in report["proposals"]] == ["memory_base_mismatch"]
+
+
+def test_base_mismatch_without_current_hash_opens_proposal(hub, tmp_path):
+    target = workspace(tmp_path, mode="sync", one="# One\nlocal\n")
+    sync.push(target, client(hub), settings(target), yes=True)
+    hub.epoch = hubc.event_id()
+    hub.put_reply = (409, {"code": "memory_base_mismatch", "current_revision": 7})
+
+    report = sync.push(target, client(hub), settings(target), yes=True)
+
+    assert report["published"] == []
+    assert [proposal["reason"] for proposal in report["proposals"]] == ["memory_base_mismatch"]
+
+
 def test_a_spooled_write_is_withheld_once_its_card_turns_private(hub, tmp_path):
     target = workspace(tmp_path, mode="sync", one="# One\nconfidential draft\n")
     hub.mode = "down"
