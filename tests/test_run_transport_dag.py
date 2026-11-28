@@ -48,11 +48,13 @@ class _DagHarness:
         *,
         dependencies,
         outcomes=None,
+        exceptions=None,
         held=None,
         slow_workers=None,
         on_scheduler_resolved=None,
     ):
         outcomes = outcomes or {}
+        exceptions = exceptions or {}
         slow_workers = slow_workers or {}
         self.invocations = []
         roster = _roster_for(assignments)
@@ -64,6 +66,8 @@ class _DagHarness:
                 invocations.append(cli_ref)
             if cli_ref in slow_workers:
                 time.sleep(slow_workers[cli_ref])
+            if cli_ref in exceptions:
+                raise exceptions[cli_ref]
             if cli_ref in outcomes:
                 outcome = outcomes[cli_ref]
                 return agents.AgentResult(text=outcome.text, ok=outcome.ok, detail=outcome.detail)
@@ -141,6 +145,48 @@ def test_held_stage_never_dispatched(dag_harness, capsys):
     assert by_worker["i"].status == "skipped"
     assert dag_harness.invocations_set == set()
     assert "falling back" not in capsys.readouterr().err
+
+
+def test_held_result_keeps_task_id(dag_harness):
+    assignment = Assignment(worker="p", task="task-p", task_id="task-id-p", stage=1, covers=("plan",))
+
+    result = dag_harness(
+        assignments=[assignment],
+        dependencies=DEPS,
+        held={"plan": ["approve:plan"]},
+    )[0]
+
+    assert result.status == "held"
+    assert result.task_id == assignment.task_id
+
+
+def test_skipped_result_keeps_task_id(dag_harness):
+    plan = Assignment(worker="p", task="task-p", task_id="task-id-p", stage=1, covers=("plan",))
+    implement = Assignment(worker="i", task="task-i", task_id="task-id-i", stage=2, covers=("implement",))
+
+    results = dag_harness(
+        assignments=[plan, implement],
+        dependencies=DEPS,
+        outcomes={"p": WorkerResult(worker="p", task="task-p", text="", ok=False, detail="boom")},
+    )
+
+    skipped = results[1]
+    assert skipped.status == "skipped"
+    assert skipped.task_id == implement.task_id
+
+
+def test_exception_result_keeps_task_id(dag_harness):
+    assignment = Assignment(worker="p", task="task-p", task_id="task-id-p", stage=1, covers=("plan",))
+
+    result = dag_harness(
+        assignments=[assignment],
+        dependencies=DEPS,
+        exceptions={"p": RuntimeError("worker failed")},
+    )[0]
+
+    assert result.ok is False
+    assert result.detail == "worker failed"
+    assert result.task_id == assignment.task_id
 
 
 def test_empty_covers_runs_as_independent_dag_root(dag_harness, capsys):
