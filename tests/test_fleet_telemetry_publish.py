@@ -177,24 +177,83 @@ def test_hooks_continue_after_failure(publisher, monkeypatch, capsys, publish_fa
 
 
 @pytest.mark.parametrize(
-    ("stdout", "expected"),
+    ("stdout", "returncode", "expected"),
     [
         (
             '{"examined": 5, "observed": "private stdout", "published": true, "skipped": -1, "scheduled": 1000000001}',
+            1,
             ("observer: status=failed examined=5\n", ""),
         ),
-        ("private stdout", ("", "observer: skipped (JSONDecodeError)\n")),
-        (None, ("", "observer: skipped (TimeoutExpired)\n")),
+        ('{"published": 1}', 2, ("observer: status=truncated published=1\n", "")),
+        ("private stdout", 1, ("", "observer: skipped (JSONDecodeError)\n")),
+        (None, 1, ("", "observer: skipped (TimeoutExpired)\n")),
     ],
 )
-def test_optional_run_keeps_child_output_private(publisher, monkeypatch, capsys, stdout, expected):
+def test_optional_run_keeps_child_output_private(publisher, monkeypatch, capsys, stdout, returncode, expected):
     def run(command, **kwargs):
         assert kwargs["stdin"] == publisher["subprocess"].DEVNULL
         assert kwargs["capture_output"]
         if stdout is None:
             raise publisher["subprocess"].TimeoutExpired(command, 17, stderr="private stderr")
-        return SimpleNamespace(stdout=stdout, stderr="private stderr", returncode=1)
+        return SimpleNamespace(stdout=stdout, stderr="private stderr", returncode=returncode)
 
     monkeypatch.setattr(publisher["subprocess"], "run", run)
     publisher["_optional_run"]("observer", ["private command"], 17)
     assert capsys.readouterr() == expected
+
+
+def test_machine_command_failure_keeps_stderr_out_of_timer_logs(monkeypatch, capsys):
+    import subprocess
+    import sys
+
+    from brigade import fleet_client
+
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: "node-fixture")
+    monkeypatch.setattr(
+        subprocess,
+        "run",
+        lambda *args, **kwargs: SimpleNamespace(returncode=1, stdout="", stderr="private stderr marker"),
+    )
+    monkeypatch.setattr(sys, "argv", [str(SCRIPT), "--dry-run"])
+
+    with pytest.raises(SystemExit) as exc:
+        runpy.run_path(str(SCRIPT), run_name="__main__")
+    assert exc.value.code == 0
+    assert capsys.readouterr() == ("", "telemetry: skipped (RuntimeError)\n")
+
+
+def test_managed_observer_uses_override_and_prepends_brigade_path(publisher, monkeypatch):
+    calls = []
+    monkeypatch.setenv("T3_FLEET_AGENT", "fixture-agent")
+    monkeypatch.setenv("PATH", "original-path")
+    brigade_bin = str(Path("fixture-bin") / "brigade")
+    monkeypatch.setattr(publisher["shutil"], "which", lambda name: brigade_bin)
+    monkeypatch.setitem(publisher, "_optional_run", lambda *args, env: calls.append((*args, env["PATH"])))
+
+    publisher["_observe_t3"]()
+
+    assert calls == [
+        (
+            "t3 observe",
+            ["fixture-agent", "observe", "--max", "20"],
+            32,
+            "fixture-bin" + publisher["os"].pathsep + "original-path",
+        )
+    ]
+
+
+def test_managed_observer_prefers_deployed_windows_python(publisher, monkeypatch):
+    import ntpath
+
+    monkeypatch.setitem(
+        publisher,
+        "os",
+        SimpleNamespace(
+            name="nt",
+            environ={"LOCALAPPDATA": r"C:\fixture"},
+            path=SimpleNamespace(join=ntpath.join, isfile=lambda path: path == python),
+        ),
+    )
+    python = r"C:\fixture\T3Fleet\venv\Scripts\python.exe"
+
+    assert publisher["_t3_agent_command"]() == [python, "-m", "t3_fleet.agent"]

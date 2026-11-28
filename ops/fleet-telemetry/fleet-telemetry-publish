@@ -34,7 +34,7 @@ def _run(args: list[str], timeout: float = 15.0) -> str:
         [BRIGADE, *args], capture_output=True, text=True, timeout=timeout, check=False
     )
     if result.returncode != 0:
-        raise RuntimeError(f"brigade {' '.join(args)} exited {result.returncode}: {result.stderr.strip()[:200]}")
+        raise RuntimeError("brigade command failed")
     return result.stdout
 
 
@@ -172,7 +172,7 @@ def _observe_t3() -> None:
     brigade_dir = os.path.dirname(shutil.which(BRIGADE) or "")
     if brigade_dir:
         env["PATH"] = brigade_dir + os.pathsep + env.get("PATH", "")
-    _optional_run("t3 observe", [*command, "observe", "--max", "20"], 20, env=env)
+    _optional_run("t3 observe", [*command, "observe", "--max", "20"], 32, env=env)
 
 
 def _optional_run(label: str, command: list[str], timeout: float, *, env: dict[str, str] | None = None) -> None:
@@ -188,7 +188,7 @@ def _optional_run(label: str, command: list[str], timeout: float, *, env: dict[s
             value = summary.get(name)
             if type(value) is int and 0 <= value <= 1_000_000_000:
                 counts.append(f"{name}={value}")
-        status = "ok" if result.returncode == 0 else "failed"
+        status = {0: "ok", 2: "truncated"}.get(result.returncode, "failed")
         print(f"{label}: status={status}" + (" " + " ".join(counts) if counts else ""))
     except Exception as error:  # noqa: BLE001 - independent best-effort hooks
         print(f"{label}: skipped ({type(error).__name__})", file=sys.stderr)
@@ -301,8 +301,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return _publish_machine(dry_run=False)
     finally:
-        # 2*15 machine + 20 managed + 2*17 native + 12 tick = 96 seconds,
-        # plus one second of CPU sampling, within the 120s systemd timeout.
+        # Machine commands, CPU sample, managed observer, native observers, tick:
+        # 15 + 15 + 1 + 32 + 17 + 17 + 12 = 109 seconds.
+        # ExecStartPost drop-ins share the same 120s systemd start timeout.
+        # Setting BRIGADE_NATIVE_T3_OBSERVER=1 runs the native T3 observer twice
+        # if an ExecStartPost drop-in already runs it.
         # Native helpers have their own 15s deadline; the tick gets 10s inside 12s.
         for hook in (_observe_t3, _observe_native_t3, _observe_openclaw, _action_tick):
             try:
@@ -315,5 +318,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as error:  # noqa: BLE001 - a timer must not spam failures
-        print(f"telemetry: skipped ({type(error).__name__}: {error})", file=sys.stderr)
+        print(f"telemetry: skipped ({type(error).__name__})", file=sys.stderr)
         sys.exit(0)
