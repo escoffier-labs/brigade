@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
@@ -64,6 +65,13 @@ _DIGEST_FIELDS = frozenset({"payload_digest", "spec_digest", "attempt_id", "resu
 
 class TaskJournalError(RuntimeError):
     """A bounded task refusal; no transport action has been performed."""
+
+
+@dataclass
+class ReadMetadata:
+    """Tolerated damage from the same verified journal snapshot."""
+
+    partial_tail_digest: str | None = None
 
 
 def token(value: object) -> bool:
@@ -332,15 +340,21 @@ def validate_pairs(events: Sequence[run_journal.RunEvent]) -> None:
             raise TaskJournalError("task checkpoint refused: incomplete-pair")
 
 
-def _verified(run_dir: Path) -> list[run_journal.RunEvent]:
+def _verified(
+    run_dir: Path, *, tolerate_partial_tail: bool = False, sync_head: bool = True, metadata: ReadMetadata | None = None
+) -> list[run_journal.RunEvent]:
     path = run_lifecycle._journal_path(run_dir)
     if not run_journal.bound_is_file(path):
         raise TaskJournalError("task lifecycle journal is not active")
     report = run_journal.read_journal_bounded(path)
-    if report.partial_tail is not None:
+    if report.partial_tail is not None and not tolerate_partial_tail:
         raise TaskJournalError("task journal partial tail")
     if report.chain_errors:
         raise TaskJournalError("task journal chain error or unsupported reader")
+    if metadata is not None:
+        metadata.partial_tail_digest = (
+            hashlib.sha256(report.partial_tail).hexdigest() if report.partial_tail is not None else None
+        )
     events = list(report.events)
     if any(e.run_id != run_dir.name for e in events):
         raise TaskJournalError("task journal run identity mismatch")
@@ -351,11 +365,29 @@ def _verified(run_dir: Path) -> list[run_journal.RunEvent]:
     latest = checkpoints[-1]
     body = json.loads(run_checkpoint.validate_checkpoint(run_dir, latest))
     run_checkpoint._verify_coverage(events, latest, body)
-    if events:
+    if events and sync_head:
         run_journal.sync_journal_head(
             path, expected_sequence=events[-1].sequence, expected_event_digest=events[-1].event_digest
         )
     return events
+
+
+def read_only(run_dir: Path, *, metadata: ReadMetadata | None = None) -> tuple[Path, list[run_journal.RunEvent]]:
+    """Verify a task journal without locking, syncing, or repairing its tail."""
+    try:
+        run_dir = run_journal.normalize_run_dir(run_dir)
+        return run_dir, _verified(run_dir, tolerate_partial_tail=True, sync_head=False, metadata=metadata)
+    except TaskJournalError:
+        raise
+    except run_checkpoint.CheckpointError as exc:
+        raise TaskJournalError(run_events._bound(f"task checkpoint refused: {exc.category}")) from exc
+    except (
+        OSError,
+        ValueError,
+        run_journal.RunJournalError,
+        run_lifecycle.LifecycleJournalError,
+    ) as exc:
+        raise TaskJournalError("task journal operation refused or durability indeterminate") from exc
 
 
 @contextmanager

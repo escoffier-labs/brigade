@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import cli, config, memory_hooks
 from brigade.config import Config
 from brigade.selection import Selection
@@ -475,7 +476,7 @@ def test_git_marker_rejects_nonconventional_shape(tmp_path: Path, monkeypatch, m
     if marker_kind == "directory":
         marker.mkdir()
     elif marker_kind == "fifo":
-        os.mkfifo(marker)
+        make_fifo(marker)
     else:
         contents = {
             "direct": f"gitdir: {common_dir}\n".encode(),

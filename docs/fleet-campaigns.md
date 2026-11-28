@@ -96,7 +96,8 @@ brigade fleet campaign show KEY [--json]
 list is capped at 50 campaigns (default 20). `show`
 prints the summary, then one row per repository: bucket, status, attempts, owner node,
 latest Brigade task (`task`), latest Fleet execution (`run`), latest GitHub PR and
-whether it drifted. In JSON, `brigade` retains the Brigade task link and `fleet_run`
+park kind (`park`, or `-` when the member is not parked), and whether it drifted. In
+JSON, `park_kind` carries the same park kind, `brigade` retains the Brigade task link and `fleet_run`
 projects the latest `fleet-run` link recorded by `link_execution`. Text output strips
 terminal control characters. The Hub routes are `POST /work/campaigns` (operator only,
 201 when created, 200 otherwise), `GET /work/campaigns` and
@@ -288,6 +289,8 @@ brigade fleet campaign consume KEY --worker SEAT [--target WORKSPACE] [--watch] 
 ```
 
 Run this on a node with the repositories checked out and listed in `.brigade/repos.toml`.
+Entries that cannot resolve to a checkout identity are omitted as before, but the text
+and JSON output name each dropped repos.toml identity with the reason.
 A pass does this for one member:
 
 1. **Select.** The consumer reads the campaign and keeps members whose repository

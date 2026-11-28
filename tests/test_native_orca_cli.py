@@ -101,6 +101,15 @@ def coordinator(tmp_path, capsys):
     return Coordinator(tmp_path, capsys)
 
 
+def test_unenrolled_orca_claim_omits_absent_policy_digest(coordinator):
+    run_id = coordinator.open()
+    assert coordinator.claim()["state"] == "claimed"
+    claim = next(event for event in _events(coordinator.workspace, run_id) if event.event_type == "task.native-claimed")
+    assert claim.payload["admission"] == "admitted"
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", claim.payload["roster_digest"])
+    assert "policy_digest" not in claim.payload
+
+
 def test_orca_1_4_269_ambiguous_start_restart_and_notice(coordinator):
     coordinator.limit_one_worker()
     run_id = coordinator.open()

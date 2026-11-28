@@ -6,6 +6,7 @@ nothing.
 """
 
 from __future__ import annotations
+from tests._fifo import make_fifo
 
 import argparse
 import importlib.util
@@ -515,7 +516,7 @@ def test_setup_refuses_a_non_regular_operator_copy(project, tmp_path, capsys, ki
     operator = project / "secrets" / setup.OPERATOR_TOKEN
     operator.unlink()
     if kind == "fifo":
-        os.mkfifo(operator, 0o600)
+        make_fifo(operator, 0o600)
     else:
         operator.mkdir()
     capsys.readouterr()

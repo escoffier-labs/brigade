@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import cli, dirfd, skills_cmd
 from brigade.projection import kernel as projection
 from brigade.skills_cmd.packs import UnsupportedLexicalPathError, _absolute_lexical_path
@@ -2485,7 +2486,7 @@ def test_state_write_append_and_read_refuse_hardlinked_targets(tmp_path):
 def test_state_read_refuses_fifo_instead_of_blocking(tmp_path):
     workspace = tmp_path / "ws"
     (workspace / ".brigade" / "skills" / "installs").mkdir(parents=True)
-    os.mkfifo(workspace / ".brigade" / "skills" / "installs" / "pipe.json")
+    make_fifo(workspace / ".brigade" / "skills" / "installs" / "pipe.json")
 
     with skills_cmd._held_state_root(workspace) as anchor:
         with pytest.raises(skills_cmd.SkillsStatePathError):
@@ -3457,7 +3458,7 @@ def test_install_refuses_fifo_receipt_and_history_without_blocking(tmp_path, cap
     previous_handler = signal.signal(signal.SIGALRM, _raise_alarm)
     try:
         (installs / "security-review-claude.json").unlink()
-        os.mkfifo(installs / "security-review-claude.json")
+        make_fifo(installs / "security-review-claude.json")
         signal.alarm(10)
         try:
             rc_receipt = skills_cmd.install(
@@ -3475,7 +3476,7 @@ def test_install_refuses_fifo_receipt_and_history_without_blocking(tmp_path, cap
         (installs / "security-review-claude.json").unlink()
         (installs / "security-review-claude.json").write_bytes(original_receipt)
         (installs / "history.jsonl").unlink(missing_ok=True)
-        os.mkfifo(installs / "history.jsonl")
+        make_fifo(installs / "history.jsonl")
         signal.alarm(10)
         try:
             rc_history = skills_cmd.install(

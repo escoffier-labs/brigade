@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import aboyeur
 from brigade import agents
 from brigade import cli
@@ -1742,7 +1743,7 @@ def test_lkg_and_high_water_reject_unsafe_files(tmp_path, monkeypatch):
         assert decision.exit_code == 1
         assert victim.read_text(encoding="utf-8") == "do not touch\n"
         lkg.unlink()
-        os.mkfifo(lkg)
+        make_fifo(lkg)
         decision = fleet_model_admission.fetch_versioned_roster()
         assert decision.ok is False
         assert decision.exit_code == 1

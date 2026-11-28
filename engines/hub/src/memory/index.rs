@@ -1430,6 +1430,88 @@ impl Publisher {
 }
 
 #[cfg(test)]
+mod dead_posting_tests {
+    use super::*;
+
+    fn card(id: &str, revision: i64, text: &str) -> Card {
+        Card {
+            scope: "fleet".into(),
+            card_id: id.into(),
+            revision,
+            content_hash: format!("hash-{id}-{revision}"),
+            trust: "agent-unreviewed".into(),
+            text: text.into(),
+            automated: false,
+        }
+    }
+
+    fn posting_ids(builder: &Builder, term: &str) -> Vec<String> {
+        builder
+            .snap
+            .segments
+            .iter()
+            .filter_map(|segment| segment.postings(term))
+            .flat_map(|(docs, _)| docs)
+            .map(|doc| builder.snap.docs.get(*doc).card_id.to_string())
+            .collect()
+    }
+
+    #[test]
+    fn merges_drop_superseded_postings_and_keep_live_postings() {
+        let mut builder = Builder::from_cards(Vec::<Card>::new(), 0);
+        builder.fan_in = 2;
+        builder.apply(
+            vec![Change::Live(card("revised", 1, "shared obsolete\n"))],
+            1,
+        );
+        builder.apply(
+            vec![Change::Live(card("survivor", 2, "shared survivor\n"))],
+            2,
+        );
+        builder.apply(
+            vec![Change::Live(card("revised", 3, "shared current\n"))],
+            3,
+        );
+        builder.apply(vec![Change::Live(card("new", 4, "shared new\n"))], 4);
+
+        assert_eq!(builder.snap.segments.len(), 2);
+        assert!(posting_ids(&builder, "obsolete").is_empty());
+        assert_eq!(posting_ids(&builder, "current"), ["revised"]);
+        assert_eq!(
+            posting_ids(&builder, "shared"),
+            ["survivor", "revised", "new"]
+        );
+    }
+
+    #[test]
+    fn deletion_between_merges_drops_the_deleted_posting() {
+        let mut builder = Builder::from_cards(Vec::<Card>::new(), 0);
+        builder.fan_in = 2;
+        builder.apply(
+            vec![Change::Live(card("deleted", 1, "shared withdrawn\n"))],
+            1,
+        );
+        builder.apply(vec![Change::Live(card("first", 2, "shared first\n"))], 2);
+        builder.apply(
+            vec![Change::Gone {
+                scope: "fleet".into(),
+                card_id: "deleted".into(),
+            }],
+            3,
+        );
+        builder.apply(vec![Change::Live(card("second", 4, "shared second\n"))], 4);
+        builder.apply(vec![Change::Live(card("third", 5, "shared third\n"))], 5);
+
+        assert_eq!(builder.snap.segments.len(), 2);
+        assert!(posting_ids(&builder, "withdrawn").is_empty());
+        assert_eq!(
+            posting_ids(&builder, "shared"),
+            ["first", "second", "third"]
+        );
+    }
+}
+
+#[cfg(test)]
 mod projection_tests {
     use super::*;
     fn card() -> Card {

@@ -86,7 +86,9 @@ deletes the subscription. Other `4xx` responses (except `408` and `429`),
 redirects and `413` are permanent for that event. Ten permanent failures in a row
 drop the subscription. A subscription receives at most 120 deliveries an hour;
 the rest wait. Subscriptions last at most seven days; `ttlMs` is clamped to
-between one minute and seven days, and `null` does not mean unlimited.
+between one minute and seven days, and `null` does not mean unlimited. A
+`claim.expired` event is not delivered when its lease lapsed before the
+subscription was created.
 
 ## Threat model
 

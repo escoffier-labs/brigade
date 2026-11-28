@@ -371,6 +371,8 @@ def _members(conn: sqlite3.Connection, key: str, spec: str) -> list[dict[str, An
     for repo, work_id, override, stored in _member_rows(conn, key):
         item = store._loaded_item(conn, str(work_id))
         held = _holder(conn, str(work_id))
+        next_action = held.get("next_action")
+        park_kind = next_action.get("kind") if isinstance(next_action, Mapping) else None
         rows.append(
             {
                 "repo": str(repo),
@@ -382,6 +384,9 @@ def _members(conn: sqlite3.Connection, key: str, spec: str) -> list[dict[str, An
                 "drifted": str(stored) != member_fingerprint(spec, str(override)),
                 "owner_node": held.get("owner_node"),
                 "ownership_state": held.get("state"),
+                "park_kind": park_kind
+                if park_kind in ("await-review", "await-checks", "await-merge", "blocked")
+                else None,
                 "brigade": _latest_link(conn, str(work_id), "brigade"),
                 "fleet_run": _latest_link(conn, str(work_id), "fleet-run"),
                 "github": _latest_link(conn, str(work_id), "github"),

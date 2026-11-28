@@ -138,7 +138,11 @@ def serve_get(request: Any, hub: HubContext, path: str, query: str) -> None:
             # they are reported against cannot straddle a concurrent write.
             conn.execute("BEGIN")
             try:
-                payload = fleet_hub_model_roster.seat_usage(conn)
+                try:
+                    payload = fleet_hub_model_roster.seat_usage(conn)
+                except FleetHubError as exc:
+                    request._send_json(400, {"error": str(exc)})
+                    return
             finally:
                 conn.rollback()
         elif path == "/preference":

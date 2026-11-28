@@ -1,0 +1,2 @@
+- Let task list, show, and wait inspect read-only run archives without locking or repairing a torn journal tail.
+- Task waits now refuse a stable torn journal tail after the existing read-error threshold, while changing or repaired tails reset that threshold.

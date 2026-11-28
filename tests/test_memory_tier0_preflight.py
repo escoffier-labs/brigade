@@ -4,6 +4,7 @@ import json
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import cli, memory_reflect
 from brigade import memory_proposal_v2_reflect as reflect_proposal
 from tests.test_memory_negative_outcomes import failed_card as failed_card
@@ -455,7 +456,7 @@ def test_preflight_no_follow_and_resource_bounds(tmp_path, kind):
             os.link(tmp_path / "other.json", path)
     elif kind == "fifo":
         path.unlink()
-        os.mkfifo(path)
+        make_fifo(path)
     elif kind == "parent":
         (tmp_path / "alias").symlink_to(".bia", target_is_directory=True)
         name = "alias/policy.json"
@@ -647,7 +648,7 @@ def test_preflight_unsafe_input_never_composes(tmp_path, monkeypatch, location, 
     elif kind == "hardlink":
         os.link(other, path)
     elif kind == "fifo":
-        os.mkfifo(path)
+        make_fifo(path)
     else:
         path.write_bytes(b"x" * (preflight.io.MAX_INPUT_BYTES + 1))
 

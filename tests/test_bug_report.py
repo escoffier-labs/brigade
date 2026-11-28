@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import cli
 
 
@@ -1113,7 +1114,7 @@ def test_selected_inputs_reject_links_fifos_and_swaps(report_env, monkeypatch, c
     if kind == "symlink":
         selected.symlink_to(victim)
     elif kind == "fifo":
-        os.mkfifo(selected)
+        make_fifo(selected)
     else:
         selected.write_text("expected log")
         original_read = os.read
@@ -1657,7 +1658,7 @@ def test_last_error_reader_rejects_unsafe_or_oversized_files(report_env, monkeyp
     elif kind == "fifo":
         if not hasattr(os, "mkfifo"):
             pytest.skip("FIFO creation requires POSIX")
-        os.mkfifo(path)
+        make_fifo(path)
         # A no-writer FIFO would hang the vulnerable reader, so fail on an
         # ordinary Path.open before that operation can block.
         original = Path.open

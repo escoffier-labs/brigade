@@ -486,6 +486,7 @@ def test_show_prints_summary_and_member_rows(monkeypatch, capsys):
                 "attempt_count": 1,
                 "drifted": True,
                 "owner_node": "node-a",
+                "park_kind": "await-review",
                 "brigade": {"display_ref": "task-9\x1b"},
                 "fleet_run": {"display_ref": "node-a/run-9\x1b"},
                 "github": {"display_ref": "acme/one#4", "external_state": "open"},
@@ -500,10 +501,12 @@ def test_show_prints_summary_and_member_rows(monkeypatch, capsys):
     assert "blocked 3," in lines[0] and "canceled 4," in lines[0] and "archived 5," in lines[0]
     assert (
         "acme/one  in_flight  running  attempts 1  owner node-a  task task-9  run node-a/run-9"
-        "  pr acme/one#4 (open)  drifted" in lines[1]
+        "  pr acme/one#4 (open)  park await-review  drifted" in lines[1]
     )
-    assert "owner -  task -  run -  pr -  in-spec" in lines[2]
+    assert "owner -  task -  run -  pr -  park -  in-spec" in lines[2]
     assert "\x1b" not in "".join(lines)
+    assert cli.main(["fleet", "campaign", "show", "camp-1", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["members"][0]["park_kind"] == "await-review"
 
 
 def test_show_failure_exits_nonzero(monkeypatch, capsys):

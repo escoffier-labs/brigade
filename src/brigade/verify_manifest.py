@@ -469,6 +469,31 @@ def registered_manifest_ids(target: Path, *, facts: verify_manifest_git.VerifyGi
     return sorted(ids)
 
 
+def unresolved_manifest_base(
+    target: Path, *, facts: verify_manifest_git.VerifyGitFacts | None = None
+) -> dict[str, str] | None:
+    """Describe an unresolved trusted base when workspace manifests exist locally."""
+    if facts is not None and facts.target != target:
+        raise ValueError("verify Git facts target does not match manifest target")
+    manifest_dir = target / "verify" / "manifests"
+    if not any(path.is_file() for path in manifest_dir.glob("*.json")):
+        return None
+    base = facts.base if facts is not None else verify_manifest_git.resolve_base(target)
+    if base.status == "resolved":
+        return None
+    if base.status == "unresolved_default_branch":
+        tried = "origin/HEAD, origin/main, and origin/master"
+        remediation = "run `git fetch origin <branch>` or `git remote set-head origin -a`"
+    else:
+        tried = f"HEAD and {base.reference}" if base.reference else "HEAD and the default branch"
+        remediation = "fetch the default branch and ensure it has a merge base with HEAD"
+    return {
+        "status": base.status,
+        "tried": tried,
+        "remediation": remediation,
+    }
+
+
 def _normalize_repo_path(path: str) -> str:
     normalized = path.replace("\\", "/")
     while normalized.startswith("./"):

@@ -913,6 +913,26 @@ def dispatch_reservation_request_id(seat: str, attempt: int) -> str:
     return f"dispatch:{seat}:{attempt}"
 
 
+def has_durable_dispatch_write(
+    events: Iterable[Any], *, seat: str, attempt: int, task_attempt: tuple[str, str | None] | None = None
+) -> bool:
+    """Return whether journal facts prove a request or task claim was written."""
+    for event in events:
+        event_type = _event_type(event)
+        payload = _event_payload(event)
+        if event_type == "run.dispatch.requested":
+            if payload.get("seat") == seat and payload.get("attempt") == attempt:
+                return True
+        elif event_type in {"task.launch-claimed", "task.native-claimed"} and task_attempt is not None:
+            if (
+                payload.get("task_id") == task_attempt[0]
+                and (task_attempt[1] is None or payload.get("attempt_id") == task_attempt[1])
+                and payload.get("dispatch_attempt") == attempt
+            ):
+                return True
+    return False
+
+
 def parse_dispatch_reservation_request_id(request_id: str) -> tuple[str, int] | None:
     """Return ``(seat, attempt)`` when ``request_id`` uses the stable dispatch form."""
     if not isinstance(request_id, str) or not request_id.startswith("dispatch:"):
@@ -1736,6 +1756,7 @@ class BudgetCoordinator:
         record_requested: Callable[[int], int | None],
         reclaim_pending: bool = True,
         task_attempt: tuple[str, str] | None = None,
+        durable_write_exists: Callable[[int], bool] | None = None,
     ) -> int | None:
         """Atomically allocate attempt, reserve, and durably record requested.
 
@@ -1748,8 +1769,11 @@ class BudgetCoordinator:
 
         With ``reclaim_pending=False``, always allocate and admit before calling
         the recorder, which must return exactly the supplied positive integer.
-        Callback failure or a mismatched binding retains the reservation because
-        a claim or request may already be durable. This option is not a durable
+        Callback failure retains the reservation when a claim or request may
+        already be durable. Callers that can inspect those facts may provide
+        ``durable_write_exists`` so a refusal that wrote neither releases the
+        reservation. A mismatched binding retains the reservation because the
+        callback returned after its writes. This option is not a durable
         fence: another identity can still be requested from this process-local
         coordinator. Production activation requires replay checks, immutable
         identity through admission and transport, and resume/retry guards.
@@ -1793,7 +1817,17 @@ class BudgetCoordinator:
             try:
                 recorded_attempt = record_requested(attempt)
             except Exception:
-                if reclaim_pending and not decision.replayed:
+                release = reclaim_pending
+                if not reclaim_pending and durable_write_exists is not None:
+                    try:
+                        release = not (
+                            self._has_durable_dispatch_requested(seat, attempt) or durable_write_exists(attempt)
+                        )
+                    except Exception:
+                        # An unreadable durability source is ambiguous, so keep
+                        # the unit rather than risk authorizing a second launch.
+                        release = False
+                if release and not decision.replayed:
                     self._unreserve_unlocked(request_id=request_id, units=1)
                 raise
             if not reclaim_pending and (

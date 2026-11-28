@@ -7,6 +7,7 @@ import os
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade.cli import main
 from brigade.context_preview import preview
 from tests._posix import requires_dirfd
@@ -309,7 +310,7 @@ def test_cap_exhausted_is_metadata_only_and_separate_advisory(tree):
 def test_nonregular_candidates_are_never_read(tree, kind):
     repo, cwd = tree
     if kind == "fifo":
-        os.mkfifo(cwd / "AGENTS.override.md")
+        make_fifo(cwd / "AGENTS.override.md")
     else:
         # Device symlink must be rejected, never opened or followed.
         (cwd / "AGENTS.override.md").symlink_to("/dev/null")

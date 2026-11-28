@@ -68,10 +68,12 @@ def _scoreability_notice(
         "reason": projection.reason,
         "attributed": projection.attributed,
         "registered_manifest_ids": [],
+        "manifest_base_unresolved": None,
         "remediation": None,
     }
     if not projection.eligible:
         notice["registered_manifest_ids"] = verify_manifest.registered_manifest_ids(target, facts=facts)
+        notice["manifest_base_unresolved"] = verify_manifest.unresolved_manifest_base(target, facts=facts)
         notice["remediation"] = _ADHOC_SCOREABILITY_REMEDIATION
     return notice
 
@@ -87,5 +89,7 @@ def _print_scoreability_notice(notice: dict[str, Any]) -> None:
     manifest_ids = notice.get("registered_manifest_ids")
     if isinstance(manifest_ids, list) and manifest_ids:
         print(f"  registered manifests: {', '.join(manifest_ids)}")
+    elif unresolved := notice.get("manifest_base_unresolved"):
+        print(f"  registered manifests: base unresolved; tried {unresolved['tried']}; {unresolved['remediation']}")
     else:
         print("  registered manifests: none tracked under verify/manifests/ in this target")

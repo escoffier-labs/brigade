@@ -24,8 +24,10 @@ nothing here writes it to disk. The caller's search log keeps the #2196 rules.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import time
+from contextlib import AbstractContextManager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -33,12 +35,14 @@ from typing import Any
 from . import memory_bm25
 from . import memory_hub_client as hubc
 from . import memory_hub_store as store
+from .inbox_lock import InboxLockTimeout
 
 RRF_K = 60
 WIDE = 200
 HUB_LIMIT_MAX = 20  # the hub's `search` limit
 _SOURCE_ORDER = {"hub": 0, "local": 1, "replica": 2}
 _HUBS_WITHOUT_SEARCH_SESSIONS: set[str] = set()
+_LOG = logging.getLogger(__name__)
 
 
 def enabled(target: Path) -> bool:
@@ -290,19 +294,35 @@ def _merge_scope_replies(replies: list[dict[str, Any]], limit: int) -> dict[str,
     return merged
 
 
-def _remember_refused(target: Path, scopes: tuple[str, ...], *, now: float) -> None:
+def _remember_refused(target: Path, scopes: tuple[str, ...], *, now: float, deadline: float | None = None) -> None:
     """Remember a refusal for a later search. A cache write never fails the search."""
     try:
-        store.remember_refused_scopes(target, scopes, now=now)
+        with _refused_state_lock(target, deadline=deadline):
+            store.remember_refused_scopes(target, scopes, now=now)
+    except InboxLockTimeout:
+        _LOG.debug("hub state lock timed out; skipped recording refused scopes")
     except OSError:
         pass
 
 
-def _forget_refused(target: Path, scopes: tuple[str, ...], *, now: float) -> None:
+def _forget_refused(target: Path, scopes: tuple[str, ...], *, now: float, deadline: float | None = None) -> None:
+    if not set(scopes).intersection(store.refused_scopes(target, now=now)):
+        return
     try:
-        store.forget_refused_scopes(target, scopes, now=now)
+        with _refused_state_lock(target, deadline=deadline):
+            store.forget_refused_scopes(target, scopes, now=now)
+    except InboxLockTimeout:
+        _LOG.debug("hub state lock timed out; skipped forgetting refused scopes")
     except OSError:
         pass
+
+
+def _refused_state_lock(target: Path, *, deadline: float | None = None) -> AbstractContextManager[None]:
+    """Keep optional cache writes inside a short slice of the search budget."""
+    wait = 0.1
+    if deadline is not None:
+        wait = min(wait, max(0.0, deadline - _monotonic()))
+    return store.locked(target, deadline_seconds=wait)
 
 
 def _search_readable_scopes(
@@ -338,10 +358,10 @@ def _search_readable_scopes(
         if not _missing_grant(exc):
             raise
         if len(send) == 1:
-            _remember_refused(target, send, now=now)
+            _remember_refused(target, send, now=now, deadline=deadline)
             return _ScopeSearch(None, tuple([*refused, *send]), remembered=tuple(refused))
     else:
-        _forget_refused(target, send, now=now)
+        _forget_refused(target, send, now=now, deadline=deadline)
         return _ScopeSearch(body, tuple(refused), remembered=tuple(refused))
     replies: list[dict[str, Any]] = []
     unprobed: list[str] = []
@@ -358,7 +378,7 @@ def _search_readable_scopes(
         except hubc.HubRefusal as exc:
             if not _missing_grant(exc):
                 raise
-            _remember_refused(target, (scope,), now=now)
+            _remember_refused(target, (scope,), now=now, deadline=deadline)
             refused.append(scope)
         except hubc.HubUnavailable as exc:
             if exc.reason != "timeout":

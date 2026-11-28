@@ -91,7 +91,7 @@ def claim(*, workspace: Path, run_id: str, task_id: str, orca_run: str, orca_tas
                 "intent_digest": intent_digest,
                 "admission": evidence.code,
                 "roster_digest": evidence.roster_digest,
-                "policy_digest": evidence.policy_digest,
+                **({"policy_digest": evidence.policy_digest} if evidence.policy_digest is not None else {}),
             },
             append=journal.append_fact,
             record_requested=journal.record_dispatch_requested,

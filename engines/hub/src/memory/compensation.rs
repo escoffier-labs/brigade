@@ -686,9 +686,9 @@ fn remember_stale_inputs(
     save_journal(tx, key, journal)
 }
 
-/// A suppressed outcome is not a completed stale verdict. Forget the cached
-/// fingerprint so the next poll re-runs the scan and can report the trip once
-/// the blocking referral is decided.
+/// Suppressed outcomes and retryable failures are not completed stale verdicts.
+/// Forget the cached fingerprint so the next poll re-runs the scan once a
+/// blocking referral is decided or a retry becomes possible.
 fn clear_stale_inputs(tx: &dyn WriteTx, key: &str, journal: &mut Json) -> rusqlite::Result<()> {
     let removed = journal
         .as_object_mut()
@@ -806,6 +806,7 @@ pub fn watch(
             .and_then(|r| serde_json::from_str::<Json>(&s(&r[0])).ok())
             .filter(Json::is_object)
             .unwrap_or_else(|| json!({}));
+        let mut polled_inputs = None;
         // A permanently stale watch still owes a later distinct trip, but the
         // scan it would repeat is the expensive part. Skip it while every input
         // it reads is identical to the last stale evaluation.
@@ -815,11 +816,26 @@ pub fn watch(
                 if inputs.as_deref() == Some(saved) {
                     continue;
                 }
+                polled_inputs = Some(inputs);
             }
         }
-        let Some(trip) = trigger(tx, &body, applied, p.now_ms, request, a, scanner)? else {
+        let trip = trigger(tx, &body, applied, p.now_ms, request, a, scanner)?;
+        // The trigger can consume retrieval rows. A fingerprint from before
+        // that cursor advance cannot describe the completed scan's inputs.
+        if polled_inputs.is_some()
+            && tx.query(
+                "SELECT value FROM memory_meta WHERE key=?1",
+                &[t(&cursor_key)],
+            )? != cursor
+        {
+            polled_inputs = None;
+        }
+        let Some(trip) = trip else {
             if journal["result"] == "stale" {
-                let inputs = watch_inputs(tx, &body, applied, p.now_ms, request, a, scanner)?;
+                let inputs = match polled_inputs.take() {
+                    Some(inputs) => inputs,
+                    None => watch_inputs(tx, &body, applied, p.now_ms, request, a, scanner)?,
+                };
                 remember_stale_inputs(tx, &journal_key, &mut journal, inputs)?;
             }
             continue;
@@ -832,7 +848,10 @@ pub fn watch(
             || journal["completed_trips"].get(&fingerprint).is_some()
         {
             if journal["result"] == "stale" {
-                let inputs = watch_inputs(tx, &body, applied, p.now_ms, request, a, scanner)?;
+                let inputs = match polled_inputs.take() {
+                    Some(inputs) => inputs,
+                    None => watch_inputs(tx, &body, applied, p.now_ms, request, a, scanner)?,
+                };
                 remember_stale_inputs(tx, &journal_key, &mut journal, inputs)?;
             }
             continue;
@@ -881,13 +900,17 @@ pub fn watch(
             journal["result"] = json!(journal_result);
             journal["completed_trips"][fingerprint] = json!(journal_result);
             let inputs = if journal_result == "stale" {
-                watch_inputs(tx, &body, applied, p.now_ms, request, a, scanner)?
+                match polled_inputs.take() {
+                    Some(inputs) => inputs,
+                    None => watch_inputs(tx, &body, applied, p.now_ms, request, a, scanner)?,
+                }
             } else {
                 None
             };
             set_stale_inputs(&mut journal, inputs);
             save_journal(tx, &journal_key, &journal)?;
         } else {
+            clear_stale_inputs(tx, &journal_key, &mut journal)?;
             // A refusal must leave both verifier and retrieval signals retryable.
             tx.execute("DELETE FROM memory_meta WHERE key=?1", &[t(&cursor_key)])?;
             if let Some(row) = cursor.first() {

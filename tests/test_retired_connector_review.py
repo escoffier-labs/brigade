@@ -5,6 +5,7 @@ import stat
 from pathlib import Path
 
 import pytest
+from tests._fifo import make_fifo
 from brigade import cli
 from brigade.dot import legacy_registry as grokbot_packs
 from brigade.dot import connector_registry as registry, lifecycle
@@ -259,7 +260,7 @@ def test_hostile_retained_instance_refuses_without_hanging(dot_private_dir, name
     if hostile == "fifo":
         if not hasattr(os, "mkfifo"):
             pytest.skip("no FIFO on this platform")
-        os.mkfifo(instance)
+        make_fifo(instance)
     elif hostile == "oversized":
         instance.write_text(json.dumps({"pad": "x" * 70_000}))
     else:

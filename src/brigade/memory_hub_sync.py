@@ -12,6 +12,7 @@ refuses an admin credential (`memory_hub_client.refuse_admin`).
 from __future__ import annotations
 
 import contextlib
+import logging
 import re
 import time
 from datetime import datetime, timezone
@@ -21,6 +22,8 @@ from typing import Any, Callable, Iterator
 from . import memory_hub_client as hubc
 from . import memory_hub_store as store
 from .inbox_lock import InboxLockTimeout
+
+_LOG = logging.getLogger(__name__)
 
 SPOOL_MAX_AGE_MS = 28 * 24 * 3600 * 1000
 CLOCK_SKEW_WARN_SECONDS = 60
@@ -203,8 +206,14 @@ def _forget_search_refusals(target: Path, readable: set[str]) -> None:
     """
     if not readable:
         return
+    now = time.time()
+    if not readable.intersection(store.refused_scopes(target, now=now)):
+        return
     try:
-        store.forget_refused_scopes(target, tuple(sorted(readable)), now=time.time())
+        with _state_lock(target):
+            store.forget_refused_scopes(target, tuple(sorted(readable)), now=time.time())
+    except InboxLockTimeout:
+        _LOG.debug("hub state lock timed out; skipped forgetting refused scopes")
     except OSError:
         pass
 
@@ -917,6 +926,7 @@ def _publishable(
             # Published under another log_epoch: the restored hub may not hold
             # this card, so the old base proves nothing. Adopt a current head
             # or send the card again; a base the hub rejects becomes a proposal.
+            card["published_in_other_epoch"] = True
             last = None
         if isinstance(last, dict) and last.get("content_hash") == card["content_hash"]:
             continue
@@ -965,7 +975,9 @@ def _replay_refusal(target: Path, entry: dict[str, Any], local: list[dict[str, A
     return "card-gone"
 
 
-def _record_published(target: Path, hub: str, entry: dict[str, Any], event: dict[str, Any], epoch: str) -> None:
+def _record_published(
+    target: Path, hub: str, entry: dict[str, Any], event: dict[str, Any], epoch: str, *, written: bool = True
+) -> None:
     """Read-modify-write of published.json. Callers hold `store.locked`."""
     state = store.published(target)
     cards = state.setdefault(hub, {}).setdefault(entry["scope"], {})
@@ -975,7 +987,7 @@ def _record_published(target: Path, hub: str, entry: dict[str, Any], event: dict
         "log_epoch": epoch,
         "path": entry.get("path"),
         # Adopted and rebased heads do not prove an acknowledged local write.
-        "written": True,
+        "written": written,
     }
     store.save_published(target, state)
 
@@ -993,6 +1005,7 @@ def _entry(scope: str, card: dict[str, Any], hub: str) -> dict[str, Any]:
         "origin": "interactive",
         "path": card["rel"],
         "derived_id": card.get("derived_id", False),
+        "published_in_other_epoch": card.get("published_in_other_epoch", False),
     }
     if base:
         entry["base_epoch"] = base.get("log_epoch")
@@ -1005,6 +1018,23 @@ def _request(entry: dict[str, Any]) -> dict[str, Any]:
     if entry.get("base_revision") is not None:
         body["base_epoch"] = entry.get("base_epoch")
     return body
+
+
+def _matching_live_head(client: hubc.MemoryHubClient, entry: dict[str, Any], head: dict[str, Any], epoch: str) -> bool:
+    """A matching conflict hash can still belong to a retired or superseded head."""
+    try:
+        body = client.call("card", scope=entry["scope"], card_id=entry["card_id"], offset=0)
+    except (hubc.HubConfigError, hubc.HubRefusal, hubc.HubUnavailable):
+        return False
+    card = hubc.obj(body.get("card"))
+    return (
+        body.get("log_epoch") == epoch
+        and card.get("scope") == entry["scope"]
+        and card.get("card_id") == entry["card_id"]
+        and card.get("state") == "live"
+        and card.get("revision") == head["revision"]
+        and card.get("content_hash") == head["content_hash"]
+    )
 
 
 class _Push:
@@ -1051,13 +1081,35 @@ class _Push:
                 self._spool(entry, spooled=spooled)
                 return
             reason = exc.code or f"http-{exc.status}"
+            current_revision = exc.body.get("current_revision")
+            current_hash = exc.body.get("current_hash")
+            sent_hash = hubc.content_hash(entry["text"])
+            if (
+                exc.code == "memory_base_mismatch"
+                and entry.get("published_in_other_epoch") is True
+                and isinstance(current_hash, str)
+                and current_hash == sent_hash
+                and isinstance(current_revision, int)
+                and not isinstance(current_revision, bool)
+                and current_revision > 0
+                and isinstance(self.epoch, str)
+                and bool(self.epoch)
+                and _matching_live_head(
+                    self.client, entry, {"revision": current_revision, "content_hash": current_hash}, self.epoch
+                )
+            ):
+                event = {"revision": current_revision, "content_hash": current_hash}
+                _record_published(self.target, self.client.identity, entry, event, self.epoch, written=False)
+                store.spool_remove(self.target, entry["hub"], entry["client_event_id"])
+                self.report["published"].append({"card_id": entry["card_id"], "revision": current_revision})
+                return
             # A new derived key must never replace a hub card that already
             # owns it. CAS is authoritative even without a readable replica.
             if (
                 entry.get("derived_id")
                 and entry.get("base_revision") is None
                 and exc.code == "memory_base_mismatch"
-                and exc.body.get("current_hash") != hubc.content_hash(entry["text"])
+                and current_hash != sent_hash
             ):
                 reason = "card-id-collision"
             if exc.code not in CONFLICT_CODES or reason == "card-id-collision":

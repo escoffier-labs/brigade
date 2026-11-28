@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -259,6 +260,8 @@ def test_successful_run_leaves_the_member_open_and_is_not_rerun(hub):
     assert item["status"] not in {"completed", "canceled", "archived"} and item["attempt_count"] == 0
     parked = Node(conn, "node-a").get_ownership(work_id)["ownership"]
     assert parked["next_action"]["kind"] == "await-review"
+    shown = Node(conn, "node-a").get_campaign(KEY)["members"]
+    assert next(member for member in shown if member["work_id"] == work_id)["park_kind"] == "await-review"
     assert parked["evidence_refs"][0]["ref"] == passes[0].run_id
     assert "brigade/dispatch/task-1" in parked["next_action"]["resume_condition"]
     # Every step left a Hub event, and the local receipt names the same steps.
@@ -514,7 +517,7 @@ def test_consume_json_exits_nonzero_when_a_pass_failed(tmp_path, monkeypatch, ca
     from brigade import cli, fleet_client
     from brigade.cli import fleet_campaign
 
-    monkeypatch.setattr(fleet_campaign, "_local_repos", lambda target: {"acme/one": tmp_path})
+    monkeypatch.setattr(fleet_campaign, "_local_repos", lambda target: ({"acme/one": tmp_path}, []))
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda target: "node-a")
     monkeypatch.setattr(
         consumer, "consume", lambda hub, **kw: [consumer.Pass("failed", "acme/one", "w-1", 1, "r-1", "boom")]
@@ -525,6 +528,64 @@ def test_consume_json_exits_nonzero_when_a_pass_failed(tmp_path, monkeypatch, ca
     assert (
         cli.main(["fleet", "campaign", "consume", KEY, "--target", str(tmp_path), "--worker", "coder", "--json"]) == 0
     )
+
+
+def test_consume_reports_unresolvable_repository_in_text_and_json(tmp_path, monkeypatch, capsys):
+    from brigade import cli, fleet_client
+
+    valid = tmp_path / "valid"
+    valid.mkdir()
+    subprocess.run(["git", "-C", str(valid), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(valid), "remote", "add", "origin", "https://github.com/acme/valid.git"], check=True
+    )
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "repos.toml").write_text(
+        '[[repo]]\nid="valid"\npath="valid"\n[[repo]]\nid="missing"\npath="missing"\n'
+    )
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda target: "node-a")
+    monkeypatch.setattr(consumer, "consume", lambda hub, **kw: [])
+
+    command = ["fleet", "campaign", "consume", KEY, "--target", str(tmp_path), "--worker", "coder"]
+    assert cli.main(command) == 0
+    assert capsys.readouterr().out.strip() == "dropped  missing  repository_identity_unresolved"
+    assert cli.main([*command, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "dropped": [{"identity": "missing", "reason": "repository_identity_unresolved"}],
+        "passes": [],
+    }
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_consume_reports_all_dropped_repositories_before_refusing(tmp_path, monkeypatch, capsys, json_output):
+    from brigade import cli
+
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "repos.toml").write_text(
+        '[[repo]]\nid="missing-one"\npath="missing-one"\n[[repo]]\nid="missing-two"\npath="missing-two"\n'
+    )
+
+    def unexpected_consume(*args, **kwargs):
+        pytest.fail("an empty repository selection must not reach the consumer")
+
+    monkeypatch.setattr(consumer, "consume", unexpected_consume)
+    command = ["fleet", "campaign", "consume", KEY, "--target", str(tmp_path), "--worker", "coder"]
+    assert cli.main([*command, *(["--json"] if json_output else [])]) == 2
+    captured = capsys.readouterr()
+    if json_output:
+        assert json.loads(captured.out) == {
+            "dropped": [
+                {"identity": identity, "reason": "repository_identity_unresolved"}
+                for identity in ("missing-one", "missing-two")
+            ],
+            "passes": [],
+        }
+        assert json.loads(captured.err) == {"error": "no_local_repositories"}
+    else:
+        assert captured.out.splitlines() == [
+            f"dropped  {identity}  repository_identity_unresolved" for identity in ("missing-one", "missing-two")
+        ]
+        assert captured.err == "error: no_local_repositories\n"
 
 
 def test_receipt_writer_appends_one_json_line_per_step(tmp_path):
@@ -556,6 +617,58 @@ def test_launch_local_runs_only_its_own_task_through_dispatch_apply(apply_target
     assert len(intents) == 1
 
 
+def _campaign_ledger_task(target, work_id="wl-retire"):
+    task_id, reason = consumer._local_task(target, "Campaign work", work_id, [])
+    assert task_id is not None and reason == ""
+    return task_id
+
+
+def _set_task_claim(target, task_id, actor):
+    with locking._task_ledger_lock(target):
+        task_ledger = locking._read_task_ledger(target)
+        task = next(row for row in task_ledger["tasks"] if row["id"] == task_id)
+        task["claim"] = {"claim_id": "claim-1", "actor": actor, "claimed_at": "2026-01-01T00:00:00+00:00"}
+        locking._write_task_ledger(target, task_ledger)
+
+
+def test_retire_cancels_an_unclaimed_pending_task(apply_target):  # noqa: F811
+    task_id = _campaign_ledger_task(apply_target)
+
+    assert consumer._retire_task(apply_target, task_id, "coder") is None
+    task = next(row for row in locking._read_task_ledger(apply_target)["tasks"] if row["id"] == task_id)
+    assert task["status"] == "cancelled"
+
+
+def test_retire_skips_a_pending_task_claimed_by_another_consumer(apply_target):  # noqa: F811
+    task_id = _campaign_ledger_task(apply_target)
+    _set_task_claim(apply_target, task_id, "reviewer")
+
+    assert consumer._retire_task(apply_target, task_id, "coder") == f"task {task_id} is claimed by reviewer"
+    task = next(row for row in locking._read_task_ledger(apply_target)["tasks"] if row["id"] == task_id)
+    assert task["status"] == "pending"
+
+
+def test_retire_cancels_a_pending_task_claimed_by_this_consumer(apply_target):  # noqa: F811
+    task_id = _campaign_ledger_task(apply_target)
+    _set_task_claim(apply_target, task_id, "coder")
+
+    assert consumer._retire_task(apply_target, task_id, "coder") is None
+    task = next(row for row in locking._read_task_ledger(apply_target)["tasks"] if row["id"] == task_id)
+    assert task["status"] == "cancelled"
+
+
+def test_reopening_a_campaign_task_clears_its_claim(apply_target):  # noqa: F811
+    task_id = _campaign_ledger_task(apply_target)
+    _set_task_claim(apply_target, task_id, "coder")
+    assert consumer._retire_task(apply_target, task_id, "coder") is None
+
+    reopened_id, reason = consumer._local_task(apply_target, "Campaign work", "wl-retire", [])
+
+    task = next(row for row in locking._read_task_ledger(apply_target)["tasks"] if row["id"] == task_id)
+    assert (reopened_id, reason, task["status"]) == (task_id, "", "pending")
+    assert "claim" not in task and "assignee" not in task
+
+
 def test_cli_refuses_without_local_repositories_before_touching_the_hub(tmp_path, capsys):
     from brigade import cli
 
@@ -574,8 +687,8 @@ def test_unreadable_holds_refuse_the_pass_instead_of_forgetting_holds(tmp_path, 
 
 
 def test_a_failing_task_cleanup_never_hides_the_run(tmp_path, monkeypatch):
-    def fail(repo_path, task_id):
+    def fail(repo_path, task_id, consumer_name):
         raise OSError("ledger lock timed out")
 
     monkeypatch.setattr(consumer, "_retire_task", fail)
-    consumer._retire_quietly(tmp_path, "task-1")
+    consumer._retire_quietly(tmp_path, "task-1", "coder")

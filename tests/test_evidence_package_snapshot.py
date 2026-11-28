@@ -13,6 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import attestation_input, evidence_package, localio
 from brigade.evidence_package_snapshot import PackageSnapshotError, snapshot_package
 
@@ -640,7 +641,7 @@ def test_package_children_must_be_the_listed_regular_files(tmp_path: Path) -> No
 
     directory = _write_package(tmp_path)
     (directory / "changes.patch").unlink()
-    os.mkfifo(directory / "changes.patch")
+    make_fifo(directory / "changes.patch")
     _assert_refused(directory, "unsafe")
 
 
