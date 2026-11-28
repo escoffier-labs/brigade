@@ -1,0 +1,1 @@
+- Retry memory compensation watches after retryable failures even when their inputs revert, and fingerprint changed poll inputs only once.

@@ -833,15 +833,19 @@ async fn compensation_stale_watch_is_final_after_one_attempt() {
 #[tokio::test]
 async fn compensation_stale_watch_skips_the_manifest_rescan_until_a_distinct_trip() {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    struct Counting(Arc<AtomicUsize>);
+    struct Counting {
+        scans: Arc<AtomicUsize>,
+        descriptions: Arc<AtomicUsize>,
+    }
     impl Scanner for Counting {
         fn scan(&self, _: &str) -> Scan {
-            self.0.fetch_add(1, Ordering::SeqCst);
+            self.scans.fetch_add(1, Ordering::SeqCst);
             Scan::Clean {
                 ruleset: "test-v7".into(),
             }
         }
         fn describe(&self) -> (bool, Option<String>) {
+            self.descriptions.fetch_add(1, Ordering::SeqCst);
             (true, Some("test-v7".into()))
         }
     }
@@ -858,8 +862,15 @@ async fn compensation_stale_watch_skips_the_manifest_rescan_until_a_distinct_tri
     )
     .await;
     let scans = Arc::new(AtomicUsize::new(0));
+    let descriptions = Arc::new(AtomicUsize::new(0));
     h.store.take();
-    h.open(Arc::new(Counting(scans.clone())), None);
+    h.open(
+        Arc::new(Counting {
+            scans: scans.clone(),
+            descriptions: descriptions.clone(),
+        }),
+        None,
+    );
     let first = watch(&h).await;
     assert_eq!(first.body["results"][0]["result"], "failed");
     assert!(
@@ -876,12 +887,76 @@ async fn compensation_stale_watch_skips_the_manifest_rescan_until_a_distinct_tri
     let one = verifier_signal(&h, AGENT_TOKEN, "negative-one", "active", true, "").await;
     let two = verifier_signal(&h, NODE_TOKEN, "negative-two", "active", true, "").await;
     scans.store(0, Ordering::SeqCst);
+    descriptions.store(0, Ordering::SeqCst);
     let later = watch_negative(&h, vec![one, two]).await;
     assert_eq!(later.body["results"][0]["rollback_of"], id, "{later:?}");
     assert_eq!(later.body["results"][0]["trigger"], "negative-outcome");
     assert!(
         scans.load(Ordering::SeqCst) > 0,
         "a distinct trip must re-scan the changed manifests"
+    );
+    assert_eq!(
+        descriptions.load(Ordering::SeqCst),
+        2,
+        "a changed poll must fingerprint its watch inputs once"
+    );
+}
+
+#[tokio::test]
+async fn compensation_retryable_failure_forgets_stale_inputs_after_an_input_reverts() {
+    let (h, id, _) = applied().await;
+    verifier_signal(&h, AGENT_TOKEN, "retry-one", "active", false, "").await;
+    verifier_signal(&h, NODE_TOKEN, "retry-two", "active", false, "").await;
+    let key = format!("compensation_watch:{}", id.as_str().unwrap());
+    {
+        let db = rusqlite::Connection::open(h.memory()).unwrap();
+        db.execute(
+            "INSERT INTO memory_meta(key,value) VALUES(?1,?2)",
+            rusqlite::params![
+                key,
+                json!({"result":"stale","stale_inputs":"before-change"}).to_string()
+            ],
+        )
+        .unwrap();
+    }
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"grant","principal":"agent:dot","scope":"changed-input","rights":["read"],"client_event_id":h.id()}),
+    )
+    .await;
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"auto_apply_switch","enabled":false,"client_event_id":h.id()}),
+    )
+    .await;
+    let failed = watch(&h).await;
+    assert_eq!(failed.body["results"][0]["result"], "failed", "{failed:?}");
+    let db = rusqlite::Connection::open(h.memory()).unwrap();
+    let journal: String = db
+        .query_row(
+            "SELECT value FROM memory_meta WHERE key=?1",
+            [&key],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(
+        serde_json::from_str::<Json>(&journal).unwrap()["stale_inputs"].is_null(),
+        "a retryable failure must forget the stale input fingerprint"
+    );
+    db.execute(
+        "DELETE FROM memory_grants WHERE principal='agent:dot' AND scope='changed-input'",
+        [],
+    )
+    .unwrap();
+    h.call(
+        ADMIN_TOKEN,
+        json!({"action":"auto_apply_switch","enabled":true,"client_event_id":h.id()}),
+    )
+    .await;
+    let retried = watch(&h).await;
+    assert_eq!(
+        retried.body["results"][0]["result"], "applied",
+        "{retried:?}"
     );
 }
 
