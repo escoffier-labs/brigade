@@ -2,7 +2,7 @@
  "parity_version": 1,
  "profiles": {
   "defaults": {
-   "digest": "571305a30463dede5c412185d1a62f7bd2c44fe91fb06c4e6cc70ae91a5c52d7",
+   "digest": "ce056e26ee01b856a30964389b87aa3d4053c141654ea123a0ce0ddb13a73c21",
    "tables": {
     "action_broker_grants": {
      "columns": [
@@ -489,11 +489,13 @@
       "credential_state",
       "load",
       "machine",
+      "memory_pressure",
       "node_id",
       "observed_at",
       "observed_id",
       "running",
       "status",
+      "swap_pressure",
       "ttl_seconds",
       "updated_at",
       "usable_seats"
@@ -1804,7 +1806,7 @@
    }
   },
   "migrated-v22": {
-   "digest": "4b39ba89535078cdaf6a80248888031883e8ba064dc464438cd7055434755658",
+   "digest": "c3a97eb97262ea24ad473a6e4ffaf25fbeb021c90d310a19394a5657110720ad",
    "tables": {
     "action_broker_grants": {
      "columns": [
@@ -2291,11 +2293,13 @@
       "credential_state",
       "load",
       "machine",
+      "memory_pressure",
       "node_id",
       "observed_at",
       "observed_id",
       "running",
       "status",
+      "swap_pressure",
       "ttl_seconds",
       "updated_at",
       "usable_seats"
@@ -3606,7 +3610,7 @@
    }
   },
   "migrated-v34": {
-   "digest": "4b39ba89535078cdaf6a80248888031883e8ba064dc464438cd7055434755658",
+   "digest": "c3a97eb97262ea24ad473a6e4ffaf25fbeb021c90d310a19394a5657110720ad",
    "tables": {
     "action_broker_grants": {
      "columns": [
@@ -4093,11 +4097,13 @@
       "credential_state",
       "load",
       "machine",
+      "memory_pressure",
       "node_id",
       "observed_at",
       "observed_id",
       "running",
       "status",
+      "swap_pressure",
       "ttl_seconds",
       "updated_at",
       "usable_seats"
@@ -5408,7 +5414,7 @@
    }
   },
   "outbox": {
-   "digest": "160814b354216963e875b18371595f521c11001634a569275883f8e59e029df6",
+   "digest": "011b42d50afc0563f9fb18acd039cf13d95ccd6af8640a3d07d1a84f150b247c",
    "tables": {
     "action_broker_grants": {
      "columns": [
@@ -5950,11 +5956,13 @@
       "credential_state",
       "load",
       "machine",
+      "memory_pressure",
       "node_id",
       "observed_at",
       "observed_id",
       "running",
       "status",
+      "swap_pressure",
       "ttl_seconds",
       "updated_at",
       "usable_seats"

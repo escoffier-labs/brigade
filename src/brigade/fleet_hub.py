@@ -109,6 +109,7 @@ from . import (
     fleet_hub_events,
     fleet_hub_messages,
     fleet_hub_preference,
+    fleet_hub_schema_repair,
     fleet_hub_sealed,
     worklore_campaigns,
     worklore_store,
@@ -264,6 +265,15 @@ CREATE TABLE IF NOT EXISTS claims (
     lock_run_dir TEXT
 );
 """
+_TELEMETRY_ADDITIVE_COLUMNS = (
+    (
+        "fleet_machine_telemetry",
+        "memory_pressure",
+        "ALTER TABLE fleet_machine_telemetry ADD COLUMN memory_pressure REAL",
+    ),
+    ("fleet_machine_telemetry", "swap_pressure", "ALTER TABLE fleet_machine_telemetry ADD COLUMN swap_pressure REAL"),
+)
+
 _CLAIMS_ADDITIVE_COLUMNS = (
     "harness",
     "role",
@@ -277,6 +287,7 @@ _EVENTS_ADDITIVE_COLUMNS = ("exit_status", "capability_fingerprint", "repo_ident
 # Independently developed migrations can reserve the same schema version.
 # Register nullable additions here so current-version databases self-heal too.
 _ADDITIVE_COLUMNS = (
+    *_TELEMETRY_ADDITIVE_COLUMNS,
     (
         "interactive_sessions",
         "provider_link_json",
@@ -302,45 +313,7 @@ _ADDITIVE_INDEXES = (
 
 
 def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:
-    from . import fleet_hub_paging
-
-    # Order matters: an events table first (a hub at the current schema version may predate one added later on
-    # the events branch), then the ALTERs that need their table, then indexes that need their columns.
-    existing = {(kind, name) for kind, name in conn.execute("SELECT type, name FROM sqlite_master")}
-    absent = [(kind, ddl) for kind, name, ddl in fleet_hub_events.SCHEMA_OBJECTS if (kind, name) not in existing]
-    missing = [ddl for kind, ddl in absent if kind == "table"]
-    created = {
-        name for kind, name, _ddl in fleet_hub_events.SCHEMA_OBJECTS if kind == "table" and (kind, name) not in existing
-    }
-    missing.extend(
-        ddl
-        for table, column, ddl in _ADDITIVE_COLUMNS
-        if table not in created and column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-    )
-    missing.extend(fleet_hub_messages.missing_reply_backfills(conn))
-    missing.extend(ddl for kind, ddl in absent if kind == "index")
-    # Index repair shares the current-version self-heal transaction and its
-    # read-only fast path. Claim fencing tables retain their strict validation.
-    missing.extend(
-        ddl
-        for name, ddl in _ADDITIVE_INDEXES
-        if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?", (name,)).fetchone() is None
-    )
-    if ("index", "fleet_messages_sealed_acked") not in existing:
-        missing.append(
-            "CREATE INDEX IF NOT EXISTS fleet_messages_sealed_acked ON fleet_messages (acked_at,id) WHERE content_state='sealed'"
-        )
-    from . import fleet_hub_questions
-
-    missing.extend(fleet_hub_questions.missing_schema(conn))
-    from . import fleet_hub_identity, fleet_hub_message_keys
-
-    return (
-        missing
-        + fleet_hub_paging.missing_schema(conn)
-        + fleet_hub_message_keys.missing_schema(conn)
-        + fleet_hub_identity.missing_schema(conn)
-    )
+    return fleet_hub_schema_repair.missing_additive_schema(conn, _ADDITIVE_COLUMNS, _ADDITIVE_INDEXES)
 
 
 # Per-node credentials (schema v4, issue #1150): node_id -> SHA-256 of the
@@ -701,6 +674,8 @@ def _apply_schema(
     from . import fleet_hub_routing
 
     fleet_hub_routing.ensure_schema(conn)
+    for ddl in fleet_hub_schema_repair.missing_column_ddl(conn, _TELEMETRY_ADDITIVE_COLUMNS):
+        conn.execute(ddl)
     from . import fleet_policy_delegation
 
     fleet_policy_delegation.ensure_schema(conn)

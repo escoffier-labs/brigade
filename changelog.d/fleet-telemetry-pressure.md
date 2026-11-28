@@ -1,0 +1,1 @@
+- The Linux fleet publisher's `load` now means CPU utilization sampled over about one second, with I/O wait counted as idle. I/O-bound hosts no longer appear CPU-saturated from load average alone. Placement also uses available memory pressure and considers swap pressure when memory pressure reaches 80%.

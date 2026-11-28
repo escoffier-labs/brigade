@@ -1,0 +1,249 @@
+#!/usr/bin/env python3
+"""Publish one fleet machine telemetry snapshot to the Brigade hub.
+
+Run by a timer on every enrolled machine. Reports only what this host can
+prove: its own load, and the seats whose Brigade CLI binding is actually
+installed here and whose policy entry lists this machine. A hub that cannot
+be reached is not an error worth waking anyone for; the snapshot simply
+expires and the machine goes unknown, which is the honest state.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+from datetime import datetime, timezone
+from pathlib import Path
+
+TTL_SECONDS = 300
+CPU_BUSY = 0.95  # Leave a small CPU margin for new work.
+MEMORY_BUSY = 0.90  # Keep at least a tenth of RAM available for new work.
+SWAP_BUSY = 0.50  # Half-used swap matters when RAM headroom is also low.
+SWAP_MEMORY_FLOOR = 0.80  # Ignore lingering swap use when enough RAM is available.
+BRIGADE = os.environ.get("BRIGADE_BIN") or shutil.which("brigade") or "brigade"
+
+
+def _run(args: list[str], timeout: float = 60.0) -> str:
+    result = subprocess.run(
+        [BRIGADE, *args], capture_output=True, text=True, timeout=timeout, check=False
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"brigade {' '.join(args)} exited {result.returncode}: {result.stderr.strip()[:200]}")
+    return result.stdout
+
+
+def _node_id() -> str:
+    from brigade import fleet_client  # provided by the venv running this script
+
+    return str(fleet_client.resolve_node_id())
+
+
+def _executable_for(cli_ref: str) -> str:
+    from brigade import agents
+
+    return agents.command_for(cli_ref)
+
+
+def _load() -> float:
+    try:
+        one = os.getloadavg()[0]
+    except (OSError, AttributeError):
+        return 0.0
+    return round(min(one / (os.cpu_count() or 1), 1.0), 3)
+
+
+def _cpu_ticks(path: Path) -> tuple[int, int]:
+    with path.open(encoding="ascii") as stream:
+        fields = stream.readline().split()
+    if len(fields) < 9 or fields[0] != "cpu":
+        raise ValueError("missing aggregate CPU counters")
+    # Guest counters are included in user and nice. Steal counts as busy.
+    ticks = [int(value) for value in fields[1:9]]
+    return sum(ticks), ticks[3] + ticks[4]
+
+
+def _cpu_util(path: Path) -> float | None:
+    try:
+        total_before, idle_before = _cpu_ticks(path)
+        time.sleep(1)
+        total_after, idle_after = _cpu_ticks(path)
+        total = total_after - total_before
+        idle = idle_after - idle_before
+        if total <= 0:
+            return None
+        return round(min(1.0, max(0.0, (total - idle) / total)), 3)
+    except (OSError, ValueError, OverflowError):
+        return None
+
+
+def _swap_pressure(text: str) -> float | None:
+    fields = {}
+    for line in text.splitlines():
+        key, _, value = line.partition(":")
+        if key in {"SwapTotal", "SwapFree"}:
+            parts = value.split()
+            try:
+                fields[key] = int(parts[0]) if parts else None
+            except ValueError:
+                fields[key] = None
+    total = fields.get("SwapTotal")
+    free = fields.get("SwapFree")
+    if total == 0:
+        return 0.0
+    if total is None or total < 0 or free is None or free < 0:
+        return None
+    return max(0, total - free) / total
+
+
+def _memory_and_swap(path: Path) -> tuple[float | None, float | None]:
+    from brigade.fleet_node_memory import parse_meminfo
+
+    try:
+        text = path.read_text(encoding="ascii", errors="replace")
+    except OSError:
+        return None, None
+    try:
+        memory = parse_meminfo(text)
+    except OverflowError:
+        memory = None
+    return memory, _swap_pressure(text)
+
+
+def _load_fields(proc: Path) -> dict[str, object]:
+    stat, meminfo = proc / "stat", proc / "meminfo"
+    if not stat.exists() and not meminfo.exists():
+        load = _load()
+        return {"load": load, "status": "busy" if load >= CPU_BUSY else "available"}
+
+    cpu = _cpu_util(stat)
+    memory, swap = _memory_and_swap(meminfo)
+    load = _load() if cpu is None else cpu
+    reasons = []
+    fields: dict[str, object] = {"load": load}
+    if cpu is not None:
+        fields["cpu_util"] = cpu
+    if load >= CPU_BUSY:
+        reasons.append("load" if cpu is None else "cpu_util")
+    if memory is not None:
+        fields["memory_pressure"] = memory
+        if memory >= MEMORY_BUSY:
+            reasons.append("memory_pressure")
+    if swap is not None:
+        fields["swap_pressure"] = swap
+        if swap >= SWAP_BUSY and memory is not None and memory >= SWAP_MEMORY_FLOOR:
+            reasons.append("swap_pressure")
+    fields["status"] = "busy" if reasons else "available"
+    fields["busy_reasons"] = reasons  # Informational only. The Hub does not store this list.
+    return fields
+
+
+def _t3_agent_command() -> list[str] | None:
+    """The local t3-fleet target agent, if this host runs one."""
+    override = os.environ.get("T3_FLEET_AGENT")
+    if override:
+        return [override]
+    # Prefer the deployed runtime over anything else on PATH: Windows hosts can
+    # carry an older user-site t3-fleet-agent without the observe action.
+    python = os.path.join(os.environ.get("LOCALAPPDATA", ""), "T3Fleet", "venv", "Scripts", "python.exe")
+    if os.name == "nt" and os.path.isfile(python):
+        return [python, "-m", "t3_fleet.agent"]
+    found = shutil.which(
+        os.path.expanduser("~/.local/share/t3-fleet/venv/bin/t3-fleet-agent")
+    ) or shutil.which("t3-fleet-agent")
+    return [found] if found else None
+
+
+def _observe_t3() -> None:
+    """Publish T3 thread lifecycle to the hub through the target agent.
+
+    The agent reports with this host's own node identity. Failures are logged
+    and never block the telemetry snapshot.
+    """
+    command = _t3_agent_command()
+    if command is None:
+        return
+    env = dict(os.environ)
+    brigade_dir = os.path.dirname(shutil.which(BRIGADE) or "")
+    if brigade_dir:
+        env["PATH"] = brigade_dir + os.pathsep + env.get("PATH", "")
+    try:
+        result = subprocess.run(
+            [*command, "observe", "--max", "20"],
+            capture_output=True, text=True, timeout=90, check=False, env=env,
+            stdin=subprocess.DEVNULL,
+        )
+        summary = json.loads(result.stdout) if result.stdout.strip() else {}
+        print(f"t3 observe: exit={result.returncode} examined={summary.get('examined')} truncated={summary.get('truncated')}")
+    except Exception as error:  # noqa: BLE001 - observation is best effort
+        print(f"t3 observe: skipped ({type(error).__name__})", file=sys.stderr)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dry-run", action="store_true", help="Print the telemetry body without publishing")
+    args = parser.parse_args(argv)
+    if not args.dry_run:
+        _observe_t3()
+    node_id = _node_id()
+    document = json.loads(_run(["fleet", "policy", "show", "--json"]))
+    document = document.get("document", document)
+
+    machine = next(
+        (name for name, body in (document.get("machines") or {}).items() if body.get("node_id") == node_id),
+        None,
+    )
+    if machine is None:
+        print(f"telemetry: this node ({node_id}) is not named in the policy document; nothing to publish")
+        return 0
+
+    usable = []
+    for name, seat in sorted((document.get("seats") or {}).items()):
+        if not seat.get("enabled"):
+            continue
+        if machine not in (seat.get("eligible_machines") or []):
+            continue
+        cli_ref = ((seat.get("bindings") or {}).get("brigade") or {}).get("cli")
+        if not cli_ref:
+            continue
+        if shutil.which(_executable_for(str(cli_ref))):
+            usable.append(name)
+
+    load_fields = _load_fields(Path("/proc"))
+    body = {
+        "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        "ttl_seconds": TTL_SECONDS,
+        **load_fields,
+        "running": {"session_ids": [], "run_ids": []},
+        "active_claims": [],
+        "usable_seats": usable,
+        "credential_state": "ok",
+    }
+
+    if args.dry_run:
+        print(json.dumps(body))
+        return 0
+
+    handle = tempfile.NamedTemporaryFile("w", suffix=".json", delete=False, encoding="utf-8")
+    try:
+        json.dump(body, handle)
+        handle.close()
+        _run(["fleet", "policy", "observe", "--file", handle.name])
+    finally:
+        os.unlink(handle.name)
+
+    print(f"telemetry: {machine} status={body['status']} load={body['load']} seats={len(usable)}")
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except Exception as error:  # noqa: BLE001 - a timer must not spam failures
+        print(f"telemetry: skipped ({type(error).__name__}: {error})", file=sys.stderr)
+        sys.exit(0)

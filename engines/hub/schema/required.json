@@ -4810,7 +4810,9 @@
         "usable_seats",
         "credential_state",
         "observed_id",
-        "updated_at"
+        "updated_at",
+        "memory_pressure",
+        "swap_pressure"
       ],
       "columns": [
         [
@@ -4840,6 +4842,14 @@
         [
           "machine",
           "TEXT",
+          0,
+          null,
+          0,
+          0
+        ],
+        [
+          "memory_pressure",
+          "REAL",
           0,
           null,
           0,
@@ -4881,6 +4891,14 @@
           "status",
           "TEXT",
           1,
+          null,
+          0,
+          0
+        ],
+        [
+          "swap_pressure",
+          "REAL",
+          0,
           null,
           0,
           0
@@ -4935,7 +4953,7 @@
           "unique": 1
         }
       },
-      "sql": "CREATE TABLE fleet_machine_telemetry (node_id TEXT NOT NULL PRIMARY KEY, machine TEXT, observed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, status TEXT NOT NULL, load REAL, running TEXT NOT NULL, active_claims TEXT NOT NULL, usable_seats TEXT NOT NULL, credential_state TEXT NOT NULL, observed_id TEXT NOT NULL, updated_at TEXT NOT NULL)"
+      "sql": "CREATE TABLE fleet_machine_telemetry (node_id TEXT NOT NULL PRIMARY KEY, machine TEXT, observed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, status TEXT NOT NULL, load REAL, running TEXT NOT NULL, active_claims TEXT NOT NULL, usable_seats TEXT NOT NULL, credential_state TEXT NOT NULL, observed_id TEXT NOT NULL, updated_at TEXT NOT NULL, memory_pressure REAL, swap_pressure REAL)"
     },
     "fleet_mesh_statements": {
       "autoincrement": false,
@@ -18631,6 +18649,166 @@
       }
     ],
     "fleet_machine_telemetry": [
+      {
+        "autoincrement": false,
+        "checks": [],
+        "column_order": [
+          "node_id",
+          "machine",
+          "observed_at",
+          "ttl_seconds",
+          "status",
+          "load",
+          "running",
+          "active_claims",
+          "usable_seats",
+          "credential_state",
+          "observed_id",
+          "updated_at",
+          "memory_pressure",
+          "swap_pressure"
+        ],
+        "columns": [
+          [
+            "active_claims",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "credential_state",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "load",
+            "REAL",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "machine",
+            "TEXT",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "memory_pressure",
+            "REAL",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "node_id",
+            "TEXT",
+            1,
+            null,
+            1,
+            0
+          ],
+          [
+            "observed_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "observed_id",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "running",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "status",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "swap_pressure",
+            "REAL",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "ttl_seconds",
+            "INTEGER",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "updated_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "usable_seats",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "sqlite_autoindex_fleet_machine_telemetry_1": {
+            "columns": [
+              [
+                0,
+                "node_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        },
+        "sql": "CREATE TABLE fleet_machine_telemetry (node_id TEXT NOT NULL PRIMARY KEY, machine TEXT, observed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, status TEXT NOT NULL, load REAL, running TEXT NOT NULL, active_claims TEXT NOT NULL, usable_seats TEXT NOT NULL, credential_state TEXT NOT NULL, observed_id TEXT NOT NULL, updated_at TEXT NOT NULL, memory_pressure REAL, swap_pressure REAL)"
+      },
       {
         "autoincrement": false,
         "checks": [],

@@ -27,6 +27,7 @@ from .fleet_hub_sessions import count_live_by_node, count_standalone_by_node
 
 PLACEMENT_SCHEMA = "brigade.fleet_placement.v1"
 DEFAULT_THRESHOLD = 0.70
+SWAP_MEMORY_FLOOR = 0.80  # Match the telemetry publisher’s gate for swap pressure.
 ADVICE_TTL_SECONDS = 120
 TRUST = "node-reported telemetry and inventory; advisory only, never admission"
 # Placement is about a repository, not a consumer, so it resolves seats from policy defaults and the
@@ -259,6 +260,8 @@ def _place(
             reasons.append("repo-machine-not-eligible")
         expiry = _telemetry_expiry(telemetry, routing)
         cpu = None if telemetry is None else telemetry.get("load")
+        memory_pressure = None if telemetry is None else telemetry.get("memory_pressure")
+        swap_pressure = None if telemetry is None else telemetry.get("swap_pressure")
         capacity = int(machine.get("concurrency") or 0)
         node = str(machine.get("node_id"))
         # A node with no health row at all is its own reason, so an operator can tell a node that has
@@ -282,13 +285,17 @@ def _place(
         fresh = expiry is not None and now < expiry
         effective = None
         if fresh and cpu is not None and session_ratio is not None:
-            effective = max(float(cpu), session_ratio, 0.0 if memory is None else memory)
+            effective = max(float(cpu), session_ratio, memory or 0.0, memory_pressure or 0.0)
+            if swap_pressure is not None and memory_pressure is not None and memory_pressure >= SWAP_MEMORY_FLOOR:
+                effective = max(effective, swap_pressure)
         loads[name] = {
             "effective_load": None if effective is None else round(effective, 4),
             "load_inputs": {
                 "cpu": cpu,
                 "sessions": sessions,
                 "memory": memory,
+                "memory_pressure": memory_pressure,
+                "swap_pressure": swap_pressure,
                 "concurrency": capacity,
                 "agent_sessions": agent_sessions,
                 "agent_session_weight": weight,
@@ -333,18 +340,24 @@ def _place(
                 reasons = list(dict.fromkeys("not-placeable" if r in _INVENTORY_REASONS else r for r in reasons))
             if len(usable.get(name, [])) > 1 and name in (origin, chosen):
                 reasons.append("multiple-projects")  # informational: never changes ``eligible``
-            if name in loads and loads[name]["load_inputs"]["memory"] is None:
+            inputs = (loads.get(name) or {}).get("load_inputs", {})
+            if name in loads and inputs["memory"] is None and inputs["memory_pressure"] is None:
                 reasons.append("memory-unknown")  # informational: never changes ``eligible``
+            candidate_inputs = {
+                "agent_sessions": inputs.get("agent_sessions", 0),
+                "agent_session_weight": weight,
+            }
+            if name == origin:
+                candidate_inputs.update(
+                    memory_pressure=inputs.get("memory_pressure"), swap_pressure=inputs.get("swap_pressure")
+                )
             result.append(
                 {
                     "machine": name,
                     "eligible": row["eligible"],
                     "effective_load": (loads.get(name) or {}).get("effective_load"),
                     "reasons": reasons,
-                    "load_inputs": {
-                        "agent_sessions": (loads.get(name) or {}).get("load_inputs", {}).get("agent_sessions", 0),
-                        "agent_session_weight": weight,
-                    },
+                    "load_inputs": candidate_inputs,
                 }
             )
         return result

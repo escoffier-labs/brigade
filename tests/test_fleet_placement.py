@@ -170,6 +170,8 @@ def test_origin_under_threshold_stays_local(fleet):
         "cpu": 0.1,
         "sessions": 0,
         "memory": None,
+        "memory_pressure": None,
+        "swap_pressure": None,
         "concurrency": 1,
         "agent_sessions": 0,
         "agent_session_weight": 0.0,
@@ -277,6 +279,23 @@ def test_effective_load_is_the_max_of_cpu_and_session_ratio(fleet):
     _session(fleet, NODE_CLOUD, "live-session-one")
     cloud = next(row for row in _place(fleet)["candidates"] if row["machine"] == "worker-cloud-1")
     assert cloud["effective_load"] == 0.6
+
+
+@pytest.mark.parametrize(("memory_pressure", "effective"), [(None, 0.1), (0.69, 0.69), (0.80, 0.95)])
+def test_publisher_swap_counts_only_with_high_memory_pressure(fleet, memory_pressure, effective):
+    stamp = _iso(_now() + timedelta(seconds=1))
+    _observe(fleet, NODE_LINUX, load=0.1, observed_at=stamp, memory_pressure=memory_pressure, swap_pressure=0.95)
+    _observe(fleet, NODE_LINUX_2, load=0.2, observed_at=stamp, memory_pressure=0.4, swap_pressure=0.9)
+    result = _place(fleet)
+    origin = next(row for row in result["candidates"] if row["machine"] == "worker-linux-1")
+    peer = next(row for row in result["candidates"] if row["machine"] == "worker-linux-2")
+    assert origin["effective_load"] == effective
+    assert origin["load_inputs"]["memory_pressure"] == memory_pressure
+    assert origin["load_inputs"]["swap_pressure"] == 0.95
+    assert ("memory-unknown" in origin["reasons"]) == (memory_pressure is None)
+    assert ("machine-load-shed" in origin["reasons"]) == (effective >= 0.70)
+    assert peer["effective_load"] == 0.4
+    assert "memory_pressure" not in peer["load_inputs"] and "swap_pressure" not in peer["load_inputs"]
 
 
 def test_ranking_among_peers_uses_existing_rank_then_lower_load(fleet):

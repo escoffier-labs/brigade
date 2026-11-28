@@ -198,9 +198,13 @@ def discover_schema_helpers(conn: sqlite3.Connection) -> None:
             for name in helpers:
                 getattr(module, name)(conn)
         elif re.search(r"CREATE\s+(?:TABLE|INDEX|TRIGGER)\b", source, re.I):
-            assert path.stem in {"fleet_hub", "fleet_hub_claims", "fleet_ci_node", "fleet_export"}, (
-                f"unclassified schema owner: {path.name}"
-            )
+            assert path.stem in {
+                "fleet_hub",
+                "fleet_hub_claims",
+                "fleet_hub_schema_repair",  # Run through fleet_hub.init_db.
+                "fleet_ci_node",
+                "fleet_export",
+            }, f"unclassified schema owner: {path.name}"
     conn.commit()
 
 
@@ -283,6 +287,15 @@ def databases(directory: Path):
             yield name, conn
         finally:
             conn.close()
+    # Both shapes use schema 51. Rust must accept the legacy table before Python repairs it.
+    path = directory / "telemetry-before-pressure.db"
+    with closing(fleet_hub.init_db(path)) as conn:
+        conn.execute("ALTER TABLE fleet_machine_telemetry DROP COLUMN swap_pressure")
+        conn.execute("ALTER TABLE fleet_machine_telemetry DROP COLUMN memory_pressure")
+        conn.commit()
+        yield "telemetry-before-pressure", conn
+    with closing(fleet_hub.init_db(path)) as conn:
+        yield "telemetry-after-pressure", conn
     # Existing regression builders remove additive columns from a current DB.
     # Replay their complete old-table shapes, rather than accepting column-wise unions.
     drops = {
