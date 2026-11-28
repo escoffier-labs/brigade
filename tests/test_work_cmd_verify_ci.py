@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -247,6 +248,74 @@ def test_ci_records_unknown(checkout, monkeypatch, capsys, case, reason):
     assert reason in payload["reason"]
     assert "private diagnostic" not in out
     assert json.loads(_record(target, head).read_text()) == payload
+
+
+def test_ci_advises_how_to_rename_existing_remote(checkout, capsys):
+    target, _, _ = checkout
+    _git(target, "remote", "rename", "origin", "upstream")
+
+    assert _ci(target) == 2
+    reason = json.loads(capsys.readouterr().out)["reason"]
+    assert "Existing remotes: upstream" in reason
+    assert "git remote rename upstream origin" in reason
+    command = shlex.split(reason.partition("with: ")[2])
+    subprocess.run(command, cwd=target, check=True)
+    assert _git(target, "remote") == "origin"
+
+
+def test_ci_advises_how_to_add_origin_when_no_remotes_exist(checkout, capsys):
+    target, _, _ = checkout
+    _git(target, "remote", "remove", "origin")
+
+    assert _ci(target) == 2
+    reason = json.loads(capsys.readouterr().out)["reason"]
+    assert "Add one with: git remote add origin" in reason
+
+
+@pytest.mark.parametrize("has_origin", [False, True])
+def test_ci_advises_using_first_github_remote(checkout, capsys, has_origin):
+    target, _, _ = checkout
+    url = f"https://{_GITHUB_HOST}/example-org/example-repo.git"
+    _git(target, "remote", "rename", "origin", "upstream")
+    first = "origin" if has_origin else "archive"
+    _git(target, "remote", "add", first, "https://example.invalid/example-org/example-repo.git")
+    assert _git(target, "remote").splitlines() == [first, "upstream"]
+
+    assert _ci(target) == 2
+    reason = json.loads(capsys.readouterr().out)["reason"]
+    advice = (
+        f"Point origin at GitHub with: git remote set-url origin {url}"
+        if has_origin
+        else "Rename upstream to origin with: git remote rename upstream origin"
+    )
+    assert reason == f"No GitHub origin remote was found. Existing remotes: {first}, upstream. {advice}"
+    subprocess.run(shlex.split(reason.partition("with: ")[2]), cwd=target, check=True)
+    assert _git(target, "remote", "get-url", "origin") == url
+
+
+@pytest.mark.parametrize(
+    ("remotes", "advice"),
+    [
+        (("archive", "upstream"), "Add one with: git remote add origin"),
+        (("origin", "upstream"), "Point origin at GitHub with: git remote set-url origin"),
+    ],
+)
+def test_ci_advises_a_runnable_command_when_no_remote_qualifies(checkout, capsys, remotes, advice):
+    target, _, _ = checkout
+    _git(target, "remote", "remove", "origin")
+    for name in remotes:
+        _git(target, "remote", "add", name, "https://example.invalid/example-org/example-repo.git")
+
+    assert _ci(target) == 2
+    reason = json.loads(capsys.readouterr().out)["reason"]
+    assert reason == (
+        f"No GitHub origin remote was found. Existing remotes: {', '.join(remotes)}. "
+        f"{advice} https://github.com/OWNER/REPOSITORY.git"
+    )
+    command = reason.split("with: ", 1)[1].replace("OWNER/REPOSITORY", "example-org/example-repo")
+    subprocess.run(shlex.split(command), cwd=target, check=True)
+    url = subprocess.run(["git", "remote", "get-url", "origin"], cwd=target, check=True, capture_output=True, text=True)
+    assert url.stdout.strip() == "https://github.com/example-org/example-repo.git"
 
 
 def test_ci_refuses_dirty_tree_without_query_or_record(checkout, capsys):
