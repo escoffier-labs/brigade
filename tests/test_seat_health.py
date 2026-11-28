@@ -480,6 +480,37 @@ def test_model_inventory_receives_the_per_check_budget(monkeypatch):
     assert seen == [("grok", "grok-4.5", None, seat_health.MODEL_REACHABILITY_TIMEOUT_SECONDS)]
 
 
+@pytest.mark.parametrize(
+    ("hosts", "expected_calls"),
+    [(("http://models.test", "http://models.test"), 1), (("http://one.test", "http://two.test"), 2)],
+    ids=("shared-environment", "different-environments"),
+)
+def test_roster_model_inventory_is_shared_only_for_matching_environments(monkeypatch, hosts, expected_calls):
+    calls = []
+
+    def fake_run(argv, **kwargs):
+        if argv[-1] == "models":
+            calls.append(kwargs["env"]["OLLAMA_HOST"])
+            return proc.Result(0, "Available models:\n* grok-4.5\n", "")
+        return proc.Result(0, "", "")
+
+    monkeypatch.setattr(model_inventory.proc, "run", fake_run)
+    primary = roster.Agent(
+        "primary",
+        "grok",
+        "plan",
+        model="grok-4.5",
+        fallback=("backup",),
+        env={"OLLAMA_HOST": hosts[0]},
+    )
+    backup = roster.Agent("backup", "grok", "work", model="grok-4.5", reasoning="high", env={"OLLAMA_HOST": hosts[1]})
+    value = roster.Roster("primary", {"primary": primary, "backup": backup})
+
+    SeatHealthProbe(collect_executable_version=False).probe_roster(value, allow_model_smoke=False)
+
+    assert len(calls) == expected_calls
+
+
 @pytest.mark.parametrize("positive_budget", (False, True), ids=("already-expired", "positive-budget"))
 def test_overall_deadline_returns_timeout_results_without_serial_wait(monkeypatch, positive_budget):
     if positive_budget:

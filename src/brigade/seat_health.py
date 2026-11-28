@@ -205,6 +205,7 @@ class SeatHealthProbe:
         # Roster doctor renders model inventory separately, so it can turn this
         # off to avoid a duplicate provider listing. Readiness leaves it on.
         self._collect_model_inventory = collect_model_inventory
+        self._inventory_inspector = model_inventory.ModelInventoryInspector()
         self._cache: dict[str, _CacheEntry] = {}
         self._cache_lock = threading.Lock()
 
@@ -590,13 +591,26 @@ class SeatHealthProbe:
         # Prompt-free inventory is safe in every mode.  Roster doctor retains
         # its established rendering below; readiness relies on this listing
         # when model smoke is disabled so it never sends an inference request.
-        if self._collect_model_inventory and seat.transport == "direct" and seat.cli is not None:
-            inspected = model_inventory.ModelInventoryInspector().inspect(
-                seat.cli,
-                requested,
-                getattr(seat, "command", None),
-                timeout_seconds=timeout_seconds,
-            )
+        inventory_cli = seat.cli in {"cursor", "grok"} or (isinstance(seat.cli, str) and seat.cli.startswith("ollama:"))
+        if self._collect_model_inventory and seat.transport == "direct" and inventory_cli:
+            inventory_env = None
+            if seat.env is not None:
+                overrides, env_error = agents.resolve_env_overrides(seat.env)
+                if env_error:
+                    return SeatHealthCheck(
+                        "model-reachability", "degraded", env_error, cause_code="inventory-unavailable"
+                    )
+                inventory_env = dict(os.environ)
+                inventory_env.update(overrides or {})
+            command = getattr(seat, "command", None)
+            if inventory_env is None:
+                inspected = self._inventory_inspector.inspect(
+                    seat.cli, requested, command, timeout_seconds=timeout_seconds
+                )
+            else:
+                inspected = self._inventory_inspector.inspect(
+                    seat.cli, requested, command, timeout_seconds=timeout_seconds, env=inventory_env
+                )
             if inspected is not None:
                 if inspected.state == "exact":
                     return SeatHealthCheck("model-reachability", "passed", inspected.detail)

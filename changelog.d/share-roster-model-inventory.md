@@ -1,0 +1,1 @@
+- Reuse model inventory listings across roster readiness seats only when their commands and effective environments match.
