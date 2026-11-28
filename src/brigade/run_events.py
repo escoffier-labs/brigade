@@ -638,6 +638,8 @@ def _validate_native_t3_payload(event_type: str, payload: Mapping[str, Any]) -> 
         if "admission" in payload and payload["admission"] != "admitted":
             raise CanonicalizationError("task.native-claimed admission is invalid")
         for field in ("roster_digest", "policy_digest"):
+            if field == "policy_digest" and payload.get(field) is None:
+                continue
             if field in payload and (
                 not isinstance(payload[field], str) or _SHA256_DIGEST.fullmatch(payload[field]) is None
             ):

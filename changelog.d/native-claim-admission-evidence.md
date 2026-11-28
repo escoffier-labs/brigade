@@ -1,1 +1,3 @@
 - Reject native claim admission evidence with a denied result or malformed roster and policy digests.
+- Accept legacy native claim evidence with a null policy digest while retaining digest validation.
+- Omit absent policy digests when recording unenrolled Orca claims.

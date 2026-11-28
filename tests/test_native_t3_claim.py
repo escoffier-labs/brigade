@@ -1162,6 +1162,35 @@ def test_native_claim_admission_evidence_is_validated_but_optional():
         event_type="task.native-claimed", payload={**old_payload, **evidence}, idempotency_key="valid"
     )
 
+    run_events.validate_event_request(
+        event_type="task.native-claimed",
+        payload={**old_payload, **evidence, "policy_digest": None},
+        idempotency_key="legacy-null-policy",
+    )
+    envelope = run_events.build_event(
+        run_id="t3-" + "a" * 64,
+        sequence=1,
+        event_type="task.native-claimed",
+        payload={**old_payload, **evidence, "policy_digest": None},
+        idempotency_key="legacy-null-policy",
+        recorded_at="2026-01-01T00:00:00.000000Z",
+        previous_digest=None,
+    )
+    assert run_events.validate_event(json.loads(json.dumps(envelope))) == []
+    for value in ("e" * 64, "sha256:" + "e" * 63, "sha256:" + "g" * 64, "", 1, False, [], {}):
+        with pytest.raises(run_events.CanonicalizationError, match="policy_digest"):
+            run_events.validate_event_request(
+                event_type="task.native-claimed",
+                payload={**old_payload, **evidence, "policy_digest": value},
+                idempotency_key="bad-policy-digest",
+            )
+    with pytest.raises(run_events.CanonicalizationError, match="roster_digest is invalid"):
+        run_events.validate_event_request(
+            event_type="task.native-claimed",
+            payload={**old_payload, **evidence, "roster_digest": None},
+            idempotency_key="null-roster-digest",
+        )
+
     with pytest.raises(run_events.CanonicalizationError, match="admission is invalid"):
         run_events.validate_event_request(
             event_type="task.native-claimed",
