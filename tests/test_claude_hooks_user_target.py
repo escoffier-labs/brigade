@@ -229,18 +229,18 @@ def test_hook_run_times_out_when_pin_resolution_hangs(tmp_path: Path, monkeypatc
 
 
 def test_hook_run_unwired_path_times_out_when_git_stat_hangs(tmp_path: Path, monkeypatch, capsys):
-    """A stalled ``.git`` exists() check on an unwired SessionStart must not block."""
+    """A stalled ``.git`` is_dir() check on an unwired SessionStart must not block."""
     repo = tmp_path / "unwired-git"
     (repo / ".git").mkdir(parents=True)
     monkeypatch.setattr(envelope, "HOOK_TIMEOUT_SECONDS", 0.1)
-    original_exists = Path.exists
+    original_is_dir = Path.is_dir
 
-    def hanging_exists(self: Path) -> bool:
+    def hanging_is_dir(self: Path) -> bool:
         if self.name == ".git":
             time.sleep(5)
-        return original_exists(self)
+        return original_is_dir(self)
 
-    monkeypatch.setattr(Path, "exists", hanging_exists)
+    monkeypatch.setattr(Path, "is_dir", hanging_is_dir)
     capsys.readouterr()
     started = time.monotonic()
     assert (

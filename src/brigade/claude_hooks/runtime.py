@@ -1972,9 +1972,10 @@ def _unwired_init_hint(payload: dict[str, Any]) -> dict[str, Any] | None:
     The user-scope hooks promise one-and-done onboarding: an agent entering an
     unwired repo must be told the exact init command instead of silence. Only
     SessionStart hints, only for a real git checkout, and never for the user's
-    home directory itself. Linked worktrees are skipped too: their ``.git`` is a
-    file rather than a directory, they are short-lived, and ``brigade init``
-    would install care timers for each one that outlive the work.
+    home directory itself. Any checkout whose ``.git`` is a file is skipped too:
+    that covers linked worktrees, submodules, and ``--separate-git-dir``
+    checkouts. None of them is a standalone repo, so hinting at init there would
+    install care timers for a directory that is not its own checkout.
     """
     raw_cwd = payload.get("cwd")
     if not isinstance(raw_cwd, str) or not raw_cwd:
