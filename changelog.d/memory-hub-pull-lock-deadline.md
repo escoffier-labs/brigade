@@ -1,1 +1,3 @@
 - Bound all memory Hub pull state-lock waits to one shared deadline and serialize its refused-scope cache cleanup.
+- Charge only accumulated state-lock acquisition waits to the pull budget, so slow Hub reads can still complete.
+- Keep refused-grant replica discard independent of the pull wait budget and make search-refusal cache cleanup best effort.
