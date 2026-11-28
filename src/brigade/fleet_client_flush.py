@@ -43,6 +43,7 @@ from pathlib import Path
 from typing import Any
 
 DEAD_LETTER_SUFFIX = ".rejected.jsonl"
+STUCK_SUFFIX = ".stuck.jsonl"
 DEAD_LETTER_MAX_RECORDS = 200
 # Events larger than this keep their identity fields but not their body.
 DEAD_LETTER_MAX_EVENT_BYTES = 16 * 1024
@@ -57,6 +58,49 @@ _IDENTITY_FIELDS = ("node_id", "run_id", "sequence", "digest", "ts", "state")
 def dead_letter_path(spool: Path) -> Path:
     # Node ids are sanitized to [A-Za-z0-9_-], so this never names a spool.
     return spool.with_name(spool.stem + DEAD_LETTER_SUFFIX)
+
+
+def stuck_path(spool: Path) -> Path:
+    return spool.with_name(spool.stem + STUCK_SUFFIX)
+
+
+def read_stuck(spool: Path) -> dict[str, Any] | None:
+    """Read the durable poison-head health marker for ``spool``."""
+    from . import fleet_client as client
+    from .fleet_client_spool_entry import _has_regular_spool
+
+    marker = stuck_path(spool)
+    try:
+        if not _has_regular_spool(spool):
+            return None
+        records = client._read_spool(marker)
+        if not _has_regular_spool(spool):
+            return None
+    except (OSError, client.FleetClientError):
+        return None
+    if len(records) != 1 or not isinstance(records[0].get("head_poison_count"), int):
+        return None
+    return records[0]
+
+
+def _record_stuck(client: Any, spool: Path, count: int, dir_fd: int | None) -> None:
+    try:
+        client._write_spool_atomic(stuck_path(spool), [{"head_poison_count": count}], dir_fd=dir_fd)
+    except (OSError, client.FleetClientError) as exc:
+        client._LOG.warning("fleet spool %s: could not record stuck health: %s", spool, exc)
+
+
+def _clear_stuck(client: Any, spool: Path, dir_fd: int | None) -> None:
+    marker = stuck_path(spool)
+    try:
+        if dir_fd is None:
+            marker.unlink(missing_ok=True)
+        else:
+            os.unlink(marker.name, dir_fd=dir_fd)
+    except FileNotFoundError:
+        pass
+    except OSError as exc:
+        client._LOG.warning("fleet spool %s: could not clear stuck health: %s", spool, exc)
 
 
 def _sanitize_reason(reason: str) -> str:
@@ -199,6 +243,7 @@ def flush_locked(
 
     events = client._read_spool(path, dir_fd=dir_fd)
     if not events:
+        _clear_stuck(client, path, dir_fd)
         if dir_fd is not None:
             try:
                 os.unlink(path.name, dir_fd=dir_fd)
@@ -238,6 +283,7 @@ def flush_locked(
                 deadline = _monotonic() + bisect_budget
             _bisect(batch, exc, bisect_post, client._PoisonResponse, on_delivered, outcome, whole_batch_budget)
             if outcome.aborted:
+                _record_stuck(client, path, outcome.consecutive_singles, dir_fd)
                 client._LOG.warning(
                     "fleet spool %s: hub rejects every event (%d single rejections, no delivery); "
                     "keeping %d event(s) queued for the next flush",
@@ -267,6 +313,8 @@ def flush_locked(
     # pending rejections stay queued and are never dead-lettered.
     if not outcome.aborted and not outcome.stopped:
         _commit_pending(outcome)
+    if outcome.delivered:
+        _clear_stuck(client, path, dir_fd)
     if not outcome.delivered and not outcome.dead:
         return 0
     # Delivered and dead-lettered events form the handled prefix. Everything
