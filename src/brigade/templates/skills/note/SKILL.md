@@ -33,6 +33,7 @@ Common triggers:
 2. Review the conversation to identify the topic and pull the relevant commands, errors, paths.
 3. Write the `.md` file to `~/notes/<topic-slug>.md`.
 4. Sync to the configured Obsidian inbox (see "Sync target" below).
+5. Tell the user the exact file path and confirm the sync.
 
 ## Note format
 
