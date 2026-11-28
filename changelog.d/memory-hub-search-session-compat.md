@@ -1,1 +1,3 @@
 - Retry memory Hub searches without session fields when an older Hub rejects those fields.
+- Remember missing Hub search session support only after a successful compatibility retry.
+- Preserve the original Hub request refusal when the session compatibility retry budget is exhausted.

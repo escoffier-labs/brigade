@@ -246,12 +246,13 @@ def _hub_search(
         return call()
     except hubc.HubRefusal as exc:
         session_fields = fields.keys() & {"session_id", "session_kind"}
-        if exc.code != "memory_query_invalid" or not session_fields:
+        if exc.code != "memory_query_invalid" or not session_fields or deadline - _monotonic() <= 0:
             raise
-        _HUBS_WITHOUT_SEARCH_SESSIONS.add(client.identity)
         for name in session_fields:
             fields.pop(name)
-        return call()
+        body = call()
+        _HUBS_WITHOUT_SEARCH_SESSIONS.add(client.identity)
+        return body
 
 
 def _missing_grant(exc: hubc.HubRefusal) -> bool:
