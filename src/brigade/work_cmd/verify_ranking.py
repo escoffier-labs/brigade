@@ -219,24 +219,44 @@ def _has_pytest_evidence(target: Path) -> bool:
     if _config_has_section(target / "tox.ini", "pytest"):
         return True
 
+    try:
+        requirements = (target / "requirements-dev.txt").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        requirements = ""
+    if _dependencies_include_pytest(requirements.splitlines()):
+        return True
+
     pyproject = target / "pyproject.toml"
     if not pyproject.is_file():
         return False
     try:
         data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError):
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
         return False
     tool = data.get("tool")
     if isinstance(tool, dict) and "pytest" in tool:
         return True
+    dependency_groups: list[object] = []
     project = data.get("project")
-    if not isinstance(project, dict):
-        return False
-    dependency_groups = [project.get("dependencies")]
-    optional = project.get("optional-dependencies")
-    if isinstance(optional, dict):
-        dependency_groups.extend(optional.values())
+    if isinstance(project, dict):
+        dependency_groups.append(project.get("dependencies"))
+        dependency_groups.extend(_table_values(project.get("optional-dependencies")))
+    dependency_groups.extend(_table_values(data.get("dependency-groups")))
+    if isinstance(tool, dict):
+        poetry = tool.get("poetry")
+        if isinstance(poetry, dict):
+            dependency_groups.append(poetry.get("dependencies"))
+            for group in _table_values(poetry.get("group")):
+                if isinstance(group, dict):
+                    dependency_groups.append(group.get("dependencies"))
+        pdm = tool.get("pdm")
+        if isinstance(pdm, dict):
+            dependency_groups.extend(_table_values(pdm.get("dev-dependencies")))
     return any(_dependencies_include_pytest(group) for group in dependency_groups)
+
+
+def _table_values(value: object) -> list[object]:
+    return list(value.values()) if isinstance(value, dict) else []
 
 
 def _config_has_section(path: Path, section: str) -> bool:
@@ -245,15 +265,20 @@ def _config_has_section(path: Path, section: str) -> bool:
     parser = configparser.ConfigParser()
     try:
         parser.read(path, encoding="utf-8")
-    except (configparser.Error, OSError):
+    except (configparser.Error, OSError, UnicodeDecodeError):
         return False
     return parser.has_section(section)
 
 
 def _dependencies_include_pytest(value: object) -> bool:
+    if isinstance(value, dict):
+        return any(isinstance(name, str) and name.casefold() == "pytest" for name in value)
     if not isinstance(value, list):
         return False
-    return any(isinstance(item, str) and re.match(r"^pytest(?:\s|\[|[<>=!~;@]|$)", item.strip()) for item in value)
+    return any(
+        isinstance(item, str) and re.match(r"^pytest(?:\s|\[|[<>=!~;@]|$)", item.strip(), re.IGNORECASE)
+        for item in value
+    )
 
 
 def _candidate_command_prefix(target: Path) -> str | None:

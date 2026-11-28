@@ -398,3 +398,59 @@ def test_command_prefix_detects_brigadestack_layout():
     repository = Path(__file__).resolve().parents[1]
 
     assert verify_ranking._verification_command_prefix(repository) == "PYTHONPATH=src python3 -m pytest -q"
+
+
+@pytest.mark.parametrize(
+    ("path", "template"),
+    [
+        ("pyproject.toml", '[project]\ndependencies = ["{dependency}>=9"]\n'),
+        ("pyproject.toml", '[project.optional-dependencies]\ntest = ["{dependency}[extra]>=9"]\n'),
+        ("pyproject.toml", '[dependency-groups]\ntest = [{{include-group = "base"}}, "{dependency}>=9"]\n'),
+        ("pyproject.toml", '[tool.poetry.dependencies]\n"{dependency}" = "^9"\n'),
+        ("pyproject.toml", '[tool.poetry.group.test.dependencies]\n"{dependency}" = {{version = "^9"}}\n'),
+        ("pyproject.toml", '[tool.pdm.dev-dependencies]\ntest = ["{dependency}>=9"]\n'),
+        ("requirements-dev.txt", '# Development tools\n{dependency}[extra]>=9 ; python_version >= "3.11"\n'),
+    ],
+)
+@pytest.mark.parametrize("dependency", ["pytest", "PyTeSt", "pytest-cov", "pytest_custom", "pytest2"])
+def test_dependency_evidence_matches_only_pytest_without_tests_directory(tmp_path, path, template, dependency):
+    (tmp_path / path).write_text(template.format(dependency=dependency))
+
+    assert not (tmp_path / "tests").exists()
+    expected = "python3 -m pytest -q" if dependency.casefold() == "pytest" else None
+    assert verify_ranking._verification_command_prefix(tmp_path) == expected
+
+
+@pytest.mark.parametrize("path", ["pyproject.toml", "setup.cfg", "tox.ini", "requirements-dev.txt"])
+def test_ranking_ignores_undecodable_configuration(tmp_path, monkeypatch, path):
+    (tmp_path / path).write_bytes(b"\xff\xfe")
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"fake-index")
+    monkeypatch.setattr(verify_ranking.component_bins, "resolve", lambda _name: "/fake/code-graph")
+
+    ranking = verify_ranking.rank_verification_candidates(
+        tmp_path,
+        files=["module.py"],
+        affected_runner=lambda *args: {
+            "changed_files": ["module.py"],
+            "affected_tests": [{"file_path": "test_module.py", "min_hops": 1}],
+        },
+    )
+
+    assert ranking["degraded"] is False
+    assert ranking["suggested_command"] is None
+    assert ranking["candidates"][0]["command"] == "test_module.py"
+
+
+def test_dependency_detection_does_not_execute_or_follow_declarations(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text('[dependency-groups]\ntest = [{include-group = "test"}]\n')
+    (tmp_path / "requirements-dev.txt").write_text("-r extra-requirements.txt\n-e .\n")
+    (tmp_path / "extra-requirements.txt").write_text("pytest\n")
+    (tmp_path / "setup.py").write_text('raise RuntimeError("must not execute")\n')
+
+    def unexpected_run(*args, **kwargs):
+        pytest.fail("dependency detection must only read static evidence")
+
+    monkeypatch.setattr(verify_ranking.proc, "run", unexpected_run)
+    assert verify_ranking._verification_command_prefix(tmp_path) is None
