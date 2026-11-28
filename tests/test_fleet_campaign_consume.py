@@ -573,6 +573,34 @@ def test_unreadable_holds_refuse_the_pass_instead_of_forgetting_holds(tmp_path, 
     assert "w-1" not in consumer.Holds(tmp_path / "absent.json")
 
 
+def test_concurrent_holds_adds_preserve_both_entries(tmp_path):
+    path = tmp_path / "holds.json"
+    ready = threading.Barrier(3)
+
+    def add(work_id):
+        holds = consumer.Holds(path)
+        ready.wait()
+        holds.add(work_id, "lost grant", datetime.fromisoformat("2026-01-01T00:00:00+00:00"))
+
+    workers = [threading.Thread(target=add, args=(work_id,)) for work_id in ("w-1", "w-2")]
+    for worker in workers:
+        worker.start()
+    ready.wait()
+    for worker in workers:
+        worker.join()
+
+    assert set(json.loads(path.read_text(encoding="utf-8"))) == {"w-1", "w-2"}
+
+
+def test_contains_reloads_holds_added_after_consumer_started(tmp_path):
+    path = tmp_path / "holds.json"
+    watching = consumer.Holds(path)
+
+    consumer.Holds(path).add("w-late", "lost grant", datetime.fromisoformat("2026-01-01T00:00:00+00:00"))
+
+    assert "w-late" in watching
+
+
 def test_a_failing_task_cleanup_never_hides_the_run(tmp_path, monkeypatch):
     def fail(repo_path, task_id):
         raise OSError("ledger lock timed out")

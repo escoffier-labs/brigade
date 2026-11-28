@@ -1,0 +1,1 @@
+- Preserve concurrent fleet campaign holds and refresh them while watching for work.
