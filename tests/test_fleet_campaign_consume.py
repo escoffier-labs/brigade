@@ -404,6 +404,76 @@ def test_reclaimed_member_whose_previous_generation_linked_a_run_is_not_launched
     assert [p.outcome for p in run(conn, "node-b", now, again)[0]] == ["idle"]
 
 
+def test_reclaimed_member_uses_attempt_events_after_operator_reset(hub):
+    conn, _, clock, now = hub
+    work_id = member_ids(conn)["acme/one"]
+    first = Runs(conn, "node-a", state="failed")
+    assert [p.outcome for p in run(conn, "node-a", now, first, watch=False)[0]] == ["failed"]
+    item = Node(conn, "node-a").get_item(work_id)["item"]
+    status, reset = call(
+        conn,
+        f"/work/items/{work_id}/attempts",
+        {"action": "reset"},
+        admin=True,
+        headers={"If-Match": str(item["version"])},
+        method="POST",
+    )
+    assert status == 200 and reset["item"]["attempt_count"] == 0
+    owner = Node(conn, "node-a")
+    ownership = owner.get_ownership(work_id)["ownership"]
+    owner.ownership_action(
+        work_id,
+        {"action": "take", "generation": ownership["generation"]},
+        if_match=ownership["revision"],
+        idempotency_key="operator-reset-reclaim",
+        holder_nonce=consumer.new_ownership_nonce(),
+    )
+    other_ids = [member_id for member_id in member_ids(conn).values() if member_id != work_id]
+    conn.execute("UPDATE work_items SET status='completed' WHERE work_id IN (?, ?)", other_ids)
+    conn.commit()
+    clock[0] = "2026-01-01T00:02:00+00:00"
+    later = Runs(conn, "node-b")
+    passes, _ = run(conn, "node-b", now, later, watch=False)
+    assert [p.outcome for p in passes] == ["parked"] and later.launched == ["acme/one"]
+
+
+def test_launcher_that_links_a_run_then_raises_is_reported_and_not_relaunched(hub, tmp_path):
+    conn, _, clock, now = hub
+    work_id = member_ids(conn)["acme/one"]
+    node = Node(conn, "node-a")
+    holds_path = tmp_path / "holds.json"
+
+    def launch_then_raise(*args, **kwargs):
+        run_id = "run-node-a-created"
+        conn.execute(
+            "INSERT INTO events (node_id, run_id, sequence, digest, state, ts, received_at) "
+            "VALUES ('node-a', ?, 1, 'd', 'running', 'now', 'now')",
+            (run_id,),
+        )
+        conn.commit()
+        node.link_execution(
+            work_id, {"node_id": "node-a", "run_id": run_id}, generation=1, holder_nonce=node.nonces[-1]
+        )
+        raise RuntimeError("receipt failed")
+
+    passes, events = run(
+        conn,
+        "node-a",
+        now,
+        launch_then_raise,
+        watch=False,
+        hub_override=node,
+        holds=consumer.Holds(holds_path),
+    )
+    assert [(p.outcome, p.run_id, p.detail) for p in passes] == [("error", "run-node-a-created", "RuntimeError")]
+    assert events[-1]["event"] == "error"
+    assert Node(conn, "node-a").get_ownership(work_id)["ownership"]["next_action"]["kind"] == "blocked"
+    clock[0] = "2026-01-01T00:10:00+00:00"
+    later = Runs(conn, "node-b")
+    run(conn, "node-b", now, later, holds=consumer.Holds(holds_path))
+    assert "acme/one" not in later.launched
+
+
 @pytest.mark.parametrize("state", ["failed", "lost_race"])
 def test_failed_intent_with_no_run_id_counts_an_attempt_and_is_not_repeated(hub, tmp_path, state):
     conn, _, _, now = hub

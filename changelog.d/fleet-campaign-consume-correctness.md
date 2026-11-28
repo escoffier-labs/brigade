@@ -1,0 +1,2 @@
+- Prevent fleet campaign members from being launched again when a launcher links a run before reporting an error.
+- Use durable started and failed attempt events when deciding whether a reclaimed campaign member has an unaccounted run.

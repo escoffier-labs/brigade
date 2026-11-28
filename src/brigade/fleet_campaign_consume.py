@@ -307,12 +307,17 @@ def _work(
     work_id, repo, generation = str(member["work_id"]), str(member["repo"]), int(grant["generation"])
     payload = hub.get_item(work_id)
     item = payload["item"]
+    runs = [x for x in payload.get("links", []) if isinstance(x, dict) and x.get("link_type") == "fleet-run"]
     if reclaim:
         # The previous holder expired. If it linked a run the Hub never counted, that run may still
         # be going or may have finished. Do not start a second one; an operator decides.
-        runs = [x for x in payload.get("links", []) if isinstance(x, dict) and x.get("link_type") == "fleet-run"]
-        if len(runs) > int(item.get("attempt_count", 0)):
-            detail = "a previous generation linked a run with no failed attempt recorded; it may be running or finished"
+        attempt_events = sum(
+            event.get("event_type") in {"attempt-started", "attempt-failed"}
+            for event in payload.get("recent_events", [])
+            if isinstance(event, dict)
+        )
+        if len(runs) > attempt_events:
+            detail = "a previous generation linked a run with no attempt event recorded; it may be running or finished"
             emit(
                 {"event": "previous-run", "repo": repo, "work_id": work_id, "generation": generation, "detail": detail}
             )
@@ -334,6 +339,8 @@ def _work(
             f"lease too short to start: {lease_text}, need at least {needed} seconds; raise lease_seconds in the offer"
         )
         return _hand_back(hub, member, nonce, generation, emit, detail)
+    known_runs = {str(run.get("external_key")) for run in runs}
+    progress["launch"] = Launch("started")
     try:
         launch = launcher(
             repos[repo],
@@ -346,8 +353,28 @@ def _work(
             acceptance=list(campaign.get("acceptance", [])),
             deadline_seconds=budget,
         )
-    except (OSError, ValueError) as exc:
-        launch = Launch("refused", detail=type(exc).__name__)
+    except Exception as exc:
+        try:
+            current = hub.get_item(work_id)
+            linked = [
+                link
+                for link in current.get("links", [])
+                if isinstance(link, dict)
+                and link.get("link_type") == "fleet-run"
+                and str(link.get("external_key")) not in known_runs
+            ]
+        except Exception:
+            raise
+        if linked:
+            external_key = str(linked[-1].get("external_key", ""))
+            run_id = external_key.split("/", 1)[-1] or None
+            progress["launch"] = Launch("error", run_id=run_id, detail=type(exc).__name__)
+            raise
+        progress.pop("launch", None)
+        if isinstance(exc, (OSError, ValueError)):
+            launch = Launch("refused", detail=type(exc).__name__)
+        else:
+            raise
     progress["launch"] = launch
     emit({"event": "launch", "repo": repo, "work_id": work_id, "generation": generation, **_launch_fields(launch)})
     try:
