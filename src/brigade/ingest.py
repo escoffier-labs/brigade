@@ -53,7 +53,6 @@ from .handoff_ingest_rules import (
 from . import handoff_origin
 from .bounded_read import read_regular_file
 from .instruction_inventory import INSPECTION_CEILING
-from .selection import WRITER_INBOXES
 from .untrusted import scan_untrusted
 
 SECTION_RE = re.compile(r"^##\s+(?P<name>.+?)\s*$", re.MULTILINE)
@@ -135,9 +134,10 @@ class IngestStats:
     skipped: int = 0
     failed: int = 0
     actions: List[str] = field(default_factory=list)
-    # sha256 of every handoff handled this run, so one handoff copied into
-    # several worktree inboxes is ingested once.
-    seen_digests: set[str] = field(default_factory=set)
+    # (sha256, lane) of every handoff handled this run, so one handoff copied into
+    # several worktree inboxes is ingested once. The lane is the origin's automatic
+    # filing authority: a review copy never suppresses a verified draft's bytes.
+    seen_digests: set[tuple[str, bool]] = field(default_factory=set)
     # Overflow cards that hold review drafts: [{"path", "problem", "held_drafts"}], also written to
     # `.brigade/memory-care/inbox/blocked-cards.json` for the report to read.
     blocked_cards: List[dict] = field(default_factory=list)
@@ -157,8 +157,6 @@ def _resolve_inbox_paths(target: Path) -> list[Path]:
     Also includes every existing inbox declared in `.brigade/handoff-sources.json`,
     including roots outside `target`, so a second configured root is ingested.
     """
-    from .config import load_config
-
     paths: list[Path] = []
     seen: set[str] = set()
     declared: dict[Path, list[str]] = {}
@@ -175,14 +173,8 @@ def _resolve_inbox_paths(target: Path) -> list[Path]:
         seen.add(key)
         paths.append(resolved)
 
-    cfg = load_config(target)
-    if cfg is None:
-        add(target / ".claude" / "memory-handoffs", target, ".claude/memory-handoffs")
-    else:
-        for h in sorted(cfg.selection.harnesses):
-            rel = WRITER_INBOXES.get(h)
-            if rel:
-                add(target / rel, target, rel)
+    for rel in handoff_origin.selection_writer_inbox_rels(target):
+        add(target / rel, target, rel)
     for root, rel in _handoff_source_inboxes(target):
         add(root / rel, root, rel)
     # Handoffs written in a linked worktree of a watched root are found
@@ -353,14 +345,19 @@ def ingest_into(
                     origin = handoff_origin.verify_handoff(source, path, snapshot)
                 except Exception:
                     origin = None
-                if origin is None:
-                    origin = handoff_origin.unstamped_origin(source, path, snapshot, own_inboxes=own_inboxes)
+                else:
+                    # Only a clean verification that found no sidecar is unstamped.
+                    if origin is None:
+                        origin = handoff_origin.unstamped_origin(source, path, snapshot, own_inboxes=own_inboxes)
                 content_policy = (
                     origin is not None and origin.session_kind == "unknown" and origin.untrusted_tools is not True
                 )
                 filing_eligible = origin is not None and (origin.allows_automatic_filing or content_policy)
+                unstamped = origin is not None and origin.unstamped
                 if origin is not None:
                     sidecar = origin.stamp.sidecar
+                # Authority is per lane: a review copy never answers for a verified draft's bytes.
+                digest = (sha, origin is not None and origin.allows_automatic_filing)
 
                 def claim_origin(verified: handoff_origin.VerifiedOrigin | None = origin) -> bool:
                     nonlocal filing_eligible
@@ -382,13 +379,15 @@ def ingest_into(
                 if filing_eligible and not dry_run:
                     if _is_tracked(path, _git_tracked_files(path.parent)):
                         raise TrackedHandoffError("handoff became tracked before origin claim")
-                    if sha in stats.seen_digests:
+                    if digest in stats.seen_digests:
                         claim_origin()
-                if filing_eligible and sha in stats.seen_digests:
+                if filing_eligible and digest in stats.seen_digests:
                     if not dry_run:
                         _archive(path, processed_dir, sha)
-                        assert sidecar is not None
-                        handoff_origin.remove_stamp(sidecar)
+                        # An unstamped origin published no stamp of its own to remove.
+                        if not unstamped:
+                            assert sidecar is not None
+                            handoff_origin.remove_stamp(sidecar)
                     stats.skipped += 1
                     stats.actions.append(_summary("skip", path.name, "duplicate-content"))
                     continue
@@ -430,7 +429,7 @@ def ingest_into(
                     else None,
                     policy_origin=origin if content_policy else None,
                 )
-                if not dry_run and sidecar is not None and action.kind in _HANDLED_KINDS:
+                if not dry_run and sidecar is not None and not unstamped and action.kind in _HANDLED_KINDS:
                     handoff_origin.remove_stamp(sidecar)
             except TrackedHandoffError:
                 action = Action("skipped", _summary("skip", path.name, _TRACKED_SKIP_CODE))
@@ -452,7 +451,7 @@ def ingest_into(
             # handled. A retryable skip leaves the handoff pending, so a later
             # identical copy must not be archived as its duplicate.
             if filing_eligible and action.kind in _HANDLED_KINDS:
-                stats.seen_digests.add(sha)
+                stats.seen_digests.add(digest)
             stats.processed += 1
             stats.actions.append(action.summary)
             stats.failed += action.failed

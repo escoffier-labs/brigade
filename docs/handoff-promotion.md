@@ -219,14 +219,22 @@ for card filing. A `create-card` draft needs a free destination name. An
 `update-card` draft needs an `Expected card SHA256` that matches the current
 card. Ingest repeats the destination check under the publication lock.
 
-A draft with no stamp at all, sitting in one of the target's own writer inboxes,
-is read as the same unknown origin with unknown tool use. It goes through the
-same content policy, and the filed card records `origin: unstamped` beside
-`trust: agent-unreviewed` and the `auto_filed` date. Ingest claims it under the
-same lock as a stamp claim, keyed by the draft's path and content, so one draft
-publication is filed once. A draft outside the target's own inboxes, a tracked
-or linked draft, or a draft whose stamp exists but fails verification still goes
-to the review inbox.
+A draft with no stamp at all, sitting in one of the memory owner's own writer
+inboxes, is read as the same unknown origin with unknown tool use. It goes
+through the same content policy, and the filed card records `origin: unstamped`
+beside `trust: agent-unreviewed` and the `auto_filed` date. The writer publishes
+the origin sidecar before the draft, and ingest claims the draft under the same
+lock as a stamp claim, keyed by the draft's path and content, so one draft
+publication is filed once. A stamp that appears before the claim sends that
+draft to review instead of filing it. Fleet ingest (`brigade repos ingest`) does
+not use this lane for worker repos. A draft outside the memory owner's own
+inboxes, or a draft whose stamp exists but fails verification, still goes to the
+review inbox. A tracked draft stays in place as `tracked-or-unverifiable` and a
+linked draft fails in place as `linked-handoff`; neither goes to the review
+inbox.
+
+With card promotion disabled, this lane files nothing and holds the draft's
+review copy.
 
 Both content scans cover the whole draft and evaluate each section separately.
 Drafts use LF or CRLF line endings. The final card must fit the

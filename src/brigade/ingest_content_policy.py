@@ -38,16 +38,22 @@ def _destination_refusal(sections: dict[str, str], before: bytes | None, *, publ
 
 
 def _mark_filed(card: str, *, unstamped: bool = False) -> str:
-    """Write the filing metadata and retain the rest of the card."""
+    """Write the filing metadata and retain the rest of the card.
+
+    `origin` is always replaced so a verified unknown-origin draft cannot name its
+    own origin. Only a top-level `origin` key is metadata; an `origin:` line inside
+    a block scalar is card content and is kept.
+    """
     lines = card.splitlines(keepends=True)
     closing = next(i for i, line in enumerate(lines[1:], 1) if line.strip() == "---")
     kept = [lines[0]]
     dropped_indent = None
-    replaced = _REPLACED_METADATA | ({"origin"} if unstamped else frozenset())
     for line in lines[1:closing]:
         key, sep, _ = line.partition(":")
         indent = len(line) - len(line.lstrip())
-        if sep and key.strip().strip("\"'").casefold() in replaced:
+        name = key.strip().strip("\"'").casefold()
+        replaced = sep and (name in _REPLACED_METADATA or (name == "origin" and indent == 0))
+        if replaced:
             dropped_indent = indent
             continue
         if dropped_indent is not None and (indent > dropped_indent or line.lstrip().startswith("- ")):

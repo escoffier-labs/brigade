@@ -1,1 +1,2 @@
-- A handoff draft written into a target's own writer inbox with no origin stamp is now decided by the existing content policy and filed with an `origin: unstamped` marker instead of waiting for review forever.
+- A handoff draft a bot writes straight into the memory owner's own writer inbox with no origin stamp is now decided by the existing content policy and filed with an `origin: unstamped` marker instead of waiting for review forever.
+- `brigade handoff draft` now publishes the origin sidecar before the draft, so a signing failure leaves a draft that waits for review instead of one that files itself.

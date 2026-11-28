@@ -400,7 +400,21 @@ class UnstampedStamp(VerifiedStamp):
         except (OSError, ValueError):
             return False
         os.close(state)
-        return _claim(self.consumed)
+        if not _claim(self.consumed):
+            return False
+        # A writer may publish its stamp between the check and this claim. That
+        # stamp is not ours to spend, so the draft keeps its review instead.
+        try:
+            self.sidecar.lstat()
+        except FileNotFoundError:
+            return True
+        except OSError:
+            pass
+        try:
+            self.consumed.unlink()
+        except OSError:
+            pass
+        return False
 
 
 @dataclass(frozen=True)
@@ -410,19 +424,27 @@ class VerifiedOrigin(Origin):
     unstamped: bool = False
 
 
-def own_inbox_paths(target: Path) -> frozenset[Path]:
-    """The target's own per-harness writer inboxes, never an externally declared root."""
+def selection_writer_inbox_rels(target: Path) -> tuple[str, ...]:
+    """Writer inbox paths relative to `target` for its harness selection.
+
+    Falls back to the pre-v0.3.0 `.claude/memory-handoffs` path when no config
+    exists. Raises where the config cannot be loaded; callers decide the default.
+    """
     from .config import load_config
     from .selection import WRITER_INBOXES
 
+    config = load_config(target)
+    if config is None:
+        return (".claude/memory-handoffs",)
+    return tuple(WRITER_INBOXES[name] for name in sorted(config.selection.harnesses) if name in WRITER_INBOXES)
+
+
+def own_inbox_paths(target: Path) -> frozenset[Path]:
+    """The memory owner's own per-harness writer inboxes, never an externally declared root."""
     try:
-        config = load_config(target)
+        relative = selection_writer_inbox_rels(target)
     except (OSError, ValueError):
         return frozenset()
-    if config is None:
-        relative: tuple[str, ...] = (".claude/memory-handoffs",)
-    else:
-        relative = tuple(WRITER_INBOXES[name] for name in sorted(config.selection.harnesses) if name in WRITER_INBOXES)
     return frozenset(path for path in ((target / rel).resolve() for rel in relative) if path.is_dir())
 
 
@@ -432,12 +454,13 @@ UNSTAMPED_CLAIM_SCHEMA = "brigade.unstamped-origin.v1"
 def unstamped_origin(
     target: Path, handoff: Path, snapshot: bytes, *, own_inboxes: frozenset[Path]
 ) -> VerifiedOrigin | None:
-    """Read a stamp-less draft in the target's own inbox as an unknown origin.
+    """Read a stamp-less draft in the owner's own inbox as an unknown origin.
 
     Any stamp file at all, including one that fails verification, keeps its
     review: only a draft that never carried a stamp reaches the content policy.
-    The claim is keyed by path and content, so the same draft publication is
-    decided once and later arrival with the same name still gets its own claim.
+    The claim is keyed by path and content, so a re-arrival of the same bytes at
+    the same name resumes that one claim, while different bytes at the same name
+    get a claim of their own.
     """
     if handoff.absolute().parent not in own_inboxes:
         return None
@@ -541,6 +564,19 @@ def _verify(
         return None
     except (OSError, ValueError, TypeError, KeyError, RecursionError):
         return None
+
+
+def publish_unverified_stamp(target: Path, handoff: Path) -> None:
+    """Publish a MAC-less sidecar so a draft that cannot be signed waits for review.
+
+    Writers publish this before the draft, so no reader ever lists a draft whose
+    origin is still unpublished. A real stamp replaces it atomically; if signing
+    then fails, the placeholder keeps the draft in review instead of unstamped.
+    """
+    sidecar = stamp_path(target, handoff)
+    sidecar.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    payload = {"schema": SCHEMA, "unstamped": True, "handoff_name": handoff.name, "path_digest": sidecar.stem}
+    handoff_publish.publish_handoff(sidecar.parent, sidecar.name, json.dumps(payload) + "\n", replace=True)
 
 
 def stamp_handoff(target: Path, handoff: Path, snapshot: bytes, origin: Origin) -> bool:

@@ -736,6 +736,75 @@ def unstamped_draft(target, monkeypatch):
     return path
 
 
+def test_worker_draft_without_a_signing_key_goes_to_review(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRIGADE_RUN_ID", "test-run")
+    # build_draft cannot sign without a key, but its placeholder keeps review.
+    path = Path(
+        drafts.build_draft(
+            target=tmp_path,
+            title="Content policy",
+            summary="A durable fact.",
+            content=CARD,
+            fact=["A recorded fact."],
+            evidence=["A recorded observation."],
+            action="create-card",
+            inbox=".claude/memory-handoffs",
+            target_card="policy.md",
+        )["path"]
+    )
+    sidecar = handoff_origin.stamp_path(tmp_path, path)
+    assert sidecar.is_file()
+    assert handoff_origin.verify_handoff(tmp_path, path, path.read_bytes()) is None
+    assert run_ingest(tmp_path).inboxed == 1
+    assert review_reason(tmp_path) == "reason: origin-review-required"
+    assert not (tmp_path / CARD_PATH).exists()
+
+
+def test_unstamped_draft_with_a_failing_verification_goes_to_review(tmp_path, monkeypatch):
+    unstamped_draft(tmp_path, monkeypatch)
+
+    def fail(*args, **kwargs):
+        raise OSError("verification unavailable")
+
+    monkeypatch.setattr(handoff_origin, "verify_handoff", fail)
+    stats = run_ingest(tmp_path)
+    assert stats.inboxed == 1
+    assert review_reason(tmp_path) == "reason: origin-review-required"
+    assert stats.promoted == 0
+    assert not (tmp_path / CARD_PATH).exists()
+
+
+def test_mark_filed_keeps_an_origin_line_inside_a_block_scalar():
+    from brigade import ingest_content_policy
+
+    card = "---\nid: card-x\ntopic: t\nnotes: |\n  origin: upstream feed\n---\n\nBody.\n"
+    out = ingest_content_policy._mark_filed(card, unstamped=True)
+    assert "  origin: upstream feed" in out
+    assert out.count("origin: unstamped") == 1
+
+
+def test_mark_filed_drops_a_verified_drafts_own_origin():
+    from brigade import ingest_content_policy
+
+    card = "---\nid: card-x\ntopic: t\ntrust: reviewed\norigin: human\n---\n\nBody.\n"
+    out = ingest_content_policy._mark_filed(card, unstamped=False)
+    assert "origin:" not in out
+    assert "trust: agent-unreviewed" in out
+
+
+def test_mark_filed_replaces_a_nested_origin_only_once():
+    from brigade import ingest_content_policy
+
+    card = (
+        "---\nid: card-x\ntopic: t\ntrust: reviewed\norigin: human\n"
+        "origin:\n  source: link\n  refs:\n    - a\n---\n\nBody.\n"
+    )
+    out = ingest_content_policy._mark_filed(card, unstamped=True)
+    assert out.count("origin:") == 1
+    assert "origin: unstamped" in out
+    assert "source: link" not in out
+
+
 def card_frontmatter(target):
     from brigade import memory_cmd
 
