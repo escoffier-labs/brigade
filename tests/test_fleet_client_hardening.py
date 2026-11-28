@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import fleet_client
 
 
@@ -229,7 +230,7 @@ class TestSpoolPrivacy:
             if not hasattr(os, "mkfifo"):
                 pytest.skip("os.mkfifo is POSIX-only")
             spool.parent.mkdir(parents=True)
-            os.mkfifo(spool)
+            make_fifo(spool)
 
         assert fleet_client.flush_spool(fleet_client.resolve_node_id()) == 0
         assert list(spool.parent.iterdir()) == [spool]
@@ -377,7 +378,7 @@ class TestSpoolPrivacy:
     def test_non_regular_spool_file_is_refused_without_blocking(self, home):
         spool = _spool()
         spool.parent.mkdir(parents=True)
-        os.mkfifo(spool)
+        make_fifo(spool)
         assert fleet_client.report_event({"run_id": "r1", "state": "run.started"}) is False
         assert stat.S_ISFIFO(os.stat(spool).st_mode)
 

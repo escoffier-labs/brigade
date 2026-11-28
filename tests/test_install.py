@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from tests._fifo import make_fifo
 from brigade import __version__ as brigade_version
 from brigade import install as install_mod
 from brigade.templates import template_root
@@ -543,7 +544,7 @@ def test_a_skill_md_swapped_for_a_fifo_mid_read_does_not_hang(tmp_path, monkeypa
         if str(path).endswith("SKILL.md") and not flags & os.O_CREAT and not swapped:
             swapped.append(True)
             skill.unlink()
-            os.mkfifo(skill)
+            make_fifo(skill)
         return real_open(path, flags, *args, **kwargs)
 
     def hung(*_args):

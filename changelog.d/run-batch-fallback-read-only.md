@@ -1,0 +1,2 @@
+- Preserve each batch worker's read-only setting when building an invalid-final fallback prompt.
+- Pin the legacy batch request fingerprint against future isolation-field changes.

@@ -75,6 +75,31 @@ def test_doctor_keeps_full_detail_for_settings_error_and_integrity_refusal(tmp_p
     assert check["detail"].index("hook settings error") < check["detail"].index("session directory integrity refused:")
 
 
+def test_doctor_rebuilds_settings_error_detail_from_issues(tmp_path: Path, monkeypatch):
+    target = tmp_path / "repo"
+    target.mkdir()
+    from brigade.claude_hooks import classify as classify_mod
+
+    monkeypatch.setattr(
+        classify_mod,
+        "classify",
+        lambda _target: {
+            "state": "partial",
+            "issues": ["hook settings error: unable to read settings: denied"],
+            "hooks": {"error": "unable to read settings: denied"},
+            "detail": "diagnostic without a state prefix",
+        },
+    )
+
+    check = doctor_mod._check_claude_work_loop(target)
+
+    assert check == (
+        doctor_mod.FAIL,
+        "claude work loop",
+        "state=error; hook settings error: unable to read settings: denied",
+    )
+
+
 def test_doctor_reports_advisory_only_without_hooks(tmp_path: Path, capsys):
     target = _wired(tmp_path)
     assert hooks_uninstall(target=target) == 0

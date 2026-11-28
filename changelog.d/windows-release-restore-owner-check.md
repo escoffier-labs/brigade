@@ -1,0 +1,1 @@
+- Keep a failed Windows lock release from restoring metadata after the lock changes owners.

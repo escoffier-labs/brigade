@@ -2734,6 +2734,7 @@ def health(target: Path) -> dict:
     from . import verify_manifest
 
     registered_manifest_ids = verify_manifest.registered_manifest_ids(target)
+    unresolved_manifest_base = verify_manifest.unresolved_manifest_base(target)
 
     issues: list[dict] = []
     if verify_run_count > 0 and receipt_audit["eligible"] == 0:
@@ -2741,6 +2742,12 @@ def health(target: Path) -> dict:
         # is not actionable when the reader has no way to learn the available ids.
         if registered_manifest_ids:
             available = "registered manifest ids: " + ", ".join(registered_manifest_ids)
+        elif unresolved_manifest_base:
+            available = (
+                "verify manifest base is unresolved; "
+                f"tried {unresolved_manifest_base['tried']}; "
+                f"{unresolved_manifest_base['remediation']}"
+            )
         else:
             available = "no verify manifests are tracked under verify/manifests/ in this target yet"
         issues.append(
@@ -2782,6 +2789,7 @@ def health(target: Path) -> dict:
         "ineligibility_rate": receipt_audit["ineligibility_rate"],
         "leading_ineligibility_reason": receipt_audit["leading_ineligibility_reason"],
         "registered_verify_manifest_ids": registered_manifest_ids,
+        "verify_manifest_base_unresolved": unresolved_manifest_base,
         "exploration_bands": receipt_audit["exploration_bands"],
         "latest_receipt_window": receipt_audit["latest_receipt_window"],
         "issue_count": len(issues),

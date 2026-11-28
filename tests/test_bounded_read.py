@@ -6,6 +6,7 @@ import os
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import bounded_read
 from brigade.bounded_read import read_regular_file
 from tests._instruction_fixtures import HAS_FIFO, deadline
@@ -36,7 +37,7 @@ def test_missing_and_directory_and_dangling_are_named(tmp_path):
 @pytest.mark.skipif(not HAS_FIFO, reason="POSIX FIFOs")
 def test_a_fifo_is_refused_without_blocking(tmp_path):
     fifo = tmp_path / "pipe"
-    os.mkfifo(fifo)
+    make_fifo(fifo)
     with deadline():
         got = read_regular_file(fifo, max_bytes=10)
     assert (got.data, got.reason) == (None, "not-regular")
@@ -48,7 +49,7 @@ def test_without_o_nonblock_the_type_is_checked_before_opening(tmp_path, monkeyp
     path = tmp_path / "f.txt"
     path.write_bytes(b"ok")
     fifo = tmp_path / "pipe"
-    os.mkfifo(fifo)
+    make_fifo(fifo)
     with deadline():
         assert read_regular_file(fifo, max_bytes=10).reason == "not-regular"
     assert read_regular_file(path, max_bytes=10).data == b"ok"
@@ -105,7 +106,7 @@ def test_without_o_nonblock_a_swapped_fifo_that_does_not_block_the_open_is_refus
     decoy = tmp_path / "decoy.txt"
     decoy.write_bytes(b"ok")
     fifo = tmp_path / "pipe"
-    os.mkfifo(fifo)
+    make_fifo(fifo)
     writer = os.open(fifo, os.O_RDWR)  # a writer is present, so the plain open returns
     try:
         _swap_after_first_stat(monkeypatch, fifo, decoy)

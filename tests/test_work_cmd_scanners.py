@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._fifo import make_fifo
 from tests._child_publish import PUBLISH_SOURCE, wait_for_text
 
 from brigade import cli
@@ -725,7 +726,7 @@ def test_scanner_import_output_rejects_fifo_without_blocking(tmp_path):
         pytest.skip("FIFO creation is unavailable on this platform")
     imports = tmp_path / "imports"
     imports.mkdir()
-    os.mkfifo(imports / "output.jsonl")
+    make_fifo(imports / "output.jsonl")
 
     _path, records, errors = _scanner_import_output(tmp_path, "imports/output.jsonl")
 
@@ -3287,7 +3288,7 @@ def test_scanner_inbox_helpers_reject_fifo_without_blocking(tmp_path, helper, da
 
     inbox = tmp_path / ".brigade" / "work" / "imports" / "inbox.jsonl"
     inbox.parent.mkdir(parents=True)
-    os.mkfifo(inbox)
+    make_fifo(inbox)
 
     with pytest.raises(OSError):
         if helper == "read":
@@ -4645,7 +4646,7 @@ def test_scanner_inbox_run_lock_refuses_planted_fifo_lock_file(tmp_path):
 
     lock_path = scanners_mod._scanner_inbox_lock_path(tmp_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    os.mkfifo(lock_path)
+    make_fifo(lock_path)
 
     with pytest.raises(OSError):
         with scanners_mod._scanner_inbox_run_lock(tmp_path):

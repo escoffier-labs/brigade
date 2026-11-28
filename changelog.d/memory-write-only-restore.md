@@ -1,0 +1,1 @@
+- Document the memory Hub restore limitation for write-only credentials and the required read-capable push after a restore.

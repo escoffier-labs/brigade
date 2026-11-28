@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import cli
 from brigade import fleet_client
 from brigade import code_graph_background, code_graph_delta, component_bins
@@ -664,7 +665,7 @@ def test_prune_verify_runs_source_special_file_keeps_run_dir(tmp_path, monkeypat
     root.mkdir(parents=True)
     run_dir, _ = _write_verify_run_dir(root, "20260101-000001-a")
     _write_verify_run_dir(root, "20260101-000002-b")
-    os.mkfifo(run_dir / "stream")
+    make_fifo(run_dir / "stream")
     copy_attempted = False
 
     def _unexpected_copytree(*args, **kwargs):

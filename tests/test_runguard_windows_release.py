@@ -538,6 +538,32 @@ def test_release_reads_the_metadata_it_may_restore_through_the_shared_open(
     assert not lock_path.exists()
 
 
+def test_restore_metadata_writes_back_for_the_matching_owner(tmp_path: Path) -> None:
+    lock_path = tmp_path / "run.lock"
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    target = lock_path / "withheld"
+    withheld = runguard_release._Metadata(files=((target, b"restored"),))
+
+    runguard_release._restore_metadata(lock_path, ownership, withheld)
+
+    assert target.read_bytes() == b"restored"
+
+
+def test_restore_metadata_skips_a_different_owner_with_the_same_identity(tmp_path: Path) -> None:
+    lock_path = tmp_path / "run.lock"
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    owner_path = lock_path / "owner.json"
+    owner = json.loads(owner_path.read_text(encoding="utf-8"))
+    owner["owner_token"] = "replacement-owner"
+    owner_path.write_text(json.dumps(owner), encoding="utf-8")
+    target = lock_path / "withheld"
+    withheld = runguard_release._Metadata(files=((target, b"stale metadata"),))
+
+    runguard_release._restore_metadata(lock_path, ownership, withheld)
+
+    assert not target.exists()
+
+
 @requires_fake_kernel32
 def test_a_stale_claimer_cannot_take_the_lock_the_release_is_emptying(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

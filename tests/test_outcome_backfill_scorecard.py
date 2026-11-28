@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -304,6 +305,28 @@ def test_health_half_fed_uses_receipt_only_advice(tmp_path):
     assert "verify/manifests" in health["top_issue"]["detail"]
     assert "registered verifier" not in health["top_issue"]["detail"]
     assert "outcome capture" not in health["top_issue"]["detail"].lower()
+
+
+def test_health_half_fed_reports_local_manifests_with_unresolved_base(tmp_path):
+    _init_git_repo(tmp_path)
+    assert work_cmd.verify_run(target=tmp_path, commands=[f"{sys.executable} -c \"print('ok')\""]) == 0
+    manifests = tmp_path / "verify" / "manifests"
+    manifests.mkdir(parents=True)
+    (manifests / "local.json").write_text('{"manifest_id":"local"}\n', encoding="utf-8")
+    subprocess.run(
+        ["git", "remote", "add", "origin", "https://example.invalid/project.git"],
+        cwd=tmp_path,
+        check=True,
+    )
+
+    health = outcome_cmd.health(tmp_path)
+
+    unresolved = health["verify_manifest_base_unresolved"]
+    assert unresolved["status"] == "unresolved_default_branch"
+    assert unresolved["tried"] == "origin/HEAD, origin/main, and origin/master"
+    assert "git fetch origin" in unresolved["remediation"]
+    assert "base is unresolved" in health["top_issue"]["detail"]
+    assert "no verify manifests are tracked" not in health["top_issue"]["detail"]
 
 
 def test_latest_receipt_window_sort_is_stable(scoreable_target):

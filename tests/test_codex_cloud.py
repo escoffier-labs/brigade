@@ -8,6 +8,8 @@ from threading import Event
 
 import pytest
 
+from tests._fifo import make_fifo
+
 from brigade import (
     agents,
     cli,
@@ -1013,7 +1015,7 @@ def test_recovery_v3_rejects_unsafe_existing_record_writes(tmp_path, kind):
     elif kind == "directory":
         path.mkdir(mode=0o700)
     elif kind == "fifo":
-        codex_cloud.os.mkfifo(path, 0o600)
+        make_fifo(path, 0o600)
     else:
         path.write_bytes(_recovery_record_bytes())
         path.chmod(0o666)
@@ -1097,7 +1099,7 @@ def test_recovery_v3_fifo_read_is_bounded(tmp_path):
     path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
     _make_recovery_cloud_directory(tmp_path)
     path.parent.mkdir(mode=0o700)
-    codex_cloud.os.mkfifo(path, 0o600)
+    make_fifo(path, 0o600)
     script = (
         "import sys; from pathlib import Path; from brigade import codex_cloud; "
         "assert codex_cloud._recover_lease_holder(Path(sys.argv[1]), 'lease-1') is None"

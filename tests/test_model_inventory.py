@@ -1,6 +1,10 @@
 import os
 import stat
 
+import pytest
+
+from tests._home import set_home
+
 from brigade import agents, model_inventory
 
 
@@ -435,3 +439,37 @@ def test_ollama_inventory_is_loaded_once_for_different_seats(monkeypatch):
 
 def test_unsupported_harness_has_no_live_inventory_check():
     assert model_inventory.ModelInventoryInspector().inspect("codex", "gpt-5.5") is None
+
+
+@pytest.mark.parametrize(
+    ("cli_ref", "requested"), [("cursor", "test-model"), ("grok", "test-model"), ("ollama:test", "test")]
+)
+@pytest.mark.parametrize("stream", ["stderr", "stdout"])
+def test_failed_inventory_redacts_ref_resolved_secret_before_caching(monkeypatch, tmp_path, cli_ref, requested, stream):
+    set_home(monkeypatch, tmp_path)
+    synthetic_value = "synthetic-inventory-secret-" + "x" * 180
+    monkeypatch.setenv("SYNTHETIC_LISTING_SECRET", synthetic_value)
+    seat_env = {"LISTING_TOKEN_REF": "SYNTHETIC_LISTING_SECRET", "MODEL_SOURCE": "synthetic-source"}
+    overrides, error = agents.resolve_env_overrides(seat_env)
+    assert error == ""
+    diagnostic = f"listing failed: token={synthetic_value}; source=synthetic-source"
+    failure = agents.proc.Result(1, diagnostic if stream == "stdout" else "", diagnostic if stream == "stderr" else "")
+    calls = []
+
+    def run(*args, **kwargs):
+        calls.append(kwargs["env"])
+        return failure
+
+    monkeypatch.setattr(model_inventory, "_run_cursor_inventory", run)
+    monkeypatch.setattr(model_inventory.proc, "run", run)
+    inspector = model_inventory.ModelInventoryInspector()
+    kwargs = {"env": overrides, "secret_targets": agents.secret_ref_targets(seat_env)}
+    result = inspector.inspect(cli_ref, requested, **kwargs)
+
+    assert result is not None
+    assert result.state == "unavailable"
+    assert "listing failed: token=[LISTING_TOKEN]; source=synthetic-source" in result.detail
+    assert synthetic_value not in result.detail
+    assert all(synthetic_value not in inventory.error for inventory in inspector._inventories.values())
+    assert inspector.inspect(cli_ref, requested, **kwargs) is result
+    assert calls == [overrides]

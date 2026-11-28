@@ -15,7 +15,13 @@ from .worker_failure import safe_detail
 
 
 def _governance(
-    status: str, observed_at: float, scope: str, detail: str = "", capacity: int | None = None
+    status: str,
+    observed_at: float,
+    scope: str,
+    detail: str = "",
+    capacity: int | None = None,
+    *,
+    reason: str = "",
 ) -> Observation:
     """One Brigade-governance observation; the brigade route owns these facts."""
     return Observation(
@@ -24,6 +30,7 @@ def _governance(
         scope,
         detail=detail,
         capacity=capacity,
+        reason=reason,
         source="brigade-governance",
     )
 
@@ -38,6 +45,7 @@ class _HubAdmissionOutcome:
     enrollment: str | None = None
     parsed_policy: Mapping[str, Any] | None = None
     early_capacity_detail: str | None = None
+    early_capacity_reason: str = ""
 
 
 def _local_lock_capacity_observation(
@@ -82,20 +90,24 @@ def _capacity_or_unknown(
     *,
     observed_at: float,
     scope: str,
+    reason: str = "",
 ) -> Observation:
-    if lock_state in {"live", "skipped", "invalid"}:
+    if lock_state == "invalid":
+        detail = f"{detail}; local run lock state is {lock_state}"
+    elif lock_state in {"live", "skipped"}:
         return _local_lock_capacity_observation(
             lock_state,
             max_workers,
             observed_at=observed_at,
             scope=scope,
         )
-    return _governance("unknown", observed_at, scope, detail=detail)
+    return _governance("unknown", observed_at, scope, detail=detail, reason=reason)
 
 
 def _hub_seat_usage_capacity(
     limits: list[tuple[str, int]],
     snapshot: Mapping[str, Any] | None,
+    max_workers: int,
     *,
     observed_at: float,
     scope: str,
@@ -107,7 +119,7 @@ def _hub_seat_usage_capacity(
     response must carry the same roster revision and policy digest as the
     admission snapshot; anything else is unknown, never ready.
     """
-    from . import fleet_client_policy
+    from . import fleet_client_policy, fleet_hub_model_roster
 
     def _unknown(detail: str) -> Observation:
         return _governance("unknown", observed_at, scope, detail=detail)
@@ -118,6 +130,8 @@ def _hub_seat_usage_capacity(
         return _unknown(f"hub seat usage unavailable ({safe_detail(str(exc))})")
     if not isinstance(usage, Mapping):
         return _unknown("hub seat usage returned a malformed payload")
+    if usage.get("schema") != fleet_hub_model_roster.SEAT_USAGE_SCHEMA:
+        return _unknown("hub seat usage returned a missing or unexpected schema")
     seats = usage.get("seats")
     revision = usage.get("roster_revision")
     digest = usage.get("policy_digest")
@@ -134,7 +148,7 @@ def _hub_seat_usage_capacity(
         if type(occupied) is not int or occupied < 0:
             return _unknown(f"hub seat usage returned malformed occupancy for seat {seat_name!r}")
         free = max(0, limit - occupied)
-        capacity = free if capacity is None else min(capacity, free)
+        capacity = min(max_workers, free) if capacity is None else min(capacity, free)
         details.append(f"seat {seat_name!r} limit {limit}, occupied {occupied}")
     if capacity is None:
         return _unknown("hub seat usage had no limited seat to check")
@@ -568,6 +582,8 @@ def _hub_admission(
             break
 
     parsed_policy: Mapping[str, Any] | None = None
+    capacity_detail: str | None = None
+    capacity_reason = ""
     if admission_obs is None:
         if enrollment == "denied":
             admission_obs = _governance(
@@ -579,7 +595,31 @@ def _hub_admission(
         elif enrollment == "enrolled":
             try:
                 policy_payload = fleet_client_policy.show_policy()
-                raw_doc = policy_payload.get("document") if isinstance(policy_payload, Mapping) else None
+                if not isinstance(policy_payload, Mapping):
+                    raise fleet_policy.FleetPolicyError("fleet policy response is malformed")
+                authority = snapshot.get("fleet_policy")
+                snapshot_version = authority.get("version") if isinstance(authority, Mapping) else None
+                snapshot_digest = authority.get("digest") if isinstance(authority, Mapping) else None
+                if (
+                    type(policy_payload.get("version")) is not int
+                    or policy_payload.get("version") != snapshot_version
+                    or policy_payload.get("digest") != snapshot_digest
+                ):
+                    capacity_detail = "hub capacity unverified: hub policy changed after the readiness snapshot"
+                    capacity_reason = "hub-policy-changed"
+                    return _HubAdmissionOutcome(
+                        effective_roster=effective_roster,
+                        scope=resolved_scope,
+                        admission=_governance(
+                            "unknown", observed_at, resolved_scope, detail=capacity_detail, reason=capacity_reason
+                        ),
+                        snapshot=snapshot,
+                        source=source,
+                        enrollment=enrollment,
+                        early_capacity_detail=capacity_detail,
+                        early_capacity_reason=capacity_reason,
+                    )
+                raw_doc = policy_payload.get("document")
                 if not isinstance(raw_doc, Mapping):
                     raise fleet_policy.FleetPolicyError("fleet policy response is missing document")
                 parsed_policy = fleet_policy.parse_document(raw_doc)
@@ -652,6 +692,8 @@ def _hub_admission(
         source=source,
         enrollment=enrollment,
         parsed_policy=parsed_policy,
+        early_capacity_detail=capacity_detail,
+        early_capacity_reason=capacity_reason,
     )
 
 
@@ -668,6 +710,7 @@ def _hub_capacity(
     enrollment: str | None,
     parsed_policy: Mapping[str, Any] | None,
     early_capacity_detail: str | None,
+    early_capacity_reason: str,
 ) -> Observation:
     if early_capacity_detail is not None:
         return _capacity_or_unknown(
@@ -676,6 +719,7 @@ def _hub_capacity(
             early_capacity_detail,
             observed_at=observed_at,
             scope=scope,
+            reason=early_capacity_reason,
         )
 
     if lock_state in {"live", "skipped", "invalid"}:
@@ -718,7 +762,13 @@ def _hub_capacity(
                     capacity=0,
                 )
             if positive_seats:
-                return _hub_seat_usage_capacity(positive_seats, snapshot, observed_at=observed_at, scope=scope)
+                return _hub_seat_usage_capacity(
+                    positive_seats,
+                    snapshot,
+                    effective_roster.max_workers,
+                    observed_at=observed_at,
+                    scope=scope,
+                )
         return _governance(
             "unknown",
             observed_at,
@@ -766,7 +816,13 @@ def _hub_capacity(
             detail=f"hub model admission returned malformed limit for seat {malformed_seat!r}",
         )
     if positive_limit_seats:
-        return _hub_seat_usage_capacity(positive_limit_seats, snapshot, observed_at=observed_at, scope=scope)
+        return _hub_seat_usage_capacity(
+            positive_limit_seats,
+            snapshot,
+            effective_roster.max_workers,
+            observed_at=observed_at,
+            scope=scope,
+        )
 
     extra_source = (
         "hub repo claim and hub model seat limits (unlimited)" if claim_checked else "hub model seat limits (unlimited)"
@@ -882,6 +938,7 @@ def brigade_route_readiness(
         enrollment=hub_admission.enrollment,
         parsed_policy=hub_admission.parsed_policy,
         early_capacity_detail=hub_admission.early_capacity_detail,
+        early_capacity_reason=hub_admission.early_capacity_reason,
     )
     observations = {
         "admission": hub_admission.admission,

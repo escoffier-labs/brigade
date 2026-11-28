@@ -1,0 +1,1 @@
+- Campaign task cleanup now leaves tasks claimed by another consumer alone and clears stale claims when reopening tasks.

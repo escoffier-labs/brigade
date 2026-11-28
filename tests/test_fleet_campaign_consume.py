@@ -557,6 +557,58 @@ def test_launch_local_runs_only_its_own_task_through_dispatch_apply(apply_target
     assert len(intents) == 1
 
 
+def _campaign_ledger_task(target, work_id="wl-retire"):
+    task_id, reason = consumer._local_task(target, "Campaign work", work_id, [])
+    assert task_id is not None and reason == ""
+    return task_id
+
+
+def _set_task_claim(target, task_id, actor):
+    with locking._task_ledger_lock(target):
+        task_ledger = locking._read_task_ledger(target)
+        task = next(row for row in task_ledger["tasks"] if row["id"] == task_id)
+        task["claim"] = {"claim_id": "claim-1", "actor": actor, "claimed_at": "2026-01-01T00:00:00+00:00"}
+        locking._write_task_ledger(target, task_ledger)
+
+
+def test_retire_cancels_an_unclaimed_pending_task(apply_target):  # noqa: F811
+    task_id = _campaign_ledger_task(apply_target)
+
+    assert consumer._retire_task(apply_target, task_id, "coder") is None
+    task = next(row for row in locking._read_task_ledger(apply_target)["tasks"] if row["id"] == task_id)
+    assert task["status"] == "cancelled"
+
+
+def test_retire_skips_a_pending_task_claimed_by_another_consumer(apply_target):  # noqa: F811
+    task_id = _campaign_ledger_task(apply_target)
+    _set_task_claim(apply_target, task_id, "reviewer")
+
+    assert consumer._retire_task(apply_target, task_id, "coder") == f"task {task_id} is claimed by reviewer"
+    task = next(row for row in locking._read_task_ledger(apply_target)["tasks"] if row["id"] == task_id)
+    assert task["status"] == "pending"
+
+
+def test_retire_cancels_a_pending_task_claimed_by_this_consumer(apply_target):  # noqa: F811
+    task_id = _campaign_ledger_task(apply_target)
+    _set_task_claim(apply_target, task_id, "coder")
+
+    assert consumer._retire_task(apply_target, task_id, "coder") is None
+    task = next(row for row in locking._read_task_ledger(apply_target)["tasks"] if row["id"] == task_id)
+    assert task["status"] == "cancelled"
+
+
+def test_reopening_a_campaign_task_clears_its_claim(apply_target):  # noqa: F811
+    task_id = _campaign_ledger_task(apply_target)
+    _set_task_claim(apply_target, task_id, "coder")
+    assert consumer._retire_task(apply_target, task_id, "coder") is None
+
+    reopened_id, reason = consumer._local_task(apply_target, "Campaign work", "wl-retire", [])
+
+    task = next(row for row in locking._read_task_ledger(apply_target)["tasks"] if row["id"] == task_id)
+    assert (reopened_id, reason, task["status"]) == (task_id, "", "pending")
+    assert "claim" not in task and "assignee" not in task
+
+
 def test_cli_refuses_without_local_repositories_before_touching_the_hub(tmp_path, capsys):
     from brigade import cli
 
@@ -603,11 +655,11 @@ def test_contains_reloads_holds_added_after_consumer_started(tmp_path):
 
 
 def test_a_failing_task_cleanup_never_hides_the_run(tmp_path, monkeypatch):
-    def fail(repo_path, task_id):
+    def fail(repo_path, task_id, consumer_name):
         raise OSError("ledger lock timed out")
 
     monkeypatch.setattr(consumer, "_retire_task", fail)
-    consumer._retire_quietly(tmp_path, "task-1")
+    consumer._retire_quietly(tmp_path, "task-1", "coder")
 
 
 @pytest.mark.parametrize("during_watch", [False, True])

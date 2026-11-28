@@ -17,7 +17,7 @@ from . import helpers
 DEFAULT_CHECK_NAME = "ci-gate"
 _SCHEMA = "brigade.verify_ci.v1"
 _RECORD_DIR = ".brigade/work/verify-ci"
-# Brigade runtime state is never the work product, so it does not make a tree dirty.
+# Untracked Brigade runtime state is never the work product, so it does not make a tree dirty.
 _STATE_DIR = ".brigade/work"
 _SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _EXIT_CODES = {"passed": 0, "failed": 1, "pending": 2, "unknown": 2}
@@ -160,7 +160,7 @@ def _record_path(target: Path, head: str, check_name: str = DEFAULT_CHECK_NAME) 
 
 def _tree_state(target: Path, head: str, tree: str) -> str:
     """Return ``clean``, ``dirty`` or ``unreadable`` for the working tree against HEAD."""
-    live = localio.tree_fingerprint_with_head(target, extra_evidence_paths=(_STATE_DIR,))
+    live = localio.tree_fingerprint_with_head(target, extra_untracked_paths=(_STATE_DIR,))
     if None in live:
         return "unreadable"
     return "clean" if live == (tree, head) else "dirty"

@@ -1,0 +1,1 @@
+- Make Hub startup reject current-version memory databases that are missing either proposal quota index.

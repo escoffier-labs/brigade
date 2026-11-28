@@ -382,6 +382,16 @@ def test_fingerprint_golden_vector():
     assert run_batch.request_fingerprint(payload) == digest
 
 
+def test_pre_isolation_batch_fingerprint_golden_vector():
+    payload = {
+        "schema": "brigade.run_batch.v1",
+        "request_id": "legacy-request",
+        "tasks": [{"task_id": "inspect", "text": "Inspect the example", "seat": "coder"}],
+    }
+
+    assert run_batch.request_fingerprint(payload) == "90afac51e92e4f117622ede94a89ad3ff97f3d91ae999d123abbfacd1ba82e94"
+
+
 @pytest.mark.parametrize("stored", ["ABC", "0" * 63, "G" * 64, "A" * 64, 7])
 def test_compare_request_refuses_malformed_stored_fingerprint(stored):
     with pytest.raises(run_batch.BatchError) as caught:
