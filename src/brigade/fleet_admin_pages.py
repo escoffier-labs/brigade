@@ -497,13 +497,14 @@ def _overview_live_work(view: deck.DeckView, station: deck.StationView) -> str:
         harnesses = " · ".join(f"{harness} {count}" for harness, count, _, _ in groups)
         linked = sum(group[2] for group in groups)
         cloud = sum(group[3] for group in groups)
-        details = f"<small>{_esc(harnesses)} ({linked} T3-linked, {cloud} cloud)</small>"
+        overlap = " (may overlap)" if linked and cloud else ""
+        details = f"<small>{_esc(harnesses)} ({linked} T3-linked, {cloud} cloud){overlap}</small>"
     managed = f"<small>brigade run {station.busy}/{capacity}</small>" if station.busy else ""
     headline = f"<span>Agent sessions</span><b>{station.sessions}</b>" if total else "<span>No live work</span>"
     return (
         f'<div class="overview-machine-capacity"><div>{headline}</div>'
         f'<progress class="overview-use-bar" value="{total}" max="{max(1, capacity)}" aria-label="Live work"></progress>'
-        f"<small>{capacity} configured slots</small>{details}{managed}</div>"
+        f"<small>{capacity} configured Deck slots</small>{details}{managed}</div>"
     )
 
 
@@ -517,20 +518,19 @@ def _overview_machine_load(view: deck.DeckView, machine: deck.MachineState | Non
     memory, sessions = view.machine_pressure.get(machine.node_id, (None, None))
     inputs = [
         (label, value)
-        for label, value in (("CPU", cpu), ("memory", memory), ("session load", sessions))
+        for label, value in (("CPU", cpu), ("memory", memory), ("placement session load", sessions))
         if value is not None and math.isfinite(value)
     ]
     high = [(label, value) for label, value in inputs if value >= DEFAULT_THRESHOLD]
     signals = [f"{label} {value:.0%}" for label, value in sorted(high, key=lambda item: item[1], reverse=True)]
-    if machine.unused_reason == "machine-load-shed":
-        signals.append("node is shedding load")
-    elif machine.state == "busy" or machine.unused_reason == "machine-busy":
+    node_busy = machine.state == "busy" or machine.unused_reason == "machine-busy"
+    if node_busy:
         signals.append("node reports busy")
-    if signals and status not in {"offline", "stale"}:
-        return "Busy because: " + ", ".join(signals)
     if status in {"offline", "stale"}:
         return "Load unknown"
-    return ", ".join(f"{label} {value:.0%}" for label, value in inputs if label != "session load") or "Load unknown"
+    if signals and (status in {"working", "limited"} or node_busy):
+        return "Busy because: " + ", ".join(signals)
+    return ", ".join(f"{label} {value:.0%}" for label, value in inputs if label in {"CPU", "memory"}) or "Load unknown"
 
 
 def render_overview_machines(view: deck.DeckView, now: datetime) -> str:

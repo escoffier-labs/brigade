@@ -4,6 +4,7 @@ from html import escape
 
 
 def heading(identifier: str, title: str, count: int | None = None) -> str:
+    identifier = escape(identifier)
     summary = "" if count is None else f'<small class="overview-section-count"> · {count}</small>'
     return (
         f'<h2 id="{identifier}"><button type="button" class="overview-section-toggle" '
@@ -12,13 +13,13 @@ def heading(identifier: str, title: str, count: int | None = None) -> str:
 
 
 def body(identifier: str, content: str) -> str:
-    return f'<div class="overview-section-body" id="{identifier}-content">{content}</div>'
+    return f'<div class="overview-section-body" id="{escape(identifier)}-content">{content}</div>'
 
 
 def card(identifier: str, title: str, href: str, content: str, count: int) -> str:
     return (
-        f'<section class="admin-card" aria-labelledby="{identifier}"><header>'
-        f'{heading(identifier, title, count)}<a class="card-link" href="{href}">View all</a></header>'
+        f'<section class="admin-card" aria-labelledby="{escape(identifier)}"><header>'
+        f'{heading(identifier, title, count)}<a class="card-link" href="{escape(href)}">View all</a></header>'
         f"{body(identifier, content)}</section>"
     )
 

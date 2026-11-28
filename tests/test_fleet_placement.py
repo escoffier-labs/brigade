@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from datetime import timedelta
 from io import StringIO
 
@@ -278,6 +279,23 @@ def test_deck_uses_placement_session_load_and_deduplicates_harness_counts(fleet)
     assert view.machine_pressure[NODE_CLOUD] == (0.33, cloud["effective_load"]) == (0.33, 0.75)
     assert view.stations[0].sessions == 2
     assert view.session_breakdown[NODE_CLOUD] == (("claude", 1, 1, 0), ("codex", 1, 0, 0))
+
+
+def test_deck_omits_placement_session_load_for_zero_concurrency(fleet):
+    plane = fleet_deck_pages_http.control_plane_from_hub(fleet)
+    machine = next(machine for machine in plane.machines if machine.node_id == NODE_LINUX)
+    plane = replace(plane, machines=(replace(machine, capacity="0"),))
+    assert fleet_deck_pages_http._machine_pressure(fleet, plane, {}, _now())[NODE_LINUX] == (None, None)
+
+
+def test_deck_pressure_falls_back_when_policy_cannot_be_read(fleet, monkeypatch):
+    plane = fleet_deck_pages_http.control_plane_from_hub(fleet)
+
+    def unavailable(_conn):
+        raise sqlite3.OperationalError("policy unavailable")
+
+    monkeypatch.setattr(fleet_hub_policy, "current_policy", unavailable)
+    assert fleet_deck_pages_http._machine_pressure(fleet, plane, {}, _now()) == {}
 
 
 def test_linked_provider_report_counts_once_at_full_weight(fleet):

@@ -1670,8 +1670,20 @@ def test_machine_row_orders_busy_inputs_by_load():
     plane = _plane([_machine("alpha", NODE_A, state="busy", load="0.96"), _machine("beta", NODE_B, load="0.03")])
     view = replace(view, control_plane=plane, machine_pressure={NODE_A: (0.81, 0.75), NODE_B: (0.26, 0)})
     html = pages.render_overview_machines(view, NOW)
-    assert "Busy because: CPU 96%, memory 81%, session load 75%, node reports busy" in html
+    assert "Busy because: CPU 96%, memory 81%, placement session load 75%, node reports busy" in html
     assert "CPU 3%, memory 26%" in html
+
+
+def test_idle_machine_with_high_cpu_shows_calm_readings():
+    from brigade import fleet_admin_pages as pages
+
+    view = _sessions_view([])
+    plane = _plane([_machine("alpha", NODE_A, load="0.96")])
+    view = replace(view, control_plane=plane, machine_pressure={NODE_A: (0.20, 0)})
+    html = pages.render_overview_machines(view, NOW)
+    assert ">idle<" in html and "No live work" in html
+    assert "CPU 96%, memory 20%" in html
+    assert "Busy because:" not in html
 
 
 def test_station_without_jobs_or_sessions_stays_idle():

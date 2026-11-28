@@ -218,3 +218,16 @@ machines.onclick();
 assert.ok(panel(machines).hidden);
 """,
     )
+
+
+def test_disclosure_card_escapes_identifier_and_href_attributes():
+    from brigade import fleet_deck_disclosure
+
+    identifier = 'title" data-unexpected="value'
+    href = '/deck/activity?view="all"&status=live'
+    markup = Markup(fleet_deck_disclosure.card(identifier, "Work", href, "<p>Details</p>", 1))
+    assert all("data-unexpected" not in attrs for _, attrs in markup.tags)
+    assert any(attrs.get("aria-labelledby") == identifier for _, attrs in markup.tags)
+    assert any(attrs.get("aria-controls") == identifier + "-content" for _, attrs in markup.tags)
+    assert any(attrs.get("id") == identifier + "-content" for _, attrs in markup.tags)
+    assert any(attrs.get("href") == href for _, attrs in markup.tags)

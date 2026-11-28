@@ -55,7 +55,10 @@ def _machine_pressure(
     counts: Mapping[str, int],
     now: datetime,
 ) -> dict[str, tuple[float | None, float | None]]:
-    document = fleet_hub_policy.current_policy(conn)["document"]
+    try:
+        document = fleet_hub_policy.current_policy(conn)["document"]
+    except (FleetHubError, sqlite3.Error, KeyError, ValueError, TypeError):
+        return {}
     routing = document.get("routing") or {}
     weight = routing.get("agent_session_weight", fleet_policy.DEFAULT_AGENT_SESSION_WEIGHT)
     standalone = fleet_hub_sessions.count_standalone_by_node(conn, now_epoch=now.timestamp()) if weight else {}
@@ -65,9 +68,10 @@ def _machine_pressure(
     for machine in plane.machines:
         node = machine.node_id
         sessions = counts.get(node, 0) if fleet_t3_health.sessions_unknown_reason(health, node) is None else None
+        capacity = int(machine.capacity) if machine.capacity.isdigit() else 0
         ratio = (
-            fleet_hub_placement.session_load_ratio(sessions, standalone.get(node, 0), int(machine.capacity), weight)
-            if machine.capacity.isdigit()
+            fleet_hub_placement.session_load_ratio(sessions, standalone.get(node, 0), capacity, weight)
+            if capacity > 0
             else None
         )
         pressure[node] = (memory.get(node), ratio)
