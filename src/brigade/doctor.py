@@ -836,9 +836,15 @@ def _check_claude_work_loop(target: Path) -> CheckResult | None:
     # whole work-loop package; treat that as FAIL so agents stop guessing.
     if hook_error:
         status = FAIL
-        # Keep the classifier's full, ordered diagnostic; force only the state token.
-        _state, sep, diagnostics = detail.partition("; ")
-        detail = f"state=error; {diagnostics}" if sep else detail
+        # Keep the classifier's full, ordered issue list; force only the state token.
+        issues = payload.get("issues")
+        if isinstance(issues, list) and all(isinstance(issue, str) for issue in issues):
+            diagnostics = "; ".join(issues) if issues else "current guidance, skill, and hooks"
+            detail = f"state=error; {diagnostics}"
+        else:
+            expected_prefix = f"state={state}; "
+            diagnostics = detail[len(expected_prefix) :] if detail.startswith(expected_prefix) else detail
+            detail = f"state=error; {diagnostics}"
     legacy_count = hooks.get("legacy_handler_count", 0)
     if legacy_count and status != FAIL:
         status = WARN

@@ -259,6 +259,27 @@ def test_doctor_agent_corrupt_hooks_is_error_severity(tmp_path: Path, capsys):
     assert "parse failure" in finding["observed"]
 
 
+def test_doctor_agent_separates_corrupt_hooks_and_integrity_refusal(tmp_path: Path, capsys):
+    target = _wire(tmp_path)
+    (target / ".claude" / "settings.json").write_text("{not-json\n")
+    sessions = target / ".brigade" / "work" / "claude-hooks" / "sessions"
+    sessions.parent.mkdir(parents=True, exist_ok=True)
+    sessions.write_text("not a directory")
+    capsys.readouterr()
+
+    assert doctor_mod.run(target=target, agent=True, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    findings = [item for item in payload["findings"] if item["name"] == "claude work loop"]
+
+    assert len(findings) == 2
+    settings, refusal = findings
+    assert "JSONDecodeError" in settings["observed"]
+    assert "session directory integrity refused" not in settings["observed"]
+    assert settings["expected"] == "readable, valid JSON settings"
+    assert refusal["observed"].startswith("session directory integrity refused:")
+    assert refusal["expected"] == "check status OK"
+
+
 def test_doctor_agent_ledger_stale_finding(tmp_path: Path, monkeypatch):
     target = _wire(tmp_path)
     stale_ts = (datetime.now(timezone.utc) - timedelta(days=doctor_mod.OUTCOME_LEDGER_STALE_DAYS + 2)).isoformat()

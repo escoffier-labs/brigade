@@ -219,7 +219,10 @@ def _split_observed_expected(detail: str) -> tuple[str, str]:
     invalid = re.search(r"(?i)\binvalid JSON:\s*(.+)$", text)
     if invalid:
         return f"parse failure: {invalid.group(1).strip()}", "valid JSON object"
-    unable = re.search(r"(?i)unable to read[^:]*:\s*(.+)$", text)
+    unable = re.search(
+        r"(?i)unable to read[^:]*:\s*(.+?)(?=;\s*session directory integrity refused:|$)",
+        text,
+    )
     if unable:
         return f"parse failure: {unable.group(1).strip()}", "readable, valid JSON settings"
     if "wired but no verify run" in text.lower():
@@ -328,9 +331,23 @@ def build_findings(
     resolved_selection = _resolve_selection(target, selection)
     findings: list[dict[str, Any]] = []
     for check in checks:
-        finding = finding_from_check(check, target=target, selection=resolved_selection)
-        if finding is not None:
-            findings.append(finding)
+        status, name, detail, scope = _normalize_scoped_check(check)
+        split = re.match(
+            r"(?is)(.*hook settings error:.*?);\s*(session directory integrity refused:.*)$",
+            detail,
+        )
+        finding_checks: list[CheckResult | ScopedCheckResult]
+        if name == "claude work loop" and split:
+            finding_checks = [
+                (status, name, split.group(1), scope),
+                (status, name, split.group(2), scope),
+            ]
+        else:
+            finding_checks = [check]
+        for finding_check in finding_checks:
+            finding = finding_from_check(finding_check, target=target, selection=resolved_selection)
+            if finding is not None:
+                findings.append(finding)
     return findings
 
 

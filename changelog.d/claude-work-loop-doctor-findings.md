@@ -1,0 +1,1 @@
+- Keep Claude work-loop doctor issue ordering reliable and report settings errors separately from session integrity refusals in agent output.
