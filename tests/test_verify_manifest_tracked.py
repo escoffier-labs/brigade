@@ -8,14 +8,37 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from brigade import verify_manifest
 from brigade.verify_manifest import _WORKSPACE_MANIFESTS_REL
 
-from tests.test_verify_trial import _track_workspace_manifest, _write_patch_manifest
+from tests.test_verify_trial import (
+    _init_verify_git_repo,
+    _track_workspace_manifest,
+    _write_patch_manifest,
+    _write_skill_subject,
+)
 
 pytest_plugins = ["tests.test_verify_trial"]
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture
+def scoreable_target(tmp_path: Path) -> Path:
+    target = tmp_path / "ws"
+    target.mkdir()
+    _init_verify_git_repo(target)
+    _write_skill_subject(target)
+    subprocess.run(["git", "add", "skills"], cwd=target, check=True, stdout=subprocess.DEVNULL)
+    subprocess.run(
+        ["git", "-c", "user.name=Test User", "-c", "user.email=test@example.invalid", "commit", "-m", "add skill"],
+        cwd=target,
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    return target
 
 
 def _workspace_manifest_paths() -> list[Path]:

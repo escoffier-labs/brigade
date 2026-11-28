@@ -1,0 +1,1 @@
+- Treat verifier receipts based on local HEAD without a remote as audit-only evidence instead of scoreable evidence.

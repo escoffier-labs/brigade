@@ -68,6 +68,9 @@ def _track_workspace_manifest(path: Path, manifest_id: str) -> None:
         check=True,
         stdout=subprocess.DEVNULL,
     )
+    remotes = subprocess.run(["git", "remote"], cwd=path, check=True, text=True, capture_output=True).stdout.split()
+    if "origin" in remotes:
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=path, check=True)
 
 
 def _write_skill_subject(
@@ -220,6 +223,14 @@ def scoreable_target(tmp_path):
         check=True,
         stdout=subprocess.DEVNULL,
     )
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=target, check=True, text=True, capture_output=True
+    ).stdout.strip()
+    subprocess.run(["git", "remote", "add", "origin", "."], cwd=target, check=True)
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/main", head], cwd=target, check=True)
+    subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], cwd=target, check=True
+    )
     return target
 
 
@@ -303,6 +314,29 @@ def test_manifest_verify_writes_subject_binding_and_check_roles(scoreable_target
     projection = verify_trial.project_trial(receipt, target=scoreable_target)
     assert projection.eligible is False
     assert projection.reason == "empty_patch"
+
+
+def test_no_remote_manifest_receipt_is_audit_only(scoreable_target, monkeypatch):
+    _write_fixture_manifest(scoreable_target, manifest_id="local-only-fixture")
+    subprocess.run(["git", "remote", "remove", "origin"], cwd=scoreable_target, check=True)
+
+    receipt = _run_manifest_verify(scoreable_target, "local-only-fixture", monkeypatch=monkeypatch, start_session=False)
+    projection = verify_trial.project_trial(receipt, target=scoreable_target)
+
+    assert receipt["status"] == "completed"
+    assert receipt["subject_binding"]["manifest_binding"]["base_source"] == "no_remote"
+    assert projection.eligible is False
+    assert projection.reason == "verifier_manifest_no_remote"
+
+
+def test_default_branch_manifest_receipt_still_scores(scoreable_target, monkeypatch):
+    _write_fixture_manifest(scoreable_target, manifest_id="remote-fixture")
+
+    receipt = _run_manifest_verify(scoreable_target, "remote-fixture", monkeypatch=monkeypatch, start_session=False)
+    projection = verify_trial.project_trial(receipt, target=scoreable_target)
+
+    assert receipt["subject_binding"]["manifest_binding"]["base_source"] == "default_branch"
+    assert projection.eligible is True
 
 
 def test_manifest_verify_rejects_cli_command_override(scoreable_target):
