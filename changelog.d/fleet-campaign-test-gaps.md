@@ -1,1 +1,3 @@
 - Cover live replacement-holder fencing and real dispatch child deadline cancellation in the fleet campaign tests.
+- Advance the dispatch deadline only after child startup and require one timeout with budget-exhausted failure evidence.
+- Assert the replacement holder belongs to node-b at generation 2 and stale capability reads return holder-mismatch.
