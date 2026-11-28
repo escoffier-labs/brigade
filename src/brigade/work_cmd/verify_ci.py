@@ -35,9 +35,9 @@ def _head_identity(target: Path) -> tuple[str, str] | None:
     return (head, tree) if tree and _SHA.fullmatch(tree) else None
 
 
-def _github_repository(target: Path) -> str | None:
+def _github_repository(target: Path, remote_name: str = "origin") -> str | None:
     try:
-        remote = helpers._git_value(target, "remote", "get-url", "origin") or ""
+        remote = helpers._git_value(target, "remote", "get-url", remote_name) or ""
         if remote.startswith("git@github.com:"):
             path = remote.removeprefix("git@github.com:")
         else:
@@ -55,23 +55,16 @@ def _github_repository(target: Path) -> str | None:
 
 def _missing_origin_reason(target: Path) -> str:
     remotes = (helpers._git_value(target, "remote") or "").splitlines()
-    if not remotes:
-        return (
-            "No GitHub origin remote was found. Add one with: "
-            "git remote add origin https://github.com/OWNER/REPOSITORY.git"
-        )
-    names = ", ".join(remotes)
+    source = next((name for name in remotes if _github_repository(target, name) is not None), None)
+    prefix = "No GitHub origin remote was found. "
+    if remotes:
+        prefix += f"Existing remotes: {', '.join(remotes)}. "
+    if source is None:
+        return prefix + "Add one with: git remote add origin https://github.com/OWNER/REPOSITORY.git"
     if "origin" in remotes:
-        return (
-            f"No GitHub origin remote was found. Existing remotes: {names}. "
-            "Point origin at GitHub with: "
-            "git remote set-url origin https://github.com/OWNER/REPOSITORY.git"
-        )
-    source = shlex.quote(remotes[0])
-    return (
-        f"No GitHub origin remote was found. Existing remotes: {names}. "
-        f"Rename {remotes[0]} to origin with: git remote rename {source} origin"
-    )
+        url = helpers._git_value(target, "remote", "get-url", source) or ""
+        return prefix + f"Point origin at GitHub with: git remote set-url origin {shlex.quote(url)}"
+    return prefix + f"Rename {source} to origin with: git remote rename {shlex.quote(source)} origin"
 
 
 def _named_runs(output: str, check_name: str) -> list[dict[str, Any]]:

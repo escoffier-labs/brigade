@@ -214,6 +214,42 @@ def test_ci_advises_how_to_add_origin_when_no_remotes_exist(checkout, capsys):
     assert "Add one with: git remote add origin" in reason
 
 
+@pytest.mark.parametrize("has_origin", [False, True])
+def test_ci_advises_using_first_github_remote(checkout, capsys, has_origin):
+    target, _, _ = checkout
+    url = f"https://{_GITHUB_HOST}/example-org/example-repo.git"
+    _git(target, "remote", "rename", "origin", "upstream")
+    first = "origin" if has_origin else "archive"
+    _git(target, "remote", "add", first, "https://example.invalid/example-org/example-repo.git")
+    assert _git(target, "remote").splitlines() == [first, "upstream"]
+
+    assert _ci(target) == 2
+    reason = json.loads(capsys.readouterr().out)["reason"]
+    advice = (
+        f"Point origin at GitHub with: git remote set-url origin {url}"
+        if has_origin
+        else "Rename upstream to origin with: git remote rename upstream origin"
+    )
+    assert reason == f"No GitHub origin remote was found. Existing remotes: {first}, upstream. {advice}"
+    subprocess.run(shlex.split(reason.partition("with: ")[2]), cwd=target, check=True)
+    assert _git(target, "remote", "get-url", "origin") == url
+
+
+@pytest.mark.parametrize("remotes", [("archive", "upstream"), ("origin", "upstream")])
+def test_ci_advises_adding_github_origin_when_no_remote_qualifies(checkout, capsys, remotes):
+    target, _, _ = checkout
+    _git(target, "remote", "remove", "origin")
+    for name in remotes:
+        _git(target, "remote", "add", name, "https://example.invalid/example-org/example-repo.git")
+
+    assert _ci(target) == 2
+    reason = json.loads(capsys.readouterr().out)["reason"]
+    assert reason == (
+        f"No GitHub origin remote was found. Existing remotes: {', '.join(remotes)}. "
+        "Add one with: git remote add origin https://github.com/OWNER/REPOSITORY.git"
+    )
+
+
 def test_ci_refuses_dirty_tree_without_query_or_record(checkout, capsys):
     target, head, _ = checkout
     (target / "untracked.txt").write_text("dirty")
