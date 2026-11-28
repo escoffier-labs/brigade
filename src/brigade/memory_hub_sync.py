@@ -626,7 +626,10 @@ def _refuse_scope(
     readable.discard(scope)
     replica.retain_scopes(readable)
     replica.meta["read_scopes"] = sorted(set(replica.meta.get("read_scopes") or []) & readable)
-    save()
+    try:
+        save()
+    except InboxLockTimeout:
+        save()
     report["warnings"].append(
         f"the hub refused {scope} during the pull; its replicated cards were dropped and it is not readable"
     )

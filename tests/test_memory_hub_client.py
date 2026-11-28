@@ -11,7 +11,7 @@ import shutil
 import os
 import stat
 import threading
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -2017,6 +2017,55 @@ def test_a_scope_the_hub_refused_is_never_served_from_the_replica(hub, tmp_path,
     hub.do_card = refuse_a_then_rate_limit_b
     # The CLI's replica fallback is not Dot's: a push-safe card read never answers from a replica.
     assert tools.memory_card("y", scope="repo:b") == {"error": "card_not_found", "name": "y"}
+
+
+def test_a_refused_scope_save_retries_once_after_a_lock_timeout(hub, tmp_path, monkeypatch):
+    target = _two_scope_reader(hub, tmp_path, ("repo:a", "x", "refused scope text"))
+    _put_on(hub, "x", "new text", scope="repo:a")
+    hub.do_card = lambda body: GRANT_MISSING
+    original_state_lock = sync._state_lock
+    attempts = 0
+
+    @contextmanager
+    def first_refusal_save_times_out(path):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            raise sync.InboxLockTimeout("busy")
+        with original_state_lock(path):
+            yield
+
+    monkeypatch.setattr(sync, "_state_lock", first_refusal_save_times_out)
+    sync.pull(target, client(hub), settings(target))
+
+    saved = store.replica(target)
+    assert attempts >= 3
+    assert saved.meta["read_scopes"] == ["repo:b"]
+    assert _card_ids(saved) == set()
+
+
+def test_a_refused_scope_save_exits_busy_after_two_lock_timeouts(hub, tmp_path, monkeypatch, capsys):
+    target = _two_scope_reader(hub, tmp_path, ("repo:a", "x", "refused scope text"))
+    _put_on(hub, "x", "new text", scope="repo:a")
+    hub.do_card = lambda body: GRANT_MISSING
+    original_state_lock = sync._state_lock
+    attempts = 0
+
+    @contextmanager
+    def both_refusal_saves_time_out(path):
+        nonlocal attempts
+        attempts += 1
+        if attempts in (2, 3):
+            raise sync.InboxLockTimeout("busy")
+        with original_state_lock(path):
+            yield
+
+    monkeypatch.setattr(sync, "_state_lock", both_refusal_saves_time_out)
+    code, _, error = run(["memory", "hub", "pull", "--target", str(target)], capsys)
+
+    assert attempts == 3
+    assert code == 75
+    assert "another memory hub push or pull is running" in error
 
 
 @pytest.mark.parametrize("keep", ["--keep-hub", "--keep-local"])
