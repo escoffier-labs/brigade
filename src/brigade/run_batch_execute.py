@@ -982,6 +982,7 @@ def stored_result(
             "result_id": state.result_id if state else None,
             "result_ref": str(path.relative_to(run_dir)) if path.is_file() else None,
             "workspace": "worktree" if worktree else "shared",
+            "checkout_created": bool(state and state.workspace is not None),
             "selection": run_batch_capability.selection(task),
             "artifact": artifact,
             "refusal": {"code": refusal[0], "reason": refusal[1]} if refusal is not None else None,

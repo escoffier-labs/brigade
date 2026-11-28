@@ -253,6 +253,9 @@ marker present reports `indeterminate` (`reservation-held`) and never calls.
 The batch result JSON carries the same status as an additive `synthesis`
 member (`{status, seat, ref, digest, reason}` or null). The per-task
 `synthesis.json` summary retains its existing `brigade.synthesis.v1` shape.
+Each task also retains its declared `workspace` value and carries
+`checkout_created`, which is true only after a worktree checkout was created
+and bound. It is false for shared tasks and tasks refused before checkout.
 Synthesis is described in [explicit task batches](run-batch.md#synthesis).
 
 ---

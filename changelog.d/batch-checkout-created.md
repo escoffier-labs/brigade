@@ -1,0 +1,1 @@
+- Report whether each batch task's worktree checkout was actually created in result JSON.

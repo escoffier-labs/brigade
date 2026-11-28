@@ -890,8 +890,9 @@ in the local task result sidecar.
 JSON output uses `brigade.run_batch_result.v1`, with `run_id`, `request_id`, `run_status`, and a
 `tasks` object keyed by task ID. Each member has `status`, `not_run`, `result_id`,
 `result_ref` (relative to the run directory, or null), `workspace`
-(`worktree` for a task that ran in its own reserved checkout, `shared` for one
-that ran in the caller workspace), `selection`
+(`worktree` for declared worktree isolation, `shared` for declared shared
+isolation), `checkout_created` (true only when the task's worktree checkout was
+created and bound, and false for shared tasks or refusals before checkout), `selection`
 (`{"kind": "seat", "capability": null}` or
 `{"kind": "capability", "capability": "<tag>"}`, with no roster or task text),
 `artifact` (`{delivery, candidate_commit,
