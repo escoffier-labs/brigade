@@ -1,2 +1,3 @@
 - `brigade model trial paired-live` now ends a cell at its deadline even when a process the arm started left the session and keeps the arm's stdout open, and it stops any process still carrying that cell's random marker after teardown, failing that cell and reporting the pids, without touching a same-user process the cell did not start.
 - When teardown has to stop the stderr reader before the stream ends, the cell reports descendant-held pipes instead of passing.
+- The teardown drain of stderr is bounded, so a descendant that keeps writing cannot hold the cell open.

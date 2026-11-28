@@ -1108,16 +1108,24 @@ def test_windows_job_stops_a_descendant_that_inherits_both_arm_output_pipes(tmp_
     assert (run.code, run.timed_out, run.cleanup_failed) == (0, False, False)
 
 
-def _stderr_holder_script(pid_file, output):
+def _stderr_holder_script(pid_file, output, *, keep_writing=False):
+    # keep_writing makes the escaped child stream stderr nonstop instead of idling on the pipe.
+    hold = (
+        "    end = time.monotonic() + 30\n"
+        "    while time.monotonic() < end:\n"
+        "        sys.stderr.write('x' * 256)\n"
+        "        sys.stderr.flush()\n"
+        "        time.sleep(0.002)\n"
+        if keep_writing
+        else "    time.sleep(30)\n"
+    )
     return (
         "import os, pathlib, sys, time\n"
         "if os.fork() == 0:\n"
         "    os.setsid()\n"
         "    sys.stdout.close()\n"
         "    print('diagnostic', file=sys.stderr, flush=True)\n"
-        f"    pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
-        "    time.sleep(30)\n"
-        "    os._exit(0)\n"
+        f"    pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid()))\n" + hold + "    os._exit(0)\n"
         "ready_deadline = time.monotonic() + 1\n"
         f"while not pathlib.Path({str(pid_file)!r}).exists():\n"
         "    if time.monotonic() >= ready_deadline:\n"
@@ -1141,6 +1149,27 @@ def test_stderr_reader_stops_at_the_cell_deadline_when_a_setsid_child_holds_the_
         assert run.stream == b"  \n"
         assert run.stderr == b"diagnostic\n"
         assert run.held_pipes and not run.timed_out
+    finally:
+        if pid_file.exists():
+            try:
+                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+            except OSError:
+                pass
+
+
+@pytest.mark.skipif(not hasattr(os, "setsid"), reason="requires os.setsid")
+def test_teardown_drain_is_bounded_while_a_descendant_keeps_writing_stderr(tmp_path):
+    pid_file = tmp_path / "writer.pid"
+    script = _stderr_holder_script(pid_file, "complete output", keep_writing=True)
+    observer = _Observer(expected_model="m", session_id="s", version="v", cwd=tmp_path)
+    env = {key: os.environ[key] for key in ENV_PASSTHROUGH if key in os.environ}
+    started = time.monotonic()
+    try:
+        run = _run_process([sys.executable, "-c", script], env, tmp_path, "", 30, observer, "tok")
+        # Well under EXIT_GRACE: the bounded drain stops even though stderr never goes quiet.
+        assert time.monotonic() - started < 3
+        assert observer.failure == "malformed_stream"
+        assert not run.timed_out and run.held_pipes
     finally:
         if pid_file.exists():
             try:

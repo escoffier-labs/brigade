@@ -97,6 +97,7 @@ MAX_STREAM_BYTES = 16 * 1024 * 1024
 MAX_LINE_BYTES = 4 * 1024 * 1024
 MAX_STDERR_BYTES = 1024 * 1024
 STDERR_TAIL = 65536
+STDERR_TEARDOWN_DRAIN_SECONDS = 0.2  # Longest teardown spends draining stderr already in flight.
 MAX_TRACE_BYTES = 4 * 1024 * 1024
 MAX_RECEIPT_BYTES = 1024 * 1024
 MAX_EVIDENCE_BYTES = 64 * 1024 * 1024
@@ -730,11 +731,15 @@ class _StderrCapture:
             if os.name == "posix" and self.deadline is not None:
                 poller = select.poll()
                 poller.register(pipe.fileno(), select.POLLIN | select.POLLHUP | select.POLLERR)
+            stop_by: float | None = None
             while True:
                 if poller is not None and self.deadline is not None:
                     if self.stopping.is_set():
-                        # Teardown: drain what is already buffered, then stop without waiting.
-                        if not poller.poll(0):
+                        # Teardown: drain what is already buffered, then stop without waiting. The
+                        # drain is bounded, so a descendant that keeps writing cannot hold teardown.
+                        if stop_by is None:
+                            stop_by = time.monotonic() + STDERR_TEARDOWN_DRAIN_SECONDS
+                        if time.monotonic() >= stop_by or not poller.poll(0):
                             break
                     else:
                         remaining = self.deadline - time.monotonic()
