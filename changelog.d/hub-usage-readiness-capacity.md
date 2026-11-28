@@ -1,0 +1,1 @@
+- Roster readiness now rejects Hub seat usage with a missing or unexpected schema and caps reported Hub capacity at the configured worker maximum.
