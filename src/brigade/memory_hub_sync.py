@@ -733,6 +733,8 @@ def withheld(text: str) -> str | None:
     counts, whatever its case and whether or not the key is quoted, and the first word of its value decides: no
     such line or `public` publishes, `private` is `visibility-private`, and
     anything else, an empty value included, is `visibility-unrecognized`. A
+    frontmatter line that mentions visibility without matching that key form is
+    also `visibility-unrecognized`. A
     `visibility:` line in a leading block that does not parse as frontmatter
     (no closing fence, a malformed fence, no fence at all) is
     `visibility-unrecognized` too. Push, spool replay and import all ask this.
@@ -753,7 +755,12 @@ def withheld(text: str) -> str | None:
     else:
         end = next((index for index, line in enumerate(lines[start:]) if not line.strip()), None)
         block, parsed = lines[start : start + end if end is not None else None], False
-    values = [match.group(2) for match in map(_VISIBILITY_LINE.match, block) if match]
+    matches = [_VISIBILITY_LINE.match(line) for line in block]
+    values = [match.group(2) for match in matches if match]
+    if parsed and any(
+        "visibility" in line.lower() and match is None for line, match in zip(block, matches, strict=True)
+    ):
+        return VISIBILITY_UNRECOGNIZED
     if not values:
         return None
     if not parsed:
