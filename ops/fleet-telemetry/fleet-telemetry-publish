@@ -29,12 +29,12 @@ SWAP_MEMORY_FLOOR = 0.80  # Ignore lingering swap use when enough RAM is availab
 BRIGADE = os.environ.get("BRIGADE_BIN") or shutil.which("brigade") or "brigade"
 
 
-def _run(args: list[str], timeout: float = 60.0) -> str:
+def _run(args: list[str], timeout: float = 15.0) -> str:
     result = subprocess.run(
         [BRIGADE, *args], capture_output=True, text=True, timeout=timeout, check=False
     )
     if result.returncode != 0:
-        raise RuntimeError(f"brigade {' '.join(args)} exited {result.returncode}: {result.stderr.strip()[:200]}")
+        raise RuntimeError("brigade command failed")
     return result.stdout
 
 
@@ -172,24 +172,75 @@ def _observe_t3() -> None:
     brigade_dir = os.path.dirname(shutil.which(BRIGADE) or "")
     if brigade_dir:
         env["PATH"] = brigade_dir + os.pathsep + env.get("PATH", "")
+    _optional_run("t3 observe", [*command, "observe", "--max", "20"], 32, env=env)
+
+
+def _optional_run(label: str, command: list[str], timeout: float, *, env: dict[str, str] | None = None) -> None:
+    """Keep raw child stdout/stderr and exception text out of timer logs."""
     try:
         result = subprocess.run(
-            [*command, "observe", "--max", "20"],
-            capture_output=True, text=True, timeout=90, check=False, env=env,
-            stdin=subprocess.DEVNULL,
+            command, capture_output=True, text=True, timeout=timeout, check=False,
+            env=env, stdin=subprocess.DEVNULL,
         )
         summary = json.loads(result.stdout) if result.stdout.strip() else {}
-        print(f"t3 observe: exit={result.returncode} examined={summary.get('examined')} truncated={summary.get('truncated')}")
-    except Exception as error:  # noqa: BLE001 - observation is best effort
-        print(f"t3 observe: skipped ({type(error).__name__})", file=sys.stderr)
+        counts = []
+        for name in ("examined", "observed", "published", "skipped", "scheduled"):
+            value = summary.get(name)
+            if type(value) is int and 0 <= value <= 1_000_000_000:
+                counts.append(f"{name}={value}")
+        status = {0: "ok", 2: "truncated"}.get(result.returncode, "failed")
+        print(f"{label}: status={status}" + (" " + " ".join(counts) if counts else ""))
+    except Exception as error:  # noqa: BLE001 - independent best-effort hooks
+        print(f"{label}: skipped ({type(error).__name__})", file=sys.stderr)
 
 
-def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dry-run", action="store_true", help="Print the telemetry body without publishing")
-    args = parser.parse_args(argv)
-    if not args.dry_run:
-        _observe_t3()
+# The runner owns private journal selection in its manifest, not a CLI flag.
+# Fail closed on a configuration mismatch; never rewrite the manifest here.
+_ACTION_TICK_PROGRAM = """
+import json, sys
+from pathlib import Path
+from brigade.fleet_action_runner import load_manifest, tick
+manifest = Path(sys.argv[1])
+expected_journal = Path(sys.argv[2])
+if not expected_journal.is_absolute() or Path(load_manifest(manifest)["journal_dir"]) != expected_journal:
+    raise ValueError("journal configuration mismatch")
+print(json.dumps(tick(manifest, budget_seconds=10, max_actions=1)))
+"""
+
+
+def _observe_native_t3() -> None:
+    if os.environ.get("BRIGADE_NATIVE_T3_OBSERVER") != "1":
+        return
+    broker = os.environ.get("BRIGADE_ALERT_BROKER_PYTHON") or os.path.expanduser(
+        "~/.local/share/brigade-alert-broker/venv/bin/python"
+    )
+    native = os.environ.get("BRIGADE_ALERT_T3_PYTHON") or os.path.expanduser(
+        "~/.local/share/t3-fleet/venv/bin/python"
+    )
+    _optional_run("native t3 observe", [broker, "-m", "brigade.fleet_t3_observer", "--t3-python", native, "--publish"], 17)
+
+
+def _observe_openclaw() -> None:
+    if os.environ.get("BRIGADE_OPENCLAW_OBSERVER") != "1":
+        return
+    broker = os.environ.get("BRIGADE_ALERT_BROKER_PYTHON") or os.path.expanduser(
+        "~/.local/share/brigade-alert-broker/venv/bin/python"
+    )
+    _optional_run("openclaw observe", [broker, "-m", "brigade.fleet_openclaw_observer", "--publish"], 17)
+
+
+def _action_tick() -> None:
+    if os.environ.get("BRIGADE_ALERT_ACTIONS_ENABLED") != "1":
+        return
+    broker = os.environ.get("BRIGADE_ALERT_BROKER_PYTHON") or os.path.expanduser(
+        "~/.local/share/brigade-alert-broker/venv/bin/python"
+    )
+    manifest = os.path.expanduser(os.environ.get("BRIGADE_ALERT_ACTIONS_MANIFEST") or "~/.config/brigade/alert-actions/manifest.json")
+    journal = os.path.expanduser(os.environ.get("BRIGADE_ALERT_ACTIONS_JOURNAL") or "~/.local/state/brigade-alert-actions")
+    _optional_run("alert actions tick", [broker, "-c", _ACTION_TICK_PROGRAM, manifest, journal], 12)
+
+
+def _publish_machine(*, dry_run: bool) -> int:
     node_id = _node_id()
     document = json.loads(_run(["fleet", "policy", "show", "--json"]))
     document = document.get("document", document)
@@ -225,7 +276,7 @@ def main(argv: list[str] | None = None) -> int:
         "credential_state": "ok",
     }
 
-    if args.dry_run:
+    if dry_run:
         print(json.dumps(body))
         return 0
 
@@ -241,9 +292,31 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--dry-run", action="store_true", help="Print the telemetry body without publishing")
+    args = parser.parse_args(argv)
+    if args.dry_run:
+        return _publish_machine(dry_run=True)
+    try:
+        return _publish_machine(dry_run=False)
+    finally:
+        # Machine commands, CPU sample, managed observer, native observers, tick:
+        # 15 + 15 + 1 + 32 + 17 + 17 + 12 = 109 seconds.
+        # ExecStartPost drop-ins share the same 120s systemd start timeout.
+        # Setting BRIGADE_NATIVE_T3_OBSERVER=1 runs the native T3 observer twice
+        # if an ExecStartPost drop-in already runs it.
+        # Native helpers have their own 15s deadline; the tick gets 10s inside 12s.
+        for hook in (_observe_t3, _observe_native_t3, _observe_openclaw, _action_tick):
+            try:
+                hook()
+            except Exception as error:  # noqa: BLE001 - one hook cannot suppress another
+                print(f"optional hook: skipped ({type(error).__name__})", file=sys.stderr)
+
+
 if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as error:  # noqa: BLE001 - a timer must not spam failures
-        print(f"telemetry: skipped ({type(error).__name__}: {error})", file=sys.stderr)
+        print(f"telemetry: skipped ({type(error).__name__})", file=sys.stderr)
         sys.exit(0)
