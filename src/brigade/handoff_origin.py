@@ -456,11 +456,13 @@ def unstamped_origin(
 ) -> VerifiedOrigin | None:
     """Read a stamp-less draft in the owner's own inbox as an unknown origin.
 
-    Any stamp file at all, including one that fails verification, keeps its
-    review: only a draft that never carried a stamp reaches the content policy.
-    The claim is keyed by path and content, so a re-arrival of the same bytes at
-    the same name resumes that one claim, while different bytes at the same name
-    get a claim of their own.
+    Any sidecar present at read time, including one that fails verification,
+    keeps its review. Only a draft with no sidecar reaches the content policy:
+    either the writer never published one, or it was deliberately deleted, which
+    takes shell access and so falls outside the threat model. The claim is keyed
+    by path and content, so a re-arrival of the same bytes at the same name
+    resumes that one claim, while different bytes at the same name get a claim of
+    their own.
     """
     if handoff.absolute().parent not in own_inboxes:
         return None
@@ -572,6 +574,8 @@ def publish_unverified_stamp(target: Path, handoff: Path) -> None:
     Writers publish this before the draft, so no reader ever lists a draft whose
     origin is still unpublished. A real stamp replaces it atomically; if signing
     then fails, the placeholder keeps the draft in review instead of unstamped.
+    Deleting the placeholder afterwards is a deliberate shell action, so that
+    draft reads as unstamped and the content policy decides it.
     """
     sidecar = stamp_path(target, handoff)
     sidecar.parent.mkdir(mode=0o700, parents=True, exist_ok=True)

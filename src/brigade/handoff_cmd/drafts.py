@@ -911,7 +911,9 @@ def build_draft(
     # Publish the origin sidecar first, the draft second, the real stamp third. A
     # reader that lists the draft always finds a sidecar, and a signing failure
     # leaves the MAC-less placeholder, which routes the draft to review. When even
-    # the placeholder cannot be published, no draft is written at all.
+    # the placeholder cannot be published, no draft is written at all. Deleting the
+    # sidecar afterwards is a deliberate shell action: the draft then reads as
+    # unstamped and the content policy decides it.
     try:
         handoff_origin.publish_unverified_stamp(target, path)
     except OSError as exc:
