@@ -50,6 +50,18 @@ def _init_verify_git_repo(path: Path) -> None:
     )
 
 
+def _add_verify_origin(path: Path) -> None:
+    """Give scoreable fixtures a synthetic default branch without network access."""
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=path, check=True, text=True, capture_output=True
+    ).stdout.strip()
+    subprocess.run(["git", "remote", "add", "origin", "."], cwd=path, check=True)
+    subprocess.run(["git", "update-ref", "refs/remotes/origin/main", head], cwd=path, check=True)
+    subprocess.run(
+        ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], cwd=path, check=True
+    )
+
+
 def _track_workspace_manifest(path: Path, manifest_id: str) -> None:
     rel = _WORKSPACE_MANIFESTS_REL / f"{manifest_id}.json"
     subprocess.run(["git", "add", str(rel)], cwd=path, check=True, stdout=subprocess.DEVNULL)
@@ -223,14 +235,7 @@ def scoreable_target(tmp_path):
         check=True,
         stdout=subprocess.DEVNULL,
     )
-    head = subprocess.run(
-        ["git", "rev-parse", "HEAD"], cwd=target, check=True, text=True, capture_output=True
-    ).stdout.strip()
-    subprocess.run(["git", "remote", "add", "origin", "."], cwd=target, check=True)
-    subprocess.run(["git", "update-ref", "refs/remotes/origin/main", head], cwd=target, check=True)
-    subprocess.run(
-        ["git", "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"], cwd=target, check=True
-    )
+    _add_verify_origin(target)
     return target
 
 
@@ -327,6 +332,13 @@ def test_no_remote_manifest_receipt_is_audit_only(scoreable_target, monkeypatch)
     assert receipt["subject_binding"]["manifest_binding"]["base_source"] == "no_remote"
     assert projection.eligible is False
     assert projection.reason == "verifier_manifest_no_remote"
+    from brigade.work_cmd.verify_scoreability import _scoreability_notice
+
+    notice = _scoreability_notice(scoreable_target, receipt)
+    assert "remote default branch" in notice["remediation"]
+    assert "--command" not in notice["remediation"]
+    receipt["subject_binding"].pop("verifier_identity")
+    assert verify_trial.project_trial(receipt, target=scoreable_target).reason == "verifier_identity_missing"
 
 
 def test_default_branch_manifest_receipt_still_scores(scoreable_target, monkeypatch):

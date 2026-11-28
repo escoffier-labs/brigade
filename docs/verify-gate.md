@@ -115,7 +115,10 @@ Closeout allows up to 60 seconds for policy lookup and blocks if lookup times ou
 - Brigade runs the declared command from the working tree with the caller's
   environment, including `PY`. The gate does not compare the script with the
   copy on the base.
-- With no remote, the base is local `HEAD`.
+- With no remote, the base is local `HEAD`. Manifest receipts from this fallback
+  remain audit-only for outcome scoring (`verifier_manifest_no_remote`), even
+  when the verification gate accepts the completed check. Configure a remote
+  default branch with available history and rerun the manifest for scoreable evidence.
 - Policy lookup runs the first `git` on `PATH`, so a declared repository
   reads as undeclared if a stand-in fails the remote and `HEAD` probes and
   the working-tree declaration is deleted. Required CI on the head commit

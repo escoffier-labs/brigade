@@ -688,14 +688,15 @@ def _validate_manifest_contract(
     manifest_binding = _manifest_binding_dict(binding)
     if manifest_binding is None or not _manifest_binding_structure_complete(manifest_binding):
         return "verifier_manifest_missing"
-    if manifest_binding.get("base_source") == "no_remote":
-        # A receipt does not preserve enough remote history to distinguish a
-        # repository that never had a remote from one whose remote was removed.
-        return "verifier_manifest_no_remote"
 
     binding_mode = binding.get("binding_mode")
     if binding_mode in {"patch_backed", "fixture_eval"} and not _verifier_identity_complete(binding):
         return "verifier_identity_missing"
+
+    if manifest_binding.get("base_source") == "no_remote":
+        # A receipt does not preserve enough remote history to distinguish a
+        # repository that never had a remote from one whose remote was removed.
+        return "verifier_manifest_no_remote"
 
     if target is None:
         return None

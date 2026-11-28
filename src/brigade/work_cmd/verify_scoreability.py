@@ -46,6 +46,13 @@ _ADHOC_SCOREABILITY_REMEDIATION = (
 )
 
 
+_NO_REMOTE_SCOREABILITY_REMEDIATION = (
+    "manifest receipts based on local HEAD without a remote are audit-only evidence; "
+    "configure a remote default branch with available history and rerun "
+    "`brigade work verify run --manifest <id>` to produce a scoreable receipt"
+)
+
+
 def _scoreability_notice(
     target: Path, receipt: dict[str, Any], *, facts: verify_manifest_git.VerifyGitFacts | None = None
 ) -> dict[str, Any]:
@@ -72,7 +79,11 @@ def _scoreability_notice(
     }
     if not projection.eligible:
         notice["registered_manifest_ids"] = verify_manifest.registered_manifest_ids(target, facts=facts)
-        notice["remediation"] = _ADHOC_SCOREABILITY_REMEDIATION
+        notice["remediation"] = (
+            _NO_REMOTE_SCOREABILITY_REMEDIATION
+            if projection.reason == "verifier_manifest_no_remote"
+            else _ADHOC_SCOREABILITY_REMEDIATION
+        )
     return notice
 
 

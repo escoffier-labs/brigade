@@ -18,6 +18,7 @@ from brigade.claude_hooks import producer_session, runtime
 from brigade.install import install_selection
 from brigade.selection import Selection
 from tests.test_verify_trial import (
+    _add_verify_origin,
     _init_verify_git_repo,
     _run_manifest_verify,
     _track_workspace_manifest,
@@ -77,6 +78,7 @@ def hook_target(tmp_path: Path) -> Path:
     _init_verify_git_repo(target)
     _write_skill_subject(target)
     _commit_all(target, "wire and add skill")
+    _add_verify_origin(target)
     _write_patch_manifest(target)
     return target
 

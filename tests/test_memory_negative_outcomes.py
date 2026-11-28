@@ -17,7 +17,7 @@ from brigade import memory_evidence_log as log
 from brigade.work_cmd import verification as verify_mod
 from tests.test_memory_outcome_evidence import capture, verified_card as verified_card
 from tests.test_memory_reflect import card, command, snapshot
-from tests.test_verify_trial import _init_verify_git_repo, _track_workspace_manifest
+from tests.test_verify_trial import _add_verify_origin, _init_verify_git_repo, _track_workspace_manifest
 
 
 pytestmark = pytest.mark.skipif(
@@ -29,6 +29,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture
 def failed_card(tmp_path, monkeypatch):
     _init_verify_git_repo(tmp_path)
+    _add_verify_origin(tmp_path)
     path = card(tmp_path, "cache", body="Keep the cache warm. [[linked]]")
     card(tmp_path, "linked", body="Keep linked state.")
     monkeypatch.setattr(verify_mod.helpers, "_now", lambda: datetime(2026, 10, 20, 12, tzinfo=timezone.utc))
@@ -119,13 +120,14 @@ def test_negative_review_revalidates_current_bindings(tmp_path, failed_card, cap
     if drift == "manifest":
         manifest = tmp_path / "verify/manifests/negative-card.json"
         manifest.write_text(manifest.read_text().replace("report-failing-tests", "changed-case"))
-        # Manifests are read from the Git base, so drift means a committed change.
+        # Advance the synthetic default branch so the trusted manifest base drifts.
         subprocess.run(
             ["git", "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-qam", "drift"],
             cwd=tmp_path,
             check=True,
             capture_output=True,
         )
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=tmp_path, check=True)
     elif drift == "timestamp":
         ledger = tmp_path / log.LOG_PATH
         row = json.loads(ledger.read_text())

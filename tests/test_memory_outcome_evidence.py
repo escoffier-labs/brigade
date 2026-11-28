@@ -15,7 +15,12 @@ from brigade import memory_evidence_log as log
 from brigade.work_cmd import verification as verify_mod
 from tests.test_outcome_cmd import _write_run_receipt
 from tests.test_memory_reflect import card, command, snapshot
-from tests.test_verify_trial import _init_verify_git_repo, _run_manifest_verify, _track_workspace_manifest
+from tests.test_verify_trial import (
+    _add_verify_origin,
+    _init_verify_git_repo,
+    _run_manifest_verify,
+    _track_workspace_manifest,
+)
 
 pytestmark = pytest.mark.skipif(
     os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"),
@@ -27,6 +32,7 @@ pytestmark = pytest.mark.skipif(
 def verified_card(tmp_path, monkeypatch, request):
     monkeypatch.setattr(verify_mod.helpers, "_now", lambda: datetime(2026, 10, 20, 12, tzinfo=timezone.utc))
     _init_verify_git_repo(tmp_path)
+    _add_verify_origin(tmp_path)
     path = card(tmp_path, "cache")
     role = getattr(request, "param", "effectiveness")
     if role in ("linked", "anchored-linked"):

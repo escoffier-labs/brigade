@@ -1,1 +1,3 @@
 - Treat verifier receipts based on local HEAD without a remote as audit-only evidence instead of scoreable evidence.
+- Explain how to replace audit-only no-remote manifest receipts and preserve verifier identity validation before the no-remote verdict.
+- Keep hook producer and memory outcome scoring fixtures backed by synthetic default branches.

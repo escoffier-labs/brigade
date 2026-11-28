@@ -418,6 +418,13 @@ Only a skill whose staged copy has an install receipt recording a reviewed `brig
 
 `--capture` does not make a receipt scoreable. Scorecard eligibility is projected only from a verifier-authored `subject_binding`, and only a tracked manifest under `verify/manifests/` can author one. Ad-hoc `--command` and `--argv-json` runs are audit-only: real evidence for a human reader, never a trial for `outcome rank` or the promotion ratchet. The artifact id passed to `--capture` is caller-supplied and is deliberately not trusted as the scored subject (`docs/proposals/skill-scorecards.md`, core contract 2 and 3).
 
+A tracked manifest receipt whose `manifest_binding.base_source` is `no_remote`
+uses local `HEAD` as its base and remains audit-only with reason
+`verifier_manifest_no_remote`. This applies even when all checks pass, because
+receipt history cannot distinguish a repository that never had a remote from
+one whose remote was removed. Configure a remote default branch with available
+history and rerun `brigade work verify run --manifest <id>` for scoreable evidence.
+
 Every `--capture` run now prints its verdict, so an ineligible receipt is visible on the run that produced it rather than only in `brigade work brief`:
 
 ```
