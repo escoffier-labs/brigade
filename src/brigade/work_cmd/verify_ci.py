@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -50,6 +51,27 @@ def _github_repository(target: Path) -> str | None:
     if re.fullmatch(r"[a-zA-Z0-9-]+/[a-zA-Z0-9_.-]+", repository) is None or repository.split("/")[1] in {".", ".."}:
         return None
     return repository
+
+
+def _missing_origin_reason(target: Path) -> str:
+    remotes = (helpers._git_value(target, "remote") or "").splitlines()
+    if not remotes:
+        return (
+            "No GitHub origin remote was found. Add one with: "
+            "git remote add origin https://github.com/OWNER/REPOSITORY.git"
+        )
+    names = ", ".join(remotes)
+    if "origin" in remotes:
+        return (
+            f"No GitHub origin remote was found. Existing remotes: {names}. "
+            "Point origin at GitHub with: "
+            "git remote set-url origin https://github.com/OWNER/REPOSITORY.git"
+        )
+    source = shlex.quote(remotes[0])
+    return (
+        f"No GitHub origin remote was found. Existing remotes: {names}. "
+        f"Rename {remotes[0]} to origin with: git remote rename {source} origin"
+    )
 
 
 def _named_runs(output: str, check_name: str) -> list[dict[str, Any]]:
@@ -185,7 +207,7 @@ def verify_ci(*, target: Path, check_name: str = DEFAULT_CHECK_NAME, json_output
     fetched = (
         _fetch_check(target, repository, head, check_name)
         if repository is not None
-        else {"reason": "No GitHub origin remote was found."}
+        else {"reason": _missing_origin_reason(target)}
     )
     record = {
         "schema": _SCHEMA,

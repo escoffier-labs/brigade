@@ -1,0 +1,1 @@
+- Make CI verification name existing Git remotes and show an actionable command when the required `origin` remote is missing.

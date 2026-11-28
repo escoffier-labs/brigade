@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shlex
 import subprocess
 
 import pytest
@@ -189,6 +190,28 @@ def test_ci_records_unknown(checkout, monkeypatch, capsys, case, reason):
     assert reason in payload["reason"]
     assert "private diagnostic" not in out
     assert json.loads(_record(target, head).read_text()) == payload
+
+
+def test_ci_advises_how_to_rename_existing_remote(checkout, capsys):
+    target, _, _ = checkout
+    _git(target, "remote", "rename", "origin", "upstream")
+
+    assert _ci(target) == 2
+    reason = json.loads(capsys.readouterr().out)["reason"]
+    assert "Existing remotes: upstream" in reason
+    assert "git remote rename upstream origin" in reason
+    command = shlex.split(reason.partition("with: ")[2])
+    subprocess.run(command, cwd=target, check=True)
+    assert _git(target, "remote") == "origin"
+
+
+def test_ci_advises_how_to_add_origin_when_no_remotes_exist(checkout, capsys):
+    target, _, _ = checkout
+    _git(target, "remote", "remove", "origin")
+
+    assert _ci(target) == 2
+    reason = json.loads(capsys.readouterr().out)["reason"]
+    assert "Add one with: git remote add origin" in reason
 
 
 def test_ci_refuses_dirty_tree_without_query_or_record(checkout, capsys):
