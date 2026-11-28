@@ -219,7 +219,10 @@ def _split_observed_expected(detail: str) -> tuple[str, str]:
     invalid = re.search(r"(?i)\binvalid JSON:\s*(.+)$", text)
     if invalid:
         return f"parse failure: {invalid.group(1).strip()}", "valid JSON object"
-    unable = re.search(r"(?i)unable to read[^:]*:\s*(.+)$", text)
+    unable = re.search(
+        r"(?i)unable to read[^:]*:\s*(.+?)(?=;\s*session directory integrity refused:|$)",
+        text,
+    )
     if unable:
         return f"parse failure: {unable.group(1).strip()}", "readable, valid JSON settings"
     if "wired but no verify run" in text.lower():
@@ -327,10 +330,35 @@ def build_findings(
 ) -> list[dict[str, Any]]:
     resolved_selection = _resolve_selection(target, selection)
     findings: list[dict[str, Any]] = []
-    for check in checks:
-        finding = finding_from_check(check, target=target, selection=resolved_selection)
-        if finding is not None:
-            findings.append(finding)
+    for source_check_index, check in enumerate(checks):
+        status, name, detail, scope = _normalize_scoped_check(check)
+        split = re.match(
+            r"(?is)(.*hook settings error:.*?);\s*(session directory integrity refused:.*?)"
+            r"(; the bundled brigade-work skill differs.*)?$",
+            detail,
+        )
+        finding_checks: list[CheckResult | ScopedCheckResult]
+        if name == "claude work loop" and split:
+            preceding, boundary, settings_error = split.group(1).rpartition("; hook settings error:")
+            settings_detail = "hook settings error:" + settings_error if boundary else split.group(1)
+            hint = split.group(3) or ""
+            finding_checks = []
+            if boundary and preceding != "state=error":
+                finding_checks.append((status, name, preceding + hint, scope))
+                hint = ""
+            finding_checks.extend(
+                [
+                    (status, name, settings_detail + hint, scope),
+                    (status, name, split.group(2), scope),
+                ]
+            )
+        else:
+            finding_checks = [check]
+        for finding_check in finding_checks:
+            finding = finding_from_check(finding_check, target=target, selection=resolved_selection)
+            if finding is not None:
+                finding["source_check_index"] = source_check_index
+                findings.append(finding)
     return findings
 
 
@@ -343,9 +371,7 @@ def summary_line(passed: int, findings: int) -> str:
 def _passed_count(checks: Sequence[CheckResult | ScopedCheckResult], findings: Sequence[Mapping[str, Any]]) -> int:
     """Count silent-healthy checks: OK/INFO plus harness N/A suppressions."""
     counts = _status_counts(list(checks))
-    actionable = sum(1 for check in checks if _normalize_scoped_check(check)[0] in ACTIONABLE_STATUSES)
-    suppressed = actionable - len(findings)
-    return counts[OK] + counts[INFO] + max(0, suppressed)
+    return counts[OK] + counts[INFO] + _suppressed_actionable_count(checks, findings)
 
 
 def _failed_count_from_findings(findings: Sequence[Mapping[str, Any]]) -> int:
@@ -365,7 +391,8 @@ def _suppressed_actionable_count(
     findings: Sequence[Mapping[str, Any]],
 ) -> int:
     actionable = sum(1 for check in checks if _normalize_scoped_check(check)[0] in ACTIONABLE_STATUSES)
-    return max(0, actionable - len(findings))
+    surfaced = len({finding["source_check_index"] for finding in findings})
+    return max(0, actionable - surfaced)
 
 
 def _agent_exit_from_findings(findings: Sequence[Mapping[str, Any]]) -> int:
