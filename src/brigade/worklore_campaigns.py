@@ -497,7 +497,14 @@ def campaign_offer(conn: sqlite3.Connection, work_id: str) -> dict[str, Any] | N
     ).fetchone()
     if row is None:
         return None
-    return {"event_id": row[0], "actor_id": row[1], "actor_type": row[2], "offer": json.loads(row[3])["offer"]}
+    try:
+        detail = json.loads(row[3])
+        if not isinstance(detail, Mapping):
+            raise _field_bound("stored campaign offer detail must be an object")
+        offer = parse_offer(detail.get("offer"))
+    except (ValueError, TypeError, KeyError, WorkloreValidationError):
+        raise _field_bound("stored campaign offer is invalid") from None
+    return {"event_id": row[0], "actor_id": row[1], "actor_type": row[2], "offer": offer}
 
 
 def member_campaign(conn: sqlite3.Connection, work_id: str) -> dict[str, str] | None:
@@ -528,13 +535,13 @@ def member_excluded(conn: sqlite3.Connection, work_id: str) -> bool:
         grant = None if member is None else campaign_offer(conn, member["work_id"])
         if grant is None or member is None:
             return False
-        exclusions = grant["offer"]["exclusions"]
-        return not isinstance(exclusions, list) or member["repo"] in exclusions
+        offer = parse_offer(grant["offer"])
+        return member["repo"] in offer["exclusions"]
     except sqlite3.OperationalError as exc:
         if str(exc).startswith("no such table"):
             return False
         raise
-    except (ValueError, TypeError, KeyError):
+    except (WorkloreValidationError, ValueError, TypeError, KeyError):
         return True
 
 
@@ -545,7 +552,7 @@ def _eligible_campaign(conn: sqlite3.Connection, member: Mapping[str, str]) -> d
     grant = campaign_offer(conn, member["work_id"])
     if grant is None:
         raise store.WorkloreForbidden("campaign has no authorization offer", code="campaign-not-authorized")
-    return grant
+    return {**grant, "offer": parse_offer(grant["offer"])}
 
 
 def take_authority(
