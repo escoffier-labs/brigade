@@ -1,0 +1,1 @@
+- Make task disposal durable before deleting its branch so an interrupted branch delete can be retried safely.

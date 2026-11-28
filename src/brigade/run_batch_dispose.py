@@ -25,8 +25,8 @@ must never lose the only copy of work.
   worktree directory itself, and ``--discard`` is the only path that forces it.
 * The ``task.disposed`` fact is appended as soon as the removal succeeded and
   while the task lock is still held, before the optional branch delete runs. A
-  failed branch delete therefore leaves a recorded disposal and reports its own
-  refusal, and a later ``--delete-branch`` run retries only that delete. A crash
+  failed or interrupted branch delete therefore leaves a recorded disposal,
+  and a later ``--delete-branch`` run retries only that delete. A crash
   between removal and the fact is repaired by running the command again: the
   checkout is gone and the binding is present, so the missing fact and the
   stranded reservation lease are recorded and released instead of failing
@@ -708,9 +708,15 @@ def _dispose_one(
         plan = _plan_task(run_dir, workspace, state, base_sha, discard=discard, delete_branch=delete_branch)
         if plan.binding is not None:
             _remove(workspace, plan, discard=discard)
-        # Removal is irreversible, so the disposal is recorded as soon as it
-        # succeeded: a failed branch delete below must not leave the checkout
-        # gone with no recorded reason and no way to re-run.
+        # Removal is irreversible, so record the disposal before attempting the
+        # optional branch delete. A process exit during that delete must leave a
+        # durable disposal that a later --delete-branch run can finish.
+        _append(
+            run_dir,
+            workspace,
+            "task.disposed",
+            {"task_id": task_id, "mode": plan.mode, "branch_kept": branch_kept},
+        )
         if plan.branch_kept == BRANCH_DELETED:
             try:
                 _delete_branch(workspace, plan)
@@ -718,12 +724,6 @@ def _dispose_one(
                 branch_error = exc
             else:
                 branch_kept = BRANCH_DELETED
-        _append(
-            run_dir,
-            workspace,
-            "task.disposed",
-            {"task_id": task_id, "mode": plan.mode, "branch_kept": branch_kept},
-        )
     # Released after the lock, so the lease directory is empty by the time it is
     # removed. A crash before this line leaves it for the next run to release.
     _release_lease(path)
