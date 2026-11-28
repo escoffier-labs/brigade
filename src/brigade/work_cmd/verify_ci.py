@@ -241,6 +241,8 @@ def closeout_evidence(target: Path) -> dict[str, Any]:
     except OSError:
         tree_state = "unreadable"
     if tree_state == "dirty":
+        if record["state"] == "failed":
+            return {**record, "reason": "Local changes are not covered by this failed CI result."}
         return {**unknown, "reason": "The working tree differs from HEAD, so the saved CI result does not cover it."}
     if tree_state != "clean":
         return {**unknown, "reason": "The working tree state could not be read from git."}

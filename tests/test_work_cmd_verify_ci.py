@@ -298,6 +298,32 @@ def test_closeout_does_not_apply_passed_ci_to_uncommitted_changes(checkout, monk
     assert evidence["head_sha"] == head
 
 
+@pytest.mark.parametrize(
+    ("dirty", "expected_state", "expected_note"),
+    [
+        (True, "failed", "Local changes are not covered"),
+        (False, "failed", None),
+    ],
+)
+def test_closeout_keeps_failed_ci_for_recorded_head(
+    checkout, monkeypatch, capsys, dirty, expected_state, expected_note
+):
+    target, head, _ = checkout
+    _fake_gh(monkeypatch, head, _check(head, conclusion="failure"))
+    assert _ci(target) == 1
+    capsys.readouterr()
+    if dirty:
+        (target / "uncommitted.txt").write_text("changed after CI ran")
+
+    evidence = _closeout_ci(target, capsys)
+    assert evidence["state"] == expected_state
+    assert evidence["head_sha"] == head
+    if expected_note is None:
+        assert "reason" not in evidence
+    else:
+        assert expected_note in evidence["reason"]
+
+
 def test_ci_treats_pathologically_nested_json_as_unknown(checkout, monkeypatch, capsys):
     target, head, _ = checkout
     _fake_gh(monkeypatch, head, stdout="[" * 200_000)
