@@ -390,8 +390,76 @@ def claim_review_stamp(target: Path, mac: str, decision_id: str) -> bool:
 
 
 @dataclass(frozen=True)
+class UnstampedStamp(VerifiedStamp):
+    """A draft written without a stamp, claimed under the same lock as a stamp."""
+
+    def claim(self) -> bool:
+        # Origins/ may be absent: no stamp was ever published for this draft.
+        try:
+            state = dirfd.open_directory_chain(self.consumed.parent.parent, create=True)
+        except (OSError, ValueError):
+            return False
+        os.close(state)
+        return _claim(self.consumed)
+
+
+@dataclass(frozen=True)
 class VerifiedOrigin(Origin):
     stamp: VerifiedStamp
+    # No signed record of the writer survived, only its location in the target's own inbox.
+    unstamped: bool = False
+
+
+def own_inbox_paths(target: Path) -> frozenset[Path]:
+    """The target's own per-harness writer inboxes, never an externally declared root."""
+    from .config import load_config
+    from .selection import WRITER_INBOXES
+
+    try:
+        config = load_config(target)
+    except (OSError, ValueError):
+        return frozenset()
+    if config is None:
+        relative: tuple[str, ...] = (".claude/memory-handoffs",)
+    else:
+        relative = tuple(WRITER_INBOXES[name] for name in sorted(config.selection.harnesses) if name in WRITER_INBOXES)
+    return frozenset(path for path in ((target / rel).resolve() for rel in relative) if path.is_dir())
+
+
+UNSTAMPED_CLAIM_SCHEMA = "brigade.unstamped-origin.v1"
+
+
+def unstamped_origin(
+    target: Path, handoff: Path, snapshot: bytes, *, own_inboxes: frozenset[Path]
+) -> VerifiedOrigin | None:
+    """Read a stamp-less draft in the target's own inbox as an unknown origin.
+
+    Any stamp file at all, including one that fails verification, keeps its
+    review: only a draft that never carried a stamp reaches the content policy.
+    The claim is keyed by path and content, so the same draft publication is
+    decided once and later arrival with the same name still gets its own claim.
+    """
+    if handoff.absolute().parent not in own_inboxes:
+        return None
+    sidecar = stamp_path(target, handoff)
+    try:
+        sidecar.lstat()
+        return None
+    except FileNotFoundError:
+        pass
+    except OSError:
+        return None
+    digest = hashlib.sha256(
+        (UNSTAMPED_CLAIM_SCHEMA + "\n" + sidecar.stem + "\n" + hashlib.sha256(snapshot).hexdigest()).encode("ascii")
+    ).hexdigest()
+    return VerifiedOrigin(
+        "unknown",
+        None,
+        "unknown",
+        "unknown",
+        stamp=UnstampedStamp(sidecar, sidecar.parent.parent / "consumed-stamps" / digest),
+        unstamped=True,
+    )
 
 
 def _valid(origin: Origin) -> bool:

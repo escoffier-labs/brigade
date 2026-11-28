@@ -515,14 +515,16 @@ def test_posix_reflect_read_error_routes_for_review(tmp_target: Path, monkeypatc
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="Windows ingest regression")
-def test_windows_create_card_without_reflect_config(tmp_target: Path):
+def test_windows_unstamped_create_card_files_without_reflect_config(tmp_target: Path):
+    # A stamp-free draft in the target's own inbox is decided by content policy on Windows too.
     inbox = seed(tmp_target)
     assert not (tmp_target / ".brigade/memory-care.toml").exists()
     handoff(inbox, "distinct", "A separate fact about preparing a fresh testing database.")
     assert ingest.run(target=tmp_target, promote_cards=True) == 0
-    assert not (tmp_target / "memory/cards/distinct.md").exists()
-    for draft in (tmp_target / drain.INBOX_REL).glob("*.md"):
-        assert drain.parse_header(draft.read_text())[0] == "origin-review-required"
+    filed = tmp_target / "memory/cards/distinct.md"
+    assert filed.is_file()
+    assert "origin: unstamped" in filed.read_text(encoding="utf-8")
+    assert not list((tmp_target / drain.INBOX_REL).glob("*.md"))
 
 
 def test_portable_create_card_match_without_reflect_config(tmp_target: Path):

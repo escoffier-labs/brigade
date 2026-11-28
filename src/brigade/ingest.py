@@ -299,6 +299,8 @@ def ingest_into(
     # so two handoffs in one run cannot both claim an id.
     card_ids = CardIdIndex(owner)
     pending: list[ingest_near_duplicate.Pending] = []
+    # A draft in one of the owner's own inboxes may carry no stamp at all.
+    own_inboxes = handoff_origin.own_inbox_paths(owner)
     # Discovery reads several files and resolves every instruction path: once per run, not per handoff.
     routing = instruction_overflow.RouteContext(owner)
     for handoffs_dir in handoff_dirs:
@@ -351,6 +353,8 @@ def ingest_into(
                     origin = handoff_origin.verify_handoff(source, path, snapshot)
                 except Exception:
                     origin = None
+                if origin is None:
+                    origin = handoff_origin.unstamped_origin(source, path, snapshot, own_inboxes=own_inboxes)
                 content_policy = (
                     origin is not None and origin.session_kind == "unknown" and origin.untrusted_tools is not True
                 )

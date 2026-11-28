@@ -1,0 +1,1 @@
+- A handoff draft written into a target's own writer inbox with no origin stamp is now decided by the existing content policy and filed with an `origin: unstamped` marker instead of waiting for review forever.

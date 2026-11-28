@@ -169,16 +169,18 @@ def test_origin_sidecar_is_private(tmp_path):
 
 
 @pytest.mark.parametrize("trusted_first", [False, True])
-def test_duplicate_content_cannot_bypass_origin_review(tmp_path, trusted_first):
+def test_duplicate_content_is_decided_once(tmp_path, trusted_first):
+    # Unstamped drafts in the target's own inbox are decided by content policy,
+    # so identical content still reaches exactly one decision and never two.
     path = handoff(tmp_path)
     duplicate = path.with_name("000-first.md" if trusted_first else "zzz-last.md")
     duplicate.write_bytes(path.read_bytes())
     stamp(tmp_path, duplicate)
     stats = ingest.IngestStats()
     assert ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=stats, route_documents=True) == 0
-    assert stats.routed == 1
-    assert stats.inboxed == 1
-    assert stats.skipped == 0
+    assert stats.skipped == 1
+    assert stats.routed + stats.inboxed == 1
+    assert "duplicate-content" in stats.actions[1]
 
 
 def test_tooling_rejects_non_boolean_tool_status(tmp_path):

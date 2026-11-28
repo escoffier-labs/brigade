@@ -1627,7 +1627,8 @@ def test_ingest_scans_an_unchanged_index_once(tmp_target: Path, monkeypatch):
     _git(tmp_target, "add", "-f", "--", str(tracked.relative_to(tmp_target)))
     names = ["first.md", "second.md", "third.md"]
     for name in names:
-        (inbox / name).write_text(_PLAIN_HANDOFF)
+        # Distinct content so no two unstamped drafts share one content-policy decision.
+        (inbox / name).write_text(_PLAIN_HANDOFF.replace("plain handoff", f"plain handoff {name}"))
 
     real_run = subprocess.run
     scans = []

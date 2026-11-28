@@ -219,6 +219,15 @@ for card filing. A `create-card` draft needs a free destination name. An
 `update-card` draft needs an `Expected card SHA256` that matches the current
 card. Ingest repeats the destination check under the publication lock.
 
+A draft with no stamp at all, sitting in one of the target's own writer inboxes,
+is read as the same unknown origin with unknown tool use. It goes through the
+same content policy, and the filed card records `origin: unstamped` beside
+`trust: agent-unreviewed` and the `auto_filed` date. Ingest claims it under the
+same lock as a stamp claim, keyed by the draft's path and content, so one draft
+publication is filed once. A draft outside the target's own inboxes, a tracked
+or linked draft, or a draft whose stamp exists but fails verification still goes
+to the review inbox.
+
 Both content scans cover the whole draft and evaluate each section separately.
 Drafts use LF or CRLF line endings. The final card must fit the
 workspace's `max_card_bytes` limit, which defaults to 12,000 bytes. Ingest
