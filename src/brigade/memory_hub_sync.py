@@ -966,7 +966,9 @@ def _replay_refusal(target: Path, entry: dict[str, Any], local: list[dict[str, A
     return "card-gone"
 
 
-def _record_published(target: Path, hub: str, entry: dict[str, Any], event: dict[str, Any], epoch: str) -> None:
+def _record_published(
+    target: Path, hub: str, entry: dict[str, Any], event: dict[str, Any], epoch: str, *, written: bool = True
+) -> None:
     """Read-modify-write of published.json. Callers hold `store.locked`."""
     state = store.published(target)
     cards = state.setdefault(hub, {}).setdefault(entry["scope"], {})
@@ -976,7 +978,7 @@ def _record_published(target: Path, hub: str, entry: dict[str, Any], event: dict
         "log_epoch": epoch,
         "path": entry.get("path"),
         # Adopted and rebased heads do not prove an acknowledged local write.
-        "written": True,
+        "written": written,
     }
     store.save_published(target, state)
 
@@ -1007,6 +1009,23 @@ def _request(entry: dict[str, Any]) -> dict[str, Any]:
     if entry.get("base_revision") is not None:
         body["base_epoch"] = entry.get("base_epoch")
     return body
+
+
+def _matching_live_head(client: hubc.MemoryHubClient, entry: dict[str, Any], head: dict[str, Any], epoch: str) -> bool:
+    """A matching conflict hash can still belong to a retired or superseded head."""
+    try:
+        body = client.call("card", scope=entry["scope"], card_id=entry["card_id"], offset=0)
+    except (hubc.HubConfigError, hubc.HubRefusal, hubc.HubUnavailable):
+        return False
+    card = hubc.obj(body.get("card"))
+    return (
+        body.get("log_epoch") == epoch
+        and card.get("scope") == entry["scope"]
+        and card.get("card_id") == entry["card_id"]
+        and card.get("state") == "live"
+        and card.get("revision") == head["revision"]
+        and card.get("content_hash") == head["content_hash"]
+    )
 
 
 class _Push:
@@ -1066,9 +1085,12 @@ class _Push:
                 and current_revision > 0
                 and isinstance(self.epoch, str)
                 and bool(self.epoch)
+                and _matching_live_head(
+                    self.client, entry, {"revision": current_revision, "content_hash": current_hash}, self.epoch
+                )
             ):
                 event = {"revision": current_revision, "content_hash": current_hash}
-                _record_published(self.target, self.client.identity, entry, event, self.epoch)
+                _record_published(self.target, self.client.identity, entry, event, self.epoch, written=False)
                 store.spool_remove(self.target, entry["hub"], entry["client_event_id"])
                 self.report["published"].append({"card_id": entry["card_id"], "revision": current_revision})
                 return

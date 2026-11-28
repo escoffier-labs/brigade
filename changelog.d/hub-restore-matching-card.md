@@ -1,1 +1,2 @@
 - Avoid opening a memory proposal when a restored Hub already holds the exact card text being pushed.
+- Confirm a matching restored Hub head is live before adopting it, and keep retired or unreadable heads as proposals without claiming write ownership.

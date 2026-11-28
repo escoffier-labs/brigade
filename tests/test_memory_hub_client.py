@@ -587,17 +587,57 @@ def test_base_mismatch_with_matching_current_hash_records_publication(hub, tmp_p
     sync.push(target, client(hub), settings(target), yes=True)
     hub.epoch = hubc.event_id()
 
+    hub.calls.clear()
     report = sync.push(target, client(hub), settings(target), yes=True)
 
+    assert [call for call in hub.calls if call["action"] == "card"] == [
+        {"action": "card", "scope": "repo:test/app", "card_id": "one", "offset": 0}
+    ]
     assert report["published"] == [{"card_id": "one", "revision": 1}]
     assert report["proposals"] == []
     assert not list(store.proposals(target))
     published = store.published(target)[client(hub).identity]["repo:test/app"]["one"]
+    assert published["written"] is False
     assert (published["revision"], published["content_hash"], published["log_epoch"]) == (
         1,
         hubc.content_hash(text),
         hub.epoch,
     )
+
+
+@pytest.mark.parametrize("confirmation", ["retired", "changed", "epoch-changed", "forbidden", "unavailable"])
+def test_matching_hash_requires_a_live_current_head(hub, tmp_path, monkeypatch, confirmation):
+    text = "# One\nunchanged\n"
+    target = workspace(tmp_path, mode="sync", one=text)
+    sync.push(target, client(hub), settings(target), yes=True)
+    previous = copy.deepcopy(store.published(target))
+    hub.epoch = hubc.event_id()
+    if confirmation == "retired":
+        _retire(hub, "one")
+    read = hub.do_card
+
+    def confirm(body):
+        if confirmation == "forbidden":
+            return 403, {"code": "memory_grant_missing"}
+        if confirmation == "unavailable":
+            raise ConnectionRefusedError("synthetic unavailable hub")
+        status, reply = read(body)
+        if confirmation == "changed":
+            reply["card"]["revision"] += 1
+        if confirmation == "epoch-changed":
+            reply["log_epoch"] = hubc.event_id()
+        return status, reply
+
+    monkeypatch.setattr(hub, "do_card", confirm)
+    hub.calls.clear()
+    report = sync.push(target, client(hub), settings(target), yes=True)
+
+    assert report["published"] == []
+    assert [proposal["reason"] for proposal in report["proposals"]] == ["memory_base_mismatch"]
+    assert store.published(target) == previous
+    assert [call for call in hub.calls if call["action"] == "card"] == [
+        {"action": "card", "scope": "repo:test/app", "card_id": "one", "offset": 0}
+    ]
 
 
 def test_base_mismatch_with_different_current_hash_opens_proposal(hub, tmp_path):
