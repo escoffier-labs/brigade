@@ -719,6 +719,68 @@ def test_snapshot_read_errors_are_wrapped_and_reconcile_returns_invalid(
 
 
 @requires_fake_kernel32
+@pytest.mark.parametrize("missing_if_access_denied", [False, True])
+def test_bytes_reader_only_tolerates_access_denied_for_a_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing_if_access_denied: bool
+) -> None:
+    target = tmp_path / "owner.json"
+    target.write_bytes(b"{}")
+    fake = FakeKernel32(deny_opens=99)
+    _fake_kernel32(monkeypatch, fake)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(nt_process, "_last_error", lambda: ERROR_ACCESS_DENIED)
+    monkeypatch.setattr(nt_process, "DELETE_PENDING_RETRY_SECONDS", 0.0)
+
+    expected = FileNotFoundError if missing_if_access_denied else PermissionError
+    with pytest.raises(expected):
+        nt_process.read_bytes_sharing_delete(target, missing_if_access_denied=missing_if_access_denied)
+
+    assert len(fake.create_calls) == nt_process.DELETE_PENDING_RETRY_ATTEMPTS
+    assert target.read_bytes() == b"{}"
+
+
+@requires_fake_kernel32
+def test_release_capture_skips_metadata_whose_delete_remains_pending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    lock_path = tmp_path / "run.lock"
+    runguard._publish_lock(lock_path, run_dir=None)
+    expected_owner = (lock_path / "owner.json").read_bytes()
+    fake = FakeKernel32(deny_opens=nt_process.DELETE_PENDING_RETRY_ATTEMPTS)
+    _fake_kernel32(monkeypatch, fake)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(nt_process, "_last_error", lambda: ERROR_ACCESS_DENIED)
+    monkeypatch.setattr(nt_process, "DELETE_PENDING_RETRY_SECONDS", 0.0)
+
+    captured = runguard_release._metadata_bytes(lock_path)
+
+    assert captured == [(lock_path / "owner.json", expected_owner)]
+    assert Path(fake.create_calls[0][0]).name == "pid"
+    assert len(fake.create_calls) == nt_process.DELETE_PENDING_RETRY_ATTEMPTS + 1
+    assert (lock_path / "owner.json").is_file(), "the read itself must not delete metadata"
+
+
+@requires_fake_kernel32
+def test_lane_owner_observation_preserves_persistent_access_denied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    target = tmp_path / "owner.json"
+    target.write_text(json.dumps({"pid": 4242}), encoding="utf-8")
+    fake = FakeKernel32(deny_opens=99)
+    _fake_kernel32(monkeypatch, fake)
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(run_lane_state, "os", _NtOs())
+    monkeypatch.setattr(nt_process, "_last_error", lambda: ERROR_ACCESS_DENIED)
+    monkeypatch.setattr(nt_process, "DELETE_PENDING_RETRY_SECONDS", 0.0)
+
+    with pytest.raises(PermissionError):
+        run_lane_state._read_json(target)
+
+    assert len(fake.create_calls) == nt_process.DELETE_PENDING_RETRY_ATTEMPTS
+    assert target.is_file()
+
+
+@requires_fake_kernel32
 def test_persistent_access_denied_makes_a_snapshot_live_and_not_stale(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -187,7 +187,9 @@ def _metadata_bytes(path: Path) -> list[tuple[Path, bytes]]:
     The read shares delete access for the same reason every other reader does: a
     plain open would refuse the unlink this release is about to attempt. A name
     that is already gone is skipped; one that cannot be read could not be
-    restored, so nothing may be removed.
+    restored, so nothing may be removed. Only this release capture opts into
+    treating a persistent Windows access denial as a missing name. Snapshot and
+    lane owner readers must keep that denial visible to avoid stale reclamation.
     """
     captured: list[tuple[Path, bytes]] = []
     for name in _LOCK_METADATA_NAMES:
