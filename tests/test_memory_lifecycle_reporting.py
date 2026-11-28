@@ -14,6 +14,7 @@ from tests.memory_read_fixtures import windows_scheduler as windows_scheduler
 
 from brigade import memory_card_reads as reads, memory_cmd, memory_lifecycle as life
 from brigade import memory_care_journal as journal, memory_care_tend as tend
+from brigade.inbox_lock import InboxLockTimeout
 
 TODAY = date(2026, 11, 15)
 
@@ -126,6 +127,49 @@ def test_symlinked_lifecycle_state_fails_the_stage(tmp_path, monkeypatch):
     assert stage["error"] is True
     assert result["failed_stages"] == ["lifecycle"]
     assert stage["blocked"] == "lifecycle signals unreadable"
+
+
+def test_memory_care_busy_fails_the_lifecycle_stage(tmp_path, monkeypatch):
+    """Care-lock contention is a stage conflict, not an unreadable card."""
+    monkeypatch.setattr(reads, "record", lambda *args, **kwargs: True)
+    monkeypatch.setattr(life, "_references", lambda *args: {})
+    monkeypatch.setattr(life, "AUTOMATIC_ARCHIVE_ENABLED", False)
+    card(tmp_path, name="a")
+    coverage(tmp_path, date(2026, 1, 1), TODAY)
+
+    def busy(*args, **kwargs):
+        try:
+            raise InboxLockTimeout("fixture lock busy")
+        except InboxLockTimeout as exc:
+            raise journal.JournalConflict("memory care busy") from exc
+
+    monkeypatch.setattr(journal, "commit_phased", busy)
+    result = tend.run(tmp_path, stages=["lifecycle"], today=TODAY)
+    stage = result["stages"]["lifecycle"]
+    assert stage["error"] is True
+    assert stage["blocked"] == "lifecycle signals unreadable"
+    assert "skipped" not in stage
+    assert result["failed_stages"] == ["lifecycle"]
+
+
+def test_read_only_lifecycle_path_fails_the_stage(tmp_path, monkeypatch):
+    """A protected lifecycle path is a stage conflict, not an unreadable card."""
+    monkeypatch.setattr(reads, "record", lambda *args, **kwargs: True)
+    monkeypatch.setattr(life, "_references", lambda *args: {})
+    monkeypatch.setattr(life, "AUTOMATIC_ARCHIVE_ENABLED", False)
+    card(tmp_path, name="a")
+    coverage(tmp_path, date(2026, 1, 1), TODAY)
+
+    def read_only(*args, **kwargs):
+        raise journal.ReadOnlyPath("memory/cards/a.md")
+
+    monkeypatch.setattr(journal, "commit_phased", read_only)
+    result = tend.run(tmp_path, stages=["lifecycle"], today=TODAY)
+    stage = result["stages"]["lifecycle"]
+    assert stage["error"] is True
+    assert stage["blocked"] == "lifecycle signals unreadable"
+    assert "skipped" not in stage
+    assert result["failed_stages"] == ["lifecycle"]
 
 
 def test_absolute_path_scan_work_is_bounded_by_occurrences(tmp_path, monkeypatch):
