@@ -750,8 +750,31 @@ def test_launch_journal_read_error_writes_a_receipt(setup, capsys, monkeypatch):
     assert rc != 0, err
     assert len(setup[1]) == 0
     assert result["tasks"]["a"]["status"] == "queued"
+    refusal = result["tasks"]["a"]["refusal"]
+    assert refusal["code"] == "launch-refused"
+    assert "journal unreadable at launch" in refusal["reason"]
     run_dir = setup[0] / ".brigade" / "runs" / result["run_id"]
+    workers = json.loads((run_dir / "worker-results.json").read_text())
+    assert workers["results"][0]["failure_kind"] == "launch-refused"
+    assert "journal unreadable at launch" in workers["results"][0]["detail"]
+    summary = json.loads((run_dir / "synthesis.json").read_text())["result"]
+    assert "a: refused" in summary["text"]
     assert (run_dir / "run.json").is_file()
+
+
+def test_build_prompt_bug_remains_a_failure(setup, capsys, monkeypatch):
+    from brigade.aboyeur import planning
+
+    monkeypatch.setattr(planning, "_worker_prompt", Mock(side_effect=RuntimeError("prompt builder bug")))
+    rc, result, err = invoke(setup, capsys, [task("a")])
+    assert rc != 0, err
+    run_dir = setup[0] / ".brigade" / "runs" / result["run_id"]
+    workers = json.loads((run_dir / "worker-results.json").read_text())
+    worker = workers["results"][0]
+    assert worker["detail"] == "prompt builder bug"
+    assert worker.get("failure_kind") != "launch-refused"
+    summary = json.loads((run_dir / "synthesis.json").read_text())["result"]
+    assert "a: failed" in summary["text"]
 
 
 def test_missing_task_raises_batch_error_naming_task_id(setup, monkeypatch):
