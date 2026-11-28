@@ -812,7 +812,7 @@ def _dispatch_sessions(args: argparse.Namespace) -> int:
 def _dispatch_status(args: argparse.Namespace) -> int:
     import json as _json
 
-    from .. import fleet_client, run_preference
+    from .. import fleet_client, fleet_client_flush, run_preference
 
     try:
         runs = fleet_client.fetch_status(include_all=args.all)
@@ -825,10 +825,18 @@ def _dispatch_status(args: argparse.Namespace) -> int:
     except (fleet_client.FleetClientError, run_preference.RunPreferenceError):
         preference_payload = _preference_payload(run_preference.load_cached())
         preference_source = "cached"
+    stuck = fleet_client_flush.read_stuck(fleet_client.spool_path(fleet_client.resolve_node_id()))
+    warning = None
+    if stuck is not None:
+        count = stuck["head_poison_count"]
+        warning = (
+            f"fleet event spool is stuck behind {count} poison events at its head; "
+            "run `brigade fleet flush` to retry and isolate them"
+        )
     if args.json:
         print(
             _json.dumps(
-                {"preference": preference_payload, "runs": runs},
+                {"preference": preference_payload, "runs": runs, "warning": warning},
                 indent=2,
                 sort_keys=True,
             )
@@ -856,6 +864,8 @@ def _dispatch_status(args: argparse.Namespace) -> int:
         print("  ".join(cell.ljust(w) for cell, w in zip(row, widths, strict=True)))
     if not rows:
         print("(no active fleet runs)")
+    if warning is not None:
+        print(f"warning: {warning}")
     print()
     _print_preference(preference_payload, source=preference_source)
     return 0

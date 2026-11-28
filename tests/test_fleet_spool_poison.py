@@ -9,6 +9,8 @@ from pathlib import Path
 import pytest
 
 from brigade import fleet_client, fleet_client_flush
+from brigade import cli
+from tests._home import set_home
 
 NODE = "11111111-1111-4111-8111-111111111111"
 HUB = "https://hub.invalid"
@@ -59,6 +61,7 @@ class FakeHub:
 
 @pytest.fixture(autouse=True)
 def _home(tmp_path, monkeypatch):
+    set_home(monkeypatch, tmp_path / "home")
     monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "brigade-home"))
 
 
@@ -170,7 +173,7 @@ def test_mixed_batch_still_isolates_individually(monkeypatch):
     assert hub.delivery_counts == {seq: 1 for seq in range(1, 21) if seq not in bad}
 
 
-def test_four_poison_at_head_stays_queued(monkeypatch):
+def test_four_poison_at_head_sets_health_and_status_warns(monkeypatch, capsys):
     """Documented residual: four head poison events with no delivery look like a hub fault (#1846)."""
     events = [_event(seq, poison=seq <= 4) for seq in range(1, 9)]
     path = _spool(events)
@@ -179,6 +182,31 @@ def test_four_poison_at_head_stays_queued(monkeypatch):
     assert hub.stored == []
     assert _sequences(path) == list(range(1, 9))
     assert _dead_letters(path) == []
+    assert fleet_client_flush.read_stuck(path) == {"head_poison_count": 4}
+    monkeypatch.setattr(fleet_client, "fetch_status", lambda *, include_all: [])
+    monkeypatch.setattr(fleet_client, "fetch_run_preference", lambda: {})
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE)
+    assert cli.main(["fleet", "status"]) == 0
+    output = capsys.readouterr().out
+    assert "warning: fleet event spool is stuck behind 4 poison events at its head" in output
+    assert "`brigade fleet flush`" in output
+
+
+def test_successful_delivery_clears_stuck_health(monkeypatch):
+    events = [_event(seq, poison=seq <= 4) for seq in range(1, 9)]
+    path = _spool(events)
+    rejecting = FakeHub()
+    assert _flush(rejecting, monkeypatch) == 0
+    assert fleet_client_flush.read_stuck(path) is not None
+
+    accepting = FakeHub()
+
+    def accept_all(hub_url, token, body, *, timeout):
+        accepting.stored.extend(event["sequence"] for event in body)
+
+    accepting.post = accept_all
+    assert _flush(accepting, monkeypatch) == len(events)
+    assert fleet_client_flush.read_stuck(path) is None
 
 
 def test_transport_failure_after_pending_rejection_keeps_events_queued(monkeypatch):

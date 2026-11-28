@@ -1,0 +1,1 @@
+- Surface a durable fleet status warning when poison events leave the local event spool stuck, and clear it after delivery resumes.
