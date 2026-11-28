@@ -10,6 +10,7 @@ import hashlib
 import json
 import re
 from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Mapping, Sequence
 
@@ -64,6 +65,13 @@ _DIGEST_FIELDS = frozenset({"payload_digest", "spec_digest", "attempt_id", "resu
 
 class TaskJournalError(RuntimeError):
     """A bounded task refusal; no transport action has been performed."""
+
+
+@dataclass
+class ReadMetadata:
+    """Tolerated damage from the same verified journal snapshot."""
+
+    partial_tail_digest: str | None = None
 
 
 def token(value: object) -> bool:
@@ -333,7 +341,7 @@ def validate_pairs(events: Sequence[run_journal.RunEvent]) -> None:
 
 
 def _verified(
-    run_dir: Path, *, tolerate_partial_tail: bool = False, sync_head: bool = True
+    run_dir: Path, *, tolerate_partial_tail: bool = False, sync_head: bool = True, metadata: ReadMetadata | None = None
 ) -> list[run_journal.RunEvent]:
     path = run_lifecycle._journal_path(run_dir)
     if not run_journal.bound_is_file(path):
@@ -343,6 +351,10 @@ def _verified(
         raise TaskJournalError("task journal partial tail")
     if report.chain_errors:
         raise TaskJournalError("task journal chain error or unsupported reader")
+    if metadata is not None:
+        metadata.partial_tail_digest = (
+            hashlib.sha256(report.partial_tail).hexdigest() if report.partial_tail is not None else None
+        )
     events = list(report.events)
     if any(e.run_id != run_dir.name for e in events):
         raise TaskJournalError("task journal run identity mismatch")
@@ -360,11 +372,11 @@ def _verified(
     return events
 
 
-def read_only(run_dir: Path) -> tuple[Path, list[run_journal.RunEvent]]:
+def read_only(run_dir: Path, *, metadata: ReadMetadata | None = None) -> tuple[Path, list[run_journal.RunEvent]]:
     """Verify a task journal without locking, syncing, or repairing its tail."""
     try:
         run_dir = run_journal.normalize_run_dir(run_dir)
-        return run_dir, _verified(run_dir, tolerate_partial_tail=True, sync_head=False)
+        return run_dir, _verified(run_dir, tolerate_partial_tail=True, sync_head=False, metadata=metadata)
     except TaskJournalError:
         raise
     except run_checkpoint.CheckpointError as exc:
@@ -374,7 +386,6 @@ def read_only(run_dir: Path) -> tuple[Path, list[run_journal.RunEvent]]:
         ValueError,
         run_journal.RunJournalError,
         run_lifecycle.LifecycleJournalError,
-        run_events.CanonicalizationError,
     ) as exc:
         raise TaskJournalError("task journal operation refused or durability indeterminate") from exc
 

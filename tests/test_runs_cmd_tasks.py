@@ -355,7 +355,7 @@ def test_show_refuses_a_symlinked_result_sidecar(populated, tmp_path, capsys):
 def test_wait_with_no_accepted_tasks_refuses_instead_of_succeeding(task_run, monkeypatch, capsys):
     run_dir, workspace = task_run
     _accept(run_dir, workspace, "only")
-    monkeypatch.setattr(tasks, "read_tasks_read_only", lambda _run_dir: ())
+    monkeypatch.setattr(tasks, "read_tasks_read_only", lambda _run_dir, **_kwargs: ())
     assert cli.main(["runs", "tasks", "wait", str(run_dir), "--timeout", "0"]) == 2
     assert "no-tasks" in _output(capsys.readouterr())
 
@@ -371,7 +371,7 @@ def test_wait_without_timeout_reports_a_persistent_journal_refusal(populated, mo
     run_dir, _workspace = populated
     calls = []
 
-    def refuse(_run_dir):
+    def refuse(_run_dir, **_kwargs):
         calls.append(1)
         raise tasks.TaskJournalError("task journal has no recovery checkpoint")
 
@@ -389,3 +389,56 @@ def test_missing_journal_message_names_the_run_not_its_path(populated, capsys):
     output = _output(capsys.readouterr())
     assert run_dir.name in output
     assert str(run_dir.parent) not in output
+
+
+def test_wait_without_timeout_refuses_a_stable_partial_tail(populated, capsys):
+    run_dir, _workspace = populated
+    path = run_dir / "events" / "lifecycle.jsonl"
+    with path.open("ab") as stream:
+        stream.write(b'{"torn":')
+    before = path.read_bytes()
+    sleeps = []
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        assert len(sleeps) < runs_cmd_tasks.MAX_CONSECUTIVE_READ_ERRORS
+
+    metadata = task_journal.ReadMetadata()
+    tasks.read_tasks_read_only(run_dir, metadata=metadata)
+    assert metadata.partial_tail_digest == hashlib.sha256(b'{"torn":').hexdigest()
+    assert runs_cmd_tasks.wait_tasks(str(run_dir), ["queued"], cwd=run_dir, sleep=sleep) == 2
+    assert len(sleeps) == runs_cmd_tasks.MAX_CONSECUTIVE_READ_ERRORS - 1
+    assert "task-journal-unreadable" in _output(capsys.readouterr())
+    assert path.read_bytes() == before
+    assert cli.main(["runs", "tasks", "list", str(run_dir)]) == 0
+    assert cli.main(["runs", "tasks", "show", str(run_dir), "queued"]) == 0
+
+
+@pytest.mark.parametrize("repair", [False, True])
+def test_wait_resets_partial_tail_threshold_when_tail_changes(populated, repair):
+    run_dir, _workspace = populated
+    path = run_dir / "events" / "lifecycle.jsonl"
+    clean = path.read_bytes()
+    path.write_bytes(clean + b'{"torn":')
+    sleeps = []
+    limit = runs_cmd_tasks.MAX_CONSECUTIVE_READ_ERRORS
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        assert len(sleeps) <= limit
+        if len(sleeps) == limit - 1:
+            path.write_bytes(clean if repair else clean + b'{"torn":1')
+
+    assert (
+        runs_cmd_tasks.wait_tasks(
+            str(run_dir),
+            ["queued"],
+            cwd=run_dir,
+            timeout=float(limit),
+            interval=1,
+            monotonic=lambda: float(len(sleeps)),
+            sleep=sleep,
+        )
+        == 3
+    )
+    assert len(sleeps) == limit

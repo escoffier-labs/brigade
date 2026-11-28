@@ -443,13 +443,18 @@ def wait_tasks(
     latest: list[TaskRow] | None = None
     last_error: tasks.TaskJournalError | None = None
     consecutive_errors = 0
+    tail_digest: str | None = None
+    stable_tail_reads = 0
     while True:
+        metadata = tasks.journal.ReadMetadata()
         try:
-            results = tasks.read_tasks_read_only(run_dir)
+            results = tasks.read_tasks_read_only(run_dir, metadata=metadata)
         except tasks.TaskJournalError as exc:
             # A live dispatcher can transiently refuse between a task's
             # checkpoint and its fact. Keep waiting; a persistent refusal is
             # reported instead of being mistaken for a timeout.
+            tail_digest = None
+            stable_tail_reads = 0
             last_error = exc
             consecutive_errors += 1
             if not _journal_present(run_dir):
@@ -459,6 +464,13 @@ def wait_tasks(
         else:
             last_error = None
             consecutive_errors = 0
+            partial_digest = metadata.partial_tail_digest
+            stable_tail_reads = stable_tail_reads + 1 if partial_digest == tail_digest else 1
+            tail_digest = partial_digest
+            if partial_digest is None:
+                stable_tail_reads = 0
+            elif stable_tail_reads >= MAX_CONSECUTIVE_READ_ERRORS:
+                return _fail("task-journal-unreadable", "task journal partial tail did not change")
             by_id = {result.handle.spec.task_id: result for result in results}
             watched = selected or list(by_id)
             if not watched:
