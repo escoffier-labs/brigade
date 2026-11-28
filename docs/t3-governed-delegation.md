@@ -1,8 +1,9 @@
 # Governed native T3 delegation
 
 Status: enrollment, claim, reported correlation, observation, cancellation
-request, acknowledgement, hold resolution and explicit finalization are
-implemented. No Brigade-side launch exists, and Brigade never calls T3.
+request, acknowledgement, hold resolution, audited claim release and explicit
+finalization are implemented. No Brigade-side launch exists, and Brigade never
+calls T3.
 
 A T3 Code parent session runs Brigade-governed child tasks by calling Brigade
 CLI verbs around its own native `delegate_task`, `task_status` and `task_cancel`
@@ -22,6 +23,7 @@ and its durable journal.
 | `brigade t3 finalize <run>` | Implemented |
 | `brigade t3 status <run> [--json]` | Implemented |
 | `brigade t3 hold-resolve <run> <task> (--native-json <file|-> | --abandon)` | Implemented |
+| `brigade t3 release-claim <run> <task> --parent-thread <thread> --evidence <file> --confirm-no-delegate` | Implemented |
 
 `open` validates a `brigade.run_batch.v1` batch, binds every task seat to a
 declared native target, retains the exact delegation input, and records
@@ -29,7 +31,8 @@ reference-only enrollment facts. It launches nothing and reserves no budget.
 `claim`, `accepted` and `hold-resolve` consume a launch claim and record
 caller-reported correlation. `observe` classifies native status evidence,
 `cancel` prints native cancel arguments, `ack` consumes one exact retained
-result, and `finalize` closes the run explicitly.
+result, `release-claim` releases one uncorrelated claim after an audited
+operator assertion, and `finalize` closes the run explicitly.
 
 
 ## Seat bindings
@@ -248,8 +251,8 @@ path refuses a child whose `projectId` differs from the parent thread's project
 with `invalid_request`, after Brigade has consumed the launch. The roster
 `target_project` must therefore equal the T3 project of the parent thread that
 calls `delegate_task`. A mismatch is a held lost launch. Resolve it with
-`t3 hold-resolve` and never resubmit. The hold keeps its capacity slot until a
-reviewed release operation exists.
+`t3 hold-resolve` and never resubmit. The hold keeps its capacity slot, and
+`t3 release-claim` refuses a held task.
 
 ### The lost-reply hold
 
@@ -328,12 +331,16 @@ ceiling allows the declared mode.
 Occupancy counts one unit for every durable `task.launch-claimed` fact in every
 native-enrolled run under the workspace runs root. A unit stays live until a
 trusted terminal result proves quiescence and that exact result is
-acknowledged. These all occupy:
+acknowledged, or until `t3 release-claim` releases that one uncorrelated claim.
+These all occupy:
 
 - a claim that was requested but never correlated,
 - a correlated nonterminal task,
 - a task held for any reason,
 - a task abandoned after its launch claim.
+
+A released claim stops occupying, and only its own claim is removed from the
+count. Every other task keeps its own slot.
 
 A binding abandoned before any launch claim occupies nothing, because it never
 charged or launched. The scanner never takes a run lock. It reads every run
@@ -365,9 +372,98 @@ durable before the lock is released. A lock wait timeout, or a stale lock that
 is not yet reconcilable, refuses with `capacity-lock` instead of proceeding.
 
 Post-launch abandonment retains capacity indefinitely. `t3 hold-resolve
---abandon` never frees a unit, and no release command exists today. Releasing
-that capacity requires a separately reviewed containment-reconciliation
-operation. None is implemented here.
+--abandon` never frees a unit, and `t3 release-claim` refuses an abandoned or
+otherwise held task with `task-held`. Releasing a held attempt still requires a
+separately reviewed containment-reconciliation operation, which is not
+implemented here.
+
+### Releasing an uncorrelated claim
+
+A governed batch can stop after `t3 claim` committed and before the parent
+calls `delegate_task`. That claim then holds one native slot, and no native
+task exists for `t3 cancel` or `t3 hold-resolve --native-json` to address.
+`t3 release-claim` is the audited operator path for exactly that state:
+
+```bash
+brigade t3 release-claim <run> <task> --parent-thread <thread> \
+  --evidence <activity.json|activity.jsonl> --confirm-no-delegate --target <ws>
+```
+
+The verb is allowed only when the task has a durable claim and launch claim, is
+not correlated, has no recorded observation, is not terminal, is not
+acknowledged, is not held and is not already released. Every other state
+refuses with one of `confirm-required`, `already-released`, `task-held`,
+`task-terminal`, `task-acked`, `native-reply-recorded`, `no-claim`,
+`claim-incomplete` or `parent-mismatch`. A refusal writes nothing.
+
+`--confirm-no-delegate` is the operator assertion that the parent never called
+`delegate_task` for this attempt. `--evidence` is the exported parent activity
+log. The file may be one JSON object of the form
+`{"parent_thread": "<thread>", "events": [...]}`, a JSON array of records, or
+JSON Lines with one record per line. A record is
+`{"ts": "<RFC 3339 time>", "tool": "<tool name>", "thread_id": "<thread>"}`
+and carries no other keys. The object header, or at least one record, must name
+the declared parent thread, and no named thread may differ from it. The command
+refuses `evidence-missing`, `evidence-unreadable`, `evidence-invalid`,
+`evidence-too-large`, `evidence-thread-missing`,
+`evidence-thread-mismatch`, `evidence-stale` or `evidence-future`.
+
+The evidence check is deterministic. Any record whose `tool` is exactly
+`delegate_task`, at or after the claim's recorded time, refuses
+`evidence-conflict`. A delegate record with no parseable `ts` also refuses,
+because it cannot be shown to precede the claim. A `delegate_task` record from
+before the claim time is allowed. The file name is never trusted.
+
+The evidence must also be recent. Its newest row must be no more than ten
+minutes old at the release time, or the command refuses `evidence-stale`; a row
+whose timestamp cannot be read leaves the newest moment unknown and refuses the
+same way. A newest row more than one minute ahead of the release time refuses
+`evidence-future`, which tolerates ordinary clock skew without accepting a
+snapshot that cannot be ordered against the release. After the evidence is
+parsed, the task state is read again under the capacity and run locks, and a
+task that has meanwhile become correlated, terminal, acknowledged, held or
+released refuses before anything is written.
+
+On success the verb appends one `task.native-released` fact under the run lock
+and its existing journal. The fact carries the operator assertion, the release
+time, the parent thread, the evidence sha256 and byte size, the task and the
+attempt. Capacity counting skips that exact claim and no other. A second release
+of the same attempt refuses `already-released`. If a native reply or
+`t3 accepted` for the released attempt arrives later, it never creates a second
+child, but it does prove that one exists. A valid late reply therefore does two
+things: it records an `accept-conflict` hold on the task, and it appends a
+`task.native-release-reclaimed` fact for that reply so the slot occupies again.
+Every path that can record that reclaim takes the capacity lock before the run
+lock, so a concurrent claim cannot read the released state as free and reserve
+the same slot. The reclaim fact also carries a slot note. When restoring the
+unit stays inside the declared limits the note reads `within-limit`; when it
+does not, the reclaim is still recorded, because the child exists, and the note
+reads `over-limit` so capacity keeps reporting the unit past the limit instead
+of dropping it. An unreadable roster or an untrusted scan reports `unknown`.
+A malformed or mismatched reply validates first and records nothing.
+
+`t3 hold-resolve <run> <task> --native-json <that reply>` on a released attempt
+with an `accept-conflict` hold links the reply with the claim's retained request
+key under the normal correlation rules, appends an audited
+`task.native-release-voided` fact (the release it supersedes, the reply digest,
+the void time, the task and the attempt) and clears the hold. The release no
+longer stands: `t3 status` reports `released=false` and `voided=true`, and the
+task then follows the normal path through `observe`, `ack` and `finalize` as if
+it had never been released. A second void refuses `already-voided`, and a reply
+for another attempt or task refuses during validation; both write nothing. If a
+run ends between the void record and the hold resolution, the same reply
+finishes the transition on a retry: the hold clears and the task can finish,
+while any other reply still refuses. `hold-resolve --abandon` on a voided task
+behaves exactly as for any other held task.
+
+### Limits
+
+The evidence is an operator-supplied record, not an authenticated native
+attestation. Nothing in Brigade can exclude a concurrent `delegate_task`, and a
+parent that omits a call from its exported log is outside what this check can
+see. Release is therefore an operator assertion. The late-reply reclaim is the
+backstop: if a child turns up afterwards, the hold and the reclaim restore the
+slot and stop the task from correlating until an operator resolves it.
 
 ## Reported correlation, not authenticated acceptance
 
@@ -540,6 +636,13 @@ same form. Codes include `no-claim`, `claim-incomplete`, `parent-mismatch`,
 `result-mismatch`, `ack-refused`, `finalize-held`, `finalize-abandoned` and
 `observation-conflict`.
 
+Release refusals use the same one-line form. Codes include
+`confirm-required`, `already-released`, `task-held`, `task-terminal`,
+`task-acked`, `native-reply-recorded`, `evidence-missing`,
+`evidence-unreadable`, `evidence-invalid`, `evidence-too-large`,
+`evidence-thread-missing`, `evidence-thread-mismatch` and
+`evidence-conflict`.
+
 ## Limits
 
 - Parent-supplied correlation is never authenticated acceptance, and Brigade
@@ -579,10 +682,17 @@ same form. Codes include `no-claim`, `claim-incomplete`, `parent-mismatch`,
   acknowledgement, not Brigade consumption. Brigade `ack` is a separate exact
   result acknowledgement.
 - A lost `delegate_task` reply stays held. Resubmission is never authorized and
-  `hold-resolve` is the only resolution path.
+  `hold-resolve` is the only resolution path for a held task. `t3 release-claim`
+  applies only to an uncorrelated task with no hold and no native reply.
+- `t3 release-claim` proves only that the supplied activity log names the parent
+  thread and has no `delegate_task` record in the claim window. It is an
+  operator assertion backed by that file, not native evidence, and it never
+  authorizes resubmission.
 - Finalization refuses while an abandoned-unknown task exists, because this
   slice cannot release live-work capacity separately from the terminal run
-  status. The dropped unit is never refunded.
+  status. The dropped unit is never refunded. A claim freed by
+  `t3 release-claim` no longer counts as live work, but the task still has to be
+  closed by the run's terminal path.
 - `t3 cancel` records a request only. Brigade cannot prove native cancellation,
   containment or the final native status.
 

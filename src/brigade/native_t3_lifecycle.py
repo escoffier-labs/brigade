@@ -23,6 +23,7 @@ from typing import Any, Mapping
 
 from . import native_child_journal as journal_core
 from . import native_child_lifecycle as lifecycle_core
+from . import native_t3_capacity as capacity
 from . import native_t3_dispatch as dispatch
 from . import native_t3_enrollment as enrollment
 from . import run_task_journal as journal
@@ -98,39 +99,56 @@ def observe(*, workspace: Path, run_id: str, task_id: str, parent_thread: str, p
     if not journal.provider_reference(parent_thread):
         raise dispatch._refuse("invalid-identity", "the parent thread identity is not valid")
     run_dir = dispatch._context(workspace, run_id, task_id)
-    with enrollment.owned_run(workspace, run_dir):
-        dispatch._run_meta(workspace, run_dir)
-        events, verified, binding = dispatch._durable_claim(workspace, run_dir, task_id, parent_thread)
-        held = dispatch._held(events, task_id)
-        if held is not None:
-            raise dispatch._refuse("task-held", f"the task is held ({held})")
-        prior = dispatch._correlation(events, task_id)
-        if prior is None:
-            raise dispatch._refuse("no-correlation", "the task has no recorded native correlation")
-        result = dispatch.parse_claimed_result(payload, verified=verified, binding=binding)
-        dispatch._require_target(result, verified.retained.target)
-        handle_digest = dispatch._handle_digest(result, binding.parent_thread)
-        if handle_digest != prior.handle_digest or (
-            prior.provider_task_id is not None and prior.provider_task_id != result.provider_task_id
-        ):
-            raise dispatch._refuse("handle-mismatch", "the status handle does not match the recorded correlation")
-        observation = dispatch._classify(verified, binding, result)
-        if observation.family == "refused":
-            raise dispatch._refuse("native-mismatch", "the native projection does not correlate with this task")
-        terminal = observation.family == "terminal-candidate"
-        evidence = dispatch._evidence_digest(handle_digest, result, observation) if terminal else None
-        updated = dispatch._observe(workspace, run_dir, verified, result, observation, evidence=evidence)
-        return {
-            "schema": OBSERVE_SCHEMA,
-            "run_id": run_dir.name,
-            "task_id": task_id,
-            "attempt_id": binding.attempt_id,
-            "family": observation.family,
-            "reason": observation.reason,
-            "status": updated.status,
-            "result_id": updated.result_id if terminal else None,
-            "replayed": updated == verified.result,
-        }
+    try:
+        # A late observation can reclaim a released unit, so the capacity lock
+        # comes first, matching ``claim`` and ``release_claim``.
+        with capacity.capacity_lock(workspace):
+            with enrollment.owned_run(workspace, run_dir):
+                dispatch._run_meta(workspace, run_dir)
+                events, verified, binding = dispatch._durable_claim(workspace, run_dir, task_id, parent_thread)
+                result = dispatch.parse_claimed_result(payload, verified=verified, binding=binding)
+                dispatch._require_target(result, verified.retained.target)
+                dispatch._hold_late_reply(
+                    workspace,
+                    run_dir,
+                    events,
+                    task_id,
+                    binding.attempt_id,
+                    dispatch._handle_digest(result, binding.parent_thread),
+                    verified.result.handle.spec.seat,
+                )
+                prior = dispatch._correlation(events, task_id)
+                if prior is None:
+                    raise dispatch._refuse("no-correlation", "the task has no recorded native correlation")
+                held = dispatch._held(events, task_id)
+                if held is not None:
+                    raise dispatch._refuse("task-held", f"the task is held ({held})")
+                handle_digest = dispatch._handle_digest(result, binding.parent_thread)
+                if handle_digest != prior.handle_digest or (
+                    prior.provider_task_id is not None and prior.provider_task_id != result.provider_task_id
+                ):
+                    raise dispatch._refuse(
+                        "handle-mismatch", "the status handle does not match the recorded correlation"
+                    )
+                observation = dispatch._classify(verified, binding, result)
+                if observation.family == "refused":
+                    raise dispatch._refuse("native-mismatch", "the native projection does not correlate with this task")
+                terminal = observation.family == "terminal-candidate"
+                evidence = dispatch._evidence_digest(handle_digest, result, observation) if terminal else None
+                updated = dispatch._observe(workspace, run_dir, verified, result, observation, evidence=evidence)
+                return {
+                    "schema": OBSERVE_SCHEMA,
+                    "run_id": run_dir.name,
+                    "task_id": task_id,
+                    "attempt_id": binding.attempt_id,
+                    "family": observation.family,
+                    "reason": observation.reason,
+                    "status": updated.status,
+                    "result_id": updated.result_id if terminal else None,
+                    "replayed": updated == verified.result,
+                }
+    except capacity.CapacityError as exc:
+        raise dispatch._refuse(exc.code, str(exc)) from None
 
 
 def cancel(*, workspace: Path, run_id: str, task_id: str, parent_thread: str) -> dict[str, Any]:
@@ -191,8 +209,8 @@ def _describe(report: Mapping[str, Any]) -> str:
     for task in report["tasks"]:
         lines.append(
             "task {task_id} state={state} held={held_reason} correlated={correlated} "
-            "terminal={terminal} acked={acked} cancel-requested={cancel_requested} attempt={attempt} "
-            "seat={seat_digest}".format(**task)
+            "terminal={terminal} acked={acked} released={released} voided={voided} "
+            "cancel-requested={cancel_requested} attempt={attempt} seat={seat_digest}".format(**task)
         )
     return "\n".join(lines)
 
