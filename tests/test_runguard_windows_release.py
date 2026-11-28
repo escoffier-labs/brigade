@@ -21,6 +21,7 @@ import os
 import sys
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -798,6 +799,119 @@ def test_persistent_access_denied_makes_a_snapshot_live_and_not_stale(
     assert snapshot is not None
     assert snapshot.stale is False
     assert runguard._lock_is_stale(lock_path) is False
+
+
+@requires_fake_kernel32
+@pytest.mark.parametrize("release_succeeds", [True, False])
+def test_snapshot_during_our_delete_cannot_strand_a_live_lock_verdict(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, release_succeeds: bool
+) -> None:
+    """A delete callback observes the lock before the release can close its handle."""
+    lock_path = tmp_path / "run.lock"
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    fake = FakeKernel32()
+    _fake_kernel32(monkeypatch, fake)
+    _windows_release(monkeypatch)
+    # Keep the real POSIX gate while exercising the Windows metadata opens.
+    monkeypatch.setattr(runguard_gate, "sys", SimpleNamespace(platform=sys.platform))
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(nt_process, "_last_error", lambda: ERROR_ACCESS_DENIED)
+    monkeypatch.setattr(nt_process, "DELETE_PENDING_RETRY_SECONDS", 0.0)
+    deleting = False
+    observations: list[object] = []
+
+    def open_name(name: str, access: int, share: int, *rest: Any) -> int:
+        if deleting and access == nt_process.GENERIC_READ:
+            fake.create_calls.append((name, access, share, *rest))
+            return 0
+        return fake._create_file(name, access, share, *rest)
+
+    def delete_and_observe(handle: int, *args: Any) -> int:
+        nonlocal deleting
+        result = fake._set_information(handle, *args)
+        deleting = True
+        # Persistent denial lasts until this callback returns. Waiting here for
+        # a readable owner would wait for our own release, which cannot advance.
+        failures: list[BaseException] = []
+
+        def observe_pending_delete() -> None:
+            try:
+                snapshot = runguard._lock_snapshot(lock_path)
+                assert snapshot is not None and snapshot.stale
+                observations.append(runguard._claim_stale_lock(lock_path))
+                with pytest.raises(PermissionError):
+                    nt_process.read_text_sharing_delete(lock_path / "owner.json")
+            except BaseException as exc:
+                failures.append(exc)
+
+        observer = threading.Thread(target=observe_pending_delete, daemon=True)
+        observer.start()
+        observer.join(timeout=2)
+        assert not observer.is_alive(), "the snapshot must finish before our delete handle can close"
+        if failures:
+            raise failures[0]
+        return result
+
+    fake.CreateFileW = _Entry(open_name)
+    fake.SetFileInformationByHandle = _Entry(delete_and_observe)
+
+    if release_succeeds:
+        runguard._release_lock(lock_path, ownership)
+    else:
+        _deny_rename(monkeypatch)
+        clock = _FakeClock()
+        with pytest.raises(PermissionError):
+            _release_with_fake_clock(monkeypatch, lock_path, ownership, clock)
+        assert clock.now <= runguard_release.LOCK_RELEASE_RETRY_SECONDS
+        assert runguard._lock_snapshot(lock_path).stale is False
+        assert runguard._claim_stale_lock(lock_path) is None
+        assert sorted(entry.name for entry in lock_path.iterdir()) == ["owner.json", "pid"]
+        return
+
+    assert observations == [runguard._RecoveryGate.BUSY] * 2
+    assert not lock_path.exists()
+    deleting = False
+    successor = runguard._wait_to_acquire_lock(lock_path, wait_seconds=0.1, poll_interval=0.01)
+    assert runguard._read_lock_owner(lock_path)["owner_token"] == successor.owner_token
+    # Evidence from the old release must not apply to this live successor.
+    deleting = True
+    assert runguard._lock_snapshot(lock_path).stale is False
+    assert runguard._claim_stale_lock(lock_path) is None
+    deleting = False
+    fake.SetFileInformationByHandle = _Entry(fake._set_information)
+    runguard._release_lock(lock_path, successor)
+    assert not lock_path.exists()
+
+
+@requires_fake_kernel32
+def test_snapshot_denial_after_release_rechecks_the_directory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The snapshot's lstat can precede a release completed during its first open."""
+    lock_path = tmp_path / "run.lock"
+    ownership = runguard._publish_lock(lock_path, run_dir=None)
+    fake = FakeKernel32()
+    _fake_kernel32(monkeypatch, fake)
+    _windows_release(monkeypatch)
+    monkeypatch.setattr(runguard_gate, "sys", SimpleNamespace(platform=sys.platform))
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(nt_process, "_last_error", lambda: ERROR_ACCESS_DENIED)
+    monkeypatch.setattr(nt_process, "DELETE_PENDING_RETRY_SECONDS", 0.0)
+
+    def denied_open(name: str, access: int, share: int, *rest: Any) -> int:
+        fake.create_calls.append((name, access, share, *rest))
+        return 0
+
+    # Release's own opens must work; inject the overlap only at the snapshot's
+    # first read, then leave every retry denied even though the directory is gone.
+    def first_open(name: str, access: int, share: int, *rest: Any) -> int:
+        fake.CreateFileW = _Entry(fake._create_file)
+        runguard._release_lock(lock_path, ownership)
+        fake.CreateFileW = _Entry(denied_open)
+        return denied_open(name, access, share, *rest)
+
+    fake.CreateFileW = _Entry(first_open)
+
+    assert runguard._lock_snapshot(lock_path) is None
+    assert not lock_path.exists()
 
 
 # This is the acceptance test for issue #2747 on Windows. It must run there: if a

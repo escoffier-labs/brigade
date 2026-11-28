@@ -271,15 +271,30 @@ def _pid_is_active(pid: int) -> bool:
 
 @dataclass(frozen=True)
 class _LockSnapshot:
-    """One read of a lock directory: its identity and whether its owner is dead."""
+    """One read of a lock directory: its identity and whether to attempt gated recovery."""
 
     fingerprint: tuple[int, int, object]
     stale: bool
 
 
-def _lock_snapshot_read_error(path: Path, info: os.stat_result, exc: OSError) -> _LockSnapshot:
+def _lock_snapshot_read_error(path: Path, info: os.stat_result, exc: OSError) -> _LockSnapshot | None:
     if getattr(exc, "winerror", None) == nt_process.ERROR_ACCESS_DENIED:
-        return _LockSnapshot(fingerprint=(info.st_dev, info.st_ino, None), stale=False)
+        releasing = False
+        try:
+            visible = path.lstat()
+        except FileNotFoundError:
+            # The bounded metadata open may have overlapped a completed release.
+            return None
+        except OSError:
+            pass  # An unverified disappearance cannot authorize stale recovery.
+        else:
+            releasing = (visible.st_dev, visible.st_ino) == (info.st_dev, info.st_ino) and (
+                runguard_release.snapshot_is_releasing(path, info)
+            )
+        return _LockSnapshot(
+            fingerprint=(info.st_dev, info.st_ino, None),
+            stale=releasing,
+        )
     raise RunLockError(f"could not inspect run lock {path}: {exc}") from exc
 
 
@@ -433,6 +448,9 @@ def _claim_stale_lock(
     # own lock, and C's rename then takes B's live lock out of sight (B crashes
     # on `stat`, or B's lock is stranded under C's claim name while another
     # acquirer publishes beside it). A busy gate returns BUSY, never None: the lock may still be dead.
+    # A snapshot of metadata our Windows release is withholding also needs this
+    # gate: release must finish moving the directory or restoring its live owner
+    # before the re-judge below can authorize any claim.
     judged = _lock_snapshot(path)
     if judged is None or not judged.stale:
         return None
