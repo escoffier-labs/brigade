@@ -4,6 +4,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from .. import nt_process
+
 
 class _MockProcess:
     def __init__(self, pid: int) -> None:
@@ -108,6 +110,10 @@ def _collect_descendants(root_pid: int) -> set[int]:
 def _survivor_mocks(pids: set[int]) -> list[_MockProcess]:
     mocks: list[_MockProcess] = []
     for pid in pids:
+        if os.name == "nt":
+            if nt_process.pid_is_active(pid):
+                mocks.append(_MockProcess(pid))
+            continue
         try:
             os.kill(pid, 0)
             mocks.append(_MockProcess(pid))

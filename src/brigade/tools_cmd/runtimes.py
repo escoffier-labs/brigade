@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .. import nt_process
 from ..render import emit
 from . import config, constants, helpers, issues as issues_mod, paths, safety
 
@@ -78,6 +79,8 @@ def _read_pid(path: Path) -> int | None:
 def _process_alive(pid: int | None) -> bool:
     if pid is None:
         return False
+    if os.name == "nt":
+        return nt_process.pid_is_active(pid)
     stat_path = Path(f"/proc/{pid}/stat")
     if stat_path.is_file():
         try:

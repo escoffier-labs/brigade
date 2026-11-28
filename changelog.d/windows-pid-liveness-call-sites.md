@@ -1,0 +1,1 @@
+- Use Windows process handles instead of console control events for update locks, tool runtimes, and verify cleanup liveness checks.
