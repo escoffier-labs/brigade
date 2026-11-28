@@ -2028,8 +2028,199 @@ def test_a_pull_save_waits_out_a_push_that_holds_the_state_lock(hub, tmp_path, m
 def test_the_pull_state_lock_wait_fits_a_oneshot_start_timeout():
     # The sync oneshot's default start timeout is 90 seconds, so one pull state
     # write may not wait longer than this, and its attempts never extend it.
-    assert sync.PULL_STATE_LOCK_WAIT_SECONDS <= 60.0
+    assert sync.PULL_STATE_LOCK_WAIT_SECONDS == (
+        sync.SYNC_ONESHOT_START_TIMEOUT_SECONDS - sync.PULL_STATE_LOCK_SAFETY_MARGIN_SECONDS
+    )
     assert sync.PULL_STATE_LOCK_ATTEMPT_SECONDS <= sync.PULL_STATE_LOCK_WAIT_SECONDS
+
+
+def test_one_deadline_bounds_sequential_pull_state_lock_waits(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "repo:test/app", "theirs", "theirs")
+    now = [1000.0]
+    original_log = hub.do_log
+
+    def slow_log(body):
+        now[0] += 120.0
+        return original_log(body)
+
+    hub.do_log = slow_log
+    waits: list[float] = []
+
+    class SimulatedLock:
+        def __init__(self, wait: float) -> None:
+            self.wait = wait
+
+        def __enter__(self):
+            waits.append(self.wait)
+            if self.wait == 0:
+                raise sync.InboxLockTimeout("state lock timed out")
+            elapsed = min(50.0, self.wait)
+            now[0] += elapsed
+            if elapsed == self.wait:
+                raise sync.InboxLockTimeout("state lock timed out")
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(sync.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(store, "locked", lambda target, deadline_seconds: SimulatedLock(deadline_seconds))
+    monkeypatch.setattr(sync, "PULL_STATE_LOCK_ATTEMPT_SECONDS", 60.0)
+
+    with pytest.raises(sync.InboxLockTimeout, match="state lock timed out"):
+        sync.pull(target, client(hub), settings(target))
+
+    assert waits == [0, 60.0, 0, 10.0]
+    assert now[0] == 1300.0
+
+
+def test_uncontended_pull_keeps_the_full_shared_lock_budget(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "repo:test/app", "theirs", "theirs")
+    # A live refusal makes the pull clear it, so the cleanup lock is taken too.
+    store.remember_refused_scopes(target, ("repo:test/app",), now=time.time())
+    original = store.locked
+    waits: list[float] = []
+    lock_depth = [0]
+
+    class ObservedLock:
+        def __init__(self, held) -> None:
+            self.held = held
+
+        def __enter__(self):
+            result = self.held.__enter__()
+            lock_depth[0] += 1
+            return result
+
+        def __exit__(self, *args):
+            lock_depth[0] -= 1
+            return self.held.__exit__(*args)
+
+    def locked(target, deadline_seconds):
+        waits.append(deadline_seconds)
+        return ObservedLock(original(target, deadline_seconds=deadline_seconds))
+
+    original_forget = store.forget_refused_scopes
+
+    def forget_refused_scopes(*args, **kwargs):
+        assert lock_depth[0] == 1
+        return original_forget(*args, **kwargs)
+
+    monkeypatch.setattr(sync.time, "monotonic", lambda: 1000.0)
+    monkeypatch.setattr(store, "locked", locked)
+    monkeypatch.setattr(store, "forget_refused_scopes", forget_refused_scopes)
+
+    report = sync.pull(target, client(hub), settings(target))
+
+    assert report["cards"] == 1
+    assert len(waits) >= 3
+    assert set(waits) == {0}
+
+
+def test_slow_uncontended_pull_does_not_spend_lock_budget(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "repo:test/app", "theirs", "theirs")
+    now = [1000.0]
+    original_log = hub.do_log
+    original_pulling = store.pulling
+
+    class SlowPullLock:
+        def __enter__(self):
+            self.held = original_pulling(target)
+            self.held.__enter__()
+            now[0] += 120.0
+
+        def __exit__(self, *args):
+            return self.held.__exit__(*args)
+
+    def slow_log(body):
+        now[0] += 120.0
+        return original_log(body)
+
+    monkeypatch.setattr(sync.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(store, "pulling", lambda target: SlowPullLock())
+    hub.do_log = slow_log
+
+    assert sync.pull(target, client(hub), settings(target))["cards"] == 1
+    assert _card_ids(store.replica(target)) == {"theirs"}
+
+
+def test_long_pull_refusal_still_discards_replica(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "repo:test/app", "theirs", "theirs")
+    sync.pull(target, client(hub), settings(target))
+    now = [1000.0]
+    refusal = hubc.HubRefusal(403, {"code": "memory_grant_missing", "error": "no read grant"})
+
+    def refused_log(body):
+        now[0] += 120.0
+        raise refusal
+
+    monkeypatch.setattr(sync.time, "monotonic", lambda: now[0])
+    hub.do_log = refused_log
+    with pytest.raises(hubc.HubRefusal) as caught:
+        sync.pull(target, client(hub), settings(target))
+    assert caught.value is refusal
+    assert not store.replica(target).exists
+    assert not store.building(target).exists
+
+
+def test_exhausted_wait_budget_still_attempts_free_lock(tmp_path, monkeypatch):
+    budget = sync._StateLockBudget()
+    budget.remaining = 0
+    with sync._state_lock(tmp_path, budget=budget):
+        assert budget.remaining == 0
+
+
+def test_search_refusal_cleanup_lock_failure_keeps_completed_pull(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "repo:test/app", "theirs", "theirs")
+    original = sync._forget_search_refusals
+
+    def cleanup(target, readable, *, lock_budget):
+        def busy(*args, **kwargs):
+            raise sync.InboxLockTimeout("cache lock busy")
+
+        lock_budget.remaining = 0
+        monkeypatch.setattr(store, "locked", busy)
+        original(target, readable, lock_budget=lock_budget)
+
+    monkeypatch.setattr(sync, "_forget_search_refusals", cleanup)
+    assert sync.pull(target, client(hub), settings(target))["cards"] == 1
+    assert _card_ids(store.replica(target)) == {"theirs"}
+
+
+def test_refusal_is_preserved_when_discard_lock_is_busy(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="read")
+    hub.status_reply = (403, {"error": "no read grant", "code": "memory_grant_missing"})
+
+    def busy(*args, **kwargs):
+        raise sync.InboxLockTimeout("discard lock busy")
+
+    monkeypatch.setattr(sync, "PULL_STATE_LOCK_WAIT_SECONDS", 0)
+    monkeypatch.setattr(store, "locked", busy)
+    with pytest.raises(hubc.HubRefusal) as caught:
+        sync.pull(target, client(hub), settings(target))
+    assert caught.value.status == 403
+    assert caught.value.code == "memory_grant_missing"
+    assert isinstance(caught.value.__cause__, sync.InboxLockTimeout)
+
+
+def test_refusal_discard_shares_the_pull_wait_budget(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="read")
+    hub.status_reply = (403, {"error": "no read grant", "code": "memory_grant_missing"})
+    budgets = []
+    real_forget = sync.forget_hub_replica
+
+    def recording_forget(target_arg, hub_arg, *, lock_budget=None):
+        budgets.append(lock_budget)
+        return real_forget(target_arg, hub_arg, lock_budget=lock_budget)
+
+    monkeypatch.setattr(sync, "forget_hub_replica", recording_forget)
+    with pytest.raises(hubc.HubRefusal):
+        sync.pull(target, client(hub), settings(target))
+    assert len(budgets) == 1 and isinstance(budgets[0], sync._StateLockBudget)
 
 
 def test_a_pull_reports_busy_when_the_state_lock_outlasts_its_wait(hub, tmp_path, monkeypatch, capsys):

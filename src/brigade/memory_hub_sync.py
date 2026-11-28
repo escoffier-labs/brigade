@@ -31,10 +31,12 @@ LOG_PAGE = 500
 SAVE_EVERY_PAGES = 50
 # A push holds the state lock for its whole run, one `put` after another (each
 # up to 10s), so a pull's state writes wait it out instead of failing the pull
-# after the ordinary deadline. One deadline covers the whole wait, below the 90
-# second start timeout a sync oneshot gets; each attempt is shorter so the wait
-# is re-checked, and the busy lock is still reported when the deadline passes.
-PULL_STATE_LOCK_WAIT_SECONDS = 60.0
+# after the ordinary deadline. One budget covers accumulated state-lock waits,
+# below the 90 second start timeout a sync oneshot gets. Network calls and
+# protected writes do not consume it.
+SYNC_ONESHOT_START_TIMEOUT_SECONDS = 90.0
+PULL_STATE_LOCK_SAFETY_MARGIN_SECONDS = 30.0
+PULL_STATE_LOCK_WAIT_SECONDS = SYNC_ONESHOT_START_TIMEOUT_SECONDS - PULL_STATE_LOCK_SAFETY_MARGIN_SECONDS
 PULL_STATE_LOCK_ATTEMPT_SECONDS = 30.0
 PULL_STATE_LOCK_PAUSE_SECONDS = 0.5
 # Refusals that mean "this exact write can never apply": review it as a proposal.
@@ -77,37 +79,41 @@ def _state_lock_pause(seconds: float) -> None:
     time.sleep(seconds)
 
 
-@contextlib.contextmanager
-def _state_lock(target: Path) -> Iterator[None]:
-    """`store.locked` for a pull's state writes, waiting out a concurrent push.
+class _StateLockBudget:
+    def __init__(self) -> None:
+        self.remaining = PULL_STATE_LOCK_WAIT_SECONDS
 
-    One deadline bounds the whole wait, and each attempt re-checks it, so a
-    busy lock is still reported as `InboxLockTimeout` after a bounded wait and
-    the pull can simply be run again. The retry only covers acquiring the
-    lock; an error inside the protected write is never retried.
+
+@contextlib.contextmanager
+def _state_lock(target: Path, *, budget: _StateLockBudget | None = None) -> Iterator[None]:
+    """Share acquisition wait time, excluding network calls and protected writes.
+
+    Always try without blocking, including after the budget is spent. Retry
+    only acquisition failures, never an error inside the protected write.
     """
-    deadline = time.monotonic() + PULL_STATE_LOCK_WAIT_SECONDS
-    last: InboxLockTimeout | None = None
+    budget = budget if budget is not None else _StateLockBudget()
     with contextlib.ExitStack() as stack:
-        acquired = False
-        while not acquired:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            try:
-                stack.enter_context(
-                    store.locked(target, deadline_seconds=min(remaining, PULL_STATE_LOCK_ATTEMPT_SECONDS))
-                )
-                acquired = True
-            except InboxLockTimeout as exc:
-                last = exc
-                pause = min(PULL_STATE_LOCK_PAUSE_SECONDS, deadline - time.monotonic())
-                if pause > 0:
-                    _state_lock_pause(pause)
-        if not acquired:
-            raise last or InboxLockTimeout(
-                f"hub state lock stayed busy for {PULL_STATE_LOCK_WAIT_SECONDS:g}s: {store.root(target) / store.LOCK}"
-            )
+        try:
+            stack.enter_context(store.locked(target, deadline_seconds=0))
+        except InboxLockTimeout as exc:
+            last = exc
+            while budget.remaining > 0:
+                started = time.monotonic()
+                try:
+                    stack.enter_context(
+                        store.locked(target, deadline_seconds=min(budget.remaining, PULL_STATE_LOCK_ATTEMPT_SECONDS))
+                    )
+                    break
+                except InboxLockTimeout as exc:
+                    last = exc
+                finally:
+                    budget.remaining -= max(0.0, time.monotonic() - started)
+                started = time.monotonic()
+                if budget.remaining > 0:
+                    _state_lock_pause(min(PULL_STATE_LOCK_PAUSE_SECONDS, budget.remaining))
+                budget.remaining -= max(0.0, time.monotonic() - started)
+            else:
+                raise last
         yield
 
 
@@ -133,9 +139,9 @@ def forget_other_principal(target: Path, hub: str, principal: object) -> bool:
     return False
 
 
-def forget_hub_replica(target: Path, hub: str) -> None:
+def forget_hub_replica(target: Path, hub: str, *, lock_budget: _StateLockBudget | None = None) -> None:
     """Discard the live replica and any rebuild pulled from `hub`. Takes the state lock."""
-    with _state_lock(target):
+    with _state_lock(target, budget=lock_budget):
         if store.replica(target).meta.get("hub") == hub:
             store.discard_replica(target)
         if store.building(target).meta.get("hub") == hub:
@@ -187,19 +193,23 @@ def pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings)
     the network calls of a long pull.
     """
     with store.pulling(target):
+        lock_budget = _StateLockBudget()
         try:
-            return _pull(target, client, settings)
+            return _pull(target, client, settings, lock_budget=lock_budget)
         except hubc.HubRefusal as exc:
             if exc.status == 403 and exc.code == "memory_grant_missing":
                 # A `status` or `log` refusal at any point of the pull means this
                 # credential can read no scope on this hub now: nothing pulled
                 # from it may be served by fallback search later. (A `card`
                 # refusal is scope-wide only and is handled inside the pull.)
-                forget_hub_replica(target, client.identity)
+                try:
+                    forget_hub_replica(target, client.identity, lock_budget=lock_budget)
+                except OSError as cleanup_error:
+                    raise exc from cleanup_error
             raise
 
 
-def _forget_search_refusals(target: Path, readable: set[str]) -> None:
+def _forget_search_refusals(target: Path, readable: set[str], *, lock_budget: _StateLockBudget | None = None) -> None:
     """A successful pull read these scopes, so a search no longer leaves them out.
 
     A cache write never fails the pull; the next search just keeps the memory.
@@ -210,7 +220,7 @@ def _forget_search_refusals(target: Path, readable: set[str]) -> None:
     if not readable.intersection(store.refused_scopes(target, now=now)):
         return
     try:
-        with _state_lock(target):
+        with _state_lock(target, budget=lock_budget):
             store.forget_refused_scopes(target, tuple(sorted(readable)), now=time.time())
     except InboxLockTimeout:
         _LOG.debug("hub state lock timed out; skipped forgetting refused scopes")
@@ -218,7 +228,13 @@ def _forget_search_refusals(target: Path, readable: set[str]) -> None:
         pass
 
 
-def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings) -> dict[str, Any]:
+def _pull(
+    target: Path,
+    client: hubc.MemoryHubClient,
+    settings: hubc.HubSettings,
+    *,
+    lock_budget: _StateLockBudget,
+) -> dict[str, Any]:
     status = read_status(client, settings)
     epoch = str(status.get("log_epoch") or "")
     principal = str(status["principal"])
@@ -232,7 +248,7 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
         "applied": 0,
         "warnings": [],
     }
-    with _state_lock(target):
+    with _state_lock(target, budget=lock_budget):
         swap, replica = _prepare(target, hub, epoch, principal, readable, report)
 
     def save_held() -> None:
@@ -245,7 +261,7 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
         replica.save()
 
     def save() -> None:
-        with _state_lock(target):
+        with _state_lock(target, budget=lock_budget):
             save_held()
 
     try:
@@ -253,13 +269,13 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
         if str(client.call("status").get("log_epoch") or "") != epoch:
             raise _EpochMoved
         replica.meta["read_scopes"] = sorted(readable)
-        with _state_lock(target):
+        with _state_lock(target, budget=lock_budget):
             save_held()
             if swap:
                 replica = store.finish_building(target)
     except _EpochMoved:
         # Heads pulled so far belong to the old epoch: never serve them.
-        with _state_lock(target):
+        with _state_lock(target, budget=lock_budget):
             store.discard_replica(target)
             store.discard_building(target)
         report["warnings"].append("the hub's log_epoch changed during the pull; run pull again to rebuild")
@@ -275,7 +291,7 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
             f"{len(replica.missing)} card(s) are not replicated yet"
         )
     report.update(seq=replica.meta.get("seq"), cards=len(replica.heads), bytes=replica.bytes())
-    _forget_search_refusals(target, readable)
+    _forget_search_refusals(target, readable, lock_budget=lock_budget)
     return report
 
 
