@@ -160,6 +160,8 @@ def test_two_writable_worktree_tasks_run_in_separate_worktrees(site, capsys, mon
     assert first.is_dir() and second.is_dir()
     assert result["tasks"]["a"]["workspace"] == "worktree"
     assert result["tasks"]["b"]["workspace"] == "worktree"
+    assert result["tasks"]["a"]["checkout_created"] is True
+    assert result["tasks"]["b"]["checkout_created"] is True
 
 
 def test_shared_task_still_gets_the_caller_workspace(site, capsys, monkeypatch):
@@ -177,6 +179,8 @@ def test_shared_task_still_gets_the_caller_workspace(site, capsys, monkeypatch):
     assert seen["b"].resolve() == site.repo.resolve()
     assert result["tasks"]["a"]["workspace"] == "worktree"
     assert result["tasks"]["b"]["workspace"] == "shared"
+    assert result["tasks"]["a"]["checkout_created"] is True
+    assert result["tasks"]["b"]["checkout_created"] is False
 
 
 def test_caller_cwd_and_run_lock_resolution_keep_the_batch_workspace(site, capsys, monkeypatch):
@@ -315,6 +319,21 @@ def test_file_added_after_creation_refuses_that_task(site, capsys, monkeypatch):
     assert [r["detail"] for r in receipts["results"]] == ["task a workspace workspace-invalid: dirty"]
     assert cli.main(["run", "batch", str(site.home / "batch.json"), "--cwd", str(site.repo)]) == 2
     assert "task a: workspace-invalid (dirty)" in capsys.readouterr().err
+
+
+def test_worktree_refused_before_checkout_reports_not_created(site, capsys, monkeypatch):
+    def refuse_create(*args, **kwargs):
+        raise workspace.WorkspaceError(workspace.WORKSPACE_UNAVAILABLE, "create")
+
+    monkeypatch.setattr(workspace, "create", refuse_create)
+    rc, result, err = invoke(site, capsys, [site.task("a", isolation="worktree")])
+    assert rc == 2, err
+    assert result["tasks"]["a"]["workspace"] == "worktree"
+    assert result["tasks"]["a"]["checkout_created"] is False
+    assert result["tasks"]["a"]["refusal"] == {
+        "code": workspace.WORKSPACE_UNAVAILABLE,
+        "reason": "create",
+    }
 
 
 _DEAD_PID = 99999999
