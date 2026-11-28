@@ -1,0 +1,2 @@
+- Report local campaign repositories dropped because their identities cannot be resolved.
+- Show a campaign member's park kind in text and JSON output.
