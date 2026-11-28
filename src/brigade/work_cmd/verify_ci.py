@@ -15,6 +15,8 @@ from .. import localio
 from . import helpers
 
 DEFAULT_CHECK_NAME = "ci-gate"
+_CI_APP_SLUG = "github-actions"
+_CI_WORKFLOW_PATH = ".github/workflows/ci.yml"
 _SCHEMA = "brigade.verify_ci.v1"
 _RECORD_DIR = ".brigade/work/verify-ci"
 # Brigade runtime state is never the work product, so it does not make a tree dirty.
@@ -70,6 +72,29 @@ def _named_runs(output: str, check_name: str) -> list[dict[str, Any]]:
     return runs
 
 
+def _workflow_path(run: dict[str, Any]) -> Any:
+    """Return workflow path metadata when the check-run payload includes it."""
+    if "workflow_path" in run:
+        return run["workflow_path"]
+    workflow = run.get("workflow")
+    if isinstance(workflow, dict) and "path" in workflow:
+        return workflow["path"]
+    check_suite = run.get("check_suite")
+    if isinstance(check_suite, dict):
+        workflow = check_suite.get("workflow")
+        if isinstance(workflow, dict) and "path" in workflow:
+            return workflow["path"]
+    return None
+
+
+def _trusted_ci_run(run: dict[str, Any]) -> bool:
+    app = run.get("app")
+    if not isinstance(app, dict) or app.get("slug") != _CI_APP_SLUG:
+        return False
+    workflow_path = _workflow_path(run)
+    return workflow_path is None or workflow_path == _CI_WORKFLOW_PATH
+
+
 def _fetch_check(target: Path, repository: str, head: str, check_name: str) -> dict[str, Any]:
     try:
         result = subprocess.run(
@@ -112,6 +137,17 @@ def _fetch_check(target: Path, repository: str, head: str, check_name: str) -> d
         return {"reason": "GitHub returned an unreadable check-run response."}
     if not runs:
         return {"reason": "No check run with that name was found for HEAD."}
+
+    if check_name == DEFAULT_CHECK_NAME:
+        trusted_runs = [run for run in runs if _trusted_ci_run(run)]
+        if not trusted_runs:
+            return {
+                "reason": (
+                    "The ci-gate check runs for HEAD are untrusted: none came from the "
+                    "GitHub Actions app and .github/workflows/ci.yml."
+                )
+            }
+        runs = trusted_runs
 
     # A cancelled run says nothing about the commit. A push to main, for example,
     # often starts a second run for a commit the merge queue already tested, and

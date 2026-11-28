@@ -1,0 +1,1 @@
+- Require `brigade work verify ci` to use the `ci-gate` check from GitHub Actions and the CI workflow when workflow metadata is available.
