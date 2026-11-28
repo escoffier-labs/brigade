@@ -1,1 +1,2 @@
 - Show parent-reported timestamps and ages in T3 route-support readiness evidence.
+- A malformed T3 capabilities envelope no longer reports a parent time of 0 and an epoch-sized reported age in the route-support row.

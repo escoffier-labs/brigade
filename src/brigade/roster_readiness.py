@@ -524,10 +524,14 @@ def evaluate_readiness(
             reported_age = None
             if category == "route-support" and observation.source == SOURCE_PARENT_REPORTED:
                 envelope = t3_context.get("envelope") if isinstance(t3_context, Mapping) else None
-                candidate = envelope.get("reported_at") if isinstance(envelope, Mapping) else None
-                if _finite_real(candidate):
-                    reported_at = candidate
-                    reported_age = max(0.0, now - candidate)
+                candidate = (
+                    envelope.get("reported_at")
+                    if isinstance(envelope, Mapping) and envelope.get("state") == "ok"
+                    else None
+                )
+                if candidate is not None and _finite_real(candidate):
+                    reported_at = float(candidate)
+                    reported_age = max(0.0, now - reported_at)
             add(
                 category,
                 status,

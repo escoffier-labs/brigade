@@ -212,6 +212,27 @@ def test_route_support_reports_parent_age_against_evaluation_clock(workspace, tm
     assert row["reported_age_seconds"] == 25
 
 
+def test_malformed_envelope_reports_no_parent_time(workspace, tmp_path):
+    now = 2_000_000_000.0
+    loaded = _roster(workspace)
+    request = readiness.ReadinessRequest(("coder",), route="t3", isolation="worktree")
+    parsed = t3._malformed(now)
+
+    context, observations = t3.t3_route_readiness(loaded, request, workspace=workspace, report=parsed, now=now)
+    result = readiness.evaluate_readiness(
+        loaded,
+        request,
+        workspace=workspace,
+        observations=observations,
+        now=now,
+        t3_context=context,
+    )
+
+    row = _row(result, "route-support")
+    assert row.get("reported_at") is None
+    assert row.get("reported_age_seconds") is None
+
+
 def test_missing_envelope_is_unverified_caller_context(workspace, tmp_path):
     report = _inspect(workspace, tmp_path)
     assert report["status"] == "unverified"
