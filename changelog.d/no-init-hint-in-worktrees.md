@@ -1,0 +1,1 @@
+- Agents that start a session in a linked git worktree no longer get the unwired-repo init hint, so short-lived worktrees no longer accumulate their own scheduled care timers.

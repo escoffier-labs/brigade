@@ -265,6 +265,17 @@ def test_session_start_hints_init_for_unwired_git_repo(tmp_path: Path):
     assert context.startswith("[Brigade] If this context appears truncated")
 
 
+def test_session_start_stays_silent_in_linked_worktree(tmp_path: Path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", staticmethod(lambda: home.resolve()))
+    worktree = tmp_path / "linked-worktree"
+    worktree.mkdir()
+    # A linked worktree carries a ``.git`` file pointing at the parent's git dir.
+    (worktree / ".git").write_text(f"gitdir: {tmp_path / 'main' / '.git' / 'worktrees' / 'linked'}\n")
+    assert runtime.handle_payload("SessionStart", _payload(worktree, "SessionStart")) is None
+
+
 def test_session_start_stays_silent_for_home_directory(tmp_path: Path, monkeypatch):
     home = tmp_path / "home"
     (home / ".git").mkdir(parents=True)
