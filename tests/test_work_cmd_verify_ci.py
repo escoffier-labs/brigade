@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
 from brigade import cli, localio, work_cmd
+from brigade.work_cmd import verify_ci
 from tests.work_cmd_test_helpers import _init_git_repo
 
 _GITHUB_HOST = "github.com"
@@ -219,18 +221,67 @@ def test_ci_checks_entire_repository_when_target_is_subdirectory(checkout, monke
     )
     head = _git(repository, "rev-parse", "HEAD")
     _fake_gh(monkeypatch, head, _check(head))
+    localio.write_json(repository / ".brigade/work/runtime.json", {"state": "test"})
     if dirty_location == "inside":
         (target / "inside.txt").write_text("dirty\n", encoding="utf-8")
     elif dirty_location == "outside":
         (repository / "outside.txt").write_text("dirty\n", encoding="utf-8")
 
     expected = 0 if dirty_location is None else 2
-    assert _ci(target) == expected
+    for _ in range(2):
+        assert _ci(target) == expected
     captured = capsys.readouterr()
     if dirty_location == "outside":
         assert "outside --target" in captured.err
     elif dirty_location == "inside":
         assert "working tree differs from HEAD" in captured.err
+
+
+def test_subdirectory_closeout_reports_changes_outside_target(checkout, monkeypatch, capsys):
+    repository, head, _ = checkout
+    target = repository / "component"
+    target.mkdir()
+    _fake_gh(monkeypatch, head, _check(head))
+    assert _ci(target) == 0
+    capsys.readouterr()
+    monkeypatch.chdir(repository)
+    assert verify_ci.closeout_evidence(Path("component"))["state"] == "passed"
+
+    (repository / "outside.txt").write_text("changed\n", encoding="utf-8")
+    evidence = _closeout_ci(Path("component"), capsys)
+    assert evidence["state"] == "unknown"
+    assert "outside --target" in evidence["reason"]
+    assert "could not be read" not in evidence["reason"]
+
+
+def test_ci_rejects_target_outside_reported_repository(checkout, monkeypatch, capsys):
+    target, head, _ = checkout
+    real_git_value = verify_ci.helpers._git_value
+
+    def git_value(path, *args):
+        if args == ("rev-parse", "--show-toplevel"):
+            return str(target / "other-repository")
+        return real_git_value(path, *args)
+
+    monkeypatch.setattr(verify_ci.helpers, "_git_value", git_value)
+    assert _ci(target) == 2
+    assert "could not read the working tree state" in capsys.readouterr().err
+    assert not _record(target, head).exists()
+
+
+def test_ci_reuses_root_target_fingerprint(checkout, monkeypatch, capsys):
+    target, head, _ = checkout
+    _fake_gh(monkeypatch, head, _check(head))
+    real_fingerprint = localio.tree_fingerprint_with_head
+    calls = []
+
+    def fingerprint(path, **kwargs):
+        calls.append(path)
+        return real_fingerprint(path, **kwargs)
+
+    monkeypatch.setattr(localio, "tree_fingerprint_with_head", fingerprint)
+    assert _ci(target) == 0
+    assert calls == [target]
 
 
 @pytest.mark.parametrize(

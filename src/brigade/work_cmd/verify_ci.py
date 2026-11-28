@@ -167,15 +167,32 @@ def _tree_state(target: Path, head: str, tree: str) -> str:
     if root_value is None:
         return "unreadable"
     root = Path(root_value).resolve()
-    repository_live = localio.tree_fingerprint_with_head(root, extra_evidence_paths=(_STATE_DIR,))
+    try:
+        relative_target = target.relative_to(root)
+    except ValueError:
+        return "unreadable"
+    repository_live = (
+        target_live
+        if root == target
+        else localio.tree_fingerprint_with_head(
+            root, extra_evidence_paths=(_STATE_DIR, (relative_target / _STATE_DIR).as_posix())
+        )
+    )
     if None in repository_live:
         return "unreadable"
     if repository_live == (tree, head):
         return "clean"
     if root == target:
         return "dirty"
-    relative_target = target.relative_to(root)
-    scoped_status = helpers._git(root, "status", "--porcelain", "--", str(relative_target))
+    scoped_status = helpers._git(
+        root,
+        "status",
+        "--porcelain",
+        "--untracked-files=all",
+        "--",
+        str(relative_target),
+        f":(exclude){(relative_target / _STATE_DIR).as_posix()}",
+    )
     if scoped_status.returncode != 0:
         return "unreadable"
     return "dirty" if scoped_status.stdout else "dirty_outside_target"
@@ -243,6 +260,7 @@ def closeout_evidence(target: Path) -> dict[str, Any]:
     check name, another commit, or a tree that has changed since is not
     evidence for the work being closed.
     """
+    target = target.expanduser().resolve()
     identity = _head_identity(target)
     head, tree = identity or (None, None)
     unknown = {"head_sha": head, "tree_id": tree, "state": "unknown", "hint": "brigade work verify ci"}
@@ -263,6 +281,11 @@ def closeout_evidence(target: Path) -> dict[str, Any]:
         tree_state = "unreadable"
     if tree_state == "dirty":
         return {**unknown, "reason": "The working tree differs from HEAD, so the saved CI result does not cover it."}
+    if tree_state == "dirty_outside_target":
+        return {
+            **unknown,
+            "reason": "The working tree differs from HEAD outside --target, so the saved CI result does not cover it.",
+        }
     if tree_state != "clean":
         return {**unknown, "reason": "The working tree state could not be read from git."}
     return record

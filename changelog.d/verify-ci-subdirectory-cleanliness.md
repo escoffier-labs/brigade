@@ -1,1 +1,3 @@
 - Reject a clean verify CI target subdirectory when the repository has changes outside that target.
+- Keep repeated subdirectory CI verification clean by excluding runtime evidence at both target and repository roots.
+- Explain changes outside the closeout target and handle inconsistent repository layouts without a traceback.
