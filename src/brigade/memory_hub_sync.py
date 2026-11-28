@@ -31,7 +31,9 @@ SAVE_EVERY_PAGES = 50
 # after the ordinary deadline. One deadline covers the whole wait, below the 90
 # second start timeout a sync oneshot gets; each attempt is shorter so the wait
 # is re-checked, and the busy lock is still reported when the deadline passes.
-PULL_STATE_LOCK_WAIT_SECONDS = 60.0
+SYNC_ONESHOT_START_TIMEOUT_SECONDS = 90.0
+PULL_STATE_LOCK_SAFETY_MARGIN_SECONDS = 30.0
+PULL_STATE_LOCK_WAIT_SECONDS = SYNC_ONESHOT_START_TIMEOUT_SECONDS - PULL_STATE_LOCK_SAFETY_MARGIN_SECONDS
 PULL_STATE_LOCK_ATTEMPT_SECONDS = 30.0
 PULL_STATE_LOCK_PAUSE_SECONDS = 0.5
 # Refusals that mean "this exact write can never apply": review it as a proposal.
@@ -75,7 +77,7 @@ def _state_lock_pause(seconds: float) -> None:
 
 
 @contextlib.contextmanager
-def _state_lock(target: Path) -> Iterator[None]:
+def _state_lock(target: Path, *, deadline: float | None = None) -> Iterator[None]:
     """`store.locked` for a pull's state writes, waiting out a concurrent push.
 
     One deadline bounds the whole wait, and each attempt re-checks it, so a
@@ -83,7 +85,7 @@ def _state_lock(target: Path) -> Iterator[None]:
     the pull can simply be run again. The retry only covers acquiring the
     lock; an error inside the protected write is never retried.
     """
-    deadline = time.monotonic() + PULL_STATE_LOCK_WAIT_SECONDS
+    deadline = deadline if deadline is not None else time.monotonic() + PULL_STATE_LOCK_WAIT_SECONDS
     last: InboxLockTimeout | None = None
     with contextlib.ExitStack() as stack:
         acquired = False
@@ -130,9 +132,9 @@ def forget_other_principal(target: Path, hub: str, principal: object) -> bool:
     return False
 
 
-def forget_hub_replica(target: Path, hub: str) -> None:
+def forget_hub_replica(target: Path, hub: str, *, lock_deadline: float | None = None) -> None:
     """Discard the live replica and any rebuild pulled from `hub`. Takes the state lock."""
-    with _state_lock(target):
+    with _state_lock(target, deadline=lock_deadline):
         if store.replica(target).meta.get("hub") == hub:
             store.discard_replica(target)
         if store.building(target).meta.get("hub") == hub:
@@ -183,33 +185,41 @@ def pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings)
     save and the swap), so a push waits at most for one of those, never for
     the network calls of a long pull.
     """
+    lock_deadline = time.monotonic() + PULL_STATE_LOCK_WAIT_SECONDS
     with store.pulling(target):
         try:
-            return _pull(target, client, settings)
+            return _pull(target, client, settings, lock_deadline=lock_deadline)
         except hubc.HubRefusal as exc:
             if exc.status == 403 and exc.code == "memory_grant_missing":
                 # A `status` or `log` refusal at any point of the pull means this
                 # credential can read no scope on this hub now: nothing pulled
                 # from it may be served by fallback search later. (A `card`
                 # refusal is scope-wide only and is handled inside the pull.)
-                forget_hub_replica(target, client.identity)
+                forget_hub_replica(target, client.identity, lock_deadline=lock_deadline)
             raise
 
 
-def _forget_search_refusals(target: Path, readable: set[str]) -> None:
+def _forget_search_refusals(target: Path, readable: set[str], *, lock_deadline: float) -> None:
     """A successful pull read these scopes, so a search no longer leaves them out.
 
     A cache write never fails the pull; the next search just keeps the memory.
     """
     if not readable:
         return
-    try:
-        store.forget_refused_scopes(target, tuple(sorted(readable)), now=time.time())
-    except OSError:
-        pass
+    with _state_lock(target, deadline=lock_deadline):
+        try:
+            store.forget_refused_scopes(target, tuple(sorted(readable)), now=time.time())
+        except OSError:
+            pass
 
 
-def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings) -> dict[str, Any]:
+def _pull(
+    target: Path,
+    client: hubc.MemoryHubClient,
+    settings: hubc.HubSettings,
+    *,
+    lock_deadline: float,
+) -> dict[str, Any]:
     status = read_status(client, settings)
     epoch = str(status.get("log_epoch") or "")
     principal = str(status["principal"])
@@ -223,7 +233,7 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
         "applied": 0,
         "warnings": [],
     }
-    with _state_lock(target):
+    with _state_lock(target, deadline=lock_deadline):
         swap, replica = _prepare(target, hub, epoch, principal, readable, report)
 
     def save_held() -> None:
@@ -236,7 +246,7 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
         replica.save()
 
     def save() -> None:
-        with _state_lock(target):
+        with _state_lock(target, deadline=lock_deadline):
             save_held()
 
     try:
@@ -244,13 +254,13 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
         if str(client.call("status").get("log_epoch") or "") != epoch:
             raise _EpochMoved
         replica.meta["read_scopes"] = sorted(readable)
-        with _state_lock(target):
+        with _state_lock(target, deadline=lock_deadline):
             save_held()
             if swap:
                 replica = store.finish_building(target)
     except _EpochMoved:
         # Heads pulled so far belong to the old epoch: never serve them.
-        with _state_lock(target):
+        with _state_lock(target, deadline=lock_deadline):
             store.discard_replica(target)
             store.discard_building(target)
         report["warnings"].append("the hub's log_epoch changed during the pull; run pull again to rebuild")
@@ -266,7 +276,7 @@ def _pull(target: Path, client: hubc.MemoryHubClient, settings: hubc.HubSettings
             f"{len(replica.missing)} card(s) are not replicated yet"
         )
     report.update(seq=replica.meta.get("seq"), cards=len(replica.heads), bytes=replica.bytes())
-    _forget_search_refusals(target, readable)
+    _forget_search_refusals(target, readable, lock_deadline=lock_deadline)
     return report
 
 

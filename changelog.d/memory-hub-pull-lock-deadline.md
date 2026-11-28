@@ -1,0 +1,1 @@
+- Bound all memory Hub pull state-lock waits to one shared deadline and serialize its refused-scope cache cleanup.

@@ -1766,8 +1766,83 @@ def test_a_pull_save_waits_out_a_push_that_holds_the_state_lock(hub, tmp_path, m
 def test_the_pull_state_lock_wait_fits_a_oneshot_start_timeout():
     # The sync oneshot's default start timeout is 90 seconds, so one pull state
     # write may not wait longer than this, and its attempts never extend it.
-    assert sync.PULL_STATE_LOCK_WAIT_SECONDS <= 60.0
+    assert sync.PULL_STATE_LOCK_WAIT_SECONDS == (
+        sync.SYNC_ONESHOT_START_TIMEOUT_SECONDS - sync.PULL_STATE_LOCK_SAFETY_MARGIN_SECONDS
+    )
     assert sync.PULL_STATE_LOCK_ATTEMPT_SECONDS <= sync.PULL_STATE_LOCK_WAIT_SECONDS
+
+
+def test_one_deadline_bounds_sequential_pull_state_lock_waits(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "repo:test/app", "theirs", "theirs")
+    now = [1000.0]
+    waits: list[float] = []
+
+    class SimulatedLock:
+        def __init__(self, wait: float) -> None:
+            self.wait = wait
+
+        def __enter__(self):
+            waits.append(self.wait)
+            elapsed = min(50.0, self.wait)
+            now[0] += elapsed
+            if elapsed == self.wait:
+                raise sync.InboxLockTimeout("state lock timed out")
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(sync.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(store, "locked", lambda target, deadline_seconds: SimulatedLock(deadline_seconds))
+    monkeypatch.setattr(sync, "PULL_STATE_LOCK_ATTEMPT_SECONDS", 60.0)
+
+    with pytest.raises(sync.InboxLockTimeout, match="state lock timed out"):
+        sync.pull(target, client(hub), settings(target))
+
+    assert waits == [60.0, 10.0]
+    assert now[0] == 1060.0
+
+
+def test_uncontended_pull_keeps_the_full_shared_lock_budget(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "repo:test/app", "theirs", "theirs")
+    original = store.locked
+    waits: list[float] = []
+    lock_depth = [0]
+
+    class ObservedLock:
+        def __init__(self, held) -> None:
+            self.held = held
+
+        def __enter__(self):
+            result = self.held.__enter__()
+            lock_depth[0] += 1
+            return result
+
+        def __exit__(self, *args):
+            lock_depth[0] -= 1
+            return self.held.__exit__(*args)
+
+    def locked(target, deadline_seconds):
+        waits.append(deadline_seconds)
+        return ObservedLock(original(target, deadline_seconds=deadline_seconds))
+
+    original_forget = store.forget_refused_scopes
+
+    def forget_refused_scopes(*args, **kwargs):
+        assert lock_depth[0] == 1
+        return original_forget(*args, **kwargs)
+
+    monkeypatch.setattr(sync.time, "monotonic", lambda: 1000.0)
+    monkeypatch.setattr(store, "locked", locked)
+    monkeypatch.setattr(store, "forget_refused_scopes", forget_refused_scopes)
+
+    report = sync.pull(target, client(hub), settings(target))
+
+    assert report["cards"] == 1
+    assert len(waits) >= 3
+    assert set(waits) == {sync.PULL_STATE_LOCK_ATTEMPT_SECONDS}
 
 
 def test_a_pull_reports_busy_when_the_state_lock_outlasts_its_wait(hub, tmp_path, monkeypatch, capsys):
