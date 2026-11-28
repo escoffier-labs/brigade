@@ -1,2 +1,1 @@
 - `brigade model trial paired-live` now ends a cell at its deadline even when a process the arm started left the session and keeps the arm's stdout open, and it stops any process still carrying that cell's random marker after teardown, failing that cell and reporting the pids, without touching a same-user process the cell did not start.
-- Stderr capture now supports high file descriptors, reports polling failures as cell cleanup failures, and stops promptly during teardown while preserving its final redacted bytes.
