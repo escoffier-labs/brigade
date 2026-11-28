@@ -1795,6 +1795,7 @@ def _dag_dispatch(
             ok=False,
             status="held",
             detail=f"held: stage {stage_name} awaits {', '.join(route_held[stage_name])}",
+            task_id=a.task_id,
         )
 
     def terminal(i: int) -> bool:
@@ -1829,6 +1830,7 @@ def _dag_dispatch(
                         ok=False,
                         status="skipped",
                         detail="skipped: prerequisite failed",
+                        task_id=a.task_id,
                     )
             progress = False
             for i, a in enumerate(assignments):
@@ -1851,6 +1853,7 @@ def _dag_dispatch(
                                 ok=False,
                                 status="skipped",
                                 detail="skipped: unresolvable dependency cycle in plan",
+                                task_id=a.task_id,
                             )
                 continue
             done = next(as_completed(pending))
@@ -1869,6 +1872,7 @@ def _dag_dispatch(
                     text="",
                     ok=False,
                     detail=str(exc)[:200],
+                    task_id=assignments[i].task_id,
                 )
                 results[i] = finished
             if finished.ok:
