@@ -680,3 +680,79 @@ def test_antigravity_incomplete_metadata_fails_closed(monkeypatch, flag):
         next(check for check in result.checks if check.name == "authentication-entitlement").cause_code
         == "models-command-failed"
     )
+
+
+@pytest.mark.parametrize("failure", [proc.Result(124, "", "timeout after 15s"), proc.Result(1, "", "unavailable")])
+def test_failed_inventory_is_shared_only_within_one_roster_pass(monkeypatch, failure):
+    calls = []
+
+    def run(argv, **kwargs):
+        if argv[-1] == "models":
+            calls.append(argv)
+            return failure if len(calls) == 1 else proc.Result(0, "Available models:\n* grok-test\n", "")
+        return proc.Result(0, "", "")
+
+    monkeypatch.setattr(proc, "run", run)
+    primary = roster.Agent("primary", "grok", "plan", model="grok-test", fallback=("backup",))
+    backup = roster.Agent("backup", "grok", "work", model="grok-test")
+    value = roster.Roster("primary", {"primary": primary, "backup": backup})
+    probe = SeatHealthProbe(collect_executable_version=False)
+    first = probe.probe_roster(value, allow_model_smoke=False)
+    assert len(calls) == 1
+    assert all(any(c.cause_code in {"timeout", "unavailable"} for c in result.checks) for result in first)
+    second = probe.probe_roster(value, allow_model_smoke=False)
+    assert len(calls) == 2
+    assert all(any(c.name == "model-reachability" and c.status == "passed" for c in r.checks) for r in second)
+
+
+@pytest.mark.parametrize("scope", [{"seat": "primary"}, {}])
+def test_invalidate_then_probe_reloads_successful_inventory(monkeypatch, scope):
+    calls = []
+
+    def run(argv, **kwargs):
+        if argv[-1] == "models":
+            calls.append(argv)
+            model = "grok-test" if len(calls) == 1 else "other-test"
+            return proc.Result(0, f"Available models:\n* {model}\n", "")
+        return proc.Result(0, "", "")
+
+    monkeypatch.setattr(proc, "run", run)
+    seat = roster.Agent("primary", "grok", "plan", model="grok-test")
+    value = roster.Roster("primary", {"primary": seat})
+    probe = SeatHealthProbe(collect_executable_version=False)
+    probe.probe(seat, value, allow_model_smoke=False)
+    assert probe.invalidate(**scope) == 1
+    result = probe.probe(seat, value, allow_model_smoke=False)
+    assert len(calls) == 2
+    assert any(c.cause_code == "model-unavailable" for c in result.checks)
+
+
+def test_invalidate_during_listing_does_not_restore_old_cache(monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    def run(argv, **kwargs):
+        if argv[-1] == "models":
+            calls.append(argv)
+            if len(calls) == 1:
+                entered.set()
+                assert release.wait(5)
+            return proc.Result(0, "Available models:\n* grok-test\n", "")
+        return proc.Result(0, "", "")
+
+    monkeypatch.setattr(proc, "run", run)
+    seat = roster.Agent("primary", "grok", "plan", model="grok-test")
+    value = roster.Roster("primary", {"primary": seat})
+    probe = SeatHealthProbe(collect_executable_version=False)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(probe.probe, seat, value, allow_model_smoke=False)
+        try:
+            assert entered.wait(5)
+            probe.invalidate(seat="primary")
+        finally:
+            release.set()
+        future.result(timeout=5)
+    result = probe.probe(seat, value, allow_model_smoke=False)
+    assert not result.cached
+    assert len(calls) == 2

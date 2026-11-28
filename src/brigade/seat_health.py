@@ -208,6 +208,7 @@ class SeatHealthProbe:
         self._inventory_inspector = model_inventory.ModelInventoryInspector()
         self._cache: dict[str, _CacheEntry] = {}
         self._cache_lock = threading.Lock()
+        self._cache_generation = 0
 
     def probe(
         self,
@@ -220,6 +221,8 @@ class SeatHealthProbe:
         sandbox: str | None = None,
     ) -> SeatHealthResult:
         """Probe one seat.  The caller decides whether to serialize the result."""
+        with self._cache_lock:
+            generation = self._cache_generation
         started = self._clock()
         started_wall_at = self._wall_clock()
         requested = _requested(seat, roster)
@@ -311,7 +314,12 @@ class SeatHealthProbe:
             self._wall_clock(),
         )
         with self._cache_lock:
-            self._cache[fingerprint] = _CacheEntry(result, self._clock())
+            transient_inventory = any(
+                check.name == "model-reachability" and check.cause_code in {"timeout", "unavailable"}
+                for check in result.checks
+            )
+            if generation == self._cache_generation and not transient_inventory:
+                self._cache[fingerprint] = _CacheEntry(result, self._clock())
         return result
 
     def probe_roster(
@@ -324,6 +332,10 @@ class SeatHealthProbe:
         sandbox: str | None = None,
     ) -> tuple[SeatHealthResult, ...]:
         """Probe every requested root and every declared fallback in parallel."""
+        # Failed listings are shared within this pass only. Replacing the
+        # inspector also isolates late responses from an earlier pass.
+        with self._cache_lock:
+            self._inventory_inspector = model_inventory.ModelInventoryInspector()
         names = _seat_chain_names(roster)
         deadline = self._clock() + OVERALL_TIMEOUT_SECONDS
         results: dict[str, SeatHealthResult] = {}
@@ -374,6 +386,10 @@ class SeatHealthProbe:
         Returns the number of entries removed.
         """
         with self._cache_lock:
+            # Shared inventories can serve multiple seats, so invalidate all.
+            # Old in-flight inspectors cannot refill the replacement instance.
+            self._inventory_inspector = model_inventory.ModelInventoryInspector()
+            self._cache_generation += 1
             if fingerprint is not None:
                 return 1 if self._cache.pop(fingerprint, None) is not None else 0
             if seat is None:

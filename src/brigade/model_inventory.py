@@ -58,7 +58,8 @@ class ModelInventoryInspector:
     def __init__(self) -> None:
         self._inventories: dict[str, _HarnessInventory] = {}
         self._results: dict[tuple[str, str, tuple[str, ...] | None, str], ModelInventoryResult] = {}
-        self._inventory_lock = threading.Lock()
+        self._key_locks: dict[tuple[str, tuple[str, ...] | None, str], threading.Lock] = {}
+        self._locks_lock = threading.Lock()
 
     def inspect(
         self,
@@ -68,20 +69,28 @@ class ModelInventoryInspector:
         timeout_seconds: float | None = None,
         env: dict[str, str] | None = None,
     ) -> ModelInventoryResult | None:
-        env_key = _environment_key(env)
-        key = (cli_ref, requested, command, env_key)
-        if key in self._results:
-            return self._results[key]
-        budget = _INVENTORY_TIMEOUT_SECONDS if timeout_seconds is None else max(timeout_seconds, 0.0)
-        deadline = time.monotonic() + budget
-        if cli_ref in _LIST_COMMANDS:
-            result = self._inspect_listed(cli_ref, requested, command, budget=budget, deadline=deadline, env=env)
-        elif cli_ref.startswith("ollama:"):
-            result = self._inspect_ollama(requested, budget=budget, deadline=deadline, env=env)
-        else:
+        inventory_cli = "ollama" if cli_ref.startswith("ollama:") else cli_ref
+        if inventory_cli not in _LIST_COMMANDS:
             return None
-        self._results[key] = result
-        return result
+        env_key = _environment_key(env)
+        inventory_command = None if inventory_cli == "ollama" else command
+        inventory_key = (inventory_cli, inventory_command, env_key)
+        with self._locks_lock:
+            lock = self._key_locks.setdefault(inventory_key, threading.Lock())
+        # Serialize both result resolution and inventory loading for this key.
+        # A different environment or command gets its own subprocess budget.
+        with lock:
+            key = (cli_ref, requested, command, env_key)
+            if key in self._results:
+                return self._results[key]
+            budget = _INVENTORY_TIMEOUT_SECONDS if timeout_seconds is None else max(timeout_seconds, 0.0)
+            deadline = time.monotonic() + budget
+            if cli_ref in _LIST_COMMANDS:
+                result = self._inspect_listed(cli_ref, requested, command, budget=budget, deadline=deadline, env=env)
+            else:
+                result = self._inspect_ollama(requested, budget=budget, deadline=deadline, env=env)
+            self._results[key] = result
+            return result
 
     def _inspect_listed(
         self,
@@ -147,32 +156,31 @@ class ModelInventoryInspector:
         env: dict[str, str] | None = None,
     ) -> _HarnessInventory:
         key = f"{cli_ref}\0{command!r}\0{_environment_key(env)}"
-        with self._inventory_lock:
-            cached = self._inventories.get(key)
-            if cached is not None:
-                return cached
-            if cli_ref == "cursor":
-                argv = [*command, "models"] if command is not None else None
-                result = _run_cursor_inventory(argv, timeout=_remaining(deadline, budget), env=env)
-            elif cli_ref == "grok" and command is not None:
-                result = proc.run([*command, "models"], timeout=_remaining(deadline, budget), env=env)
+        cached = self._inventories.get(key)
+        if cached is not None:
+            return cached
+        if cli_ref == "cursor":
+            argv = [*command, "models"] if command is not None else None
+            result = _run_cursor_inventory(argv, timeout=_remaining(deadline, budget), env=env)
+        elif cli_ref == "grok" and command is not None:
+            result = proc.run([*command, "models"], timeout=_remaining(deadline, budget), env=env)
+        else:
+            result = proc.run(_LIST_COMMANDS[cli_ref], timeout=_remaining(deadline, budget), env=env)
+        if _is_probe_timeout(result):
+            inventory = _HarnessInventory(timed_out=True, error=f"live inventory timed out after {budget:g}s")
+        elif result.code != 0:
+            diagnostic = result.stderr.strip() or result.stdout.strip() or f"exit {result.code}"
+            inventory = _HarnessInventory(error=diagnostic[:160])
+        else:
+            output = result.stdout if cli_ref == "cursor" else f"{result.stdout}\n{result.stderr}"
+            recognized, models = _parse_model_list(cli_ref, output)
+            if not recognized:
+                inventory = _HarnessInventory(error="command returned an unrecognized inventory shape")
+            elif not models and cli_ref != "ollama":
+                inventory = _HarnessInventory(error="command returned no model IDs")
             else:
-                result = proc.run(_LIST_COMMANDS[cli_ref], timeout=_remaining(deadline, budget), env=env)
-            if _is_probe_timeout(result):
-                inventory = _HarnessInventory(timed_out=True, error=f"live inventory timed out after {budget:g}s")
-            elif result.code != 0:
-                diagnostic = result.stderr.strip() or result.stdout.strip() or f"exit {result.code}"
-                inventory = _HarnessInventory(error=diagnostic[:160])
-            else:
-                output = result.stdout if cli_ref == "cursor" else f"{result.stdout}\n{result.stderr}"
-                recognized, models = _parse_model_list(cli_ref, output)
-                if not recognized:
-                    inventory = _HarnessInventory(error="command returned an unrecognized inventory shape")
-                elif not models and cli_ref != "ollama":
-                    inventory = _HarnessInventory(error="command returned no model IDs")
-                else:
-                    inventory = _HarnessInventory(models=models)
-            self._inventories[key] = inventory
+                inventory = _HarnessInventory(models=models)
+        self._inventories[key] = inventory
         return inventory
 
     def _inspect_ollama(
