@@ -160,6 +160,15 @@ class _BaseResolver:
         ):
             # Keep Git's legacy peeling, fallback and broken-ref behavior.
             return None
+        if reference not in (b"refs/remotes/origin/main", b"refs/remotes/origin/master"):
+            branch = reference.removeprefix(b"refs/remotes/origin/").decode("ascii")
+            return BaseResolution(
+                "unresolved_default_branch",
+                message=(
+                    f"verify manifest origin/HEAD points to unexpected branch {branch}; "
+                    "run git remote set-head origin --auto"
+                ),
+            )
         return BaseResolution(
             "resolved", "default_branch", reference.decode("ascii"), default_branch_tip=oid.decode("ascii")
         )
@@ -184,6 +193,15 @@ class _BaseResolver:
         for reference in dict.fromkeys(candidates):
             tip = git("rev-parse", "--verify", f"{reference}^{{commit}}")
             if tip.returncode == 0 and tip.stdout.strip():
+                if reference not in ("refs/remotes/origin/main", "refs/remotes/origin/master"):
+                    branch = reference.removeprefix("refs/remotes/origin/")
+                    return BaseResolution(
+                        "unresolved_default_branch",
+                        message=(
+                            f"verify manifest origin/HEAD points to unexpected branch {branch}; "
+                            "run git remote set-head origin --auto"
+                        ),
+                    )
                 tip_commit = tip.stdout.decode("ascii").strip()
                 return BaseResolution("resolved", "default_branch", reference, default_branch_tip=tip_commit)
         return BaseResolution(

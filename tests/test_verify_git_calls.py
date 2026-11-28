@@ -43,6 +43,46 @@ def _set_origin(target):
     _git(target, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main")
 
 
+def test_origin_head_main_resolves_default_branch(tmp_path):
+    target = _initialize(tmp_path / "repo")
+    _set_origin(target)
+
+    base = verify_manifest_git.resolve_base(target)
+
+    assert base.status == "resolved"
+    assert base.reference == "refs/remotes/origin/main"
+    assert verify_manifest_git.VerifyGitFacts(target).base == base
+
+
+def test_origin_head_feature_branch_is_unresolved(tmp_path):
+    target = _initialize(tmp_path / "repo")
+    _set_origin(target)
+    _git(target, "update-ref", "refs/remotes/origin/feature", "HEAD")
+    _git(target, "symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/feature")
+
+    base = verify_manifest_git.resolve_base(target)
+
+    assert base.status == "unresolved_default_branch"
+    assert base.reference is None
+    assert base.message == (
+        "verify manifest origin/HEAD points to unexpected branch feature; "
+        "run git remote set-head origin --auto"
+    )
+    assert verify_manifest_git.VerifyGitFacts(target).base == base
+
+
+def test_missing_origin_head_keeps_main_fallback(tmp_path):
+    target = _initialize(tmp_path / "repo")
+    _set_origin(target)
+    _git(target, "symbolic-ref", "--delete", "refs/remotes/origin/HEAD")
+
+    base = verify_manifest_git.resolve_base(target)
+
+    assert base.status == "resolved"
+    assert base.reference == "refs/remotes/origin/main"
+    assert verify_manifest_git.VerifyGitFacts(target).base == base
+
+
 def _commit(target):
     _git(target, "add", ".")
     _git(target, "commit", "-m", "fixture update")

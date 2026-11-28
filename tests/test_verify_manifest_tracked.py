@@ -101,7 +101,7 @@ def _set_origin_default(target: Path, branch: str, commit: str) -> None:
     )
 
 
-def test_resolve_manifest_uses_non_main_origin_default_branch(scoreable_target):
+def test_resolve_manifest_rejects_non_main_origin_default_branch(scoreable_target):
     payload = _write_patch_manifest(scoreable_target, manifest_id="default-branch")
     base = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=scoreable_target, check=True, text=True, capture_output=True
@@ -112,18 +112,17 @@ def test_resolve_manifest_uses_non_main_origin_default_branch(scoreable_target):
 
     manifest, error = verify_manifest.resolve_manifest(scoreable_target, "default-branch")
 
-    assert error is None
-    assert manifest is not None
-    assert manifest.manifest_base_commit == base
-    assert manifest.manifest_worktree_modified is True
-    assert "print('ok')" in str(manifest.checks[0].command)
+    assert manifest is None
+    assert error is not None
+    assert "origin/HEAD points to unexpected branch stable" in error
+    assert "git remote set-head origin --auto" in error
 
 
 def test_resolve_manifest_refuses_manifest_absent_from_default_branch(scoreable_target):
     default_commit = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=scoreable_target, check=True, text=True, capture_output=True
     ).stdout.strip()
-    _set_origin_default(scoreable_target, "stable", default_commit)
+    _set_origin_default(scoreable_target, "main", default_commit)
     _write_patch_manifest(scoreable_target, manifest_id="branch-only")
 
     manifest, error = verify_manifest.resolve_manifest(scoreable_target, "branch-only")

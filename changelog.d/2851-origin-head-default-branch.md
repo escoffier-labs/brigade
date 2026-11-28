@@ -1,0 +1,1 @@
+- Treat an unexpected branch named by `origin/HEAD` as an unresolved verify manifest base and explain how to repair the local remote head.
