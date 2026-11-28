@@ -189,7 +189,7 @@ def _read(run_dir: Path) -> tuple[tasks.TaskResult, ...] | None:
         _fail("no-task-journal", f"no task journal in run {run_dir.name}")
         return None
     try:
-        return tasks.read_tasks(run_dir)
+        return tasks.read_tasks_read_only(run_dir)
     except tasks.TaskJournalError as exc:
         _fail("task-journal-unreadable", str(exc))
         return None
@@ -445,7 +445,7 @@ def wait_tasks(
     consecutive_errors = 0
     while True:
         try:
-            results = tasks.read_tasks(run_dir)
+            results = tasks.read_tasks_read_only(run_dir)
         except tasks.TaskJournalError as exc:
             # A live dispatcher can transiently refuse between a task's
             # checkpoint and its fact. Keep waiting; a persistent refusal is

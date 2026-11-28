@@ -332,12 +332,14 @@ def validate_pairs(events: Sequence[run_journal.RunEvent]) -> None:
             raise TaskJournalError("task checkpoint refused: incomplete-pair")
 
 
-def _verified(run_dir: Path) -> list[run_journal.RunEvent]:
+def _verified(
+    run_dir: Path, *, tolerate_partial_tail: bool = False, sync_head: bool = True
+) -> list[run_journal.RunEvent]:
     path = run_lifecycle._journal_path(run_dir)
     if not run_journal.bound_is_file(path):
         raise TaskJournalError("task lifecycle journal is not active")
     report = run_journal.read_journal_bounded(path)
-    if report.partial_tail is not None:
+    if report.partial_tail is not None and not tolerate_partial_tail:
         raise TaskJournalError("task journal partial tail")
     if report.chain_errors:
         raise TaskJournalError("task journal chain error or unsupported reader")
@@ -351,11 +353,30 @@ def _verified(run_dir: Path) -> list[run_journal.RunEvent]:
     latest = checkpoints[-1]
     body = json.loads(run_checkpoint.validate_checkpoint(run_dir, latest))
     run_checkpoint._verify_coverage(events, latest, body)
-    if events:
+    if events and sync_head:
         run_journal.sync_journal_head(
             path, expected_sequence=events[-1].sequence, expected_event_digest=events[-1].event_digest
         )
     return events
+
+
+def read_only(run_dir: Path) -> tuple[Path, list[run_journal.RunEvent]]:
+    """Verify a task journal without locking, syncing, or repairing its tail."""
+    try:
+        run_dir = run_journal.normalize_run_dir(run_dir)
+        return run_dir, _verified(run_dir, tolerate_partial_tail=True, sync_head=False)
+    except TaskJournalError:
+        raise
+    except run_checkpoint.CheckpointError as exc:
+        raise TaskJournalError(run_events._bound(f"task checkpoint refused: {exc.category}")) from exc
+    except (
+        OSError,
+        ValueError,
+        run_journal.RunJournalError,
+        run_lifecycle.LifecycleJournalError,
+        run_events.CanonicalizationError,
+    ) as exc:
+        raise TaskJournalError("task journal operation refused or durability indeterminate") from exc
 
 
 @contextmanager

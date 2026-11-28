@@ -1,0 +1,1 @@
+- Let task list, show, and wait inspect read-only run archives without locking or repairing a torn journal tail.
