@@ -19,7 +19,15 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
-from brigade import component_install, component_manifest, component_paths, component_state, distribution, localio
+from brigade import (
+    component_install,
+    component_manifest,
+    component_paths,
+    component_state,
+    distribution,
+    localio,
+    nt_process,
+)
 
 REPOSITORY = "escoffier-labs/brigade"
 RENAMED_REPOSITORY = "escoffier-labs/brigadestack"
@@ -782,6 +790,8 @@ def _lock_pid(path: Path) -> int | None:
 
 
 def _pid_alive(pid: int) -> bool:
+    if os.name == "nt":
+        return nt_process.pid_is_active(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
