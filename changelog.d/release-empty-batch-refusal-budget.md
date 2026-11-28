@@ -1,1 +1,2 @@
 - Release a batch dispatch budget reservation when launch refusal writes no durable claim or request fact.
+- Retain batch dispatch budget units when bounded journal reads fail or report a torn tail or broken chain.
