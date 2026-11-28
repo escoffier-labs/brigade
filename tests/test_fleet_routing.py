@@ -188,6 +188,7 @@ def _observe(
     active_claims: list | None = None,
     usable_seats: list[str] | None = None,
     ttl_seconds: int = 300,
+    **pressure: object,
 ) -> dict:
     body = {
         "node_id": node_id,
@@ -199,6 +200,7 @@ def _observe(
         "active_claims": active_claims if active_claims is not None else [],
         "usable_seats": ["seat-grok"] if usable_seats is None else usable_seats,
         "credential_state": credential_state,
+        **pressure,
     }
     return fleet_hub_routing.observe_machine(conn, body, caller_node=node_id)
 
@@ -566,6 +568,41 @@ def test_old_telemetry_cannot_overwrite_a_fresh_snapshot(conn):
     snap = fleet_hub_routing.snapshot(conn)
     linux = next(row for row in snap["machines"] if row["id"] == "worker-linux-1")
     assert linux["load"] == 0.0
+
+
+def test_telemetry_pressure_updates_and_old_reports_clear_it(conn):
+    _observe(conn, NODE_LINUX, memory_pressure=0.6, swap_pressure=0.5)
+    telemetry = fleet_hub_routing._telemetry(conn, NODE_LINUX)
+    assert telemetry["memory_pressure"] == 0.6 and telemetry["swap_pressure"] == 0.5
+    with pytest.raises(FleetHubConflict, match="telemetry-conflict"):
+        _observe(conn, NODE_LINUX, memory_pressure=0.7, swap_pressure=0.5)
+    _observe(conn, NODE_LINUX, observed_at=_iso(_now() + timedelta(seconds=1)))
+    telemetry = fleet_hub_routing._telemetry(conn, NODE_LINUX)
+    assert telemetry["memory_pressure"] is None and telemetry["swap_pressure"] is None
+
+
+@pytest.mark.parametrize("field", ["memory_pressure", "swap_pressure"])
+@pytest.mark.parametrize("value", [-0.1, 1.1, "0.4", True, float("nan"), float("inf")])
+def test_telemetry_rejects_invalid_pressure(conn, field, value):
+    with pytest.raises(FleetHubError, match=field):
+        _observe(conn, NODE_LINUX, **{field: value})
+
+
+def test_v51_telemetry_migration_preserves_legacy_report(conn):
+    _observe(conn, NODE_LINUX, load=0.2)
+    path = conn.execute("PRAGMA database_list").fetchone()[2]
+    with conn:
+        conn.execute("ALTER TABLE fleet_machine_telemetry DROP COLUMN memory_pressure")
+        conn.execute("ALTER TABLE fleet_machine_telemetry DROP COLUMN swap_pressure")
+        conn.execute("PRAGMA user_version=51")
+    migrated = fleet_hub.init_db(path)
+    try:
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
+        telemetry = fleet_hub_routing._telemetry(migrated, NODE_LINUX)
+        assert telemetry["load"] == 0.2
+        assert telemetry["memory_pressure"] is None and telemetry["swap_pressure"] is None
+    finally:
+        migrated.close()
 
 
 def test_zero_load_is_real_and_unknown_is_not_idle(conn):

@@ -170,6 +170,8 @@ def test_origin_under_threshold_stays_local(fleet):
         "cpu": 0.1,
         "sessions": 0,
         "memory": None,
+        "memory_pressure": None,
+        "swap_pressure": None,
         "concurrency": 1,
         "agent_sessions": 0,
         "agent_session_weight": 0.0,
@@ -277,6 +279,19 @@ def test_effective_load_is_the_max_of_cpu_and_session_ratio(fleet):
     _session(fleet, NODE_CLOUD, "live-session-one")
     cloud = next(row for row in _place(fleet)["candidates"] if row["machine"] == "worker-cloud-1")
     assert cloud["effective_load"] == 0.6
+
+
+@pytest.mark.parametrize("field", ["memory_pressure", "swap_pressure"])
+def test_publisher_pressure_counts_toward_placement_load(fleet, field):
+    _observe(fleet, NODE_LINUX, load=0.1, observed_at=_iso(_now() + timedelta(seconds=1)), **{field: 0.75})
+    _observe(fleet, NODE_LINUX_2, load=0.2, observed_at=_iso(_now() + timedelta(seconds=1)), **{field: 0.4})
+    result = _place(fleet)
+    chosen = result["recommended"]
+    assert chosen["machine"] == "worker-linux-2"
+    assert chosen["effective_load"] == chosen["load_inputs"][field] == 0.4
+    origin = next(row for row in result["candidates"] if row["machine"] == "worker-linux-1")
+    assert origin["effective_load"] == origin["load_inputs"][field] == 0.75
+    assert "machine-load-shed" in origin["reasons"]
 
 
 def test_ranking_among_peers_uses_existing_rank_then_lower_load(fleet):

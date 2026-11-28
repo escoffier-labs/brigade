@@ -15,7 +15,9 @@ def setup_action(tmp_path):
     fleet_hub.add_node(conn, "node-fixture")
     with conn:
         conn.execute(
-            "INSERT INTO fleet_machine_telemetry VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO fleet_machine_telemetry (node_id, machine, observed_at, ttl_seconds, status, load, "
+            "running, active_claims, usable_seats, credential_state, observed_id, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 "node-fixture",
                 "fixture",

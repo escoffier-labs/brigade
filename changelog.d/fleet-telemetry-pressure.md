@@ -1,0 +1,1 @@
+- Fleet telemetry now measures CPU utilization without I/O wait and reports memory and swap pressure. Fleet placement uses those pressure readings when available.

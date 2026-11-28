@@ -56,7 +56,9 @@ CREATE TABLE IF NOT EXISTS fleet_machine_telemetry (
     usable_seats TEXT NOT NULL,
     credential_state TEXT NOT NULL,
     observed_id TEXT NOT NULL,
-    updated_at TEXT NOT NULL
+    updated_at TEXT NOT NULL,
+    memory_pressure REAL,
+    swap_pressure REAL
 );
 """
 _DECISIONS_SCHEMA = """
@@ -132,6 +134,10 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     """v20 -> v21: routing telemetry, decisions, reservations, and intents."""
     fleet_quota.ensure_schema(conn)
     conn.execute(_TELEMETRY_SCHEMA)
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(fleet_machine_telemetry)")}
+    for column in ("memory_pressure", "swap_pressure"):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE fleet_machine_telemetry ADD COLUMN {column} REAL")
     conn.execute(_DECISIONS_SCHEMA)
     conn.execute(_RESERVATIONS_SCHEMA)
     conn.execute(_INTENTS_SCHEMA)
@@ -259,6 +265,13 @@ def _number(raw: Any, field: str, *, optional: bool = True) -> float | None:
     return value
 
 
+def _ratio(raw: Any, field: str) -> float | None:
+    value = _number(raw, field)
+    if value is not None and not 0.0 <= value <= 1.0:
+        raise FleetHubError(f"fleet routing field {field!r} must be a finite number in 0..1")
+    return value
+
+
 def _string_list(raw: Any, field: str) -> list[str]:
     if raw is None:
         return []
@@ -314,9 +327,9 @@ def observe_machine(conn: sqlite3.Connection, body: Any, caller_node: str) -> di
     credential_state = _bounded(payload.get("credential_state"), "credential_state")
     if credential_state not in CREDENTIAL_STATES:
         raise FleetHubError(f"fleet routing field 'credential_state' must be one of: {', '.join(CREDENTIAL_STATES)}")
-    load = _number(payload.get("load"), "load")
-    if load is not None and not 0.0 <= load <= 1.0:
-        raise FleetHubError("fleet routing field 'load' must be a finite number in 0..1")
+    load = _ratio(payload.get("load"), "load")
+    memory_pressure = _ratio(payload.get("memory_pressure"), "memory_pressure")
+    swap_pressure = _ratio(payload.get("swap_pressure"), "swap_pressure")
     running_raw = payload.get("running") or {}
     if not isinstance(running_raw, Mapping):
         raise FleetHubError("fleet routing field 'running' must be a JSON object")
@@ -339,7 +352,7 @@ def observe_machine(conn: sqlite3.Connection, body: Any, caller_node: str) -> di
         opened = True
     try:
         existing = conn.execute(
-            "SELECT observed_at, load, status, usable_seats, credential_state FROM fleet_machine_telemetry WHERE node_id=?",
+            "SELECT observed_at, load, status, usable_seats, credential_state, memory_pressure, swap_pressure FROM fleet_machine_telemetry WHERE node_id=?",
             (node_id,),
         ).fetchone()
         ignored = False
@@ -351,20 +364,21 @@ def observe_machine(conn: sqlite3.Connection, body: Any, caller_node: str) -> di
                 stored_load = existing[1]
             elif previous is not None and stamp == previous:
                 previous_usable = _load_json(existing[3], [])
-                previous_payload = (existing[2], existing[1], previous_usable, existing[4])
-                incoming_payload = (status, load, usable, credential_state)
+                previous_payload = (existing[2], existing[1], previous_usable, existing[4], existing[5], existing[6])
+                incoming_payload = (status, load, usable, credential_state, memory_pressure, swap_pressure)
                 if previous_payload != incoming_payload:
                     raise FleetHubConflict("telemetry-conflict: same-instant snapshots for this node disagree")
         if not ignored:
             conn.execute(
                 "INSERT INTO fleet_machine_telemetry (node_id, machine, observed_at, ttl_seconds, status, load, "
-                "running, active_claims, usable_seats, credential_state, observed_id, updated_at) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+                "running, active_claims, usable_seats, credential_state, observed_id, updated_at, memory_pressure, swap_pressure) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
                 "ON CONFLICT(node_id) DO UPDATE SET machine=excluded.machine, observed_at=excluded.observed_at, "
                 "ttl_seconds=excluded.ttl_seconds, status=excluded.status, load=excluded.load, "
                 "running=excluded.running, active_claims=excluded.active_claims, "
                 "usable_seats=excluded.usable_seats, credential_state=excluded.credential_state, "
-                "observed_id=excluded.observed_id, updated_at=excluded.updated_at",
+                "observed_id=excluded.observed_id, updated_at=excluded.updated_at, "
+                "memory_pressure=excluded.memory_pressure, swap_pressure=excluded.swap_pressure",
                 (
                     node_id,
                     machine,
@@ -378,6 +392,8 @@ def observe_machine(conn: sqlite3.Connection, body: Any, caller_node: str) -> di
                     credential_state,
                     observed_id,
                     _iso(),
+                    memory_pressure,
+                    swap_pressure,
                 ),
             )
         if opened:
@@ -402,7 +418,7 @@ def _telemetry(conn: sqlite3.Connection, node_id: str | None) -> dict[str, Any] 
         return None
     row = conn.execute(
         "SELECT node_id, machine, observed_at, ttl_seconds, status, load, running, active_claims, "
-        "usable_seats, credential_state, observed_id FROM fleet_machine_telemetry WHERE node_id=?",
+        "usable_seats, credential_state, observed_id, memory_pressure, swap_pressure FROM fleet_machine_telemetry WHERE node_id=?",
         (node_id,),
     ).fetchone()
     if row is None:
@@ -419,6 +435,8 @@ def _telemetry(conn: sqlite3.Connection, node_id: str | None) -> dict[str, Any] 
         "usable_seats": _load_json(row[8], []),
         "credential_state": row[9],
         "observed_id": row[10],
+        "memory_pressure": row[11],
+        "swap_pressure": row[12],
     }
 
 

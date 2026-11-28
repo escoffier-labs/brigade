@@ -126,7 +126,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 51  # v51: immutable fleet_messages.is_reply marker
+SCHEMA_VERSION = 52  # v52: machine memory and swap pressure
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
