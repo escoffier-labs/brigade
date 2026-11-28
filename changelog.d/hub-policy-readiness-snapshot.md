@@ -1,1 +1,3 @@
 - Return unknown Hub capacity when the enrolled policy version or digest differs from the readiness snapshot.
+- Keep Hub admission unknown without parsing a policy whose version or digest differs from the snapshot, including boolean versions.
+- Preserve the Hub policy change reason alongside an invalid local run lock observation.

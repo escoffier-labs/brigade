@@ -1252,12 +1252,57 @@ def test_brigade_hub_policy_limit_matches_readiness_snapshot(
     result = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
 
     capacity_row = next(item for item in result["evidence"] if item["category"] == "capacity")
+    admission_row = next(item for item in result["evidence"] if item["category"] == "admission")
     assert capacity_row["status"] == expected_status
+    assert admission_row["status"] == expected_status
     if expected_status == "passed":
         assert result["admitted_capacity"] == 1
     else:
         assert capacity_row["reason"] == "hub-policy-changed"
+        assert admission_row["reason"] == "hub-policy-changed"
         assert result["status"] == "unverified"
+
+
+@pytest.mark.parametrize("lock_state", ["absent", "invalid"])
+@pytest.mark.parametrize(
+    "version,digest",
+    [(2, ENROLLED_DIGEST), (1, "sha256:" + ("c" * 64)), (True, ENROLLED_DIGEST)],
+    ids=["version-changed", "digest-changed", "boolean-version"],
+)
+def test_brigade_hub_policy_mismatch_never_parses_for_admission(
+    declared, tmp_path, monkeypatch, lock_state, version, digest
+):
+    from brigade import fleet_client_policy, fleet_model_admission, fleet_policy, runguard
+
+    policy_doc = _enrolled_hub_env(monkeypatch, concurrency=2)
+    payload = _hub_roster_payload(source="hub", fleet_policy={"active": True, "version": 1, "digest": ENROLLED_DIGEST})
+    monkeypatch.setattr(
+        fleet_model_admission,
+        "fetch_versioned_roster",
+        lambda **kw: fleet_model_admission.ModelAdmissionDecision(True, 0, "authoritative", payload),
+    )
+    monkeypatch.setattr(
+        fleet_client_policy,
+        "show_policy",
+        lambda **kw: {"version": version, "digest": digest, "document": policy_doc},
+    )
+    monkeypatch.setattr(runguard, "inspect_run_lock_reconcile", lambda _: lock_state)
+    monkeypatch.setattr(fleet_policy, "parse_document", lambda *a: pytest.fail("mismatched policy must not be parsed"))
+    monkeypatch.setattr(
+        fleet_client_policy, "read_seat_usage", lambda: pytest.fail("mismatched policy must not supply capacity")
+    )
+
+    result = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
+    for category in ("admission", "capacity"):
+        row = next(item for item in result["evidence"] if item["category"] == category)
+        assert row["status"] == "unknown"
+        assert row["reason"] == "hub-policy-changed"
+        assert "policy changed" in row["detail"]
+        if category == "capacity" and lock_state == "invalid":
+            assert "local run lock state is invalid" in row["detail"]
+    assert result["status"] == "unverified"
+    assert result["exit_code"] == 3
+    assert result["limiting_reason"] == "hub-policy-changed"
 
 
 def test_brigade_hub_seat_usage_full_seat_is_blocked(declared, tmp_path, monkeypatch):
@@ -1702,7 +1747,11 @@ def test_brigade_hub_enrolled_policy_and_repo_identity_errors_stay_unknown(decla
         lambda **kw: fleet_model_admission.ModelAdmissionDecision(True, 0, "authoritative", enrolled_payload),
     )
     policy_doc = _enrolled_policy_document()
-    monkeypatch.setattr(fleet_client_policy, "show_policy", lambda **kw: {"document": policy_doc})
+    monkeypatch.setattr(
+        fleet_client_policy,
+        "show_policy",
+        lambda **kw: {"version": 3, "digest": ENROLLED_DIGEST, "document": policy_doc},
+    )
     _stub_seat_usage(monkeypatch, occupied=0)
 
     def _timeout_repo(ws):
@@ -1712,7 +1761,10 @@ def test_brigade_hub_enrolled_policy_and_repo_identity_errors_stay_unknown(decla
     res_timeout = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
     assert res_timeout["status"] == "unverified"
     assert res_timeout["exit_code"] == 3
-    assert next(item for item in res_timeout["evidence"] if item["category"] == "admission")["status"] == "unknown"
+    timeout_row = next(item for item in res_timeout["evidence"] if item["category"] == "admission")
+    assert timeout_row["status"] == "unknown"
+    assert "timed out" in timeout_row["detail"]
+    assert timeout_row["reason"] != "hub-policy-changed"
 
     monkeypatch.setattr(
         fleet_session_presence,
@@ -1727,7 +1779,10 @@ def test_brigade_hub_enrolled_policy_and_repo_identity_errors_stay_unknown(decla
     res_policy_err = readiness.inspect_readiness(declared, readiness.ReadinessRequest(("worker",)), workspace=tmp_path)
     assert res_policy_err["status"] == "unverified"
     assert res_policy_err["exit_code"] == 3
-    assert next(item for item in res_policy_err["evidence"] if item["category"] == "admission")["status"] == "unknown"
+    policy_row = next(item for item in res_policy_err["evidence"] if item["category"] == "admission")
+    assert policy_row["status"] == "unknown"
+    assert "bad policy" in policy_row["detail"]
+    assert policy_row["reason"] != "hub-policy-changed"
 
 
 def test_brigade_hub_seat_usage_uses_the_fullest_limited_seat(monkeypatch):

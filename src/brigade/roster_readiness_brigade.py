@@ -92,7 +92,9 @@ def _capacity_or_unknown(
     scope: str,
     reason: str = "",
 ) -> Observation:
-    if lock_state in {"live", "skipped", "invalid"}:
+    if lock_state == "invalid":
+        detail = f"{detail}; local run lock state is {lock_state}"
+    elif lock_state in {"live", "skipped"}:
         return _local_lock_capacity_observation(
             lock_state,
             max_workers,
@@ -590,15 +592,33 @@ def _hub_admission(
         elif enrollment == "enrolled":
             try:
                 policy_payload = fleet_client_policy.show_policy()
-                raw_doc = policy_payload.get("document") if isinstance(policy_payload, Mapping) else None
-                if not isinstance(raw_doc, Mapping):
-                    raise fleet_policy.FleetPolicyError("fleet policy response is missing document")
+                if not isinstance(policy_payload, Mapping):
+                    raise fleet_policy.FleetPolicyError("fleet policy response is malformed")
                 authority = snapshot.get("fleet_policy")
                 snapshot_version = authority.get("version") if isinstance(authority, Mapping) else None
                 snapshot_digest = authority.get("digest") if isinstance(authority, Mapping) else None
-                if policy_payload.get("version") != snapshot_version or policy_payload.get("digest") != snapshot_digest:
+                if (
+                    type(policy_payload.get("version")) is not int
+                    or policy_payload.get("version") != snapshot_version
+                    or policy_payload.get("digest") != snapshot_digest
+                ):
                     capacity_detail = "hub capacity unverified: hub policy changed after the readiness snapshot"
                     capacity_reason = "hub-policy-changed"
+                    return _HubAdmissionOutcome(
+                        effective_roster=effective_roster,
+                        scope=resolved_scope,
+                        admission=_governance(
+                            "unknown", observed_at, resolved_scope, detail=capacity_detail, reason=capacity_reason
+                        ),
+                        snapshot=snapshot,
+                        source=source,
+                        enrollment=enrollment,
+                        early_capacity_detail=capacity_detail,
+                        early_capacity_reason=capacity_reason,
+                    )
+                raw_doc = policy_payload.get("document")
+                if not isinstance(raw_doc, Mapping):
+                    raise fleet_policy.FleetPolicyError("fleet policy response is missing document")
                 parsed_policy = fleet_policy.parse_document(raw_doc)
                 if fleet_session_bootstrap.CONSUMER_BRIGADE_RUN not in (parsed_policy.get("consumers") or {}):
                     admission_obs = _governance(
