@@ -285,9 +285,11 @@ EVENT_TYPES.update(
             }
         ),
         # A late reply takes its released slot back, and the operator void that
-        # follows records the reply digest and the release it supersedes.
+        # follows records the reply digest and the release it supersedes. The
+        # slot note says whether restoring the unit stayed inside the declared
+        # limits, so an over-limit reclaim stays visible.
         "task.native-release-reclaimed": frozenset(
-            {"task_id", "attempt_id", "reply_digest", "release_ref", "reclaimed_at"}
+            {"task_id", "attempt_id", "reply_digest", "release_ref", "reclaimed_at", "capacity"}
         ),
         "task.native-release-voided": frozenset({"task_id", "attempt_id", "reply_digest", "release_ref", "voided_at"}),
         "task.native-capacity": frozenset({"task_id", "attempt_id", "reason", "worktree_retained"}),
@@ -713,6 +715,9 @@ def _validate_native_t3_payload(event_type: str, payload: Mapping[str, Any]) -> 
         )
         if not is_valid_recorded_at(stamp):
             raise CanonicalizationError(f"{event_type} time is invalid")
+        capacity = payload.get("capacity")
+        if capacity is not None and capacity not in {"within-limit", "over-limit", "unknown"}:
+            raise CanonicalizationError(f"{event_type} capacity is invalid")
         return
     if event_type == "task.native-capacity":
         from .native_child_observations import RESOURCE_STATES

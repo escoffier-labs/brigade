@@ -405,14 +405,24 @@ JSON Lines with one record per line. A record is
 and carries no other keys. The object header, or at least one record, must name
 the declared parent thread, and no named thread may differ from it. The command
 refuses `evidence-missing`, `evidence-unreadable`, `evidence-invalid`,
-`evidence-too-large`, `evidence-thread-missing` or
-`evidence-thread-mismatch`.
+`evidence-too-large`, `evidence-thread-missing`,
+`evidence-thread-mismatch`, `evidence-stale` or `evidence-future`.
 
 The evidence check is deterministic. Any record whose `tool` is exactly
 `delegate_task`, at or after the claim's recorded time, refuses
 `evidence-conflict`. A delegate record with no parseable `ts` also refuses,
 because it cannot be shown to precede the claim. A `delegate_task` record from
 before the claim time is allowed. The file name is never trusted.
+
+The evidence must also be recent. Its newest row must be no more than ten
+minutes old at the release time, or the command refuses `evidence-stale`; a row
+whose timestamp cannot be read leaves the newest moment unknown and refuses the
+same way. A newest row more than one minute ahead of the release time refuses
+`evidence-future`, which tolerates ordinary clock skew without accepting a
+snapshot that cannot be ordered against the release. After the evidence is
+parsed, the task state is read again under the capacity and run locks, and a
+task that has meanwhile become correlated, terminal, acknowledged, held or
+released refuses before anything is written.
 
 On success the verb appends one `task.native-released` fact under the run lock
 and its existing journal. The fact carries the operator assertion, the release
@@ -423,6 +433,13 @@ of the same attempt refuses `already-released`. If a native reply or
 child, but it does prove that one exists. A valid late reply therefore does two
 things: it records an `accept-conflict` hold on the task, and it appends a
 `task.native-release-reclaimed` fact for that reply so the slot occupies again.
+Every path that can record that reclaim takes the capacity lock before the run
+lock, so a concurrent claim cannot read the released state as free and reserve
+the same slot. The reclaim fact also carries a slot note. When restoring the
+unit stays inside the declared limits the note reads `within-limit`; when it
+does not, the reclaim is still recorded, because the child exists, and the note
+reads `over-limit` so capacity keeps reporting the unit past the limit instead
+of dropping it. An unreadable roster or an untrusted scan reports `unknown`.
 A malformed or mismatched reply validates first and records nothing.
 
 `t3 hold-resolve <run> <task> --native-json <that reply>` on a released attempt
@@ -433,9 +450,20 @@ the void time, the task and the attempt) and clears the hold. The release no
 longer stands: `t3 status` reports `released=false` and `voided=true`, and the
 task then follows the normal path through `observe`, `ack` and `finalize` as if
 it had never been released. A second void refuses `already-voided`, and a reply
-for another attempt or task refuses during validation; both write nothing.
-`hold-resolve --abandon` on a voided task behaves exactly as for any other held
-task.
+for another attempt or task refuses during validation; both write nothing. If a
+run ends between the void record and the hold resolution, the same reply
+finishes the transition on a retry: the hold clears and the task can finish,
+while any other reply still refuses. `hold-resolve --abandon` on a voided task
+behaves exactly as for any other held task.
+
+### Limits
+
+The evidence is an operator-supplied record, not an authenticated native
+attestation. Nothing in Brigade can exclude a concurrent `delegate_task`, and a
+parent that omits a call from its exported log is outside what this check can
+see. Release is therefore an operator assertion. The late-reply reclaim is the
+backstop: if a child turns up afterwards, the hold and the reclaim restore the
+slot and stop the task from correlating until an operator resolves it.
 
 ## Reported correlation, not authenticated acceptance
 

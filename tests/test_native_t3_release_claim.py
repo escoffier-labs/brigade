@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -53,6 +55,13 @@ def _jsonl(tmp_path: Path, *, records: list[dict] | None = None, name: str = "ac
     path = tmp_path / name
     path.write_text("\n".join(json.dumps(row) for row in rows) + "\n", encoding="utf-8")
     return path
+
+
+def _limit_one(workspace: Path) -> None:
+    """Declare one workspace-wide governed unit for a capacity race."""
+    roster = workspace / ".brigade" / "roster.toml"
+    text = roster.read_text(encoding="utf-8")
+    roster.write_text(f"{text.rstrip()}\n\n[limits]\nmax_workers = 1\n", encoding="utf-8")
 
 
 def _release(
@@ -757,6 +766,242 @@ def test_status_reports_a_released_task(tmp_path):
     _release(workspace, run_id, _log(tmp_path))
     after = lifecycle.status(workspace=workspace, run_id=run_id)["tasks"][0]
     assert after["released"] is True and after["held_reason"] is None
+
+
+@POSIX_ONLY
+def test_a_claim_racing_a_late_reply_cannot_take_the_reclaimed_slot(tmp_path, monkeypatch):
+    """A reclaim takes the capacity lock first, so a claim cannot take its slot."""
+    workspace = _workspace(tmp_path)
+    _limit_one(workspace)
+    first = enrollment.enroll(batch_path=_batch(tmp_path, "request-a"), target=workspace)["run_id"]
+    second = enrollment.enroll(batch_path=_batch(tmp_path, "request-b"), target=workspace)["run_id"]
+    _claim(workspace, first, "one")
+    _release(workspace, first, _log(tmp_path))
+    assert capacity.governed_occupancy(workspace).live == 0
+    reply = _reply(workspace, first)
+
+    entered = threading.Event()
+    proceed = threading.Event()
+    original = dispatch._record_reclaim
+
+    def gated(*args: object, **kwargs: object):
+        entered.set()
+        assert proceed.wait(10)
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(dispatch, "_record_reclaim", gated)
+
+    def reclaim() -> str:
+        with pytest.raises(dispatch.DispatchError) as refused:
+            dispatch.accepted(workspace=workspace, run_id=first, task_id="one", parent_thread=THREAD, payload=reply)
+        return refused.value.code
+
+    def take_the_slot() -> str:
+        try:
+            dispatch.claim(workspace=workspace, run_id=second, task_id="one", parent_thread=THREAD)
+        except dispatch.DispatchError as exc:
+            return exc.code
+        return "granted"
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        reclaiming = pool.submit(reclaim)
+        assert entered.wait(10), "the reclaim never reached its slot record"
+        claiming = pool.submit(take_the_slot)
+        done, _pending = wait([claiming], timeout=1.0)
+        assert done == set(), "a claim committed while the reclaim held the capacity lock"
+        proceed.set()
+        assert reclaiming.result(timeout=10) == "accept-conflict"
+        assert claiming.result(timeout=10) == "capacity-denied"
+
+    assert capacity_core.capacity_reasons(_events(workspace, first)) == {"one": "accept-conflict"}
+    assert capacity_core.capacity_reasons(_events(workspace, second)) == {}
+    assert capacity.governed_occupancy(workspace) == capacity.Occupancy(1, (("coder", 1),), True)
+    (reclaimed,) = [event.payload for event in _reclaim_events(workspace, first)]
+    assert reclaimed["capacity"] == "within-limit"
+
+
+@POSIX_ONLY
+def test_an_over_limit_reclaim_is_recorded_and_reported(tmp_path):
+    """A reclaim still records the child, and capacity keeps counting it."""
+    workspace = _workspace(tmp_path)
+    _limit_one(workspace)
+    first = enrollment.enroll(batch_path=_batch(tmp_path, "request-a"), target=workspace)["run_id"]
+    second = enrollment.enroll(batch_path=_batch(tmp_path, "request-b"), target=workspace)["run_id"]
+    _claim(workspace, first, "one")
+    _release(workspace, first, _log(tmp_path))
+    _claim(workspace, second, "one")
+
+    with pytest.raises(dispatch.DispatchError) as refused:
+        dispatch.accepted(
+            workspace=workspace, run_id=first, task_id="one", parent_thread=THREAD, payload=_reply(workspace, first)
+        )
+    assert refused.value.code == "accept-conflict"
+
+    (reclaimed,) = [event.payload for event in _reclaim_events(workspace, first)]
+    assert reclaimed["capacity"] == "over-limit"
+    assert capacity_core.capacity_reasons(_events(workspace, first)) == {"one": "accept-conflict"}
+    assert capacity_core.capacity_reasons(_events(workspace, second)) == {"one": "awaiting-terminal"}
+    assert capacity.governed_occupancy(workspace) == capacity.Occupancy(2, (("coder", 2),), True)
+
+
+@POSIX_ONLY
+def test_a_retry_finishes_a_void_that_lost_its_hold_resolution(tmp_path, monkeypatch):
+    workspace, run_id = _enroll(tmp_path, ("one",))
+    _claim(workspace, run_id, "one")
+    _release(workspace, run_id, _log(tmp_path))
+    reply = _reply(workspace, run_id)
+    with pytest.raises(dispatch.DispatchError):
+        dispatch.accepted(workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=reply)
+
+    original = dispatch._append
+
+    def crash_before_resolution(workspace_path: Path, run_dir: Path, event_type: str, payload: dict, *, key: str):
+        if event_type == journal_core.HOLD_RESOLVED_EVENT:
+            raise RuntimeError("simulated crash after the void record")
+        return original(workspace_path, run_dir, event_type, payload, key=key)
+
+    monkeypatch.setattr(dispatch, "_append", crash_before_resolution)
+    with pytest.raises(RuntimeError):
+        dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=reply, abandon=False)
+    monkeypatch.setattr(dispatch, "_append", original)
+
+    events = _events(workspace, run_id)
+    assert len(_void_events(workspace, run_id)) == 1
+    assert journal_core.held(events, "one") == journal_core.ACCEPT_CONFLICT
+    assert not [event for event in events if event.event_type == journal_core.HOLD_RESOLVED_EVENT]
+
+    report = dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=reply, abandon=False)
+
+    assert report["mode"] == "hold-resolved"
+    events = _events(workspace, run_id)
+    assert journal_core.held(events, "one") is None
+    assert journal_core.released(events, "one") is None
+    assert len(_void_events(workspace, run_id)) == 1
+
+    observed = lifecycle.observe(
+        workspace=workspace,
+        run_id=run_id,
+        task_id="one",
+        parent_thread=THREAD,
+        payload=_terminal_reply(workspace, run_id),
+    )
+    result_id = observed["result_id"]
+    assert result_id is not None
+    lifecycle.ack(workspace=workspace, run_id=run_id, task_id="one", result_id=result_id)
+    assert lifecycle.finalize(workspace=workspace, run_id=run_id)["status"] == "completed"
+
+
+@POSIX_ONLY
+def test_a_different_reply_after_a_half_done_void_refuses(tmp_path, monkeypatch):
+    workspace, run_id = _enroll(tmp_path, ("one",))
+    _claim(workspace, run_id, "one")
+    _release(workspace, run_id, _log(tmp_path))
+    reply = _reply(workspace, run_id)
+    with pytest.raises(dispatch.DispatchError):
+        dispatch.accepted(workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=reply)
+
+    original = dispatch._append
+
+    def crash_before_resolution(workspace_path: Path, run_dir: Path, event_type: str, payload: dict, *, key: str):
+        if event_type == journal_core.HOLD_RESOLVED_EVENT:
+            raise RuntimeError("simulated crash after the void record")
+        return original(workspace_path, run_dir, event_type, payload, key=key)
+
+    monkeypatch.setattr(dispatch, "_append", crash_before_resolution)
+    with pytest.raises(RuntimeError):
+        dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=reply, abandon=False)
+    monkeypatch.setattr(dispatch, "_append", original)
+
+    with pytest.raises(dispatch.DispatchError) as refused:
+        dispatch.hold_resolve(
+            workspace=workspace,
+            run_id=run_id,
+            task_id="one",
+            payload=_reply(workspace, run_id, childRunId="run-other"),
+            abandon=False,
+        )
+    assert refused.value.code == "already-voided"
+    events = _events(workspace, run_id)
+    assert journal_core.held(events, "one") == journal_core.ACCEPT_CONFLICT
+    assert len(_void_events(workspace, run_id)) == 1
+
+
+@POSIX_ONLY
+def test_stale_evidence_refuses(tmp_path):
+    workspace, run_id = _enroll(tmp_path, ("one",))
+    _claim(workspace, run_id, "one")
+    stale = (datetime.now(timezone.utc) - timedelta(minutes=11)).isoformat().replace("+00:00", "Z")
+    with pytest.raises(dispatch.DispatchError) as refused:
+        _release(
+            workspace,
+            run_id,
+            _log(tmp_path, records=[{"ts": stale, "tool": "task_status", "thread_id": THREAD}]),
+        )
+    assert refused.value.code == "evidence-stale"
+    assert _release_events(workspace, run_id) == []
+    assert capacity.governed_occupancy(workspace).live == 1
+
+
+@POSIX_ONLY
+def test_future_evidence_refuses(tmp_path):
+    workspace, run_id = _enroll(tmp_path, ("one",))
+    _claim(workspace, run_id, "one")
+    future = (datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+    with pytest.raises(dispatch.DispatchError) as refused:
+        _release(
+            workspace,
+            run_id,
+            _log(tmp_path, records=[{"ts": future, "tool": "task_status", "thread_id": THREAD}]),
+        )
+    assert refused.value.code == "evidence-future"
+    assert _release_events(workspace, run_id) == []
+    assert capacity.governed_occupancy(workspace).live == 1
+
+
+@POSIX_ONLY
+def test_fresh_evidence_passes(tmp_path):
+    workspace, run_id = _enroll(tmp_path, ("one",))
+    _claim(workspace, run_id, "one")
+    recent = (datetime.now(timezone.utc) - timedelta(minutes=1)).isoformat().replace("+00:00", "Z")
+    report = _release(
+        workspace,
+        run_id,
+        _log(tmp_path, records=[{"ts": recent, "tool": "task_status", "thread_id": THREAD}]),
+    )
+    assert report["state"] == "released"
+    assert capacity.governed_occupancy(workspace).live == 0
+
+
+@POSIX_ONLY
+def test_release_refuses_a_reply_recorded_after_the_evidence_check(tmp_path, monkeypatch):
+    workspace, run_id = _enroll(tmp_path, ("one",))
+    _claim(workspace, run_id, "one")
+    binding = journal_core.claim_binding(_events(workspace, run_id), "one")
+    assert binding is not None
+    original = dispatch._evidence_bytes
+
+    def inject_correlation(path: Path) -> bytes:
+        raw = original(path)
+        dispatch._append(
+            workspace,
+            _run_dir(workspace, run_id),
+            dispatch.CORRELATION_EVENT,
+            {
+                "task_id": "one",
+                "attempt_id": binding.attempt_id,
+                "mode": dispatch.PARENT_REPORTED,
+                "handle_digest": "a" * 64,
+            },
+            key="test-late-correlation",
+        )
+        return raw
+
+    monkeypatch.setattr(dispatch, "_evidence_bytes", inject_correlation)
+    with pytest.raises(dispatch.DispatchError) as refused:
+        _release(workspace, run_id, _log(tmp_path))
+    assert refused.value.code == "native-reply-recorded"
+    assert _release_events(workspace, run_id) == []
+    assert capacity.governed_occupancy(workspace).live == 1
 
 
 def _batch(tmp_path: Path, request_id: str) -> Path:
