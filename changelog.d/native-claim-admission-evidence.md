@@ -1,0 +1,1 @@
+- Reject native claim admission evidence with a denied result or malformed roster and policy digests.

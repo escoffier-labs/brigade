@@ -278,7 +278,11 @@ def _claim_record(
             "intent_digest": intent_digest,
             "admission": admission_evidence.code,
             "roster_digest": admission_evidence.roster_digest,
-            "policy_digest": admission_evidence.policy_digest,
+            **(
+                {"policy_digest": admission_evidence.policy_digest}
+                if admission_evidence.policy_digest is not None
+                else {}
+            ),
         },
         append=_append,
         record_requested=_record_dispatch_requested,

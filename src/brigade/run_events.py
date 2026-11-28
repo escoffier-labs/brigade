@@ -53,6 +53,7 @@ MIN_CANONICAL_INT = -(1 << 63)
 
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9._-]+$")
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
+_SHA256_DIGEST = re.compile(r"^sha256:[0-9a-f]{64}$")
 _HEX32 = re.compile(r"^[0-9a-f]{32}$")
 _RECORDED_AT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$")
 
@@ -633,6 +634,13 @@ def _validate_native_t3_payload(event_type: str, payload: Mapping[str, Any]) -> 
             raise CanonicalizationError("task.native-claimed Orca task is invalid")
         for field in ("template_digest", "intent_digest"):
             if not run_task_journal.digest(payload.get(field)):
+                raise CanonicalizationError(f"task.native-claimed {field} is invalid")
+        if "admission" in payload and payload["admission"] != "admitted":
+            raise CanonicalizationError("task.native-claimed admission is invalid")
+        for field in ("roster_digest", "policy_digest"):
+            if field in payload and (
+                not isinstance(payload[field], str) or _SHA256_DIGEST.fullmatch(payload[field]) is None
+            ):
                 raise CanonicalizationError(f"task.native-claimed {field} is invalid")
         return
     if event_type == "task.native-correlated":
