@@ -37,8 +37,13 @@ def _destination_refusal(sections: dict[str, str], before: bytes | None, *, publ
     return None
 
 
-def _mark_filed(card: str) -> str:
-    """Write the filing metadata and retain the rest of the card."""
+def _mark_filed(card: str, *, unstamped: bool = False) -> str:
+    """Write the filing metadata and retain the rest of the card.
+
+    `origin` is always replaced so a verified unknown-origin draft cannot name its
+    own origin. Only a top-level `origin` key is metadata; an `origin:` line inside
+    a block scalar is card content and is kept.
+    """
     lines = card.splitlines(keepends=True)
     closing = next(i for i, line in enumerate(lines[1:], 1) if line.strip() == "---")
     kept = [lines[0]]
@@ -46,7 +51,9 @@ def _mark_filed(card: str) -> str:
     for line in lines[1:closing]:
         key, sep, _ = line.partition(":")
         indent = len(line) - len(line.lstrip())
-        if sep and key.strip().strip("\"'").casefold() in _REPLACED_METADATA:
+        name = key.strip().strip("\"'").casefold()
+        replaced = sep and (name in _REPLACED_METADATA or (name == "origin" and indent == 0))
+        if replaced:
             dropped_indent = indent
             continue
         if dropped_indent is not None and (indent > dropped_indent or line.lstrip().startswith("- ")):
@@ -55,7 +62,10 @@ def _mark_filed(card: str) -> str:
             dropped_indent = None
         kept.append(line)
     text = "".join([*kept, *lines[closing:]])
-    return _insert_frontmatter_fields(text, {"trust": "agent-unreviewed", "auto_filed": date.today().isoformat()})
+    fields = {"trust": "agent-unreviewed", "auto_filed": date.today().isoformat()}
+    if unstamped:
+        fields["origin"] = "unstamped"
+    return _insert_frontmatter_fields(text, fields)
 
 
 def _scan_flagged(text: str) -> bool:
@@ -161,7 +171,7 @@ def file_card(
                 if refusal:
                     return refusal
                 existing_meta = ingest._check_card_state(before, "")
-                marked = _mark_filed(sections["suggested card content"].strip() + "\n")
+                marked = _mark_filed(sections["suggested card content"].strip() + "\n", unstamped=origin.unstamped)
                 built = ingest._build_promoted_card({**sections, "suggested card content": marked}, existing_meta)
                 after = built.encode("utf-8")
                 if len(after) > memory_cmd._config_or_default(owner).max_card_bytes:
@@ -183,6 +193,7 @@ def file_card(
                         rollback=rollback,
                         metadata={
                             "decision": "content-policy",
+                            "unstamped": origin.unstamped,
                             "origin": {
                                 field: getattr(origin, field) for field in handoff_origin.Origin.__dataclass_fields__
                             },

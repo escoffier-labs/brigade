@@ -134,7 +134,8 @@ def test_verification_uses_source_key_when_owner_differs(tmp_path):
 def test_no_key_does_not_create_a_key_or_claim_trust(tmp_path):
     path = handoff(tmp_path)
     assert not receipt_signing.key_path(tmp_path).exists()
-    assert not origin.stamp_path(tmp_path, path).exists()
+    # The MAC-less placeholder keeps review; it never verifies as a stamp.
+    assert origin.stamp_path(tmp_path, path).is_file()
     assert origin.verify_handoff(tmp_path, path, path.read_bytes()) is None
 
 
@@ -171,6 +172,8 @@ def test_origin_sidecar_is_private(tmp_path):
 
 @pytest.mark.parametrize("trusted_first", [False, True])
 def test_duplicate_content_cannot_bypass_origin_review(tmp_path, trusted_first):
+    # An unstamped twin can never annex a verified draft's filing authority, and
+    # the verified draft is never archived as the unstamped copy's duplicate.
     path = handoff(tmp_path)
     duplicate = path.with_name("000-first.md" if trusted_first else "zzz-last.md")
     duplicate.write_bytes(path.read_bytes())
@@ -399,6 +402,32 @@ def test_verified_stamp_can_be_claimed_only_once(tmp_path):
     assert first.stamp.claim()
     assert not second.stamp.claim()
     assert origin.verify_handoff(tmp_path, path, path.read_bytes()) is None
+
+
+def test_stamp_published_after_the_check_keeps_review_and_the_stamp(tmp_path, monkeypatch):
+    path = handoff(tmp_path, action="create-card")
+    # A draft written straight into the inbox carries no sidecar at check time.
+    origin.remove_stamp(origin.stamp_path(tmp_path, path))
+    receipt_signing.generate_key(tmp_path)
+    real = origin.unstamped_origin
+
+    def stamp_arrives_late(target, handoff_path, data, *, own_inboxes):
+        result = real(target, handoff_path, data, own_inboxes=own_inboxes)
+        assert result is not None
+        # ...and the writer's stamp lands between the check and the claim.
+        assert origin.stamp_handoff(target, handoff_path, data, origin.Origin("worker", None, "claude", "test-host"))
+        return result
+
+    monkeypatch.setattr(origin, "unstamped_origin", stamp_arrives_late)
+    stats = ingest.IngestStats()
+    assert ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=stats, promote_cards=True) == 0
+    assert stats.promoted == 0
+    assert stats.inboxed == 1
+    assert "origin-review-required" in stats.actions[0]
+    assert not (tmp_path / "memory/cards/origin.md").exists()
+    # The late stamp is the writer's, so ingest leaves it in place.
+    assert origin.stamp_path(tmp_path, path).exists()
+    assert (path.parent / "processed" / path.name).is_file()
 
 
 def test_real_workspace_key_still_verifies_with_attacker_override(tmp_path, monkeypatch):

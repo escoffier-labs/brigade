@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import subprocess
 
 import pytest
 
@@ -725,3 +726,212 @@ def test_card_rollback_sync_retains_recovery_record(tmp_path, monkeypatch, exist
     assert json.loads(record.read_text())["status"] == "pending"
     decision = journal.load(tmp_path, record.parent.name)
     assert journal.before_bytes(tmp_path, decision, CARD_PATH) == before
+
+
+def unstamped_draft(target, monkeypatch):
+    """A draft a bot wrote straight into the inbox, with no stamp at all."""
+    path = draft(target, monkeypatch)
+    handoff_origin.remove_stamp(handoff_origin.stamp_path(target, path))
+    assert not handoff_origin.stamp_path(target, path).exists()
+    return path
+
+
+def test_worker_draft_without_a_signing_key_goes_to_review(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRIGADE_RUN_ID", "test-run")
+    # build_draft cannot sign without a key, but its placeholder keeps review.
+    path = Path(
+        drafts.build_draft(
+            target=tmp_path,
+            title="Content policy",
+            summary="A durable fact.",
+            content=CARD,
+            fact=["A recorded fact."],
+            evidence=["A recorded observation."],
+            action="create-card",
+            inbox=".claude/memory-handoffs",
+            target_card="policy.md",
+        )["path"]
+    )
+    sidecar = handoff_origin.stamp_path(tmp_path, path)
+    assert sidecar.is_file()
+    assert handoff_origin.verify_handoff(tmp_path, path, path.read_bytes()) is None
+    assert run_ingest(tmp_path).inboxed == 1
+    assert review_reason(tmp_path) == "reason: origin-review-required"
+    assert not (tmp_path / CARD_PATH).exists()
+
+
+def test_unstamped_draft_with_a_failing_verification_goes_to_review(tmp_path, monkeypatch):
+    unstamped_draft(tmp_path, monkeypatch)
+
+    def fail(*args, **kwargs):
+        raise OSError("verification unavailable")
+
+    monkeypatch.setattr(handoff_origin, "verify_handoff", fail)
+    stats = run_ingest(tmp_path)
+    assert stats.inboxed == 1
+    assert review_reason(tmp_path) == "reason: origin-review-required"
+    assert stats.promoted == 0
+    assert not (tmp_path / CARD_PATH).exists()
+
+
+def test_mark_filed_keeps_an_origin_line_inside_a_block_scalar():
+    from brigade import ingest_content_policy
+
+    card = "---\nid: card-x\ntopic: t\nnotes: |\n  origin: upstream feed\n---\n\nBody.\n"
+    out = ingest_content_policy._mark_filed(card, unstamped=True)
+    assert "  origin: upstream feed" in out
+    assert out.count("origin: unstamped") == 1
+
+
+def test_mark_filed_drops_a_verified_drafts_own_origin():
+    from brigade import ingest_content_policy
+
+    card = "---\nid: card-x\ntopic: t\ntrust: reviewed\norigin: human\n---\n\nBody.\n"
+    out = ingest_content_policy._mark_filed(card, unstamped=False)
+    assert "origin:" not in out
+    assert "trust: agent-unreviewed" in out
+
+
+def test_mark_filed_replaces_a_nested_origin_only_once():
+    from brigade import ingest_content_policy
+
+    card = (
+        "---\nid: card-x\ntopic: t\ntrust: reviewed\norigin: human\n"
+        "origin:\n  source: link\n  refs:\n    - a\n---\n\nBody.\n"
+    )
+    out = ingest_content_policy._mark_filed(card, unstamped=True)
+    assert out.count("origin:") == 1
+    assert "origin: unstamped" in out
+    assert "source: link" not in out
+
+
+def card_frontmatter(target):
+    from brigade import memory_cmd
+
+    meta, _ = memory_cmd._parse_frontmatter((target / CARD_PATH).read_text())
+    return meta
+
+
+def test_unstamped_draft_in_own_inbox_is_filed_as_unstamped(tmp_path, monkeypatch):
+    unstamped_draft(tmp_path, monkeypatch)
+    assert run_ingest(tmp_path).promoted == 1
+    meta = card_frontmatter(tmp_path)
+    assert meta["origin"] == "unstamped"
+    assert meta["trust"] == "agent-unreviewed"
+    assert meta["auto_filed"] == date.today().isoformat()
+    (record,) = (tmp_path / journal.JOURNAL_REL).glob("*/decision.json")
+    data = json.loads(record.read_text())
+    assert data["decision"] == "content-policy"
+    assert data["unstamped"] is True
+    assert data["origin"] == {
+        "session_kind": "unknown",
+        "untrusted_tools": None,
+        "harness": "unknown",
+        "host": "unknown",
+    }
+
+
+def test_unstamped_draft_records_a_normal_origin_when_stamped(tmp_path, monkeypatch):
+    draft(tmp_path, monkeypatch)
+    assert run_ingest(tmp_path).promoted == 1
+    meta = card_frontmatter(tmp_path)
+    assert "origin" not in meta
+    (record,) = (tmp_path / journal.JOURNAL_REL).glob("*/decision.json")
+    assert json.loads(record.read_text())["unstamped"] is False
+
+
+def test_unstamped_draft_with_content_finding_goes_to_review(tmp_path, monkeypatch):
+    path = unstamped_draft(tmp_path, monkeypatch)
+    path.write_bytes(path.read_bytes().replace(b"A durable fact.", "A durable\u202e fact.".encode()))
+    assert run_ingest(tmp_path).inboxed == 1
+    assert review_reason(tmp_path) == "reason: handoff-content-signal"
+    assert not (tmp_path / CARD_PATH).exists()
+
+
+def test_tampered_stamp_is_still_origin_review(tmp_path, monkeypatch):
+    path = draft(tmp_path, monkeypatch)
+    path.write_bytes(path.read_bytes().replace(b"A recorded fact.", b"A tampered fact."))
+    assert handoff_origin.verify_handoff(tmp_path, path, path.read_bytes()) is None
+    assert handoff_origin.stamp_path(tmp_path, path).exists()
+    assert run_ingest(tmp_path).inboxed == 1
+    assert review_reason(tmp_path) == "reason: origin-review-required"
+    assert not (tmp_path / CARD_PATH).exists()
+
+
+def test_tracked_unstamped_draft_is_skipped(tmp_path, monkeypatch):
+    path = unstamped_draft(tmp_path, monkeypatch)
+    subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
+    subprocess.run(["git", "add", "-f", "--", str(path)], cwd=tmp_path, check=True)
+    stats = run_ingest(tmp_path)
+    assert stats.skipped == 1
+    assert stats.promoted == stats.inboxed == 0
+    assert "tracked-or-unverifiable" in stats.actions[0]
+    assert path.exists()
+    assert not (tmp_path / CARD_PATH).exists()
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX symlinks")
+def test_symlinked_unstamped_draft_is_refused(tmp_path, monkeypatch):
+    path = unstamped_draft(tmp_path, monkeypatch)
+    outside = tmp_path / "outside.md"
+    path.rename(outside)
+    path.symlink_to(outside)
+    stats = run_ingest(tmp_path)
+    assert stats.failed == 1
+    assert stats.promoted == stats.inboxed == 0
+    assert "linked-handoff" in stats.actions[0]
+    assert path.exists()
+    assert not (tmp_path / CARD_PATH).exists()
+
+
+def test_draft_outside_the_targets_own_inboxes_is_not_unstamped(tmp_path, monkeypatch):
+    source, owner = tmp_path / "source", tmp_path / "owner"
+    source.mkdir()
+    owner.mkdir()
+    unstamped_draft(source, monkeypatch)
+    stats = ingest.IngestStats()
+    assert ingest.ingest_into(source=source, owner=owner, stats=stats, promote_cards=True) == 0
+    assert stats.inboxed == 1
+    (review,) = (owner / memory_inbox_drain.INBOX_REL).glob("*.md")
+    assert review.read_bytes().splitlines()[1].strip() == b"reason: origin-review-required"
+    assert not (owner / CARD_PATH).exists()
+
+
+def test_unstamped_claim_prevents_a_second_filing(tmp_path, monkeypatch):
+    path = unstamped_draft(tmp_path, monkeypatch)
+
+    def fail_archive(*args):
+        raise OSError("archive unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(ingest, "_archive", fail_archive)
+        assert run_ingest(tmp_path).failed == 1
+    assert path.exists()
+    first = (tmp_path / CARD_PATH).read_bytes()
+    stats = run_ingest(tmp_path)
+    assert stats.promoted == stats.reinforced == 0
+    assert review_reason(tmp_path) == "reason: origin-review-required"
+    assert (tmp_path / CARD_PATH).read_bytes() == first
+    assert len(list((tmp_path / journal.JOURNAL_REL).glob("*/decision.json"))) == 1
+
+
+def test_unstamped_draft_is_filed_once_across_runs(tmp_path, monkeypatch):
+    unstamped_draft(tmp_path, monkeypatch)
+    assert run_ingest(tmp_path).promoted == 1
+    first = (tmp_path / CARD_PATH).read_bytes()
+    stats = run_ingest(tmp_path)
+    assert stats.promoted == stats.reinforced == stats.inboxed == 0
+    assert (tmp_path / CARD_PATH).read_bytes() == first
+    assert len(list((tmp_path / journal.JOURNAL_REL).glob("*/decision.json"))) == 1
+
+
+def test_unstamped_dry_run_writes_nothing(tmp_path, monkeypatch):
+    path = unstamped_draft(tmp_path, monkeypatch)
+    before = path.read_bytes()
+    stats = ingest.IngestStats()
+    assert ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=stats, dry_run=True, promote_cards=True) == 0
+    assert path.read_bytes() == before
+    assert not (tmp_path / CARD_PATH).exists()
+    assert not list((tmp_path / journal.JOURNAL_REL).glob("*/decision.json"))
+    assert not list((tmp_path / ".brigade/handoffs/consumed-stamps").glob("*"))
+    assert not memory_inbox_drain.pending(tmp_path)

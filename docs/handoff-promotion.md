@@ -144,7 +144,14 @@ interactive session can file cards or route documents when enabled. An
 interactive origin with unknown tool status requires review. An unknown-origin
 draft can file a card when promotion is enabled, its recorded tool status is
 false or unknown, and the draft passes the deterministic content policy. Worker, cron, and subagent
-drafts go to `memory/handoff-inbox/` for human review.
+drafts go to `memory/handoff-inbox/` for human review. A draft written by
+`brigade handoff draft` always has a sidecar, a placeholder when signing fails,
+so it is never read as unstamped: a worker draft goes to review, and an unknown
+one is decided by the content policy below. Deliberately deleting the sidecar, or
+the origins folder, instead makes the draft unstamped, so that same content
+policy decides it. That needs shell access, which the threat model already
+excludes. Content scans still apply, and the filed card is marked
+`trust: agent-unreviewed` with `origin: unstamped`.
 
 Automatic filing works on Windows with an owner-only signing key.
 Regular-file, reparse-point, and single-link checks still apply.
@@ -206,8 +213,11 @@ workspace, unset `BRIGADE_RECEIPT_SIGNING_KEY_FILE` and run
 `brigade receipts keygen` to create a fresh owner-only key. Existing stamps
 still require review after the key changes.
 
-A missing key, missing sidecar, bad MAC, changed content, or malformed stamp
-requires review. Neither drafting nor ingest creates a key.
+A missing key, bad MAC, changed content, or malformed stamp requires review. A
+deliberately deleted sidecar is the exception: inside one of the memory owner's
+own writer inboxes the draft is read as unstamped and decided by the content
+policy, and a missing sidecar elsewhere still requires review. Neither drafting
+nor ingest creates a key.
 Stamps are local to the source workspace and path. Worktree rescue and archive
 do not yet carry them, so rescued or renamed handoffs conservatively require
 review.
@@ -218,6 +228,23 @@ When card promotion is enabled, ingest evaluates verified unknown-origin drafts
 for card filing. A `create-card` draft needs a free destination name. An
 `update-card` draft needs an `Expected card SHA256` that matches the current
 card. Ingest repeats the destination check under the publication lock.
+
+A draft with no stamp at all, sitting in one of the memory owner's own writer
+inboxes, is read as the same unknown origin with unknown tool use. It goes
+through the same content policy, and the filed card records `origin: unstamped`
+beside `trust: agent-unreviewed` and the `auto_filed` date. The writer publishes
+the origin sidecar before the draft, and ingest claims the draft under the same
+lock as a stamp claim, keyed by the draft's path and content, so one draft
+publication is filed once. A stamp that appears before the claim sends that
+draft to review instead of filing it. Fleet ingest (`brigade repos ingest`) does
+not use this lane for worker repos. A draft outside the memory owner's own
+inboxes, or a draft whose stamp exists but fails verification, still goes to the
+review inbox. A tracked draft stays in place as `tracked-or-unverifiable` and a
+linked draft fails in place as `linked-handoff`; neither goes to the review
+inbox.
+
+With card promotion disabled, this lane files nothing and holds the draft's
+review copy.
 
 Both content scans cover the whole draft and evaluate each section separately.
 Drafts use LF or CRLF line endings. The final card must fit the

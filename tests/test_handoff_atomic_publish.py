@@ -71,7 +71,8 @@ def test_concurrent_reader_never_sees_a_partial_file(tmp_path: Path, monkeypatch
 
     _pause_mid_write(monkeypatch, probe)
     payload = _draft(tmp_path, inbox)
-    assert seen == [[]]
+    # Every split write (the sidecar and the draft) stays invisible to a `*.md` reader.
+    assert seen and all(names == [] for names in seen)
     published = Path(payload["path"])
     assert published.read_text(encoding="utf-8").endswith("Body.\n")
     assert sorted(p.name for p in inbox.iterdir()) == [published.name]

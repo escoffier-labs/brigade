@@ -905,18 +905,37 @@ def build_draft(
     inbox_path.mkdir(parents=True, exist_ok=True)
     if force and path.is_symlink():
         raise ValueError(f"handoff draft path is a symlink: {path}")
+    if path.exists() and not force:
+        # Never touch the stamp of a draft this call does not publish.
+        raise ValueError(f"handoff draft already exists: {path}")
+    # Publish the origin sidecar first, the draft second, the real stamp third. A
+    # reader that lists the draft always finds a sidecar, and a signing failure
+    # leaves the MAC-less placeholder, which routes the draft to review. When even
+    # the placeholder cannot be published, no draft is written at all. Deleting the
+    # sidecar afterwards is a deliberate shell action: the draft then reads as
+    # unstamped and the content policy decides it.
+    try:
+        handoff_origin.publish_unverified_stamp(target, path)
+    except OSError as exc:
+        raise ValueError(f"cannot publish the origin sidecar for {path}: {exc}") from exc
     # Publish atomically: a private temp in the inbox, fsync, then a no-replace rename, so a
     # reader or a worktree rescue never sees a half-written `*.md` and never holds a stale handle.
     try:
         _publish_mod.publish_handoff(inbox_path, path.name, text, replace=force)
     except _publish_mod.HandoffNameTaken as exc:
         raise ValueError(str(exc)) from exc
+    except OSError:
+        if not path.exists():
+            # Nothing is left for a placeholder to guard.
+            handoff_origin.remove_stamp(handoff_origin.stamp_path(target, path))
+        raise
     # Agent-authored fields never establish origin. Missing observation stays
-    # unknown, even when a signing key is available.
+    # unknown, even when a signing key is available. The placeholder published
+    # above keeps this draft in review whenever no stamp can be made.
     try:
         handoff_origin.stamp_handoff(target, path, text.encode("utf-8"), handoff_origin.draft_origin())
     except OSError:
-        pass  # A missing sidecar always routes to review.
+        pass  # The placeholder sidecar already routes this draft to review.
     lint_result = _linting_mod.lint_file(path, workspace=workspace_root)
     guard_result = _linting_mod._guard_handoff_path(path, target=target, policy=guard_policy) if guard else None
     return {

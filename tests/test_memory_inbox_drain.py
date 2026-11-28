@@ -835,6 +835,11 @@ def test_original_flags_are_written_in_header(tmp_path):
     source = tmp_path / ".claude/memory-handoffs/2026-11-13-flags.md"
     source.parent.mkdir(parents=True)
     source.write_text("## Recommended memory action\nno-card\n", encoding="utf-8")
+    # A worker draft keeps the caller's routing request, unlike the content-policy lane.
+    receipt_signing.generate_key(tmp_path)
+    assert handoff_origin.stamp_handoff(
+        tmp_path, source, source.read_bytes(), handoff_origin.Origin("worker", None, "claude", "test-host")
+    )
     stats = ingest.IngestStats()
     ingest.ingest_into(source=tmp_path, owner=tmp_path, stats=stats, promote_cards=False, route_documents=True)
     path = next((tmp_path / drain.INBOX_REL).glob("*.md"))

@@ -429,6 +429,57 @@ Drafts can create cards.
     assert "## Target document" not in text
 
 
+def test_handoff_draft_publishes_the_origin_sidecar_before_the_draft(tmp_path, monkeypatch):
+    from brigade import handoff_origin
+    from brigade.handoff_cmd import drafts
+
+    ordered = []
+    publish = drafts._publish_mod.publish_handoff
+
+    def observe(inbox, name, text, *, replace=False):
+        if name.endswith(".md"):
+            ordered.append(handoff_origin.stamp_path(tmp_path, inbox / name).exists())
+        return publish(inbox, name, text, replace=replace)
+
+    monkeypatch.setattr(drafts._publish_mod, "publish_handoff", observe)
+    payload = drafts.build_draft(
+        target=tmp_path,
+        title="Origin ordering",
+        summary="The sidecar comes first.",
+        content="Prefer short status updates.",
+        target_document="TOOLS.md",
+        inbox=".claude/memory-handoffs",
+    )
+    path = Path(payload["path"])
+    # No signing key exists, so the sidecar is the MAC-less review placeholder.
+    assert ordered == [True]
+    sidecar = handoff_origin.stamp_path(tmp_path, path)
+    assert sidecar.is_file()
+    assert handoff_origin.verify_handoff(tmp_path, path, path.read_bytes()) is None
+
+
+def test_handoff_draft_fails_without_publishing_when_the_sidecar_cannot_be_written(tmp_path, capsys, monkeypatch):
+    from brigade import handoff_origin
+
+    def refuse(*args, **kwargs):
+        raise OSError("sidecar storage unavailable")
+
+    monkeypatch.setattr(handoff_origin, "publish_unverified_stamp", refuse)
+    assert (
+        handoff_cmd.draft(
+            target=tmp_path,
+            title="No sidecar",
+            summary="Nothing is written.",
+            content="Prefer short status updates.",
+            target_document="TOOLS.md",
+            json_output=True,
+        )
+        == 2
+    )
+    assert "cannot publish the origin sidecar" in capsys.readouterr().err
+    assert not list((tmp_path / ".codex/memory-handoffs").glob("*.md"))
+
+
 def test_handoff_draft_supports_hermes_writer_inbox(tmp_path, capsys):
     assert handoff_cmd.sources_init(target=tmp_path, json_output=True) == 0
     sources_payload = json.loads(capsys.readouterr().out)
