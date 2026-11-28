@@ -760,6 +760,7 @@ def _refill(
 
 VISIBILITY_PRIVATE = "visibility-private"
 VISIBILITY_UNRECOGNIZED = "visibility-unrecognized"
+_VISIBILITY_KEY = re.compile(r"""^\s*(?:[?{]\s*|[&!][^\s{}?]+\s+)*(['"]?)visibility\1(?=\s|:|$|[},])""", re.IGNORECASE)
 _VISIBILITY_LINE = re.compile(r"""^\s*(['"]?)visibility\1\s*:(.*)$""", re.IGNORECASE)
 
 
@@ -770,6 +771,8 @@ def withheld(text: str) -> str | None:
     counts, whatever its case and whether or not the key is quoted, and the first word of its value decides: no
     such line or `public` publishes, `private` is `visibility-private`, and
     anything else, an empty value included, is `visibility-unrecognized`. A
+    leading metadata line with visibility in key position after optional anchors,
+    tags, `?` or `{` but without that key form is also `visibility-unrecognized`. A
     `visibility:` line in a leading block that does not parse as frontmatter
     (no closing fence, a malformed fence, no fence at all) is
     `visibility-unrecognized` too. Push, spool replay and import all ask this.
@@ -790,7 +793,10 @@ def withheld(text: str) -> str | None:
     else:
         end = next((index for index, line in enumerate(lines[start:]) if not line.strip()), None)
         block, parsed = lines[start : start + end if end is not None else None], False
-    values = [match.group(2) for match in map(_VISIBILITY_LINE.match, block) if match]
+    matches = [_VISIBILITY_LINE.match(line) for line in block]
+    values = [match.group(2) for match in matches if match]
+    if any(_VISIBILITY_KEY.match(line) and match is None for line, match in zip(block, matches, strict=True)):
+        return VISIBILITY_UNRECOGNIZED
     if not values:
         return None
     if not parsed:

@@ -2844,6 +2844,59 @@ def test_a_public_visibility_with_a_comment_still_publishes(hub, tmp_path):
     assert [p["card_id"] for p in report["published"]] == ["one"]
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        "{visibility: private}",
+        "&k visibility: private",
+        "? visibility",
+        "!local visibility: private",
+        "!<tag:example.test,2026:meta> &k ? 'Visibility': private",
+        "{&k !local visibility: private}",
+        "? &k !local visibility: public",
+    ],
+    ids=["flow-mapping", "anchored-key", "explicit-key", "tagged-key", "combined", "flow-combined", "public-key"],
+)
+@pytest.mark.parametrize("fenced", [True, False], ids=["fenced", "unfenced"])
+def test_withheld_fails_closed_for_unrecognized_visibility_keys(line, fenced):
+    text = f"---\n{line}\n---\n# P\nsecret\n" if fenced else f"{line}\n\n# P\nsecret\n"
+    assert sync.withheld(text) == "visibility-unrecognized"
+
+
+@pytest.mark.parametrize(
+    ("text", "reason"),
+    [
+        ("---\nvisibility: private\n---\nsecret\n", "visibility-private"),
+        ("---\nvisibility: shared\n---\nshared\n", "visibility-unrecognized"),
+        ("---\ntitle: Public note\n---\nbody\n", None),
+        ("---\ntitle: Public\n---\nbody mentions visibility\n", None),
+    ],
+    ids=["private", "shared", "no-visibility", "body-mention"],
+)
+def test_withheld_preserves_recognized_and_non_key_visibility_behavior(text, reason):
+    assert sync.withheld(text) == reason
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "title: Improve visibility",
+        "description: visibility: private is a metadata example",
+        "tags: [visibility, public]",
+        "title: '{visibility: private}'",
+        "description: &k !local visibility: private",
+        "visibility_notes: private",
+    ],
+)
+@pytest.mark.parametrize("fenced", [True, False], ids=["fenced", "unfenced"])
+def test_ordinary_visibility_mentions_still_publish(hub, tmp_path, line, fenced):
+    text = f"---\n{line}\n---\n# One\nshared\n" if fenced else f"{line}\n\n# One\nshared\n"
+    assert sync.withheld(text) is None
+    target = workspace(tmp_path, mode="sync", one=text)
+    report = sync.push(target, client(hub), settings(target), yes=True)
+    assert [p["card_id"] for p in report["published"]] == ["one"]
+
+
 @pytest.mark.parametrize(("text", "reason"), WITHHELD, ids=WITHHELD_IDS)
 def test_a_spooled_write_is_withheld_once_its_visibility_is_not_plainly_public(hub, tmp_path, text, reason):
     target = workspace(tmp_path, mode="sync", p="# P\nsecret\n")

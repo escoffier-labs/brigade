@@ -1,0 +1,2 @@
+- Memory Hub pushes now withhold cards whose frontmatter uses an unrecognized visibility key spelling.
+- Limit unrecognized visibility detection to metadata key position, including unfenced leading metadata, while allowing ordinary title, description and tag mentions.
