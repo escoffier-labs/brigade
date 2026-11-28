@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import shlex
 
 import pytest
@@ -16,7 +17,7 @@ from tests.work_cmd_test_helpers import _init_git_repo
 def test_verify_plan_degrades_without_graphtrail(tmp_path, capsys):
     """Real degrade path: GraphTrail is unavailable in this VM."""
     _init_git_repo(tmp_path)
-    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\n")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\ndependencies=['pytest']\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_demo.py").write_text("def test_ok():\n    assert True\n")
     (tmp_path / "src").mkdir()
@@ -45,7 +46,7 @@ def test_verify_plan_text_prints_degraded_graph_impact(tmp_path, capsys):
 
 def test_rank_verification_candidates_via_mocked_affected(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
-    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\n")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\ndependencies=['pytest']\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "src").mkdir()
     db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
@@ -109,7 +110,7 @@ def test_rank_verification_candidates_via_mocked_affected(tmp_path, monkeypatch)
 
 def test_verify_plan_enriched_suggests_ranked_command(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\n")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\ndependencies=['pytest']\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "src").mkdir()
     db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
@@ -217,7 +218,7 @@ def test_collect_changed_files_from_git(tmp_path):
 
 def test_rank_verification_candidates_deduplicates_duplicate_paths(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
-    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\n")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\ndependencies=['pytest']\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "src").mkdir()
     db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
@@ -365,18 +366,92 @@ def test_cli_verify_plan_passes_files(tmp_path, monkeypatch, capsys):
     assert seen["json_output"] is True
 
 
+def test_command_prefix_does_not_guess_pytest_from_tests_directory(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "widget.test.js").write_text("")
+    (tmp_path / "package.json").write_text("{}")
+
+    assert verify_ranking._verification_command_prefix(tmp_path) is None
+
+
 @pytest.mark.parametrize(
-    "files,expected",
+    ("path", "content"),
     [
-        (["pyproject.toml"], "python3 -m pytest -q"),
-        (["setup.cfg"], "python3 -m pytest -q"),
-        (["go.mod"], None),
-        (["package.json"], None),
-        ([], None),
+        ("pyproject.toml", "[tool.pytest.ini_options]\n"),
+        ("pyproject.toml", '[project]\ndependencies = ["pytest>=9"]\n'),
+        ("pytest.ini", ""),
+        ("setup.cfg", "[tool:pytest]\n"),
+        ("tox.ini", "[pytest]\n"),
+        ("conftest.py", ""),
+        ("tests/conftest.py", ""),
     ],
 )
-def test_command_prefix_guesses_pytest_only_for_python_projects(tmp_path, files, expected):
-    for name in files:
-        (tmp_path / name).write_text("")
-    (tmp_path / "test").mkdir()
+def test_command_prefix_detects_each_pytest_evidence_file(tmp_path, path, content):
+    evidence = tmp_path / path
+    evidence.parent.mkdir(exist_ok=True)
+    evidence.write_text(content)
+
+    assert verify_ranking._verification_command_prefix(tmp_path) == "python3 -m pytest -q"
+
+
+def test_command_prefix_detects_brigadestack_layout():
+    repository = Path(__file__).resolve().parents[1]
+
+    assert verify_ranking._verification_command_prefix(repository) == "PYTHONPATH=src python3 -m pytest -q"
+
+
+@pytest.mark.parametrize(
+    ("path", "template"),
+    [
+        ("pyproject.toml", '[project]\ndependencies = ["{dependency}>=9"]\n'),
+        ("pyproject.toml", '[project.optional-dependencies]\ntest = ["{dependency}[extra]>=9"]\n'),
+        ("pyproject.toml", '[dependency-groups]\ntest = [{{include-group = "base"}}, "{dependency}>=9"]\n'),
+        ("pyproject.toml", '[tool.poetry.dependencies]\n"{dependency}" = "^9"\n'),
+        ("pyproject.toml", '[tool.poetry.group.test.dependencies]\n"{dependency}" = {{version = "^9"}}\n'),
+        ("pyproject.toml", '[tool.poetry.dev-dependencies]\n"{dependency}" = "^9"\n'),
+        ("pyproject.toml", '[tool.pdm.dev-dependencies]\ntest = ["{dependency}>=9"]\n'),
+        ("requirements-dev.txt", '# Development tools\n{dependency}[extra]>=9 ; python_version >= "3.11"\n'),
+    ],
+)
+@pytest.mark.parametrize("dependency", ["pytest", "PyTeSt", "pytest-cov", "pytest_custom", "pytest2"])
+def test_dependency_evidence_matches_only_pytest_without_tests_directory(tmp_path, path, template, dependency):
+    (tmp_path / path).write_text(template.format(dependency=dependency))
+
+    assert not (tmp_path / "tests").exists()
+    expected = "python3 -m pytest -q" if dependency.casefold() == "pytest" else None
     assert verify_ranking._verification_command_prefix(tmp_path) == expected
+
+
+@pytest.mark.parametrize("path", ["pyproject.toml", "setup.cfg", "tox.ini", "requirements-dev.txt"])
+def test_ranking_ignores_undecodable_configuration(tmp_path, monkeypatch, path):
+    (tmp_path / path).write_bytes(b"\xff\xfe")
+    db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
+    db.parent.mkdir(parents=True)
+    db.write_bytes(b"fake-index")
+    monkeypatch.setattr(verify_ranking.component_bins, "resolve", lambda _name: "/fake/code-graph")
+
+    ranking = verify_ranking.rank_verification_candidates(
+        tmp_path,
+        files=["module.py"],
+        affected_runner=lambda *args: {
+            "changed_files": ["module.py"],
+            "affected_tests": [{"file_path": "test_module.py", "min_hops": 1}],
+        },
+    )
+
+    assert ranking["degraded"] is False
+    assert ranking["suggested_command"] is None
+    assert ranking["candidates"][0]["command"] == "test_module.py"
+
+
+def test_dependency_detection_does_not_execute_or_follow_declarations(tmp_path, monkeypatch):
+    (tmp_path / "pyproject.toml").write_text('[dependency-groups]\ntest = [{include-group = "test"}]\n')
+    (tmp_path / "requirements-dev.txt").write_text("-r extra-requirements.txt\n-e .\n")
+    (tmp_path / "extra-requirements.txt").write_text("pytest\n")
+    (tmp_path / "setup.py").write_text('raise RuntimeError("must not execute")\n')
+
+    def unexpected_run(*args, **kwargs):
+        pytest.fail("dependency detection must only read static evidence")
+
+    monkeypatch.setattr(verify_ranking.proc, "run", unexpected_run)
+    assert verify_ranking._verification_command_prefix(tmp_path) is None

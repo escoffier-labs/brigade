@@ -1,0 +1,3 @@
+- Require explicit pytest configuration or dependency evidence before suggesting pytest verification commands.
+- Recognize pytest in dependency groups, Poetry, PDM, and development requirements without executing dependency declarations.
+- Ignore undecodable Python project configuration while ranking verification candidates and match the pytest package name case-insensitively.
