@@ -3,6 +3,7 @@ import os
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import memory_care_journal as journal
 from tests._handoff_origin_fixtures import requires_automatic_filing
 
@@ -462,7 +463,7 @@ def test_untrusted_hold_marker_body_stays_held_and_echoes_only_bounded_text(tmp_
 def test_fifo_at_the_hold_marker_stays_held_without_blocking(tmp_path, monkeypatch):
     (tmp_path / "a.md").write_bytes(b"old a")
     decision_id = _leave_prepared(tmp_path, monkeypatch, [journal.Change("a.md", b"old a", b"new a")])
-    os.mkfifo(journal._directory(tmp_path, decision_id) / "automatic-hold")
+    make_fifo(journal._directory(tmp_path, decision_id) / "automatic-hold")
     result = journal.resolve_prepared(tmp_path, automatic=True)
     assert result[0]["phase"] == "operator_required"
     assert journal._payload(tmp_path, decision_id)["phase"] == "prepared"

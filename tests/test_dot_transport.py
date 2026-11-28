@@ -6,6 +6,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade.dot import transport
 from tests._posix import requires_dirfd
 
@@ -60,7 +61,7 @@ def test_protected_token_and_nul_path(tmp_path):
 @requires_dirfd
 def test_fifo_is_refused_without_blocking(tmp_path):
     path = tmp_path / "token"
-    os.mkfifo(path, mode=0o600)
+    make_fifo(path, mode=0o600)
     with pytest.raises(transport.ConfigurationError, match="^invalid$"):
         transport.load_hub_token_file(path)
 

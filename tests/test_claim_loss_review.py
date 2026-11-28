@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import aboyeur, agents, cli, fleet_client, fleet_session_bootstrap, proc, runguard
 from brigade import fleet_t3_transport as t3
 from brigade.aboyeur import orchestrator, planning
@@ -1090,7 +1091,7 @@ def test_stale_recovery_rejects_unsafe_retention_sidecars(tmp_path, kind):
     outside_bytes = json.dumps({"owner_token": owner["owner_token"], "diagnostics": ["outside diagnostic"]}).encode()
     outside.write_bytes(outside_bytes)
     if kind == "fifo":
-        os.mkfifo(sidecar)
+        make_fifo(sidecar)
     else:
         sidecar.symlink_to(outside)
     script = (
