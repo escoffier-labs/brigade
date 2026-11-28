@@ -73,6 +73,26 @@ def register(sub: argparse._SubParsersAction) -> None:
         action="store_true",
         help="Mark the attempt terminal-unknown. The dispatch unit stays charged.",
     )
+    p_release = t3_sub.add_parser(
+        "release-claim",
+        help=(
+            "Release one uncorrelated claim after the operator confirms no delegate_task call happened. "
+            "Frees exactly that claim's native slot and records an audited journal fact."
+        ),
+    )
+    _run_arguments(p_release)
+    p_release.add_argument("--parent-thread", required=True, help="Same declared parent thread as the claim.")
+    p_release.add_argument(
+        "--evidence",
+        required=True,
+        type=Path,
+        help="Exported parent activity log as JSON or JSON Lines. Checked for a delegate_task call.",
+    )
+    p_release.add_argument(
+        "--confirm-no-delegate",
+        action="store_true",
+        help="Operator assertion that no delegate_task call happened for this claim.",
+    )
     p_observe = t3_sub.add_parser(
         "observe",
         help=(
@@ -130,6 +150,8 @@ def dispatch(args) -> int:
         return native_t3_dispatch.accepted_cli(args)
     if args.t3_command == "hold-resolve":
         return native_t3_dispatch.hold_resolve_cli(args)
+    if args.t3_command == "release-claim":
+        return native_t3_dispatch.release_claim_cli(args)
     if args.t3_command == "observe":
         return native_t3_lifecycle.observe_cli(args)
     if args.t3_command == "cancel":

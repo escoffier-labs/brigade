@@ -19,8 +19,12 @@ never authenticated acceptance.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple, Sequence
 from urllib.parse import quote, unquote
@@ -28,7 +32,7 @@ from urllib.parse import quote, unquote
 from . import fleet_t3_transport, run_events, run_journal, run_tasks
 from . import native_child_claim as claim_core
 from .native_child_cli import _MAX_NATIVE_BYTES as _MAX_NATIVE_BYTES
-from .native_child_cli import emit as _emit, read_native as _read_native
+from .native_child_cli import ReadRefusal, emit as _emit, read_bounded_regular, read_native as _read_native
 from . import native_child_journal as journal_core
 from . import native_t3_admission as admission
 from . import native_t3_capacity as capacity
@@ -36,22 +40,38 @@ from . import native_t3_observations as observations
 from . import run_task_journal as journal
 from . import native_t3_enrollment as enrollment
 from .fleet_t3_transport import SourceRevisionError
-from .native_child_host import NativeChildError
+from .native_child_host import NativeChildCustodyError, NativeChildError
 from .native_t3_contract import INHERIT_MODE, NativeIntent, NativeIntentTemplate, NativeTarget
 from .native_t3_host import HOST
 
 SCHEMA = "brigade.t3_claim.v1"
 CORRELATION_SCHEMA = "brigade.t3_correlation.v1"
+RELEASE_SCHEMA = "brigade.t3_release_claim.v1"
 CLAIM_EVENT = journal_core.CLAIM_EVENT
 CORRELATION_EVENT = "task.native-correlated"
 HELD_EVENT = journal_core.HELD_EVENT
 HOLD_RESOLVED_EVENT = journal_core.HOLD_RESOLVED_EVENT
+RELEASED_EVENT = journal_core.RELEASED_EVENT
 PARENT_REPORTED = "parent-reported"
 OPERATOR_ASSERTED = "operator-asserted"
 ABANDONED = journal_core.ABANDONED
 ACCEPT_CONFLICT = journal_core.ACCEPT_CONFLICT
 HELD_RUN_STATUS = journal_core.HELD_RUN_STATUS
 _MAX_DIAGNOSTIC = journal_core.MAX_DIAGNOSTIC
+_MAX_EVIDENCE_BYTES = 8_388_608
+# Release evidence is an operator-supplied snapshot. It may only speak for the
+# recent past: a stale snapshot cannot rule out a delegate call since it was
+# taken, and a timestamp from the future cannot be ordered against the release.
+_EVIDENCE_MAX_AGE = timedelta(minutes=10)
+_EVIDENCE_MAX_SKEW = timedelta(seconds=60)
+_SLOT_WITHIN_LIMIT = "within-limit"
+_SLOT_OVER_LIMIT = "over-limit"
+_SLOT_UNKNOWN = "unknown"
+_EVIDENCE_TOP_KEYS = frozenset({"parent_thread", "events"})
+_EVIDENCE_RECORD_KEYS = frozenset({"ts", "tool", "thread_id"})
+_EVIDENCE_MISSING = ReadRefusal("evidence-missing", "the evidence file is not readable")
+_EVIDENCE_NOT_REGULAR = ReadRefusal("evidence-unreadable", "the evidence file is not a regular file")
+_EVIDENCE_TOO_LARGE = ReadRefusal("evidence-too-large", "the evidence file exceeds the size bound")
 _INTENT_DOMAIN = "brigade.native-t3.intent.v1"
 _HANDLE_DOMAIN = "brigade.native-t3.handle.v1"
 _EVIDENCE_DOMAIN = "brigade.native-t3.evidence.v1"
@@ -869,22 +889,38 @@ def accepted(*, workspace: Path, run_id: str, task_id: str, parent_thread: str, 
     if not journal.provider_reference(parent_thread):
         raise _refuse("invalid-identity", "the parent thread identity is not valid")
     run_dir = _context(workspace, run_id, task_id)
-    with enrollment.owned_run(workspace, run_dir):
-        _run_meta(workspace, run_dir)
-        events, verified, binding = _durable_claim(workspace, run_dir, task_id, parent_thread)
-        held = _held(events, task_id)
-        if held is not None:
-            raise _refuse("task-held", f"the task is held ({held})")
-        result = parse_claimed_result(payload, verified=verified, binding=binding)
-        _require_target(result, verified.retained.target)
-        return _correlate(
-            workspace=workspace,
-            run_dir=run_dir,
-            verified=verified,
-            result=result,
-            binding=binding,
-            mode=PARENT_REPORTED,
-        )
+    try:
+        # A late reply can reclaim a released unit, so this path takes the
+        # capacity lock before the run lock, exactly as ``claim`` and
+        # ``release_claim`` do. No reclaim path may reverse that order.
+        with capacity.capacity_lock(workspace):
+            with enrollment.owned_run(workspace, run_dir):
+                _run_meta(workspace, run_dir)
+                events, verified, binding = _durable_claim(workspace, run_dir, task_id, parent_thread)
+                result = parse_claimed_result(payload, verified=verified, binding=binding)
+                _require_target(result, verified.retained.target)
+                _hold_late_reply(
+                    workspace,
+                    run_dir,
+                    events,
+                    task_id,
+                    binding.attempt_id,
+                    _handle_digest(result, binding.parent_thread),
+                    verified.result.handle.spec.seat,
+                )
+                held = _held(events, task_id)
+                if held is not None:
+                    raise _refuse("task-held", f"the task is held ({held})")
+                return _correlate(
+                    workspace=workspace,
+                    run_dir=run_dir,
+                    verified=verified,
+                    result=result,
+                    binding=binding,
+                    mode=PARENT_REPORTED,
+                )
+    except capacity.CapacityError as exc:
+        raise _refuse(exc.code, str(exc)) from None
 
 
 def hold_resolve(
@@ -900,41 +936,79 @@ def hold_resolve(
     if (payload is None) == (not abandon):
         raise _refuse("invalid-identity", "exactly one resolution mode is required")
     run_dir = _context(workspace, run_id, task_id)
-    with enrollment.owned_run(workspace, run_dir):
-        _run_meta(workspace, run_dir)
-        events, verified, binding = _durable_claim(
-            workspace, run_dir, task_id, None, require_launch=False, require_requested=False
-        )
-        held = _held(events, task_id)
-        if not abandon:
-            if held == ABANDONED:
-                raise _refuse("task-held", f"the task is held ({held})")
-            if verified.result.launch_claim is None:
-                raise _refuse("no-claim", "the task has no durable launch claim")
-        _close_lost_request(workspace, run_dir, events, verified)
-        base = {
-            "schema": CORRELATION_SCHEMA,
-            "run_id": run_dir.name,
-            "task_id": task_id,
-            "attempt_id": binding.attempt_id,
-        }
-        if abandon:
-            replay = held == ABANDONED
-            if not replay:
-                _record_held(workspace, run_dir, task_id, binding.attempt_id, ABANDONED, binding.intent_digest)
-            return {**base, "mode": ABANDONED, "status": verified.result.status, "replayed": replay}
-        result = parse_claimed_result(payload, verified=verified, binding=binding)
-        _require_target(result, verified.retained.target)
-        if held == ACCEPT_CONFLICT:
-            return _resolve_hold(workspace, run_dir, verified, result, binding, base)
-        return _correlate(
-            workspace=workspace,
-            run_dir=run_dir,
-            verified=verified,
-            result=result,
-            binding=binding,
-            mode=OPERATOR_ASSERTED,
-        )
+    # A reply can void a release and reclaim its unit, so a resolving payload
+    # takes the capacity lock first and the run lock second. An abandon never
+    # changes capacity and keeps the run lock alone.
+    scope = capacity.capacity_lock(workspace) if payload is not None else nullcontext()
+    try:
+        with scope:
+            with enrollment.owned_run(workspace, run_dir):
+                _run_meta(workspace, run_dir)
+                events, verified, binding = _durable_claim(
+                    workspace, run_dir, task_id, None, require_launch=False, require_requested=False
+                )
+                held = _held(events, task_id)
+                if abandon and held is None and journal_core.released(events, task_id) is not None:
+                    raise _refuse("already-released", "the released claim cannot be abandoned")
+                result: NativeResult | None = None
+                if not abandon:
+                    if held == ABANDONED:
+                        raise _refuse("task-held", f"the task is held ({held})")
+                    if verified.result.launch_claim is None:
+                        raise _refuse("no-claim", "the task has no durable launch claim")
+                    void = journal_core.voided(events, task_id)
+                    if void is not None:
+                        # A crash between the void record and the hold-resolved
+                        # record leaves the void in place with the hold active.
+                        # The matching reply finishes that transition instead of
+                        # refusing; any other state stays refused.
+                        if held != ACCEPT_CONFLICT or payload is None:
+                            raise _refuse("already-voided", "the release was already voided")
+                        result = parse_claimed_result(payload, verified=verified, binding=binding)
+                        _require_target(result, verified.retained.target)
+                        if void.get("reply_digest") != _handle_digest(result, binding.parent_thread):
+                            raise _refuse("already-voided", "the release was already voided")
+                _close_lost_request(workspace, run_dir, events, verified)
+                base = {
+                    "schema": CORRELATION_SCHEMA,
+                    "run_id": run_dir.name,
+                    "task_id": task_id,
+                    "attempt_id": binding.attempt_id,
+                }
+                if abandon:
+                    replay = held == ABANDONED
+                    if not replay:
+                        _record_held(workspace, run_dir, task_id, binding.attempt_id, ABANDONED, binding.intent_digest)
+                    return {**base, "mode": ABANDONED, "status": verified.result.status, "replayed": replay}
+                if payload is None:
+                    raise _refuse("invalid-identity", "exactly one resolution mode is required")
+                if result is None:
+                    result = parse_claimed_result(payload, verified=verified, binding=binding)
+                    _require_target(result, verified.retained.target)
+                release = journal_core.released(events, task_id)
+                if release is not None:
+                    return _void_release(workspace, run_dir, events, verified, result, binding, release, held, base)
+                _hold_late_reply(
+                    workspace,
+                    run_dir,
+                    events,
+                    task_id,
+                    binding.attempt_id,
+                    _handle_digest(result, binding.parent_thread),
+                    verified.result.handle.spec.seat,
+                )
+                if held == ACCEPT_CONFLICT:
+                    return _resolve_hold(workspace, run_dir, verified, result, binding, base)
+                return _correlate(
+                    workspace=workspace,
+                    run_dir=run_dir,
+                    verified=verified,
+                    result=result,
+                    binding=binding,
+                    mode=OPERATOR_ASSERTED,
+                )
+    except capacity.CapacityError as exc:
+        raise _refuse(exc.code, str(exc)) from None
 
 
 def _resolve_hold(
@@ -989,6 +1063,466 @@ def _resolve_hold(
     }
 
 
+def _void_release(
+    workspace: Path,
+    run_dir: Path,
+    events: Sequence[run_journal.RunEvent],
+    verified: _Verified,
+    result: NativeResult,
+    binding: ClaimBinding,
+    release: Mapping[str, Any],
+    held: str | None,
+    base: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Void one release for the valid reply that proves its child exists.
+
+    The reply is linked with the claim's retained request key under the existing
+    correlation rules, then an audited void record supersedes the release and
+    the hold clears. A reply for another attempt or task never reaches here: it
+    refuses during validation, before any fact is written. A different handle
+    for the same attempt refuses ``release-mismatch`` and writes nothing.
+    """
+    if release.get("attempt_id") != binding.attempt_id:
+        raise _refuse("release-mismatch", "the release names a different attempt")
+    handle_digest = _handle_digest(result, binding.parent_thread)
+    prior = journal_core.reclaimed(events, result.task_id)
+    if prior is not None and prior.get("reply_digest") != handle_digest:
+        raise _refuse("release-mismatch", "the reply does not match the reclaimed release")
+    if held is not None and prior is None:
+        raise _refuse("journal-refused", "the held release has no reply record")
+    if prior is None:
+        _record_reclaim(
+            workspace,
+            run_dir,
+            events,
+            result.task_id,
+            binding.attempt_id,
+            release,
+            handle_digest,
+            verified.result.handle.spec.seat,
+        )
+    if held is None:
+        _record_held(
+            workspace,
+            run_dir,
+            result.task_id,
+            binding.attempt_id,
+            ACCEPT_CONFLICT,
+            str(release["evidence_sha256"]),
+        )
+    linked = _correlate(
+        workspace=workspace,
+        run_dir=run_dir,
+        verified=verified,
+        result=result,
+        binding=binding,
+        mode=OPERATOR_ASSERTED,
+    )
+    release_ref = journal_core.release_reference(release)
+    voided_at = run_events.format_recorded_at(datetime.now(timezone.utc))
+    _append(
+        workspace,
+        run_dir,
+        journal_core.VOIDED_EVENT,
+        {
+            "task_id": result.task_id,
+            "attempt_id": binding.attempt_id,
+            "reply_digest": handle_digest,
+            "release_ref": release_ref,
+            "voided_at": voided_at,
+        },
+        key=_key("release-voided", result.task_id, binding.attempt_id, release_ref),
+    )
+    _append(
+        workspace,
+        run_dir,
+        HOLD_RESOLVED_EVENT,
+        {
+            "task_id": result.task_id,
+            "attempt_id": binding.attempt_id,
+            "reason": ACCEPT_CONFLICT,
+            "evidence_digest": handle_digest,
+        },
+        key=_key("hold-resolved", result.task_id, binding.attempt_id, ACCEPT_CONFLICT, handle_digest),
+    )
+    return {
+        **base,
+        "mode": "hold-resolved",
+        "status": linked["status"],
+        "result_id": linked["result_id"],
+        "voided": True,
+        "voided_at": voided_at,
+        "release_ref": release_ref,
+        "replayed": False,
+    }
+
+
+def _evidence_bytes(path: Path) -> bytes:
+    """Read one bounded regular evidence file without following a final link."""
+    return read_bounded_regular(
+        path,
+        max_bytes=_MAX_EVIDENCE_BYTES,
+        missing=_EVIDENCE_MISSING,
+        unreadable=_EVIDENCE_NOT_REGULAR,
+        too_large=_EVIDENCE_TOO_LARGE,
+    )
+
+
+def _evidence_record(value: object) -> Mapping[str, Any]:
+    """Validate one closed activity record: ``ts``, ``tool`` and ``thread_id``."""
+    if not isinstance(value, Mapping) or set(value) - _EVIDENCE_RECORD_KEYS:
+        raise _refuse("evidence-invalid", "an evidence record is not usable")
+    for field in ("ts", "tool", "thread_id"):
+        if field in value and type(value[field]) is not str:
+            raise _refuse("evidence-invalid", "an evidence record field is not usable")
+    return value
+
+
+def _evidence_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build one evidence object, refusing a repeated key."""
+    seen: set[str] = set()
+    for key, _ in pairs:
+        if key in seen:
+            raise _refuse("evidence-invalid", "the evidence repeats an object key")
+        seen.add(key)
+    return dict(pairs)
+
+
+def _evidence_constant(_: str) -> Any:
+    """Refuse a non-finite JSON number."""
+    raise _refuse("evidence-invalid", "the evidence carries a non-finite number")
+
+
+def _evidence_rows(raw: bytes) -> tuple[str | None, tuple[Mapping[str, Any], ...]]:
+    """Parse a JSON object, a JSON array or JSON Lines, and name the thread."""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _refuse("evidence-invalid", "the evidence file is not UTF-8 text") from None
+    stripped = text.strip()
+    if not stripped:
+        raise _refuse("evidence-invalid", "the evidence file is empty")
+    try:
+        document: object = json.loads(stripped, object_pairs_hook=_evidence_object, parse_constant=_evidence_constant)
+    except (ValueError, RecursionError):
+        document = None
+    if document is not None:
+        if isinstance(document, Mapping):
+            if set(document) != _EVIDENCE_TOP_KEYS:
+                if document and set(document) <= _EVIDENCE_RECORD_KEYS:
+                    # A single-line JSON Lines export parses as one record.
+                    return None, (_evidence_record(document),)
+                raise _refuse("evidence-invalid", "the evidence document is not usable")
+            header = document["parent_thread"]
+            if type(header) is not str or not journal.provider_reference(header):
+                raise _refuse("evidence-invalid", "the evidence parent thread is not usable")
+            events = document["events"]
+            if not isinstance(events, list):
+                raise _refuse("evidence-invalid", "the evidence events are not a list")
+            return header, tuple(_evidence_record(row) for row in events)
+        if isinstance(document, list):
+            return None, tuple(_evidence_record(row) for row in document)
+        raise _refuse("evidence-invalid", "the evidence document is not usable")
+    rows: list[Mapping[str, Any]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line, object_pairs_hook=_evidence_object, parse_constant=_evidence_constant)
+        except (ValueError, RecursionError):
+            raise _refuse("evidence-invalid", "the evidence file is not valid JSON lines") from None
+        rows.append(_evidence_record(row))
+    if not rows:
+        raise _refuse("evidence-invalid", "the evidence file is empty")
+    return None, tuple(rows)
+
+
+def _evidence_thread(header_thread: str | None, rows: Sequence[Mapping[str, Any]], parent_thread: str) -> None:
+    """Require the evidence names exactly the declared parent thread."""
+    if header_thread is not None and header_thread != parent_thread:
+        raise _refuse("evidence-thread-mismatch", "the evidence names another parent thread")
+    named = header_thread is not None
+    for row in rows:
+        thread = row.get("thread_id")
+        if thread is None:
+            continue
+        named = True
+        if thread != parent_thread:
+            raise _refuse("evidence-thread-mismatch", "the evidence names another parent thread")
+    if not named:
+        raise _refuse("evidence-thread-missing", "the evidence does not name a parent thread")
+
+
+def _evidence_moment(value: object) -> datetime | None:
+    """Parse one ISO timestamp; an offset-less or date-only value refuses.
+
+    A timestamp without an explicit offset cannot be placed on the timeline
+    against a UTC claim, so it is never assumed to be UTC. Only a trailing
+    ``Z`` (either case) is read as ``+00:00``.
+    """
+    if type(value) is not str:
+        return None
+    text = value[:-1] + "+00:00" if value.endswith(("Z", "z")) else value
+    try:
+        moment = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if moment.tzinfo is None:
+        return None
+    if "T" not in text and " " not in text:
+        return None
+    return moment
+
+
+def _require_no_delegate_call(rows: Sequence[Mapping[str, Any]], start: datetime) -> None:
+    """Refuse when any delegate call is at or after the claim time.
+
+    A record whose timestamp is missing, offset-less, date-only or unparseable
+    cannot be placed before the claim, so it counts as inside the window and
+    never releases a claim. A timestamp written without fractional seconds can
+    only be placed to the second, so it compares at second precision.
+    """
+    for row in rows:
+        if row.get("tool") != "delegate_task":
+            continue
+        stamp = row.get("ts")
+        moment = _evidence_moment(stamp)
+        if moment is None:
+            raise _refuse("evidence-conflict", "the evidence shows a delegate_task call in the claim window")
+        if isinstance(stamp, str) and "." in stamp:
+            inside = moment >= start
+        else:
+            inside = moment.replace(microsecond=0) >= start.replace(microsecond=0)
+        if inside:
+            raise _refuse("evidence-conflict", "the evidence shows a delegate_task call in the claim window")
+
+
+def _require_fresh_evidence(rows: Sequence[Mapping[str, Any]], release_time: datetime) -> None:
+    """Refuse evidence whose latest row cannot speak for the release moment.
+
+    The newest row must be at most ten minutes old and no more than one minute
+    ahead of the release, because a stale snapshot cannot rule out a delegate
+    call since it was taken. A row without a usable timestamp leaves the newest
+    moment unknown, so it refuses instead of assuming freshness.
+    """
+    latest: datetime | None = None
+    for row in rows:
+        moment = _evidence_moment(row.get("ts"))
+        if moment is None:
+            raise _refuse("evidence-stale", "the evidence does not carry a usable latest timestamp")
+        if latest is None or moment > latest:
+            latest = moment
+    if latest is None:
+        raise _refuse("evidence-stale", "the evidence carries no timestamped record")
+    if latest > release_time + _EVIDENCE_MAX_SKEW:
+        raise _refuse("evidence-future", "the evidence is timestamped after the release time")
+    if latest < release_time - _EVIDENCE_MAX_AGE:
+        raise _refuse("evidence-stale", "the evidence is older than the freshness bound")
+
+
+def _claim_recorded_at(events: Sequence[run_journal.RunEvent], task_id: str) -> datetime:
+    for event in events:
+        if event.event_type == CLAIM_EVENT and event.payload.get("task_id") == task_id:
+            moment = _evidence_moment(event.recorded_at)
+            if moment is None:
+                raise _refuse("journal-refused", "the claim time is not readable")
+            return moment
+    raise _refuse("no-claim", "the task has no durable governed claim")
+
+
+def _reply_recorded(events: Sequence[run_journal.RunEvent], task_id: str, attempt_id: str) -> bool:
+    """True when a correlation or an observation already names this attempt."""
+    if _correlation(events, task_id) is not None:
+        return True
+    return any(
+        event.event_type == "task.observed"
+        and event.payload.get("task_id") == task_id
+        and event.payload.get("attempt_id") == attempt_id
+        for event in events
+    )
+
+
+def _record_reclaim(
+    workspace: Path,
+    run_dir: Path,
+    events: Sequence[run_journal.RunEvent],
+    task_id: str,
+    attempt_id: str,
+    release: Mapping[str, Any],
+    reply_digest: str,
+    seat: str,
+) -> Mapping[str, Any]:
+    """Put a released unit back once a valid late reply proves a child exists.
+
+    The record keeps the reply digest and an audit reference to the release it
+    supersedes. It is written before the hold, so a crash in between still
+    charges the unit instead of leaving the slot free. Callers hold the capacity
+    lock, so the slot note is read against a capacity snapshot no claim can move.
+    A reclaim always records the unit because the child exists; when restoring
+    it goes past a limit the note says so instead of dropping the count.
+    """
+    if not journal.digest(reply_digest):
+        raise _refuse("journal-refused", "the reply digest is not usable")
+    existing = journal_core.reclaimed(events, task_id)
+    if existing is not None:
+        return existing
+    release_ref = journal_core.release_reference(release)
+    payload = {
+        "task_id": task_id,
+        "attempt_id": attempt_id,
+        "reply_digest": reply_digest,
+        "release_ref": release_ref,
+        "reclaimed_at": run_events.format_recorded_at(datetime.now(timezone.utc)),
+        "capacity": _slot_note(workspace, seat),
+    }
+    _append(
+        workspace,
+        run_dir,
+        journal_core.RECLAIMED_EVENT,
+        payload,
+        key=_key("release-reclaimed", task_id, attempt_id, release_ref),
+    )
+    return payload
+
+
+def _slot_note(workspace: Path, seat: str) -> str:
+    """Report whether restoring one unit stays inside the declared limits.
+
+    Callers hold the capacity lock, so this snapshot cannot be overtaken by a
+    claim. An unreadable roster or an untrusted scan is reported as ``unknown``
+    rather than guessed, and the unit is still recorded by the caller.
+    """
+    occupancy = capacity.governed_occupancy(workspace)
+    if not occupancy.authoritative:
+        return _SLOT_UNKNOWN
+    try:
+        roster = admission.load_roster(workspace)
+    except (NativeChildCustodyError, OSError, ValueError):
+        return _SLOT_UNKNOWN
+    return _SLOT_WITHIN_LIMIT if capacity.assess(roster, seat, occupancy).granted else _SLOT_OVER_LIMIT
+
+
+def _hold_late_reply(
+    workspace: Path,
+    run_dir: Path,
+    events: Sequence[run_journal.RunEvent],
+    task_id: str,
+    attempt_id: str,
+    reply_digest: str,
+    seat: str,
+) -> None:
+    """Hold a released attempt that received a valid late reply, and reclaim its slot.
+
+    The reply proves a child exists, so the unit occupies again. The hold keeps
+    the task from correlating until an operator resolves it with that reply.
+    """
+    release = journal_core.released(events, task_id)
+    if release is None or release.get("attempt_id") != attempt_id:
+        return
+    evidence = release.get("evidence_sha256")
+    if not journal.digest(evidence):
+        raise _refuse("journal-refused", "the release record is not usable")
+    _record_reclaim(workspace, run_dir, events, task_id, attempt_id, release, reply_digest, seat)
+    _record_held(workspace, run_dir, task_id, attempt_id, ACCEPT_CONFLICT, str(evidence))
+    raise _refuse("accept-conflict", "the released claim received a late native reply")
+
+
+def _require_releasable(
+    events: Sequence[run_journal.RunEvent],
+    verified: _Verified,
+    task_id: str,
+    attempt_id: str,
+) -> None:
+    """Refuse every state that no longer supports releasing this claim."""
+    if journal_core.released(events, task_id) is not None:
+        raise _refuse("already-released", "the claim was already released")
+    held = _held(events, task_id)
+    if held is not None:
+        raise _refuse("task-held", f"the task is held ({held})")
+    result = verified.result
+    if result.status in journal.TERMINAL or result.result_id is not None:
+        raise _refuse("task-terminal", "the claim is already terminal")
+    if result.acknowledged:
+        raise _refuse("task-acked", "the claim result is already acknowledged")
+    if _reply_recorded(events, task_id, attempt_id):
+        raise _refuse("native-reply-recorded", "the claim already has a native reply record")
+
+
+def release_claim(
+    *,
+    workspace: Path,
+    run_id: str,
+    task_id: str,
+    parent_thread: str,
+    evidence: Path,
+    confirm_no_delegate: bool,
+) -> dict[str, Any]:
+    """Release one uncorrelated claim after an operator assertion and evidence check.
+
+    The verb frees exactly one native slot for that claim. It refuses any
+    correlated, terminal, acknowledged, held or already released task, and it
+    never changes another task's slot. The evidence must be recent, and the task
+    state is read again under the locks after the evidence is parsed, so a
+    concurrent writer cannot slip a reply or a hold past the first check.
+    """
+    workspace = workspace.expanduser().resolve()
+    if not confirm_no_delegate:
+        raise _refuse("confirm-required", "the release requires --confirm-no-delegate")
+    if not journal.provider_reference(parent_thread):
+        raise _refuse("invalid-identity", "the parent thread identity is not valid")
+    run_dir = _context(workspace, run_id, task_id)
+    now = datetime.now(timezone.utc)
+    try:
+        with capacity.capacity_lock(workspace):
+            with enrollment.owned_run(workspace, run_dir):
+                _run_meta(workspace, run_dir)
+                events, verified, binding = _durable_claim(workspace, run_dir, task_id, parent_thread)
+                _require_releasable(events, verified, task_id, binding.attempt_id)
+                raw = _evidence_bytes(evidence)
+                header_thread, rows = _evidence_rows(raw)
+                _evidence_thread(header_thread, rows, parent_thread)
+                _require_no_delegate_call(rows, _claim_recorded_at(events, task_id))
+                _require_fresh_evidence(rows, now)
+                # Re-read under the same locks. A writer that does not share
+                # them can still have correlated, held, released or finished
+                # the task while the evidence file was read and parsed.
+                events, verified, binding = _durable_claim(workspace, run_dir, task_id, parent_thread)
+                _require_releasable(events, verified, task_id, binding.attempt_id)
+                released_at = run_events.format_recorded_at(now)
+                evidence_sha256 = hashlib.sha256(raw).hexdigest()
+                _append(
+                    workspace,
+                    run_dir,
+                    RELEASED_EVENT,
+                    {
+                        "task_id": task_id,
+                        "attempt_id": binding.attempt_id,
+                        "dispatch_attempt": binding.dispatch_attempt,
+                        "parent_thread": parent_thread,
+                        "operator_assertion": True,
+                        "released_at": released_at,
+                        "evidence_sha256": evidence_sha256,
+                        "evidence_bytes": len(raw),
+                    },
+                    key=_key("released", task_id, binding.attempt_id),
+                )
+                return {
+                    "schema": RELEASE_SCHEMA,
+                    "run_id": run_dir.name,
+                    "task_id": task_id,
+                    "attempt_id": binding.attempt_id,
+                    "dispatch_attempt": binding.dispatch_attempt,
+                    "parent_thread": parent_thread,
+                    "operator_assertion": True,
+                    "released_at": released_at,
+                    "evidence_sha256": evidence_sha256,
+                    "evidence_bytes": len(raw),
+                    "state": "released",
+                }
+    except capacity.CapacityError as exc:
+        raise _refuse(exc.code, str(exc)) from None
+
+
 def claim_cli(args: Any) -> int:
     return _emit(
         lambda: claim(workspace=args.target, run_id=args.run_id, task_id=args.task_id, parent_thread=args.parent_thread)
@@ -1015,5 +1549,18 @@ def hold_resolve_cli(args: Any) -> int:
             task_id=args.task_id,
             payload=None if args.abandon else _read_native(args.native_json),
             abandon=args.abandon,
+        )
+    )
+
+
+def release_claim_cli(args: Any) -> int:
+    return _emit(
+        lambda: release_claim(
+            workspace=args.target,
+            run_id=args.run_id,
+            task_id=args.task_id,
+            parent_thread=args.parent_thread,
+            evidence=args.evidence,
+            confirm_no_delegate=args.confirm_no_delegate,
         )
     )

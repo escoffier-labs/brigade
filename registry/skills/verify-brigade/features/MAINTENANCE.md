@@ -191,6 +191,7 @@ setup                no feature file yet
 skills               no feature file yet
 stations             no feature file yet
 status               run by hand on the checkout in SKILL.md, not recorded as a drive
+t3 release-claim     no drive yet; unit-tested in tests/test_native_t3_release_claim.py
 tokens               no feature file yet
 tools                no feature file yet
 untrusted            no feature file yet; extras surface
