@@ -432,9 +432,9 @@ def test_claim_stale_lock_reads_the_owner_metadata_once_per_stale_check(
     reads: list[Path] = []
     original = runguard._read_lock_owner
 
-    def counting(path: Path) -> dict[str, object] | None:
+    def counting(path: Path, *, propagate_access_denied: bool = False) -> dict[str, object] | None:
         reads.append(path)
-        return original(path)
+        return original(path, propagate_access_denied=propagate_access_denied)
 
     monkeypatch.setattr(runguard, "_read_lock_owner", counting)
 
@@ -511,9 +511,9 @@ def test_release_reads_the_metadata_it_may_restore_through_the_shared_open(
     reads: list[Path] = []
     original = nt_process.read_bytes_sharing_delete
 
-    def spy(path: Path | str) -> bytes:
+    def spy(path: Path | str, *, missing_if_access_denied: bool = False) -> bytes:
         reads.append(Path(path))
-        return original(path)
+        return original(path, missing_if_access_denied=missing_if_access_denied)
 
     monkeypatch.setattr(nt_process, "read_bytes_sharing_delete", spy)
 
@@ -615,7 +615,9 @@ def test_a_reader_retries_a_name_whose_delete_is_still_pending(tmp_path: Path, m
 
 
 @requires_fake_kernel32
-def test_a_reader_reports_a_pending_delete_as_a_missing_name(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_release_reader_reports_a_pending_delete_as_a_missing_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     target = tmp_path / "owner.json"
     target.write_text("{}", encoding="utf-8")
     fake = FakeKernel32(deny_opens=99)
@@ -625,16 +627,16 @@ def test_a_reader_reports_a_pending_delete_as_a_missing_name(tmp_path: Path, mon
     monkeypatch.setattr(nt_process, "DELETE_PENDING_RETRY_SECONDS", 0.0)
 
     with pytest.raises(FileNotFoundError):
-        nt_process.read_text_sharing_delete(target)
+        nt_process.read_text_sharing_delete(target, missing_if_access_denied=True)
 
     assert len(fake.create_calls) == nt_process.DELETE_PENDING_RETRY_ATTEMPTS
 
 
 @requires_fake_kernel32
-def test_lock_metadata_reads_do_not_fail_hard_while_a_release_deletes_them(
+def test_persistent_access_denied_makes_a_snapshot_live_and_not_stale(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Callers like reconcile_run_lock must see a lock going away, not a refusal."""
+    """An unreadable published lock must not be reclaimed as stale."""
     lock_path = tmp_path / "run.lock"
     runguard._publish_lock(lock_path, run_dir=None)
     fake = FakeKernel32(deny_opens=999)
@@ -643,9 +645,11 @@ def test_lock_metadata_reads_do_not_fail_hard_while_a_release_deletes_them(
     monkeypatch.setattr(nt_process, "_last_error", lambda: ERROR_ACCESS_DENIED)
     monkeypatch.setattr(nt_process, "DELETE_PENDING_RETRY_SECONDS", 0.0)
 
-    assert runguard._read_lock_owner(lock_path) is None
-    assert runguard._lock_snapshot(lock_path) is not None
-    assert runguard._lock_is_stale(lock_path) is True
+    snapshot = runguard._lock_snapshot(lock_path)
+
+    assert snapshot is not None
+    assert snapshot.stale is False
+    assert runguard._lock_is_stale(lock_path) is False
 
 
 # This is the acceptance test for issue #2747 on Windows. It must run there: if a

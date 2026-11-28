@@ -193,7 +193,7 @@ def _metadata_bytes(path: Path) -> list[tuple[Path, bytes]]:
     for name in _LOCK_METADATA_NAMES:
         target = path / name
         try:
-            captured.append((target, nt_process.read_bytes_sharing_delete(target)))
+            captured.append((target, nt_process.read_bytes_sharing_delete(target, missing_if_access_denied=True)))
         except FileNotFoundError:
             continue
         except OSError:

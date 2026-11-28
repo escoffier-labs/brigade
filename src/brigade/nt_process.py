@@ -172,34 +172,36 @@ def pid_is_active(pid: int) -> bool:
         kernel32.CloseHandle(handle)
 
 
-def open_shared_delete(path: Path | str) -> int:
+def open_shared_delete(path: Path | str, *, missing_if_access_denied: bool = False) -> int:
     """Open ``path`` for reading with every share mode and return the descriptor.
 
     A Windows reader that does not share delete access blocks the holder from
     unlinking that name (issue #2747), so lock metadata is always read through
     this open. Every error a plain ``os.open`` would raise is raised unchanged;
-    anything else falls back to ``os.open``, because a binding problem must never
-    change a lock-liveness verdict.
+    persistent access denial remains an error unless the caller has already
+    started releasing this lock and asks to treat it as a missing name. Anything
+    else falls back to ``os.open``, because a binding problem must never change a
+    lock-liveness verdict.
     """
     target = Path(path)
     if sys.platform != "win32":
         return os.open(target, os.O_RDONLY | _BINARY)
     try:
-        return _open_shared_while_delete_pends(target)
+        return _open_shared_while_delete_pends(target, missing_if_access_denied=missing_if_access_denied)
     except OSError:
         raise
     except Exception:  # noqa: BLE001 - the plain open is the pre-existing behavior
         return os.open(target, os.O_RDONLY | _BINARY)
 
 
-def _open_shared_while_delete_pends(path: Path) -> int:
+def _open_shared_while_delete_pends(path: Path, *, missing_if_access_denied: bool) -> int:
     """Read a name that a concurrent release may be unlinking (issue #2747 review).
 
     While a POSIX-semantics delete is pending, opening the name answers
     ``ERROR_ACCESS_DENIED``. That is a name going away rather than a failure, and
-    readers run in paths that turn a hard error into a refused operation, so the
-    open is retried briefly and then reported as missing. A reader can only see
-    this for a lock whose own holder is releasing it.
+    the open is retried briefly. Only the release operation reports a persistent
+    denial as missing, because it has already initiated the delete. Other readers
+    preserve the denial so they cannot mistake an ACL-protected lock for stale.
     """
     attempts = DELETE_PENDING_RETRY_ATTEMPTS
     while True:
@@ -209,14 +211,16 @@ def _open_shared_while_delete_pends(path: Path) -> int:
             if getattr(error, "winerror", None) != ERROR_ACCESS_DENIED:
                 raise
             attempts -= 1
-            if attempts <= 0:
+            if attempts <= 0 and missing_if_access_denied:
                 raise FileNotFoundError(errno.ENOENT, os.strerror(errno.ENOENT), str(path)) from error
+            if attempts <= 0:
+                raise
             time.sleep(DELETE_PENDING_RETRY_SECONDS)
 
 
-def read_text_sharing_delete(path: Path | str) -> str:
+def read_text_sharing_delete(path: Path | str, *, missing_if_access_denied: bool = False) -> str:
     """Read ``path`` as text through :func:`open_shared_delete`."""
-    descriptor = open_shared_delete(path)
+    descriptor = open_shared_delete(path, missing_if_access_denied=missing_if_access_denied)
     try:
         stream = os.fdopen(descriptor, "r", encoding=locale.getencoding())
     except BaseException:
@@ -226,9 +230,9 @@ def read_text_sharing_delete(path: Path | str) -> str:
         return stream.read()
 
 
-def read_bytes_sharing_delete(path: Path | str) -> bytes:
+def read_bytes_sharing_delete(path: Path | str, *, missing_if_access_denied: bool = False) -> bytes:
     """Read ``path`` as bytes through :func:`open_shared_delete`."""
-    descriptor = open_shared_delete(path)
+    descriptor = open_shared_delete(path, missing_if_access_denied=missing_if_access_denied)
     try:
         stream = os.fdopen(descriptor, "rb")
     except BaseException:

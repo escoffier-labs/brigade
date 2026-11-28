@@ -297,8 +297,15 @@ def _lock_snapshot(path: Path) -> _LockSnapshot | None:
     except (FileNotFoundError, NotADirectoryError, ValueError):
         pass
     except OSError as exc:
+        if getattr(exc, "winerror", None) == nt_process.ERROR_ACCESS_DENIED:
+            return _LockSnapshot(fingerprint=(info.st_dev, info.st_ino, None), stale=False)
         raise RunLockError(f"could not inspect run lock {path}: {exc}") from exc
-    owner = _read_lock_owner(path)
+    try:
+        owner = _read_lock_owner(path, propagate_access_denied=True)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == nt_process.ERROR_ACCESS_DENIED:
+            return _LockSnapshot(fingerprint=(info.st_dev, info.st_ino, None), stale=False)
+        raise
     owner_pid = owner.get("pid") if owner is not None else None
     if isinstance(owner_pid, int):
         recorded_pids.append(owner_pid)
@@ -337,10 +344,14 @@ def read_lock_owner(path: Path | str | None) -> dict[str, object] | None:
         return None
 
 
-def _read_lock_owner(path: Path) -> dict[str, object] | None:
+def _read_lock_owner(path: Path, *, propagate_access_denied: bool = False) -> dict[str, object] | None:
     try:
         payload = json.loads(nt_process.read_text_sharing_delete(path / "owner.json"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+    except OSError as exc:
+        if propagate_access_denied and getattr(exc, "winerror", None) == nt_process.ERROR_ACCESS_DENIED:
+            raise
+        return None
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return None
     return payload if isinstance(payload, dict) else None
 

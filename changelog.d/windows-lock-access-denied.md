@@ -1,0 +1,1 @@
+- Treat persistently unreadable Windows lock metadata as live outside lock release.
