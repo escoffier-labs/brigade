@@ -539,6 +539,7 @@ def _show(args: argparse.Namespace) -> int:
         member = _dict(member)
         brigade, github = _dict(member.get("brigade")), _dict(member.get("github"))
         fleet_run = _dict(member.get("fleet_run"))
+        park_kind = _text(member.get("park_kind"))
         pr = _text(github.get("display_ref")) if github else "-"
         if github and github.get("external_state"):
             pr = f"{pr} ({_text(github['external_state'])})"
@@ -547,6 +548,7 @@ def _show(args: argparse.Namespace) -> int:
             f"  attempts {_count(member.get('attempt_count'))}  owner {_text(member.get('owner_node'))}"
             f"  task {_text(brigade.get('display_ref')) if brigade else '-'}"
             f"  run {_text(fleet_run.get('display_ref')) if fleet_run else '-'}  pr {pr}"
+            f"  park {park_kind}"
             f"  {'drifted' if member.get('drifted') else 'in-spec'}"
         )
     return 0
@@ -602,18 +604,19 @@ def _complete(args: argparse.Namespace) -> int:
     return 0
 
 
-def _local_repos(target: Path) -> dict[str, Path]:
-    """Canonical identity to checkout for every repos.toml entry this node can resolve."""
+def _local_repos(target: Path) -> tuple[dict[str, Path], list[dict[str, str]]]:
+    """Return resolvable checkouts and safe diagnostics for entries that were dropped."""
     entries, errors, loaded = _select_sweep_entries(target, repo_ids=None)
     if not loaded or errors:
         raise campaign.PreviewError("repository_selection_refused")
     repos: dict[str, Path] = {}
+    dropped: list[dict[str, str]] = []
     for entry in entries:
         try:
             repos.setdefault(_identity(entry), entry.path)
-        except campaign.PreviewError:
-            continue
-    return repos
+        except campaign.PreviewError as exc:
+            dropped.append({"identity": entry.repo_id, "reason": str(exc)})
+    return repos, dropped
 
 
 def _consume(args: argparse.Namespace) -> int:
@@ -625,12 +628,17 @@ def _consume(args: argparse.Namespace) -> int:
     target = args.target.expanduser().resolve()
     try:
         key = campaign.opaque_key(args.campaign_key)
-        repos = _local_repos(target)
+        repos, dropped = _local_repos(target)
     except campaign.PreviewError as exc:
         return _refuse(args, str(exc))
     except (OSError, ValueError, TypeError, IndexError, RecursionError, RuntimeError):
         return _refuse(args, "input_refused")
     if not repos:
+        if args.json:
+            print(json.dumps({"dropped": dropped, "passes": []}, sort_keys=True, indent=2))
+        else:
+            for item in dropped:
+                print(f"dropped  {_text(item['identity'])}  {_text(item['reason'])}")
         return _refuse(args, "no_local_repositories")
     try:
         passes = consumer.consume(
@@ -660,8 +668,10 @@ def _consume(args: argparse.Namespace) -> int:
     ]
     code = 1 if any(p.outcome in consumer.FAILING for p in passes) else 0
     if args.json:
-        print(json.dumps({"passes": rows}, sort_keys=True, indent=2))
+        print(json.dumps({"dropped": dropped, "passes": rows}, sort_keys=True, indent=2))
         return code
+    for item in dropped:
+        print(f"dropped  {_text(item['identity'])}  {_text(item['reason'])}")
     for row in rows:
         line = f"{_text(row['outcome'])}  {_text(row['repo'])}  generation {_text(row['generation'])}  run {_text(row['run_id'])}"
         print(f"{line}  {_text(row['detail'])}" if row["detail"] else line)

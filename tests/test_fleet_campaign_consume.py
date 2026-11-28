@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -259,6 +260,8 @@ def test_successful_run_leaves_the_member_open_and_is_not_rerun(hub):
     assert item["status"] not in {"completed", "canceled", "archived"} and item["attempt_count"] == 0
     parked = Node(conn, "node-a").get_ownership(work_id)["ownership"]
     assert parked["next_action"]["kind"] == "await-review"
+    shown = Node(conn, "node-a").get_campaign(KEY)["members"]
+    assert next(member for member in shown if member["work_id"] == work_id)["park_kind"] == "await-review"
     assert parked["evidence_refs"][0]["ref"] == passes[0].run_id
     assert "brigade/dispatch/task-1" in parked["next_action"]["resume_condition"]
     # Every step left a Hub event, and the local receipt names the same steps.
@@ -514,7 +517,7 @@ def test_consume_json_exits_nonzero_when_a_pass_failed(tmp_path, monkeypatch, ca
     from brigade import cli, fleet_client
     from brigade.cli import fleet_campaign
 
-    monkeypatch.setattr(fleet_campaign, "_local_repos", lambda target: {"acme/one": tmp_path})
+    monkeypatch.setattr(fleet_campaign, "_local_repos", lambda target: ({"acme/one": tmp_path}, []))
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda target: "node-a")
     monkeypatch.setattr(
         consumer, "consume", lambda hub, **kw: [consumer.Pass("failed", "acme/one", "w-1", 1, "r-1", "boom")]
@@ -525,6 +528,64 @@ def test_consume_json_exits_nonzero_when_a_pass_failed(tmp_path, monkeypatch, ca
     assert (
         cli.main(["fleet", "campaign", "consume", KEY, "--target", str(tmp_path), "--worker", "coder", "--json"]) == 0
     )
+
+
+def test_consume_reports_unresolvable_repository_in_text_and_json(tmp_path, monkeypatch, capsys):
+    from brigade import cli, fleet_client
+
+    valid = tmp_path / "valid"
+    valid.mkdir()
+    subprocess.run(["git", "-C", str(valid), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(valid), "remote", "add", "origin", "https://github.com/acme/valid.git"], check=True
+    )
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "repos.toml").write_text(
+        '[[repo]]\nid="valid"\npath="valid"\n[[repo]]\nid="missing"\npath="missing"\n'
+    )
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda target: "node-a")
+    monkeypatch.setattr(consumer, "consume", lambda hub, **kw: [])
+
+    command = ["fleet", "campaign", "consume", KEY, "--target", str(tmp_path), "--worker", "coder"]
+    assert cli.main(command) == 0
+    assert capsys.readouterr().out.strip() == "dropped  missing  repository_identity_unresolved"
+    assert cli.main([*command, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "dropped": [{"identity": "missing", "reason": "repository_identity_unresolved"}],
+        "passes": [],
+    }
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_consume_reports_all_dropped_repositories_before_refusing(tmp_path, monkeypatch, capsys, json_output):
+    from brigade import cli
+
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "repos.toml").write_text(
+        '[[repo]]\nid="missing-one"\npath="missing-one"\n[[repo]]\nid="missing-two"\npath="missing-two"\n'
+    )
+
+    def unexpected_consume(*args, **kwargs):
+        pytest.fail("an empty repository selection must not reach the consumer")
+
+    monkeypatch.setattr(consumer, "consume", unexpected_consume)
+    command = ["fleet", "campaign", "consume", KEY, "--target", str(tmp_path), "--worker", "coder"]
+    assert cli.main([*command, *(["--json"] if json_output else [])]) == 2
+    captured = capsys.readouterr()
+    if json_output:
+        assert json.loads(captured.out) == {
+            "dropped": [
+                {"identity": identity, "reason": "repository_identity_unresolved"}
+                for identity in ("missing-one", "missing-two")
+            ],
+            "passes": [],
+        }
+        assert json.loads(captured.err) == {"error": "no_local_repositories"}
+    else:
+        assert captured.out.splitlines() == [
+            f"dropped  {identity}  repository_identity_unresolved" for identity in ("missing-one", "missing-two")
+        ]
+        assert captured.err == "error: no_local_repositories\n"
 
 
 def test_receipt_writer_appends_one_json_line_per_step(tmp_path):
