@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from contextvars import ContextVar
 from pathlib import Path, PureWindowsPath
 from time import monotonic
 from typing import Any
@@ -30,14 +31,19 @@ _PLANNER_TOKENS = {"{base}", "{head}", "{output}", "{planner_dir}", "{repo}", "{
 _GIT_OID = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
 _PLANNER_ENV = {"PATH", "HOME", "USERPROFILE", "LANG", "LC_ALL", "LC_CTYPE", "TMPDIR", "TEMP", "TMP"}
 _WINDOWS_PLANNER_ENV = {"SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "SYSTEMDRIVE"}
+_OFFLINE_SNAPSHOT: ContextVar[bool] = ContextVar("_OFFLINE_SNAPSHOT", default=False)
 
 
 def _planner_env() -> dict[str, str]:
     """Pass only the OS settings needed by the planner and its Git commands."""
     if os.name == "nt":
         allowed = _PLANNER_ENV | _WINDOWS_PLANNER_ENV
-        return {key.upper(): value for key, value in os.environ.items() if key.upper() in allowed}
-    return {key: value for key, value in os.environ.items() if key in _PLANNER_ENV}
+        env = {key.upper(): value for key, value in os.environ.items() if key.upper() in allowed}
+    else:
+        env = {key: value for key, value in os.environ.items() if key in _PLANNER_ENV}
+    if _OFFLINE_SNAPSHOT.get():
+        env.update(GIT_NO_LAZY_FETCH="1", GIT_ALLOW_PROTOCOL="")
+    return env
 
 
 def _remaining(deadline: float | None, limit: float) -> float:
@@ -434,7 +440,13 @@ def _plan_at(
 
 
 def plan_snapshot(
-    target: Path, base: str, tree: str, *, deadline: float, facts: verify_manifest_git.VerifyGitFacts | None = None
+    target: Path,
+    base: str,
+    tree: str,
+    *,
+    deadline: float,
+    facts: verify_manifest_git.VerifyGitFacts | None = None,
+    offline: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, tuple[bytes, bytes]]]:
     """Plan from a verified tree object and the base-pinned planner."""
     base = _commit_id(base.encode("ascii"))
@@ -447,7 +459,11 @@ def plan_snapshot(
         identity = facts.identity
         if identity is not None and identity.root is not None and Path(identity.root).resolve() == target.resolve():
             git_dir = identity.git_dir
-    return _plan_at(target, base, tree, snapshot=True, deadline=deadline, git_dir=git_dir)
+    token = _OFFLINE_SNAPSHOT.set(offline)
+    try:
+        return _plan_at(target, base, tree, snapshot=True, deadline=deadline, git_dir=git_dir)
+    finally:
+        _OFFLINE_SNAPSHOT.reset(token)
 
 
 def _record_path(target: Path, head: str | None, base: str | None, *, worktree: bool = False) -> Path:

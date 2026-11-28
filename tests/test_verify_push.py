@@ -283,6 +283,36 @@ def test_newer_receipt_outcome_governs_unless_unrelated(push_repo, capsys, later
     assert result["status"] == expected, result
 
 
+@pytest.mark.parametrize(
+    ("newer", "older_pass", "expected"),
+    [
+        ("refused", True, "ok"),
+        ("refused", False, "missing_receipt"),
+        ("ambiguous", True, "indeterminate"),
+        ("required", True, "rejected"),
+    ],
+)
+def test_intake_refusal_has_no_tree_evidence(push_repo, capsys, newer, older_pass, expected):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    if older_pass:
+        _receipt(push_repo, tree)
+    wrapped = ["env", *PREFIX, SELECTOR]
+    path = _receipt(
+        push_repo, tree, second=2, status="failed", argv=wrapped if newer == "ambiguous" else None, passed=0
+    )
+    if newer == "refused":
+        receipt = json.loads(path.read_text(encoding="utf-8"))
+        command = shlex.join(wrapped) + " && git status"
+        receipt.update(
+            status="rejected",
+            planned_commands=[command],
+            commands=[{"status": "rejected", "exit_code": 2, "command": command, "test_outcomes": None}],
+        )
+        path.write_text(json.dumps(receipt), encoding="utf-8")
+    assert _single(push_repo, capsys)[1]["status"] == expected
+
+
 @pytest.mark.parametrize("status", ["failed", "rejected"])
 def test_sole_unsuccessful_receipt_reports_not_completed(push_repo, capsys, status):
     _policy(push_repo)
@@ -534,6 +564,75 @@ def test_plan_snapshot_and_remedy(push_repo, capsys, missing, prior_pass):
         assert EXTRA_SELECTOR in result["reason"]
         assert json.dumps([*PREFIX, *files]) in result["remedy"]
         assert "--worktree" not in result["remedy"]
+
+
+@pytest.mark.parametrize("case", ["covered", "uncovered", "diverged", "git-error", "git-timeout", "planner-error"])
+def test_merge_of_default_branch_rechecks_receipt_plan(push_repo, capsys, monkeypatch, case):
+    from tests.test_verify_required import configure, write
+
+    _declare(push_repo, coverage=True)
+    configure(push_repo)
+    write(push_repo, SELECTOR, "")
+    write(push_repo, EXTRA_SELECTOR, "")
+    write(
+        push_repo,
+        "planner.py",
+        "import json, os, pathlib, subprocess, sys\n"
+        "def arg(name):\n"
+        "    return sys.argv[sys.argv.index('--' + name) + 1]\n"
+        "assert os.environ['GIT_NO_LAZY_FETCH'] == '1'\n"
+        "assert os.environ['GIT_ALLOW_PROTOCOL'] == ''\n"
+        "changed = subprocess.check_output(['git', 'diff', '--name-only', arg('base'), arg('head')]).splitlines()\n"
+        f"selected = [{EXTRA_SELECTOR!r}] if b'extra.py' in changed and b'main.py' not in changed else [{SELECTOR!r}]\n"
+        "pathlib.Path(arg('output')).write_text(json.dumps(dict(mode='selective', selected=selected)))\n",
+    )
+    ancestor = _commit(push_repo, "first policy base")
+    _git(push_repo, "checkout", "-b", "topic")
+    write(push_repo, "src.py", "value = 2\n")
+    if case == "uncovered":
+        write(push_repo, "extra.py", "")
+    _commit(push_repo, "branch change")
+    _git(push_repo, "checkout", "main")
+    write(push_repo, "main.py", "")
+    if case == "planner-error":
+        write(push_repo, "planner.py", "raise SystemExit(1)\n")
+    push_base = _commit(push_repo, "advance main")
+    _git(push_repo, "update-ref", "refs/remotes/origin/main", push_base)
+    _git(push_repo, "checkout", "topic")
+    _git(push_repo, "merge", "--no-edit", "main")
+    tree = _tree(push_repo)
+    plan = {
+        "schema_version": 1,
+        "base_commit": _git(push_repo, "rev-parse", "HEAD^1") if case == "diverged" else ancestor,
+        "snapshot_tree": tree,
+        "mode": "selective",
+        "required_files": [SELECTOR],
+        "missing_files": [],
+        "run_argv": [*PREFIX, SELECTOR],
+    }
+    path = _receipt(push_repo, tree, plan=plan, deselected=0)
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    receipt["commands"][0]["env"] = None
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    if case in {"git-error", "git-timeout"}:
+        real_git = verify_manifest_git._git
+
+        def git(target, *args, **kwargs):
+            if args[:2] == ("merge-base", "--is-ancestor"):
+                if case == "git-timeout":
+                    raise subprocess.TimeoutExpired(args, kwargs["deadline"])
+                return subprocess.CompletedProcess(args, 128, b"", b"")
+            return real_git(target, *args, **kwargs)
+
+        monkeypatch.setattr(verify_manifest_git, "_git", git)
+    code, result = _single(push_repo, capsys)
+    if case == "covered":
+        assert (code, result["status"]) == (0, "ok"), result
+    else:
+        assert (code, result["status"]) == (1, "rejected"), result
+        assert "base" in result["reason"] and "again after the merge" in result["reason"]
+        assert "brigade work verify run" in result["remedy"]
+        assert json.dumps([*PREFIX, EXTRA_SELECTOR if case == "uncovered" else SELECTOR]) in result["remedy"]
 
 
 def test_only_offline_git_is_called(push_repo, capsys, monkeypatch):

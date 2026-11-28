@@ -1077,12 +1077,17 @@ def test_prune_and_gate_reject_non_directory_store(push_repo, capsys, store_kind
     assert _single(push_repo, capsys)[1]["status"] == "indeterminate"
 
 
-def test_prune_honors_grace_period_and_start_time_order(push_repo, capsys):
+@pytest.mark.parametrize("refused", [False, True])
+def test_prune_honors_grace_period_and_start_time_order(push_repo, capsys, refused):
     from time import time
 
     _policy(push_repo)
     tree = _tree(push_repo)
     older = _receipt(push_repo, tree, started_at="2026-01-01T12:00:01.100000Z")
+    if refused:
+        receipt = json.loads(older.read_text(encoding="utf-8"))
+        receipt.update(status="rejected", commands=[{"status": "rejected", "exit_code": 2}])
+        older.write_text(json.dumps(receipt), encoding="utf-8")
     newer = _receipt(push_repo, tree, second=2, started_at="2026-01-01T12:00:01.900000Z")
     destination = newer.parent.with_name("20260101-120001-work-verify-000000")
     newer.parent.rename(destination)
@@ -1634,6 +1639,36 @@ def test_block_only_refuses_gate_invocation_outside_markers(push_repo, capsys, c
     ) in capsys.readouterr().err
     assert custom_hook.read_bytes() == original
     assert not list(custom_hook.parent.glob("pre-push.*.bak"))
+
+
+@pytest.mark.parametrize("placement", ["outside", "inside", "comment"])
+def test_block_only_checks_indirect_gate_mentions(push_repo, capsys, custom_hook, placement):
+    indirect = b'gate="brigade work verify push-gate"\n'
+    start, call, end = _V1_BLOCK.splitlines(keepends=True)
+    if placement == "outside":
+        body = indirect + start + call + end + b'printf "%s" "push-gate"\n'
+    elif placement == "inside":
+        body = start + indirect + call + end
+    else:
+        body = b"  # " + indirect + start + call + end
+    original = _CUSTOM_PREFIX + (body.rstrip(b"\n") if placement == "inside" else body + _CUSTOM_SUFFIX)
+    custom_hook.write_bytes(original)
+
+    assert _gate(push_repo, "status") == 0
+    summary = capsys.readouterr().out
+    assert ("outside the marked block" in summary) == (placement == "outside")
+
+    if placement == "outside":
+        for options in ((), ("--dry-run",)):
+            assert _gate(push_repo, "install", "--block-only", *options) == 1
+            error = capsys.readouterr().err
+            assert "lines 4, 8" in error
+            assert "Then run the command again." in error
+            assert custom_hook.read_bytes() == original
+            assert not list(custom_hook.parent.glob("pre-push.*.bak"))
+    else:
+        assert _gate(push_repo, "install", "--block-only") == 0
+        assert push_gate._snippet() in custom_hook.read_bytes()
 
 
 @pytest.mark.parametrize("count", [0, 2])

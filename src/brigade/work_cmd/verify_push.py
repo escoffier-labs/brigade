@@ -25,7 +25,7 @@ from typing import Any, Literal
 
 from .. import config, localio, verify_manifest_git
 from ..verify_command import split_verify_command
-from . import constants, push_gate_display, verify_gate
+from . import constants, push_gate_display, verify_gate, verify_required
 from .verify_push_input import INPUT_BYTES, branch_updates
 
 _BUDGET_SECONDS = 2.0
@@ -39,6 +39,8 @@ _EARLIEST = datetime.min.replace(tzinfo=UTC)
 _MASKED_PASS = "newer_required_failure"
 _UNCONFIRMED_PLAN = "planned_command_unconfirmed"
 _AMBIGUOUS_INVOCATION = "required_check_invocation"
+_OLDER_PLAN_BASE = "older_plan_base"
+_DIFFERENT_PLAN_BASE = "different_plan_base"
 _PLAN_COMMANDS = 64
 _PLAN_CHARS = 16 * 1024
 _PLAN_TOKENS = 1024
@@ -98,6 +100,7 @@ class _Candidate:
     reason: str
     uncertain: bool = False
     invocation_notice: str | None = None
+    rerun_argv: list[str] | None = None
 
 
 class _Indeterminate(Exception):
@@ -284,7 +287,7 @@ class _Receipts:
         ignored = 0
         first_ignored = ""
         for name in stray:
-            receipt = self._load(name)
+            receipt = self._load(name, ignore_intake_refusals=True)
             if isinstance(receipt, _Indeterminate):
                 ignored += 1
                 first_ignored = first_ignored or name
@@ -317,10 +320,13 @@ class _Receipts:
                 remedy=f"brigade work verify push-gate prune --target {push_gate_display.shell_arg(str(self.target))}",
             )
             raise self._cap_error
-        entries.extend((name, second, self._load(name)) for name, second in sorted(named, reverse=True))
+        entries.extend(
+            (name, second, self._load(name, ignore_intake_refusals=True))
+            for name, second in sorted(named, reverse=True)
+        )
         return entries
 
-    def _load(self, name: str) -> dict[str, Any] | _Indeterminate | None:
+    def _load(self, name: str, *, ignore_intake_refusals: bool = False) -> dict[str, Any] | _Indeterminate | None:
         _remaining(self.deadline)
         path = self.root / name / "receipt.json"
         try:
@@ -344,16 +350,37 @@ class _Receipts:
         _remaining(self.deadline)
         if not valid:
             return self._entry_problem(name, "is malformed", receipt=True)
+        # The writer records an intake refusal without argv, before starting a child.
+        # Keep it visible to the prune command, which inventories receipts rather than judging evidence.
+        commands = data["commands"]
+        if (
+            ignore_intake_refusals
+            and data["status"] == "rejected"
+            and ("planned_commands" not in data or len(data["planned_commands"]) == len(commands))
+            and all(
+                record.get("status") == "rejected" and record.get("exit_code") == 2 and "argv" not in record
+                for record in commands
+            )
+        ):
+            return None
         # Keep the saved evaluator inputs and omit unrelated receipt data.
         return {
             **{
                 key: data[key]
-                for key in ("status", "tree_stable", "tree_fingerprint", "started_at", "gating", "planned_commands")
+                for key in (
+                    "status",
+                    "tree_stable",
+                    "tree_fingerprint",
+                    "started_at",
+                    "gating",
+                    "planned_commands",
+                    "inherited_test_env",
+                )
                 if key in data
             },
             "commands": [
-                {key: record[key] for key in ("argv", "status", "test_outcomes", "env") if key in record}
-                for record in data["commands"]
+                {key: record[key] for key in ("argv", "status", "test_outcomes", "env") if record.get(key) is not None}
+                for record in commands
             ],
         }
 
@@ -390,7 +417,14 @@ class _Receipts:
             yield receipt
 
 
-def _remedy(target: Path, policy: verify_gate._GatePolicy, receipt: dict[str, Any], *, fresh: bool = False) -> str:
+def _remedy(
+    target: Path,
+    policy: verify_gate._GatePolicy,
+    receipt: dict[str, Any],
+    *,
+    fresh: bool = False,
+    argv: list[str] | None = None,
+) -> str:
     def render(argv: list[str]) -> str:
         return (
             f"brigade work verify run --target {push_gate_display.shell_arg(str(target))} "
@@ -399,7 +433,8 @@ def _remedy(target: Path, policy: verify_gate._GatePolicy, receipt: dict[str, An
 
     stamp = receipt.get("gating")
     plan = stamp.get("plan") if isinstance(stamp, dict) else None
-    argv = plan.get("run_argv") if isinstance(plan, dict) else None
+    if argv is None and isinstance(plan, dict):
+        argv = plan.get("run_argv")
     if isinstance(argv, list) and all(isinstance(arg, str) and arg for arg in argv):
         prefix = policy.argv_prefix
         if len(argv) > len(prefix) and tuple(argv[: len(prefix)]) == prefix:
@@ -433,7 +468,9 @@ def _tree_verdict(
 
     try:
         for group in receipts.matching(tree):
-            candidates = (_classify_receipt(policy, prefix, tree, receipt, deadline) for receipt in group)
+            candidates = (
+                _classify_receipt(policy, prefix, tree, receipt, deadline, target=target) for receipt in group
+            )
             ordered = _order_candidates(candidates) if prefix else list(candidates)
             for candidate in ordered:
                 if not prefix and candidate.receipt["status"] in _UNFINISHED:
@@ -467,8 +504,7 @@ def _tree_verdict(
                         failure = _rejected(
                             target,
                             policy,
-                            candidate.receipt,
-                            candidate.reason,
+                            candidate,
                             "The most recent run of the required check",
                         )
                     rank = (
@@ -492,7 +528,7 @@ def _tree_verdict(
     if notice := invocation_rejection():
         return notice
     run_label = "The most recent run of the required check" if candidate.ran_required else "The last run"
-    return _rejected(target, policy, candidate.receipt, candidate.reason, run_label)
+    return _rejected(target, policy, candidate, run_label)
 
 
 def _env_prefix_message(names: tuple[str, ...]) -> str:
@@ -788,16 +824,64 @@ def _required_plan_unconfirmed(
     return False
 
 
+def _recheck_plan(
+    target: Path,
+    policy: verify_gate._GatePolicy,
+    tree: str,
+    old_base: str,
+    receipt: dict[str, Any],
+    required: list[dict[str, Any]],
+    deadline: float,
+) -> tuple[bool, str, list[str] | None]:
+    base = policy.base_commit
+    assert base is not None
+    # If planning fails, the saved command can still be run against the current base.
+    argv = receipt["gating"]["plan"].get("run_argv") or required[0]["argv"]
+    try:
+        ancestry = verify_manifest_git._git(
+            target, "merge-base", "--is-ancestor", old_base, base, deadline=deadline, git_env=_offline_git_env()
+        )
+        if ancestry.returncode == 1:
+            return False, _DIFFERENT_PLAN_BASE, argv
+        if ancestry.returncode != 0:
+            return False, _OLDER_PLAN_BASE, argv
+        fields, _, entries = verify_required.plan_snapshot(target, base, tree, deadline=deadline, offline=True)
+        tests = fields.get("tests", [])
+        if (
+            fields["mode"] != "selective"
+            or not tests
+            or any(verify_gate._coverage_path(path) != path for path in tests)
+        ):
+            return False, _OLDER_PLAN_BASE, argv
+        argv = [*policy.argv_prefix, *tests]
+        covered = verify_gate._covered_files({**receipt, "commands": required}, policy, entries)
+        if set(tests) <= covered:
+            _remaining(deadline)
+            return True, "passed_required_check", None
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired, _Indeterminate):
+        pass
+    return False, _OLDER_PLAN_BASE, argv
+
+
 def _classify_receipt(
     policy: verify_gate._GatePolicy,
     prefix: list[str],
     tree: str,
     receipt: dict[str, Any],
     deadline: float,
+    *,
+    target: Path | None = None,
 ) -> _Candidate:
     eligible, reason = verify_gate.evaluate_receipt(policy, receipt, tree, deadline=deadline)
     if reason == "policy_timeout":
         raise _Indeterminate(_TIMEOUT, "check_timeout")
+    old_base = None
+    if target is not None and reason == "policy_changed" and policy.needs_plan_coverage:
+        recorded = ((receipt.get("gating") or {}).get("plan") or {}).get("base_commit")
+        if isinstance(recorded, str) and _valid_oid(recorded) and recorded != policy.base_commit:
+            prior_policy = replace(policy, base_commit=recorded)
+            if verify_gate.evaluate_receipt(prior_policy, receipt, tree, deadline=deadline)[0]:
+                eligible, old_base = True, recorded
     identities = []
     required = []
     ambiguous = False
@@ -862,6 +946,9 @@ def _classify_receipt(
             )
         ):
             eligible, reason = False, "not_the_required_check"
+    rerun_argv = None
+    if eligible and old_base is not None and target is not None:
+        eligible, reason, rerun_argv = _recheck_plan(target, policy, tree, old_base, receipt, required, deadline)
     inconclusive.include(plan_invocation)
     notice = inconclusive.message() if uncertain else excluded.message() if not required or prefixed_coverage else None
     return _Candidate(
@@ -873,6 +960,7 @@ def _classify_receipt(
         reason,
         uncertain,
         notice,
+        rerun_argv,
     )
 
 
@@ -911,20 +999,23 @@ def _failed_required_check(receipt: dict[str, Any], commands: list[dict[str, Any
 def _rejected(
     target: Path,
     policy: verify_gate._GatePolicy,
-    receipt: dict[str, Any],
-    reason: str,
+    candidate: _Candidate,
     run_label: str,
 ) -> _Verdict:
+    receipt, reason = candidate.receipt, candidate.reason
     explanation, _ = verify_gate._plan_guidance(receipt, reason)
     if reason == "required_check_timed_out":
         explanation = "The last run timed out."
+    elif reason in {_OLDER_PLAN_BASE, _DIFFERENT_PLAN_BASE}:
+        base = "an older base" if reason == _OLDER_PLAN_BASE else "a different base"
+        explanation = f"The required check was run against {base}. Run it again after the merge."
     explanation = explanation or f"The last run has an ineligible verdict ({reason.replace('_', ' ')})."
     if explanation.startswith("The last run"):
         explanation = run_label + explanation.removeprefix("The last run")
     return _Verdict(
         "rejected",
         explanation,
-        _remedy(target, policy, receipt),
+        _remedy(target, policy, receipt, argv=candidate.rerun_argv),
     )
 
 
