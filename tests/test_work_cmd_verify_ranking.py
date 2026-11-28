@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 import shlex
 
 import pytest
@@ -16,7 +17,7 @@ from tests.work_cmd_test_helpers import _init_git_repo
 def test_verify_plan_degrades_without_graphtrail(tmp_path, capsys):
     """Real degrade path: GraphTrail is unavailable in this VM."""
     _init_git_repo(tmp_path)
-    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\n")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\ndependencies=['pytest']\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "tests" / "test_demo.py").write_text("def test_ok():\n    assert True\n")
     (tmp_path / "src").mkdir()
@@ -45,7 +46,7 @@ def test_verify_plan_text_prints_degraded_graph_impact(tmp_path, capsys):
 
 def test_rank_verification_candidates_via_mocked_affected(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
-    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\n")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\ndependencies=['pytest']\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "src").mkdir()
     db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
@@ -109,7 +110,7 @@ def test_rank_verification_candidates_via_mocked_affected(tmp_path, monkeypatch)
 
 def test_verify_plan_enriched_suggests_ranked_command(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
-    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\n")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\ndependencies=['pytest']\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "src").mkdir()
     db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
@@ -217,7 +218,7 @@ def test_collect_changed_files_from_git(tmp_path):
 
 def test_rank_verification_candidates_deduplicates_duplicate_paths(tmp_path, monkeypatch):
     _init_git_repo(tmp_path)
-    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\n")
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='demo'\nversion='0'\ndependencies=['pytest']\n")
     (tmp_path / "tests").mkdir()
     (tmp_path / "src").mkdir()
     db = tmp_path / ".brigade" / "code-graph" / "code-graph.db"
@@ -365,18 +366,35 @@ def test_cli_verify_plan_passes_files(tmp_path, monkeypatch, capsys):
     assert seen["json_output"] is True
 
 
+def test_command_prefix_does_not_guess_pytest_from_tests_directory(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "widget.test.js").write_text("")
+    (tmp_path / "package.json").write_text("{}")
+
+    assert verify_ranking._verification_command_prefix(tmp_path) is None
+
+
 @pytest.mark.parametrize(
-    "files,expected",
+    ("path", "content"),
     [
-        (["pyproject.toml"], "python3 -m pytest -q"),
-        (["setup.cfg"], "python3 -m pytest -q"),
-        (["go.mod"], None),
-        (["package.json"], None),
-        ([], None),
+        ("pyproject.toml", "[tool.pytest.ini_options]\n"),
+        ("pyproject.toml", '[project]\ndependencies = ["pytest>=9"]\n'),
+        ("pytest.ini", ""),
+        ("setup.cfg", "[tool:pytest]\n"),
+        ("tox.ini", "[pytest]\n"),
+        ("conftest.py", ""),
+        ("tests/conftest.py", ""),
     ],
 )
-def test_command_prefix_guesses_pytest_only_for_python_projects(tmp_path, files, expected):
-    for name in files:
-        (tmp_path / name).write_text("")
-    (tmp_path / "test").mkdir()
-    assert verify_ranking._verification_command_prefix(tmp_path) == expected
+def test_command_prefix_detects_each_pytest_evidence_file(tmp_path, path, content):
+    evidence = tmp_path / path
+    evidence.parent.mkdir(exist_ok=True)
+    evidence.write_text(content)
+
+    assert verify_ranking._verification_command_prefix(tmp_path) == "python3 -m pytest -q"
+
+
+def test_command_prefix_detects_brigadestack_layout():
+    repository = Path(__file__).resolve().parents[1]
+
+    assert verify_ranking._verification_command_prefix(repository) == "PYTHONPATH=src python3 -m pytest -q"

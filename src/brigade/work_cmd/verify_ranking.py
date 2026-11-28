@@ -11,7 +11,10 @@ working without the engine.
 
 from __future__ import annotations
 
+import configparser
 from pathlib import Path
+import re
+import tomllib
 from typing import Any, Sequence
 
 from .. import component_bins, engine_paths, proc
@@ -193,9 +196,6 @@ def _candidate_rank_key(item: dict[str, Any]) -> tuple[float, int, str]:
     )
 
 
-_PYTHON_PROJECT_MARKERS = ("pyproject.toml", "pytest.ini", "setup.cfg", "setup.py", "tox.ini", "conftest.py")
-
-
 def _verification_command_prefix(target: Path) -> str | None:
     """Return a pytest prefix to which the ranked file selectors are appended.
 
@@ -203,14 +203,57 @@ def _verification_command_prefix(target: Path) -> str | None:
     candidates individually because test scripts vary in how they handle file
     arguments.
     """
-    if (target / "pyproject.toml").is_file() and (target / "tests").is_dir():
+    if _has_pytest_evidence(target):
         if (target / "src").is_dir():
             return "PYTHONPATH=src python3 -m pytest -q"
         return "python3 -m pytest -q"
-    if (target / "tests").is_dir() or any((target / name).is_file() for name in _PYTHON_PROJECT_MARKERS):
-        return "python3 -m pytest -q"
     # No Python project marker: do not guess a runner. The caller then asks for a command.
     return None
+
+
+def _has_pytest_evidence(target: Path) -> bool:
+    if any((target / path).is_file() for path in ("pytest.ini", "conftest.py", "tests/conftest.py")):
+        return True
+    if _config_has_section(target / "setup.cfg", "tool:pytest"):
+        return True
+    if _config_has_section(target / "tox.ini", "pytest"):
+        return True
+
+    pyproject = target / "pyproject.toml"
+    if not pyproject.is_file():
+        return False
+    try:
+        data = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError):
+        return False
+    tool = data.get("tool")
+    if isinstance(tool, dict) and "pytest" in tool:
+        return True
+    project = data.get("project")
+    if not isinstance(project, dict):
+        return False
+    dependency_groups = [project.get("dependencies")]
+    optional = project.get("optional-dependencies")
+    if isinstance(optional, dict):
+        dependency_groups.extend(optional.values())
+    return any(_dependencies_include_pytest(group) for group in dependency_groups)
+
+
+def _config_has_section(path: Path, section: str) -> bool:
+    if not path.is_file():
+        return False
+    parser = configparser.ConfigParser()
+    try:
+        parser.read(path, encoding="utf-8")
+    except (configparser.Error, OSError):
+        return False
+    return parser.has_section(section)
+
+
+def _dependencies_include_pytest(value: object) -> bool:
+    if not isinstance(value, list):
+        return False
+    return any(isinstance(item, str) and re.match(r"^pytest(?:\s|\[|[<>=!~;@]|$)", item.strip()) for item in value)
 
 
 def _candidate_command_prefix(target: Path) -> str | None:

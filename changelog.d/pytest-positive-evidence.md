@@ -1,0 +1,1 @@
+- Require explicit pytest configuration or dependency evidence before suggesting pytest verification commands.
