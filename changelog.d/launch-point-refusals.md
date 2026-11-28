@@ -1,0 +1,1 @@
+- Label batch prompt launch refusals as refusals and retain their reason in results.

@@ -796,16 +796,30 @@ def dispatch(
         worker_writable_worktree = (
             authorized_writable_worktree if writable_worktree_for is None else bool(writable_worktree_for(assignment))
         )
-        prompt = build_prompt(
-            agent,
-            assignment,
-            prior_results=prior_results,
-            read_only=worker_read_only,
-            direct=direct,
-            code_graph=code_graph,
-            drift_impact=drift_impact,
-            evidence=evidence,
-        )
+        try:
+            prompt = build_prompt(
+                agent,
+                assignment,
+                prior_results=prior_results,
+                read_only=worker_read_only,
+                direct=direct,
+                code_graph=code_graph,
+                drift_impact=drift_impact,
+                evidence=evidence,
+            )
+        except LaunchRefused as exc:
+            return WorkerResult(
+                worker=assignment.worker,
+                task=assignment.task,
+                text="",
+                ok=False,
+                detail=str(exc),
+                status=exc.code if exc.code in NON_ABORTING_STATUSES else "refused",
+                failure_phase="dispatch",
+                failure_kind="launch-refused",
+                transport=_receipt_transport(agent, appserver=appserver),
+                requested_model=agent.model,
+            )
         request = message_envelope.emit(
             prompt,
             kind="worker-request",
@@ -1390,16 +1404,30 @@ def dispatch(
                 fallback_agent,
                 attempts,
             )
-        fallback_prompt = build_prompt(
-            fallback_agent,
-            assignment,
-            prior_results=prior_results,
-            read_only=worker_read_only,
-            direct=direct,
-            code_graph=code_graph,
-            drift_impact=drift_impact,
-            evidence=evidence,
-        )
+        try:
+            fallback_prompt = build_prompt(
+                fallback_agent,
+                assignment,
+                prior_results=prior_results,
+                read_only=worker_read_only,
+                direct=direct,
+                code_graph=code_graph,
+                drift_impact=drift_impact,
+                evidence=evidence,
+            )
+        except LaunchRefused as exc:
+            return WorkerResult(
+                worker=assignment.worker,
+                task=assignment.task,
+                text="",
+                ok=False,
+                detail=str(exc),
+                status=exc.code if exc.code in NON_ABORTING_STATUSES else "refused",
+                failure_phase="dispatch",
+                failure_kind="launch-refused",
+                transport=_receipt_transport(fallback_agent, appserver=appserver),
+                requested_model=fallback_agent.model,
+            )
         fallback_started = _attempt_timestamp()
         fallback_result = invoke(fallback_agent, fallback_prompt)
         fallback_finished = _attempt_timestamp()

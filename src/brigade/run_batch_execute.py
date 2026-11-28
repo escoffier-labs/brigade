@@ -37,7 +37,7 @@ from . import (
 )
 from .run_batch import MARKER_NAME, BatchError, read_request_marker
 from .run_batch_capability import read_only_enforcement_error
-from .run_transport import TASK_CANCELLED_STATUS, Assignment, WorkerResult
+from .run_transport import TASK_CANCELLED_STATUS, Assignment, LaunchRefused, WorkerResult
 from .roster import Roster, read_only_cloud_mutation_error
 
 
@@ -692,10 +692,12 @@ class BatchExecution:
                 # closed code here for the CLI result and its human report.
                 self.refused.add(task_id)
                 self.workspace_refusals.setdefault(task_id, (exc.code, str(exc)))
-                raise
-            except run_tasks.TaskJournalError:
+                raise LaunchRefused(str(exc), code=exc.code) from exc
+            except run_tasks.TaskJournalError as exc:
                 self.refused.add(task_id)
-                raise
+                reason = f"task {task_id} launch journal refused: {exc}"
+                self.workspace_refusals.setdefault(task_id, ("launch-refused", reason))
+                raise LaunchRefused(reason) from exc
             return original_prompt(agent, assignment, **prompt_kwargs)
 
         kwargs["build_prompt"] = build_prompt
