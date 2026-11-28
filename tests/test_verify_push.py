@@ -313,6 +313,58 @@ def test_intake_refusal_has_no_tree_evidence(push_repo, capsys, newer, older_pas
     assert _single(push_repo, capsys)[1]["status"] == expected
 
 
+def test_writer_intake_refusal_is_ignored_for_the_pushed_tree(push_repo, capsys):
+    from brigade.work_cmd import verification
+
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    older = _receipt(push_repo, tree)
+    assert (
+        verification.verify_run(
+            target=push_repo,
+            commands=["./missing-verifier-tool"],
+            code_graph_timeout=0.1,
+            reuse=False,
+        )
+        == 2
+    )
+    capsys.readouterr()
+    root = push_repo / ".brigade" / "work" / "verify-runs"
+    (written,) = set(root.glob("*/receipt.json")) - {older}
+    receipt = json.loads(written.read_text(encoding="utf-8"))
+    assert receipt["status"] == "rejected"
+    assert [record.get("status") for record in receipt["commands"]] == ["rejected"]
+    assert all(record.get("exit_code") == 2 and "argv" not in record for record in receipt["commands"])
+    assert len(receipt["planned_commands"]) == len(receipt["commands"])
+    assert receipt["tree_fingerprint"] == tree
+    assert _single(push_repo, capsys) == (0, {"ref": "HEAD", "status": "ok", "reason": None, "remedy": None})
+
+
+@pytest.mark.parametrize(
+    ("stray_name", "started_at", "expected"),
+    [
+        (None, None, "ok"),
+        ("backup-old", None, "indeterminate"),
+        (None, "2026-01-01T12:00:03+00:00", "indeterminate"),
+    ],
+    ids=["well-formed", "invalid-directory-name", "mismatched-start-time"],
+)
+def test_refused_receipt_is_ignored_only_when_well_formed(push_repo, capsys, stray_name, started_at, expected):
+    _policy(push_repo)
+    tree = _tree(push_repo)
+    _receipt(push_repo, tree)
+    path = _receipt(push_repo, tree, second=2, started_at=started_at)
+    receipt = json.loads(path.read_text(encoding="utf-8"))
+    receipt.update(status="rejected", commands=[{"status": "rejected", "exit_code": 2, "test_outcomes": None}])
+    path.write_text(json.dumps(receipt), encoding="utf-8")
+    if stray_name is not None:
+        path.parent.rename(path.parent.with_name(stray_name))
+    code, result = _single(push_repo, capsys)
+    assert (code, result["status"]) == ((0, "ok") if expected == "ok" else (3, "indeterminate"))
+    if expected != "ok":
+        assert "start timestamp" in result["reason"]
+
+
 @pytest.mark.parametrize("status", ["failed", "rejected"])
 def test_sole_unsuccessful_receipt_reports_not_completed(push_repo, capsys, status):
     _policy(push_repo)

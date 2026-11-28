@@ -1641,6 +1641,57 @@ def test_block_only_refuses_gate_invocation_outside_markers(push_repo, capsys, c
     assert not list(custom_hook.parent.glob("pre-push.*.bak"))
 
 
+@pytest.mark.parametrize("newline", [b"\n", b"\r\n"])
+def test_block_only_refuses_token_split_by_line_continuation(push_repo, capsys, custom_hook, newline):
+    original = _CUSTOM_PREFIX + b"brigade work verify push-\\" + newline + b"gate run" + newline
+    custom_hook.write_bytes(original)
+    for options in ((), ("--dry-run",)):
+        assert _gate(push_repo, "install", "--block-only", *options) == 1
+        assert (
+            "Brigade gate invocation on line 4 is outside the marked block. Move it inside the markers or remove it."
+        ) in capsys.readouterr().err
+        assert custom_hook.read_bytes() == original
+        assert not list(custom_hook.parent.glob("pre-push.*.bak"))
+
+
+def test_block_only_reports_token_after_a_commented_continuation(push_repo, capsys, custom_hook):
+    original = _CUSTOM_PREFIX + b"# note about push-gate \\\nbrigade work verify push-gate run\n" + _CUSTOM_SUFFIX
+    custom_hook.write_bytes(original)
+    assert _gate(push_repo, "install", "--block-only") == 1
+    error = capsys.readouterr().err
+    assert "Brigade gate invocation on line 5 is outside the marked block." in error
+    assert "line 4" not in error
+    assert custom_hook.read_bytes() == original
+    assert not list(custom_hook.parent.glob("pre-push.*.bak"))
+
+
+def test_status_and_plain_install_with_outside_token(push_repo, monkeypatch, capsys):
+    from brigade.work_cmd import push_gate
+
+    monkeypatch.setattr(push_gate, "which", lambda name: f"/usr/bin/{name}")
+    monkeypatch.setattr(push_gate, "_timeout_state", lambda: "usable")
+    assert _gate(push_repo, "install", "--mode", "off") == 0
+    capsys.readouterr()
+    hook = push_repo / ".git" / "hooks" / "pre-push"
+    assert _gate(push_repo, "status") == 0
+    assert capsys.readouterr().out.strip() == (
+        f"mode=off, wired, hook={hook}, version=v2, brigade on PATH, timeout on PATH, "
+        "last push=none, last 7 days gate errors=0"
+    )
+
+    original = _CUSTOM_PREFIX + b"brigade work verify push-\\\ngate run\n" + _V1_BLOCK + _CUSTOM_SUFFIX
+    hook.write_bytes(original)
+    hook.chmod(0o755)
+    assert _gate(push_repo, "status") == 0
+    assert "Brigade gate invocation on line 4 is outside the marked block." in capsys.readouterr().out
+
+    assert _gate(push_repo, "install") == 0
+    output = capsys.readouterr()
+    assert "Brigade gate invocation on line 4 is outside the marked block." in output.out + output.err
+    assert hook.read_bytes() == original
+    assert not list(hook.parent.glob("pre-push.*.bak"))
+
+
 @pytest.mark.parametrize("placement", ["outside", "inside", "comment"])
 def test_block_only_checks_indirect_gate_mentions(push_repo, capsys, custom_hook, placement):
     indirect = b'gate="brigade work verify push-gate"\n'
@@ -1663,6 +1714,7 @@ def test_block_only_checks_indirect_gate_mentions(push_repo, capsys, custom_hook
             assert _gate(push_repo, "install", "--block-only", *options) == 1
             error = capsys.readouterr().err
             assert "lines 4, 8" in error
+            assert "Move them inside the markers or remove them." in error
             assert "Then run the command again." in error
             assert custom_hook.read_bytes() == original
             assert not list(custom_hook.parent.glob("pre-push.*.bak"))

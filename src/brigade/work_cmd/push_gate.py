@@ -309,12 +309,28 @@ def _outside_gate_lines(raw: bytes, markers: list[re.Match[bytes]]) -> list[int]
     if len(markers) not in {0, 2}:
         return []
     start, end = (markers[0].start(), markers[1].end()) if markers else (0, 0)
+    physical = raw.split(b"\n")
     lines = []
     offset = 0
-    for number, line in enumerate(raw.split(b"\n"), 1):
-        if not start <= offset < end and not line.lstrip().startswith(b"#") and _GATE_TOKEN.search(line):
-            lines.append(number)
+    index = 0
+    while index < len(physical):
+        number = index + 1
+        line_start = offset
+        line = physical[index]
         offset += len(line) + 1
+        index += 1
+        if start <= line_start < end or line.lstrip().startswith(b"#"):
+            # A comment line does not continue in the shell, so never join after it.
+            continue
+        logical = line
+        while logical.endswith((b"\\", b"\\\r")) and index < len(physical):
+            logical = logical.removesuffix(b"\r").removesuffix(b"\\")
+            line = physical[index]
+            offset += len(line) + 1
+            index += 1
+            logical += line
+        if _GATE_TOKEN.search(logical):
+            lines.append(number)
     return lines
 
 
@@ -329,8 +345,10 @@ def _block_replacement(raw: bytes, *, insert: bool, preview: bool) -> tuple[byte
         raise ValueError("The effective pre-push hook must start with a Bash interpreter line.")
     markers = list(_BLOCK_MARKER.finditer(raw))
     if lines := _outside_gate_lines(raw, markers):
+        pronoun = "it" if len(lines) == 1 else "them"
         raise ValueError(
-            f"{_outside_gate_message(lines)} Move it inside the markers or remove it. Then run the command again."
+            f"{_outside_gate_message(lines)} Move {pronoun} inside the markers or remove {pronoun}. "
+            "Then run the command again."
         )
     calls = [
         match

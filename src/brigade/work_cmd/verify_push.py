@@ -352,7 +352,11 @@ class _Receipts:
             return self._entry_problem(name, "is malformed", receipt=True)
         # The writer records an intake refusal without argv, before starting a child.
         # Keep it visible to the prune command, which inventories receipts rather than judging evidence.
+        # Only ignore one that also agrees with its run directory name and start time,
+        # so a stray receipt keeps the indeterminate verdict it gets on its own.
         commands = data["commands"]
+        second = _name_second(name)
+        started = _receipt_started_at(data)
         if (
             ignore_intake_refusals
             and data["status"] == "rejected"
@@ -361,6 +365,10 @@ class _Receipts:
                 record.get("status") == "rejected" and record.get("exit_code") == 2 and "argv" not in record
                 for record in commands
             )
+            and second is not None
+            and started is not None
+            and started.replace(microsecond=0) == second
+            and started <= datetime.now(UTC)
         ):
             return None
         # Keep the saved evaluator inputs and omit unrelated receipt data.

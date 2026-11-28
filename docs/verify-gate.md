@@ -154,8 +154,9 @@ gate names the wrapper, variable, or executable spelling and prints the
 plain policy command to run again.
 
 When verify refuses every command at intake and starts none of them, the
-receipt provides no evidence about the pushed tree. An earlier passing
-receipt can still count.
+receipt provides no evidence about the pushed tree. This needs the receipt's
+run directory name and start time to agree, like any other receipt. An
+earlier passing receipt can still count.
 
 After a merge from the default branch, a passing receipt for the exact
 merged tree can still count if its plan base is an ancestor of the push
@@ -328,9 +329,11 @@ Bash command to restore it. If the hook has no block, pass
 `--confirm-insert` to insert it immediately after its single
 `STDIN_REFS="$(cat)"` line. An upgrade requires exactly one gate invocation
 inside the markers. Install and dry run refuse to change the hook if a
-line outside the block contains the `push-gate` token. Both report the
-line numbers and skip lines that are comments. Move or remove the calls
-before running the command again.
+line outside the block contains the `push-gate` token. A shell line
+continuation joins its physical lines for this check, and the report names
+the line where the joined line starts. Comment lines are skipped and do not
+continue onto the next line. Both report the line numbers. Move or remove
+the calls before running the command again.
 Status reports the block version, identifies a customised hook as
 unverified, and lists any lines with the token outside the block.
 
