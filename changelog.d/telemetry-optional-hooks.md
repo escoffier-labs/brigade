@@ -1,0 +1,1 @@
+- Add opt-in native T3 and OpenClaw observers and alert action ticks to the fleet telemetry publisher. Keep child output out of timer logs.

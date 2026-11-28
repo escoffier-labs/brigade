@@ -3,6 +3,7 @@
 import json
 import runpy
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -100,7 +101,8 @@ def test_dry_run_prints_publish_body_without_hooks(publisher, monkeypatch, capsy
 
     monkeypatch.setitem(publisher, "_node_id", lambda: "node-fixture")
     monkeypatch.setitem(publisher, "_run", read_policy)
-    monkeypatch.setitem(publisher, "_observe_t3", unexpected_hook)
+    for hook in ("_observe_t3", "_observe_native_t3", "_observe_openclaw", "_action_tick"):
+        monkeypatch.setitem(publisher, hook, unexpected_hook)
     monkeypatch.setitem(publisher, "_load", lambda: 0.99)
     monkeypatch.setitem(publisher, "_cpu_util", lambda _: 0.30)
     monkeypatch.setitem(publisher, "_memory_and_swap", lambda _: (0.60, 0.5))
@@ -120,3 +122,79 @@ def test_dry_run_prints_publish_body_without_hooks(publisher, monkeypatch, capsy
         "usable_seats": [],
         "credential_state": "ok",
     }
+
+
+@pytest.mark.parametrize(
+    ("hook", "flag", "timeout"),
+    [
+        ("_observe_native_t3", "BRIGADE_NATIVE_T3_OBSERVER", 17),
+        ("_observe_openclaw", "BRIGADE_OPENCLAW_OBSERVER", 17),
+        ("_action_tick", "BRIGADE_ALERT_ACTIONS_ENABLED", 12),
+    ],
+)
+def test_optional_hook_requires_explicit_enable(publisher, monkeypatch, hook, flag, timeout):
+    calls = []
+    monkeypatch.setitem(publisher, "_optional_run", lambda *args: calls.append(args))
+    monkeypatch.delenv(flag, raising=False)
+    publisher[hook]()
+    monkeypatch.setenv(flag, "true")
+    publisher[hook]()
+    assert calls == []
+
+    monkeypatch.setenv(flag, "1")
+    publisher[hook]()
+    assert len(calls) == 1
+    assert calls[0][2] == timeout
+
+
+@pytest.mark.parametrize("publish_fails", [False, True])
+def test_hooks_continue_after_failure(publisher, monkeypatch, capsys, publish_fails):
+    calls = []
+
+    def publish(*, dry_run):
+        assert not dry_run
+        calls.append("publish")
+        if publish_fails:
+            raise RuntimeError("publish failed")
+        return 0
+
+    def fail():
+        calls.append("managed")
+        raise ValueError("private exception text")
+
+    monkeypatch.setitem(publisher, "_publish_machine", publish)
+    monkeypatch.setitem(publisher, "_observe_t3", fail)
+    for hook in ("_observe_native_t3", "_observe_openclaw", "_action_tick"):
+        monkeypatch.setitem(publisher, hook, lambda hook=hook: calls.append(hook))
+
+    if publish_fails:
+        with pytest.raises(RuntimeError, match="publish failed"):
+            publisher["main"]([])
+    else:
+        assert publisher["main"]([]) == 0
+    assert calls == ["publish", "managed", "_observe_native_t3", "_observe_openclaw", "_action_tick"]
+    assert capsys.readouterr().err == "optional hook: skipped (ValueError)\n"
+
+
+@pytest.mark.parametrize(
+    ("stdout", "expected"),
+    [
+        (
+            '{"examined": 5, "observed": "private stdout", "published": true, "skipped": -1, "scheduled": 1000000001}',
+            ("observer: status=failed examined=5\n", ""),
+        ),
+        ("private stdout", ("", "observer: skipped (JSONDecodeError)\n")),
+        (None, ("", "observer: skipped (TimeoutExpired)\n")),
+    ],
+)
+def test_optional_run_keeps_child_output_private(publisher, monkeypatch, capsys, stdout, expected):
+    def run(command, **kwargs):
+        assert kwargs["stdin"] == publisher["subprocess"].DEVNULL
+        assert kwargs["capture_output"]
+        if stdout is None:
+            raise publisher["subprocess"].TimeoutExpired(command, 17, stderr="private stderr")
+        return SimpleNamespace(stdout=stdout, stderr="private stderr", returncode=1)
+
+    monkeypatch.setattr(publisher["subprocess"], "run", run)
+    publisher["_optional_run"]("observer", ["private command"], 17)
+    assert capsys.readouterr() == expected
