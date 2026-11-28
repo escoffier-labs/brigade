@@ -277,6 +277,12 @@ class _LockSnapshot:
     stale: bool
 
 
+def _lock_snapshot_read_error(path: Path, info: os.stat_result, exc: OSError) -> _LockSnapshot:
+    if getattr(exc, "winerror", None) == nt_process.ERROR_ACCESS_DENIED:
+        return _LockSnapshot(fingerprint=(info.st_dev, info.st_ino, None), stale=False)
+    raise RunLockError(f"could not inspect run lock {path}: {exc}") from exc
+
+
 def _lock_snapshot(path: Path) -> _LockSnapshot | None:
     """Read a lock once for both its identity and its liveness verdict (issue #2747).
 
@@ -297,15 +303,11 @@ def _lock_snapshot(path: Path) -> _LockSnapshot | None:
     except (FileNotFoundError, NotADirectoryError, ValueError):
         pass
     except OSError as exc:
-        if getattr(exc, "winerror", None) == nt_process.ERROR_ACCESS_DENIED:
-            return _LockSnapshot(fingerprint=(info.st_dev, info.st_ino, None), stale=False)
-        raise RunLockError(f"could not inspect run lock {path}: {exc}") from exc
+        return _lock_snapshot_read_error(path, info, exc)
     try:
         owner = _read_lock_owner(path, propagate_access_denied=True)
     except OSError as exc:
-        if getattr(exc, "winerror", None) == nt_process.ERROR_ACCESS_DENIED:
-            return _LockSnapshot(fingerprint=(info.st_dev, info.st_ino, None), stale=False)
-        raise
+        return _lock_snapshot_read_error(path, info, exc)
     owner_pid = owner.get("pid") if owner is not None else None
     if isinstance(owner_pid, int):
         recorded_pids.append(owner_pid)

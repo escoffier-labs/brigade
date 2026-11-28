@@ -1,1 +1,3 @@
 - Treat persistently unreadable Windows lock metadata as live outside lock release.
+- A dead-owner lock with persistently access-denied metadata reads as live and needs manual removal.
+- Convert lock metadata inspection errors consistently so reconciliation returns an invalid verdict instead of raising an operating system error.
