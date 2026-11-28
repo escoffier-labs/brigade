@@ -150,6 +150,11 @@ def _still_our_lock(path: Path, ownership: _LockOwnership) -> bool:
         return False
     if visible.st_dev != ownership.device or visible.st_ino != ownership.inode:
         return False
+    return _owner_token_matches(path, ownership)
+
+
+def _owner_token_matches(path: Path, ownership: _LockOwnership) -> bool:
+    """Whether readable owner metadata belongs to ``ownership``."""
     try:
         payload = json.loads(nt_process.read_text_sharing_delete(path / "owner.json"))
     except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError):
@@ -232,6 +237,8 @@ def _restore_metadata(path: Path, ownership: _LockOwnership, withheld: _Metadata
     except OSError:
         return
     if visible.st_dev != ownership.device or visible.st_ino != ownership.inode:
+        return
+    if not _owner_token_matches(path, ownership):
         return
     _put_back(withheld.files)
 
