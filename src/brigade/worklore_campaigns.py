@@ -492,7 +492,14 @@ def campaign_offer(conn: sqlite3.Connection, work_id: str) -> dict[str, Any] | N
     ).fetchone()
     if row is None:
         return None
-    return {"event_id": row[0], "actor_id": row[1], "actor_type": row[2], "offer": json.loads(row[3])["offer"]}
+    try:
+        detail = json.loads(row[3])
+        if not isinstance(detail, Mapping):
+            raise _field_bound("stored campaign offer detail must be an object")
+        offer = parse_offer(detail.get("offer"))
+    except (ValueError, TypeError, KeyError, WorkloreValidationError):
+        raise _field_bound("stored campaign offer is invalid") from None
+    return {"event_id": row[0], "actor_id": row[1], "actor_type": row[2], "offer": offer}
 
 
 def member_campaign(conn: sqlite3.Connection, work_id: str) -> dict[str, str] | None:
