@@ -7,6 +7,7 @@ import json
 import math
 import subprocess
 import time
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -185,6 +186,30 @@ def test_eligible_seat_is_ready_with_exact_qualifiers_and_mixed_sources(workspac
     assert _row(report, "route-support")["source"] == "parent-reported"
     for category in ("isolation", "admission", "capacity"):
         assert _row(report, category)["source"] == "brigade-governance"
+
+
+def test_route_support_reports_parent_age_against_evaluation_clock(workspace, tmp_path):
+    now = 2_000_000_000.0
+    loaded = _roster(workspace)
+    request = readiness.ReadinessRequest(("coder",), route="t3", isolation="worktree")
+    parsed = t3.load_capabilities(_write(tmp_path, _payload()))
+    parsed = replace(parsed, reported_at=now - 25, received_at=now)
+
+    context, observations = t3.t3_route_readiness(loaded, request, workspace=workspace, report=parsed, now=now)
+    result = readiness.evaluate_readiness(
+        loaded,
+        request,
+        workspace=workspace,
+        observations=observations,
+        now=now,
+        t3_context=context,
+    )
+
+    row = _row(result, "route-support")
+    assert row["observed_at"] == now
+    assert row["age_seconds"] == 0
+    assert row["reported_at"] == now - 25
+    assert row["reported_age_seconds"] == 25
 
 
 def test_missing_envelope_is_unverified_caller_context(workspace, tmp_path):
@@ -744,4 +769,8 @@ def test_cli_ready_human_line_and_json_qualifiers(workspace, tmp_path, capsys):
         ]
     )
     assert code == 0
-    assert capsys.readouterr().out.splitlines()[0] == "ready (parent-reported route support; non-reserving snapshot)"
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == "ready (parent-reported route support; non-reserving snapshot)"
+    route_support = next(line for line in lines if line.startswith("route-support"))
+    assert " age_seconds=" in route_support
+    assert " reported_age_seconds=" in route_support

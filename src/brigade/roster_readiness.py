@@ -520,6 +520,14 @@ def evaluate_readiness(
                     admitted_capacities.append(observation.capacity)
                     if observation.capacity < request.concurrency:
                         status, reason = "failed", "insufficient-capacity"
+            reported_at = None
+            reported_age = None
+            if category == "route-support" and observation.source == SOURCE_PARENT_REPORTED:
+                envelope = t3_context.get("envelope") if isinstance(t3_context, Mapping) else None
+                candidate = envelope.get("reported_at") if isinstance(envelope, Mapping) else None
+                if _finite_real(candidate):
+                    reported_at = candidate
+                    reported_age = max(0.0, now - candidate)
             add(
                 category,
                 status,
@@ -536,6 +544,11 @@ def evaluate_readiness(
                 **({"seat": observation.seat} if observation.seat is not None else {}),
                 age_seconds=age if age is not None and math.isfinite(age) else None,
                 observed_at=observation.observed_at if math.isfinite(observation.observed_at) else None,
+                **(
+                    {"reported_at": reported_at, "reported_age_seconds": reported_age}
+                    if reported_at is not None
+                    else {}
+                ),
                 ttl_seconds=OPERATION_TTL_SECONDS,
                 detail=safe_detail(observation.detail)[:240],
                 **({"observed_status": observation.status} if isolation_refused else {}),
