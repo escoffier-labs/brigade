@@ -186,6 +186,9 @@ def _dispatch_recovery(
     source_env=None,
     quarantine_state=None,
     allow_reinvocation=True,
+    read_only_for=None,
+    sandbox_read_only=None,
+    prompt_read_only=None,
 ):
     direct_calls = []
     fallback_calls = []
@@ -202,14 +205,22 @@ def _dispatch_recovery(
 
     monkeypatch.setattr(agents, "run_agent", fake_run_agent)
     monkeypatch.setattr(acpx_adapter, "run_cursor", fake_run_cursor)
+
+    def build_prompt(agent, assignment, **kwargs):
+        if prompt_read_only is not None:
+            prompt_read_only.append(kwargs["read_only"])
+        return assignment.task
+
     result = run_transport.dispatch(
         [Assignment(worker="grok-review", task="Review the diff.")],
         _recovery_roster(fallback=fallback, source_env=source_env),
-        build_prompt=lambda agent, assignment, **kwargs: assignment.task,
+        build_prompt=build_prompt,
         run_appserver_worker=lambda *args, **kwargs: agents.AgentResult(text="", ok=False, detail="unused"),
         event_writer=lambda events_dir, worker, verbose=False: None,
         cwd=tmp_path,
         read_only=read_only,
+        read_only_for=read_only_for,
+        sandbox_read_only=sandbox_read_only,
         sandbox="read-only" if read_only else None,
         direct=direct,
         quarantine_state=quarantine_state,
@@ -334,6 +345,27 @@ def test_direct_grok_fallback_recovers_after_two_invalid_finals(monkeypatch, tmp
     assert result.provenance["message"]["assignment_id"] == message_envelope.assignment_id_for(
         "grok-review", "Review the diff."
     )
+
+
+@pytest.mark.parametrize("worker_read_only", [True, False])
+def test_direct_grok_fallback_prompt_uses_worker_read_only(monkeypatch, tmp_path, worker_read_only):
+    prompt_read_only = []
+    fallback = replace(_successful_final("Fallback final."), transport="acpx", stop_reason="end_turn")
+
+    result, _, fallback_calls = _dispatch_recovery(
+        monkeypatch,
+        tmp_path,
+        [_invalid_final(), _invalid_final()],
+        fallback_result=fallback,
+        read_only=not worker_read_only,
+        read_only_for=lambda assignment: worker_read_only,
+        sandbox_read_only=True,
+        prompt_read_only=prompt_read_only,
+    )
+
+    assert result.ok is True
+    assert len(fallback_calls) == 1
+    assert prompt_read_only == [worker_read_only, worker_read_only]
 
 
 def test_direct_grok_fallback_does_not_launch_quarantined_seat(monkeypatch, tmp_path):

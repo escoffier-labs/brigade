@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._fifo import make_fifo
 from tests.test_fleet_actions import setup_action
 
 
@@ -1309,7 +1310,7 @@ def test_inbox_helper_rejects_malformed_input_before_transport(tmp_path, monkeyp
         prompt.unlink()
     elif malformed == "fifo":
         prompt.unlink()
-        os.mkfifo(prompt)
+        make_fifo(prompt)
     elif malformed == "symlink":
         prompt.rename(tmp_path / "other")
         prompt.symlink_to(tmp_path / "other")

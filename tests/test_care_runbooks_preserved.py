@@ -18,6 +18,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import care_cmd, care_patrol, care_runbooks, care_schedules, extras, memory_cmd, runbook_cmd
 
 
@@ -103,7 +104,7 @@ def _bad_entry(kind: str, path: Path, tmp_path: Path) -> None:
     if kind == "directory":
         path.mkdir()
     elif kind == "fifo":
-        os.mkfifo(path)
+        make_fifo(path)
     elif kind == "symlink-to-dir":
         (tmp_path / "elsewhere").mkdir(exist_ok=True)
         path.symlink_to(tmp_path / "elsewhere")

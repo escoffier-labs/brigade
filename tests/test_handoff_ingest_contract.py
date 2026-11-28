@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import budgets, handoff_cmd, ingest as ingest_mod
 from brigade.handoff_cmd import drafts, linting
 from brigade.handoff_ingest_rules import (
@@ -949,7 +950,7 @@ def test_a_card_swapped_for_a_fifo_is_routed_to_review_without_hanging(tmp_path:
     outcome = ingest_mod.decide(ingest_mod.parse(handoff), ws, promote_cards=True, route_documents=True)
     card = ws / "memory" / "cards" / "contract-card.md"
     card.unlink()
-    os.mkfifo(card)
+    make_fifo(card)
     with _no_hang():
         action = _execute(ws, handoff, outcome)
     assert action.kind == "inboxed"
@@ -964,7 +965,7 @@ def test_a_new_card_over_a_fifo_is_routed_to_review_without_hanging(tmp_path: Pa
     handoff = Path(payload["path"])
     outcome = ingest_mod.decide(ingest_mod.parse(handoff), ws, promote_cards=True, route_documents=True)
     assert outcome.kind == "promoted"
-    os.mkfifo(ws / "memory" / "cards" / "fresh-card.md")
+    make_fifo(ws / "memory" / "cards" / "fresh-card.md")
     with _no_hang():
         assert _execute(ws, handoff, outcome).kind == "inboxed"
 
@@ -974,7 +975,7 @@ def test_shared_card_reader_refuses_a_fifo_without_blocking(tmp_path: Path):
     from brigade.card_fingerprint import read_text_nofollow
 
     fifo = tmp_path / "card.md"
-    os.mkfifo(fifo)
+    make_fifo(fifo)
     with _no_hang(), pytest.raises(OSError, match="not a regular file"):
         read_text_nofollow(fifo)
 
@@ -993,7 +994,7 @@ def test_a_document_append_over_a_fifo_fails_without_blocking(tmp_path: Path, mo
         inbox=str(ws / "in"),
     )
     handoff = Path(payload["path"])
-    os.mkfifo(ws / "rules" / "team.md")  # swapped in after the draft passed lint
+    make_fifo(ws / "rules" / "team.md")  # swapped in after the draft passed lint
     # The path check catches the FIFO first. Disable it to prove the open itself cannot hang.
     monkeypatch.setattr(ingest_mod, "document_destination_problem", lambda *args, **kwargs: None)
     outcome = ingest_mod.Outcome("routed", dest=ws / "rules" / "team.md")

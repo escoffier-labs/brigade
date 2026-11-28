@@ -8,6 +8,7 @@ from unittest.mock import Mock
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import localio, observed_checks, work_mode
 from brigade.claude_hooks import check_events, runtime
 from tests._posix import requires_dirfd
@@ -119,7 +120,7 @@ def test_env_swap_cannot_follow_or_block(target, tmp_path, monkeypatch, kind):
             if kind == "symlink":
                 env.symlink_to(victim)
             else:
-                os.mkfifo(env)
+                make_fifo(env)
             # Refuse an unsafe open rather than hang the regression suite.
             assert flags & os.O_NONBLOCK and flags & os.O_NOFOLLOW
         return original_open(path, flags, *args, **kwargs)

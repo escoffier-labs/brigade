@@ -470,7 +470,16 @@ def ready(
                 print(f"seat: {seat['name']} selection_role={seat['selection_role']} role={seat['role']}")
         for item in report["evidence"]:
             seat_label = f" seat={item['seat']}" if item.get("seat") else ""
-            print(f"{item['category']}{seat_label}: {item['status']} freshness={item['freshness']} {item['reason']}")
+            age_label = f" age_seconds={item['age_seconds']}" if item.get("age_seconds") is not None else ""
+            reported_age_label = (
+                f" reported_age_seconds={item['reported_age_seconds']}"
+                if item.get("reported_age_seconds") is not None
+                else ""
+            )
+            print(
+                f"{item['category']}{seat_label}: {item['status']} freshness={item['freshness']}"
+                f"{age_label}{reported_age_label} {item['reason']}"
+            )
             if item.get("detail"):
                 print(f"  {item['detail']}")
             if item.get("action"):

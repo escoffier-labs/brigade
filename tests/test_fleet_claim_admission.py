@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import fleet_client
 from tests.test_fleet_claims import lease_clock as lease_clock
 from tests.test_fleet_nodes import ADMIN, NODE_A, _enroll, _plant_home_identity, _request, _serve
@@ -140,7 +141,7 @@ def test_fleet_section_refuses_non_regular_config(tmp_path, kind, strict):
     else:
         if os.name != "posix" or not hasattr(os, "mkfifo"):
             pytest.skip("FIFO requires POSIX support")
-        os.mkfifo(config)
+        make_fifo(config)
 
     if strict:
         with pytest.raises(fleet_client.FleetClientError, match="^fleet configuration could not be read$"):

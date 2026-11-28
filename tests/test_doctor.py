@@ -11,6 +11,7 @@ import shutil
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import proc
 
 from brigade import budgets
@@ -3849,7 +3850,7 @@ def test_doctor_codex_nonregular_config_is_unevaluated(tmp_path: Path, codex_use
     elif kind == "fifo":
         if not hasattr(os, "mkfifo"):
             pytest.skip("FIFO unavailable")
-        os.mkfifo(codex_user_config)
+        make_fifo(codex_user_config)
     else:
         try:
             codex_user_config.symlink_to(codex_user_config if kind == "symlink-loop" else "absent.toml")

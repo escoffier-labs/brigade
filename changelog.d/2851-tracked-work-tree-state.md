@@ -1,0 +1,1 @@
+- Count changes to tracked files under `.brigade/work` as dirty during CI verification and closeout while continuing to ignore untracked Brigade work state.

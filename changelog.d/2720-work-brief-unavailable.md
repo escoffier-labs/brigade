@@ -1,0 +1,2 @@
+- Mark failed work brief session and next-task JSON fields unavailable instead of reporting fallback values.
+- Exercise corrupt task-ledger handling through both deadline implementations.

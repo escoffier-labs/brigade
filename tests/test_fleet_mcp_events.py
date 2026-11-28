@@ -1247,48 +1247,6 @@ def test_claim_expired_when_a_lapsed_claim_is_released_before_the_sweep(stations
     assert delivery["payload"]["name"] == "claim.expired"
 
 
-def test_subscription_created_after_expiry_does_not_receive_it(stations, receiver, hub, monkeypatch) -> None:
-    """A lazily recorded expiry must not reach a subscription created after the lease lapsed."""
-    _base, _ta, _tb, db = hub
-    real_now = fleet_hub._now_epoch()
-    # The lease lapses while there is no claim.expired subscriber at all.
-    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: real_now - 30)
-    _claim(db, "repo-old")
-    # Only now does a client subscribe, so its cursor starts after the lapse.
-    subscribe(stations[1], receiver.url, name="claim.expired")
-    # An unrelated claim operation prunes the old lease and records the expiry late.
-    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: real_now - 28)
-    _claim(db, "repo-trigger", holder="holder-two")
-    assert rows(db, "SELECT COUNT(*) FROM fleet_events WHERE name='claim.expired'")[0][0] >= 1
-    assert tick(db, clock=lambda: real_now + 60) == 0
-    assert receiver.events == [], "an expiry predating the subscription is never delivered"
-
-
-def test_subscription_existing_at_expiry_receives_it_once(stations, receiver, hub, monkeypatch) -> None:
-    """The same lazily recorded expiry is still delivered to a subscription that predates it."""
-    _base, _ta, _tb, db = hub
-    subscribe(stations[1], receiver.url, name="claim.expired")
-    real_now = fleet_hub._now_epoch()
-    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: real_now)
-    _claim(db, "repo-live")
-    # Release after the lapse records the expiry through the claim path, not the sweep.
-    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: real_now + 30)
-    conn = fleet_hub.open_db(db)
-    try:
-        status, payload = fleet_hub.handle_claim(
-            conn,
-            {"action": "release", "node_id": NODE_A, "target": "repo-live", "holder": "holder-one", "scope": "holder"},
-            caller_node=NODE_A,
-        )
-    finally:
-        conn.close()
-    assert status == 200 and payload["released"], payload
-    assert tick(db, clock=lambda: real_now + 60) == 1
-    assert tick(db, clock=lambda: real_now + 61) == 0
-    assert len(receiver.events) == 1
-    assert receiver.events[0]["payload"]["name"] == "claim.expired"
-
-
 class _EventClock:
     """A stand-in for ``time`` inside ``fleet_hub_events``, driven by a test-owned value."""
 
@@ -1384,6 +1342,51 @@ def test_1967_existing_at_expiry_delivered_once(stations, receiver, hub, monkeyp
     assert receiver.events[0]["payload"]["name"] == "claim.expired"
 
 
+def test_1967_same_secret_refresh_preserves_claim_expiry_boundary(stations, receiver, hub, monkeypatch) -> None:
+    """Refreshing in place does not move the occurrence boundary past a live subscription's claim."""
+    _base, _ta, _tb, db = hub
+    state = _new_clock()
+    _inject_time(monkeypatch, state)
+    first = subscribe(stations[1], receiver.url, name="claim.expired")["result"]["id"]
+    _claim(db, "repo-refresh")
+    state["insert"] += 30
+    refreshed = subscribe(stations[1], receiver.url, name="claim.expired")["result"]["id"]
+    assert refreshed == first
+    state["epoch"] = state["insert"]
+    conn = fleet_hub.open_db(db)
+    try:
+        status, payload = fleet_hub.handle_claim(
+            conn,
+            {
+                "action": "release",
+                "node_id": NODE_A,
+                "target": "repo-refresh",
+                "holder": "holder-one",
+                "scope": "holder",
+            },
+            caller_node=NODE_A,
+        )
+    finally:
+        conn.close()
+    assert status == 200 and payload["released"], payload
+    assert tick(db, clock=lambda: state["dispatch"]) == 1
+    assert tick(db, clock=lambda: state["dispatch"] + 1) == 0
+    assert len(receiver.events) == 1
+
+
+def test_1967_expiry_equal_to_subscription_creation_delivered(stations, receiver, hub, monkeypatch) -> None:
+    """The occurrence boundary is inclusive when the lease lapse equals subscription creation."""
+    _base, _ta, _tb, db = hub
+    state = _new_clock()
+    _inject_time(monkeypatch, state)
+    subscribe(stations[1], receiver.url, name="claim.expired")
+    state["epoch"] = state["insert"] - 1
+    _claim(db, "repo-equal")
+    assert tick(db, clock=lambda: state["dispatch"]) == 1
+    assert tick(db, clock=lambda: state["dispatch"] + 1) == 0
+    assert len(receiver.events) == 1
+
+
 def test_1967_stale_expiry_does_not_starve_a_later_one(stations, receiver, hub, monkeypatch) -> None:
     """A skipped expiry ahead of a deliverable one still advances the cursor, so the later one arrives."""
     _base, _ta, _tb, db = hub
@@ -1463,14 +1466,36 @@ def test_1967_lazy_expiry_counts_toward_hourly_bound(stations, receiver, hub, mo
 
 
 def test_1967_message_created_unaffected(stations, receiver, hub, monkeypatch) -> None:
-    """The occurrence check is claim.expired-only; message.created still fans out normally."""
+    """Other event types still fan out after their insertion clock steps behind the subscription."""
     _base, _ta, _tb, db = hub
     state = _new_clock()
     _inject_time(monkeypatch, state)
     subscribe(stations[1], receiver.url, name="message.created")
-    send(stations[0], NODE_B)
-    assert tick(db, clock=lambda: state["dispatch"]) == 1
-    assert receiver.events[0]["payload"]["name"] == "message.created"
+    subscribe(stations[1], receiver.url, name="run.failed")
+    state["insert"] -= 30
+    conn = fleet_hub.open_db(db)
+    try:
+        fleet_hub_events.record_message_created(
+            conn,
+            {
+                "id": "msg-clock-step",
+                "recipient": NODE_B,
+                "sender": NODE_A,
+                "priority": "normal",
+                "created_at": "2026-01-01T00:00:00+00:00",
+            },
+        )
+        fleet_hub_events.record_run_failed(conn, _failed_event(NODE_A, "run-clock-step"))
+        conn.commit()
+    finally:
+        conn.close()
+    assert rows(
+        db,
+        "SELECT COUNT(*) FROM fleet_events e JOIN fleet_event_subscriptions s ON s.name=e.name "
+        "WHERE e.name IN ('message.created', 'run.failed') AND e.created_at < s.created_at",
+    ) == [(2,)]
+    assert tick(db, clock=lambda: state["dispatch"]) == 2
+    assert sorted(event["payload"]["name"] for event in receiver.events) == ["message.created", "run.failed"]
 
 
 def test_claim_target_text_is_never_forwarded(stations, receiver, hub) -> None:

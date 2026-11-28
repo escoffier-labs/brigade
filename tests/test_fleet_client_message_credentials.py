@@ -9,6 +9,7 @@ import urllib.request
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import cli, fleet_client, fleet_client_messages as client
 from brigade import fleet_client_message_credentials as credentials
 from tests.test_fleet_messages import NODE_A, NODE_B
@@ -101,7 +102,7 @@ def test_invalid_credential_files_are_secret_safe(configured, tmp_path, monkeypa
         path.mkdir(mode=0o700)
     elif invalid == "fifo":
         path.unlink()
-        os.mkfifo(path, 0o600)
+        make_fifo(path, 0o600)
     elif invalid == "admin":
         monkeypatch.setattr(
             fleet_client,

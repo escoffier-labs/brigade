@@ -284,6 +284,31 @@ def test_ci_reuses_root_target_fingerprint(checkout, monkeypatch, capsys):
     assert calls == [target]
 
 
+def test_ci_ignores_untracked_brigade_work_state(checkout, monkeypatch, capsys):
+    target, head, _ = checkout
+    state = target / ".brigade" / "work" / "runtime.json"
+    state.parent.mkdir(parents=True)
+    state.write_text("untracked\n")
+    _fake_gh(monkeypatch, head, _check(head))
+
+    assert _ci(target) == 0
+    assert json.loads(capsys.readouterr().out)["state"] == "passed"
+
+
+def test_ci_rejects_modified_tracked_brigade_work_state(checkout, capsys):
+    target, head, _ = checkout
+    state = target / ".brigade" / "work" / "tracked.txt"
+    state.parent.mkdir(parents=True)
+    state.write_text("committed\n")
+    _git(target, "add", "-f", ".brigade/work/tracked.txt")
+    _git(target, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "track state")
+    state.write_text("modified\n")
+
+    assert _ci(target) == 2
+    assert "commit and push" in capsys.readouterr().err.lower()
+    assert not _record(target, head).exists()
+
+
 @pytest.mark.parametrize(
     "remote",
     [
@@ -381,6 +406,35 @@ def test_closeout_does_not_apply_passed_ci_to_uncommitted_changes(checkout, monk
     assert evidence["state"] == "unknown"
     assert "differs from HEAD" in evidence["reason"]
     assert evidence["head_sha"] == head
+
+
+def test_closeout_ignores_untracked_brigade_work_state(checkout, monkeypatch, capsys):
+    target, head, _ = checkout
+    _fake_gh(monkeypatch, head, _check(head))
+    assert _ci(target) == 0
+    capsys.readouterr()
+    state = target / ".brigade" / "work" / "runtime.json"
+    state.write_text("untracked\n")
+
+    assert _closeout_ci(target, capsys)["state"] == "passed"
+
+
+def test_closeout_rejects_modified_tracked_brigade_work_state(checkout, monkeypatch, capsys):
+    target, _, _ = checkout
+    state = target / ".brigade" / "work" / "tracked.txt"
+    state.parent.mkdir(parents=True)
+    state.write_text("committed\n")
+    _git(target, "add", "-f", ".brigade/work/tracked.txt")
+    _git(target, "-c", "user.name=Test", "-c", "user.email=test@example.invalid", "commit", "-m", "track state")
+    head = _git(target, "rev-parse", "HEAD")
+    _fake_gh(monkeypatch, head, _check(head))
+    assert _ci(target) == 0
+    capsys.readouterr()
+    state.write_text("modified\n")
+
+    evidence = _closeout_ci(target, capsys)
+    assert evidence["state"] == "unknown"
+    assert "differs from HEAD" in evidence["reason"]
 
 
 def test_ci_treats_pathologically_nested_json_as_unknown(checkout, monkeypatch, capsys):
