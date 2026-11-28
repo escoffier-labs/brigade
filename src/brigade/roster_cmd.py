@@ -555,7 +555,7 @@ def doctor(
             checks.append((doctor_mod.OK, f"agent: {name}", f"{agent.cli} via {binary}; timeout={timeout:g}s"))
             if agent.cli.startswith("ollama:"):
                 ollama_model = agent.cli[len("ollama:") :]
-                inventory = inventory_inspector.inspect(agent.cli, ollama_model)
+                inventory = inventory_inspector.inspect(agent.cli, ollama_model, env=agent.env)
                 assert inventory is not None
                 checks.append(_model_inventory_check(name, inventory))
         else:
@@ -571,7 +571,7 @@ def doctor(
             elif agents.supports_model_pinning(agent.cli):
                 checks.append((doctor_mod.OK, f"agent: {name} model", f"{agent.model} via {agent.cli}"))
                 if detected and agent.transport == "direct":
-                    inventory = inventory_inspector.inspect(agent.cli, agent.model, agent.command)
+                    inventory = inventory_inspector.inspect(agent.cli, agent.model, agent.command, env=agent.env)
                     if inventory is not None:
                         checks.append(_model_inventory_check(name, inventory))
             else:

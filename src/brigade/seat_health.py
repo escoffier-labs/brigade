@@ -596,6 +596,7 @@ class SeatHealthProbe:
                 requested,
                 getattr(seat, "command", None),
                 timeout_seconds=timeout_seconds,
+                env=seat.env,
             )
             if inspected is not None:
                 if inspected.state == "exact":

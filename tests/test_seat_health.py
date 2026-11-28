@@ -460,13 +460,47 @@ def test_ollama_seat_resolves_model_from_cli_suffix(monkeypatch):
     assert calls == [["ollama", "list"]]
 
 
+def test_ollama_inventory_uses_seat_environment(monkeypatch):
+    endpoint = "http://ollama-seat.test"
+    seat = roster.Agent("worker", "ollama:llama3.2:3b", "work", env={"OLLAMA_HOST": endpoint})
+    value = roster.Roster("chef", {"chef": roster.Agent("chef", "codex", "plan"), "worker": seat})
+    seen = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(kwargs["env"])
+        return proc.Result(0, "NAME ID SIZE MODIFIED\nllama3.2:3b abcdef123456 2GB today\n", "")
+
+    monkeypatch.setattr(model_inventory.proc, "run", fake_run)
+
+    SeatHealthProbe(collect_executable_version=False).probe(seat, value, allow_model_smoke=False)
+
+    assert seen[0]["OLLAMA_HOST"] == endpoint
+
+
+def test_ollama_inventory_without_seat_environment_uses_default(monkeypatch):
+    monkeypatch.delenv("OLLAMA_HOST", raising=False)
+    seat = roster.Agent("worker", "ollama:llama3.2:3b", "work")
+    value = roster.Roster("chef", {"chef": roster.Agent("chef", "codex", "plan"), "worker": seat})
+    seen = []
+
+    def fake_run(argv, **kwargs):
+        seen.append(kwargs["env"])
+        return proc.Result(0, "NAME ID SIZE MODIFIED\nllama3.2:3b abcdef123456 2GB today\n", "")
+
+    monkeypatch.setattr(model_inventory.proc, "run", fake_run)
+
+    SeatHealthProbe(collect_executable_version=False).probe(seat, value, allow_model_smoke=False)
+
+    assert seen == [None]
+
+
 def test_model_inventory_receives_the_per_check_budget(monkeypatch):
     seat = roster.Agent("worker", "grok", "work", model="grok-4.5")
     value = roster.Roster("chef", {"chef": roster.Agent("chef", "codex", "plan"), "worker": seat})
     seen = []
 
-    def fake_inspect(self, cli_ref, requested, command=None, timeout_seconds=None):
-        seen.append((cli_ref, requested, command, timeout_seconds))
+    def fake_inspect(self, cli_ref, requested, command=None, timeout_seconds=None, env=None):
+        seen.append((cli_ref, requested, command, timeout_seconds, env))
         return model_inventory.ModelInventoryResult("exact", requested, (requested,), "exact match")
 
     monkeypatch.setattr(model_inventory.ModelInventoryInspector, "inspect", fake_inspect)
@@ -477,7 +511,7 @@ def test_model_inventory_receives_the_per_check_budget(monkeypatch):
 
     check = next(item for item in result.checks if item.name == "model-reachability")
     assert check.status == "passed"
-    assert seen == [("grok", "grok-4.5", None, seat_health.MODEL_REACHABILITY_TIMEOUT_SECONDS)]
+    assert seen == [("grok", "grok-4.5", None, seat_health.MODEL_REACHABILITY_TIMEOUT_SECONDS, None)]
 
 
 @pytest.mark.parametrize("positive_budget", (False, True), ids=("already-expired", "positive-budget"))

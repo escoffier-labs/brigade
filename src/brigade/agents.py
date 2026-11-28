@@ -1101,6 +1101,20 @@ def resolve_env_overrides(env: dict[str, str]) -> tuple[dict[str, str] | None, s
     return resolved, ""
 
 
+def resolve_child_env(
+    env: dict[str, str] | None,
+) -> tuple[dict[str, str] | None, dict[str, str] | None, str]:
+    """Build the child environment used for a seat run."""
+    if env is None:
+        return None, None, ""
+    overrides, error = resolve_env_overrides(env)
+    if overrides is None:
+        return None, None, error
+    child_env = dict(os.environ)
+    child_env.update(overrides)
+    return child_env, overrides, ""
+
+
 def secret_ref_targets(env: dict[str, str]) -> set[str]:
     """Target keys resolved from *_REF entries: the only values scrub may touch."""
 
@@ -1253,13 +1267,12 @@ def run_agent(
     cloud_safe_mode: bool = False,
     local_batch_output: bool = False,
 ) -> AgentResult:
-    child_env: dict[str, str] | None = None
     resolved_overrides: dict[str, str] | None = None
     resolved_secret_targets: set[str] | None = None
     if env is not None:
         resolved_secret_targets = secret_ref_targets(env)
-        overrides, env_error = resolve_env_overrides(env)
-        if overrides is None:
+        child_env, resolved_overrides, env_error = resolve_child_env(env)
+        if child_env is None:
             return AgentResult(
                 text="",
                 ok=False,
@@ -1268,9 +1281,8 @@ def run_agent(
                 failure_kind="env-ref-missing",
                 requested_model=model,
             )
-        resolved_overrides = overrides
-        child_env = dict(os.environ)
-        child_env.update(overrides)
+    else:
+        child_env = None
 
     executable_path = None
     if resolved_overrides is not None and "PATH" in resolved_overrides:

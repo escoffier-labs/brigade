@@ -1,0 +1,1 @@
+- Run model inventory listings with the same per-seat environment as worker runs.
