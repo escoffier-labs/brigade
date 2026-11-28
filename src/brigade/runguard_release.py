@@ -55,7 +55,7 @@ _WINDOWS = os.name == "nt"
 # Process-local evidence, scoped to the gated metadata-removal transaction.
 # Never retain a pathname after the rename: NTFS may immediately reuse its inode.
 _RELEASING: set[tuple[Path, int, int]] = set()
-_RELEASING_LOCK = threading.Lock()
+_RELEASING_LOCK = threading.RLock()
 
 
 def snapshot_is_releasing(path: Path, info: os.stat_result) -> bool:
@@ -137,9 +137,9 @@ def _release_once(path: Path, release_path: Path, ownership: _LockOwnership) -> 
         if not _still_our_lock(path, ownership):
             return
         key = (path.absolute(), ownership.device, ownership.inode)
-        with _RELEASING_LOCK:
-            _RELEASING.add(key)
         try:
+            with _RELEASING_LOCK:
+                _RELEASING.add(key)
             withheld = _withhold_metadata(path)
             moved = _rename_lock(path, release_path, ownership, withheld=withheld)
         finally:
