@@ -1143,6 +1143,69 @@ def test_native_event_payloads_are_closed(event_type, payload):
     run_events.validate_event_request(event_type=event_type, payload=valid, idempotency_key="k")
 
 
+def test_native_claim_admission_evidence_is_validated_but_optional():
+    old_payload = {
+        "task_id": "one",
+        "attempt_id": "a" * 64,
+        "dispatch_attempt": 1,
+        "parent_thread": "thread-parent",
+        "template_digest": "b" * 64,
+        "intent_digest": "c" * 64,
+    }
+    run_events.validate_event_request(event_type="task.native-claimed", payload=old_payload, idempotency_key="old")
+
+    evidence = {
+        "admission": "admitted",
+        "roster_digest": "sha256:" + "d" * 64,
+        "policy_digest": "sha256:" + "e" * 64,
+    }
+    run_events.validate_event_request(
+        event_type="task.native-claimed", payload={**old_payload, **evidence}, idempotency_key="valid"
+    )
+
+    run_events.validate_event_request(
+        event_type="task.native-claimed",
+        payload={**old_payload, **evidence, "policy_digest": None},
+        idempotency_key="legacy-null-policy",
+    )
+    envelope = run_events.build_event(
+        run_id="t3-" + "a" * 64,
+        sequence=1,
+        event_type="task.native-claimed",
+        payload={**old_payload, **evidence, "policy_digest": None},
+        idempotency_key="legacy-null-policy",
+        recorded_at="2026-01-01T00:00:00.000000Z",
+        previous_digest=None,
+    )
+    assert run_events.validate_event(json.loads(json.dumps(envelope))) == []
+    for value in ("e" * 64, "sha256:" + "e" * 63, "sha256:" + "g" * 64, "", 1, False, [], {}):
+        with pytest.raises(run_events.CanonicalizationError, match="policy_digest"):
+            run_events.validate_event_request(
+                event_type="task.native-claimed",
+                payload={**old_payload, **evidence, "policy_digest": value},
+                idempotency_key="bad-policy-digest",
+            )
+    with pytest.raises(run_events.CanonicalizationError, match="roster_digest is invalid"):
+        run_events.validate_event_request(
+            event_type="task.native-claimed",
+            payload={**old_payload, **evidence, "roster_digest": None},
+            idempotency_key="null-roster-digest",
+        )
+
+    with pytest.raises(run_events.CanonicalizationError, match="admission is invalid"):
+        run_events.validate_event_request(
+            event_type="task.native-claimed",
+            payload={**old_payload, **evidence, "admission": "denied"},
+            idempotency_key="wrong-admission",
+        )
+    with pytest.raises(run_events.CanonicalizationError, match="roster_digest is invalid"):
+        run_events.validate_event_request(
+            event_type="task.native-claimed",
+            payload={**old_payload, **evidence, "roster_digest": "d" * 64},
+            idempotency_key="bad-digest",
+        )
+
+
 @POSIX_ONLY
 def test_missing_target_is_a_bounded_run_missing_refusal(tmp_path, capsys):
     missing = tmp_path / "does-not-exist"
