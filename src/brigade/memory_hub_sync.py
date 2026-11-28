@@ -206,6 +206,9 @@ def _forget_search_refusals(target: Path, readable: set[str]) -> None:
     """
     if not readable:
         return
+    now = time.time()
+    if not readable.intersection(store.refused_scopes(target, now=now)):
+        return
     try:
         with _state_lock(target):
             store.forget_refused_scopes(target, tuple(sorted(readable)), now=time.time())

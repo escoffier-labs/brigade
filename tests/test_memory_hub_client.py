@@ -950,7 +950,7 @@ def test_concurrent_refused_scope_writers_keep_both_scopes(tmp_path, monkeypatch
 
 def test_refused_scope_lock_timeout_skips_write(tmp_path, monkeypatch, caplog):
     @contextmanager
-    def timed_out(target):
+    def timed_out(target, **kwargs):
         raise InboxLockTimeout("busy")
         yield
 
@@ -960,6 +960,93 @@ def test_refused_scope_lock_timeout_skips_write(tmp_path, monkeypatch, caplog):
 
     assert store.refused_scopes(tmp_path, now=1_000.0) == {}
     assert "skipped recording refused scopes" in caplog.text
+
+
+@pytest.mark.parametrize("scopes", [("principal:alice",), ("principal:alice", "repo:a")])
+def test_search_state_lock_contention_stays_within_budget(hub, tmp_path, scopes):
+    target = workspace(tmp_path, read_scopes=scopes)
+    _put(hub, "repo:a", "needle", "needle")
+    with store.locked(target):
+        started = time.monotonic()
+        payload = hub_search.search_payload(target, "needle", settings=settings(target))
+        elapsed = time.monotonic() - started
+    assert elapsed < hubc.SEARCH_BUDGET_SECONDS
+    assert payload["retrieval"]["skipped_scopes"] == ["principal:alice"]
+    assert "unprobed_scopes" not in payload["retrieval"]
+    if "repo:a" in scopes:
+        assert [match["card_id"] for match in payload["matches"]] == ["needle"]
+    assert not (store.root(target) / store.REFUSED_SCOPES).exists()
+
+
+def test_successful_search_creates_no_hub_state(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, read_scopes=("repo:a",))
+
+    def unexpected_lock(*args, **kwargs):
+        pytest.fail("a successful search without refusals must not lock state")
+
+    monkeypatch.setattr(hub_search, "_refused_state_lock", unexpected_lock)
+    payload = hub_search.search_payload(target, "needle", settings=settings(target))
+    assert payload["retrieval"]["hub"] == "ok"
+    assert not store.root(target).exists()
+
+
+@pytest.mark.parametrize("forget", [hub_search._forget_refused, sync._forget_search_refusals])
+@pytest.mark.parametrize("state", [None, {}, {"repo:other": 1_600.0}, {"repo:a": 900.0}])
+def test_forgetting_without_live_matching_refusals_takes_no_lock(tmp_path, monkeypatch, forget, state):
+    monkeypatch.setattr(sync.time, "time", lambda: 1_000.0)
+    path = store.root(tmp_path) / store.REFUSED_SCOPES
+    if state is not None:
+        store.ensure_root(tmp_path)
+        store.write_json(path, {"scopes": state})
+    before = path.read_bytes() if path.exists() else None
+
+    def unexpected_lock(*args, **kwargs):
+        pytest.fail("forgetting without a matching refusal must not lock state")
+
+    monkeypatch.setattr(hub_search, "_refused_state_lock", unexpected_lock)
+    monkeypatch.setattr(sync, "_state_lock", unexpected_lock)
+    if forget is hub_search._forget_refused:
+        forget(tmp_path, ("repo:a",), now=1_000.0)
+    else:
+        forget(tmp_path, {"repo:a"})
+    assert (path.read_bytes() if path.exists() else None) == before
+    if state is None:
+        assert not store.root(tmp_path).exists()
+
+
+@pytest.mark.parametrize("forget", [hub_search._forget_refused, sync._forget_search_refusals])
+def test_forgetting_reloads_refusals_after_lock_acquisition(tmp_path, monkeypatch, forget):
+    monkeypatch.setattr(sync.time, "time", lambda: 1_000.0)
+    store.remember_refused_scopes(tmp_path, ("repo:a",), now=1_000.0)
+
+    @contextmanager
+    def concurrent_update(target, **kwargs):
+        with store.locked(target):
+            store.remember_refused_scopes(target, ("repo:b",), now=1_000.0)
+            yield
+
+    monkeypatch.setattr(hub_search, "_refused_state_lock", concurrent_update)
+    monkeypatch.setattr(sync, "_state_lock", concurrent_update)
+    if forget is hub_search._forget_refused:
+        forget(tmp_path, ("repo:a",), now=1_000.0)
+    else:
+        forget(tmp_path, {"repo:a"})
+    assert set(store.refused_scopes(tmp_path, now=1_000.0)) == {"repo:b"}
+
+
+def test_refusal_lock_wait_is_capped_by_remaining_search_budget(tmp_path, monkeypatch):
+    original = store.locked
+    waits = []
+
+    def recording_lock(target, *, deadline_seconds):
+        waits.append(deadline_seconds)
+        return original(target, deadline_seconds=deadline_seconds)
+
+    monkeypatch.setattr(store, "locked", recording_lock)
+    monkeypatch.setattr(hub_search, "_monotonic", lambda: 1_000.0)
+    with hub_search._refused_state_lock(tmp_path, deadline=1_000.02):
+        pass
+    assert waits == [pytest.approx(0.02)]
 
 
 def test_a_stored_refusal_expiry_is_clamped_to_the_ttl(tmp_path):
