@@ -173,7 +173,8 @@ def test_mixed_batch_still_isolates_individually(monkeypatch):
     assert hub.delivery_counts == {seq: 1 for seq in range(1, 21) if seq not in bad}
 
 
-def test_four_poison_at_head_sets_health_and_status_warns(monkeypatch, capsys):
+@pytest.mark.parametrize("json_output", [False, True])
+def test_four_poison_at_head_sets_health_and_status_warns(monkeypatch, capsys, json_output):
     """Documented residual: four head poison events with no delivery look like a hub fault (#1846)."""
     events = [_event(seq, poison=seq <= 4) for seq in range(1, 9)]
     path = _spool(events)
@@ -186,10 +187,16 @@ def test_four_poison_at_head_sets_health_and_status_warns(monkeypatch, capsys):
     monkeypatch.setattr(fleet_client, "fetch_status", lambda *, include_all: [])
     monkeypatch.setattr(fleet_client, "fetch_run_preference", lambda: {})
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE)
-    assert cli.main(["fleet", "status"]) == 0
-    output = capsys.readouterr().out
-    assert "warning: fleet event spool is stuck behind 4 poison events at its head" in output
-    assert "`brigade fleet flush`" in output
+    assert cli.main(["fleet", "status"] + (["--json"] if json_output else [])) == 0
+    captured = capsys.readouterr()
+    assert "at least 4 consecutive rejections" in captured.err
+    assert "head events need manual intervention" in captured.err
+    assert "flush" not in captured.err
+    assert "warning:" not in captured.out
+    if json_output:
+        payload = json.loads(captured.out)
+        assert payload["runs"] == []
+        assert payload["warning"] in captured.err
 
 
 def test_successful_delivery_clears_stuck_health(monkeypatch):
@@ -429,3 +436,82 @@ def test_whole_batch_budget_must_allow_a_mixed_run(monkeypatch):
     with pytest.raises(ValueError):
         _flush(FakeHub(), monkeypatch, whole_batch_budget=1)
     assert _sequences(path) == [1, 2]
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_flush_clears_stale_marker_for_empty_or_missing_spool(monkeypatch, missing):
+    path = _spool([])
+    marker = fleet_client_flush.stuck_path(path)
+    marker.write_text('{"head_poison_count": 4}\n')
+    if missing:
+        path.unlink()
+        assert fleet_client_flush.read_stuck(path) is None
+        assert marker.exists()  # Status is read-only.
+    monkeypatch.setattr(fleet_client, "_post_events", lambda *a, **kw: pytest.fail("unexpected POST"))
+    assert fleet_client.flush_spool(NODE, hub_url=HUB, token="fixture-token") == 0
+    assert not marker.exists()
+    assert not path.exists()
+    _spool([_event(1)])
+    assert fleet_client_flush.read_stuck(path) is None
+
+
+def test_missing_spool_without_marker_creates_no_directory():
+    path = fleet_client.spool_path(NODE)
+    assert not path.parent.exists()
+    assert fleet_client_flush.read_stuck(path) is None
+    assert fleet_client.flush_spool(NODE, hub_url=HUB, token="fixture-token") == 0
+    assert not path.parent.exists()
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_status_with_relative_home_and_environment_hub(tmp_path, monkeypatch, capsys, json_output):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("BRIGADE_HOME", ".brigade")
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", HUB)
+    monkeypatch.setattr(fleet_client, "fetch_status", lambda *, include_all: [])
+    monkeypatch.setattr(fleet_client, "fetch_run_preference", lambda: {})
+    assert cli.main(["fleet", "status"] + (["--json"] if json_output else [])) == 0
+    captured = capsys.readouterr()
+    assert "manual intervention" not in captured.err
+    if json_output:
+        assert json.loads(captured.out)["warning"] is None
+    assert not (tmp_path / ".brigade").exists()
+
+
+def test_missing_spool_recreated_before_lock_keeps_rejections(monkeypatch):
+    from contextlib import contextmanager
+
+    path = _spool([])
+    path.unlink()
+    marker = fleet_client_flush.stuck_path(path)
+    marker.write_text('{"head_poison_count": 4}\n')
+    original_lock = fleet_client._spool_lock
+
+    @contextmanager
+    def lock_after_writer(spool):
+        with original_lock(spool) as dir_fd:
+            fleet_client._write_spool_atomic(spool, [_event(seq, poison=True) for seq in range(1, 9)], dir_fd=dir_fd)
+            yield dir_fd
+
+    monkeypatch.setattr(fleet_client, "_spool_lock", lock_after_writer)
+    monkeypatch.setattr(fleet_client, "_post_events", FakeHub().post)
+    assert fleet_client.flush_spool(NODE, hub_url=HUB, token="fixture-token") == 0
+    assert _sequences(path) == list(range(1, 9))
+    assert fleet_client_flush.read_stuck(path) == {"head_poison_count": 4}
+
+
+def test_read_stuck_ignores_spool_removed_during_marker_read(monkeypatch):
+    path = _spool([_event(1)])
+    marker = fleet_client_flush.stuck_path(path)
+    marker.write_text('{"head_poison_count": 4}\n')
+    original_read = fleet_client._read_spool
+
+    def read_and_remove(target, **kwargs):
+        records = original_read(target, **kwargs)
+        if target == marker:
+            path.unlink()
+        return records
+
+    monkeypatch.setattr(fleet_client, "_read_spool", read_and_remove)
+    assert fleet_client_flush.read_stuck(path) is None
+    assert marker.exists()

@@ -67,10 +67,15 @@ def stuck_path(spool: Path) -> Path:
 def read_stuck(spool: Path) -> dict[str, Any] | None:
     """Read the durable poison-head health marker for ``spool``."""
     from . import fleet_client as client
+    from .fleet_client_spool_entry import _has_regular_spool
 
     marker = stuck_path(spool)
     try:
+        if not _has_regular_spool(spool):
+            return None
         records = client._read_spool(marker)
+        if not _has_regular_spool(spool):
+            return None
     except (OSError, client.FleetClientError):
         return None
     if len(records) != 1 or not isinstance(records[0].get("head_poison_count"), int):
@@ -238,6 +243,7 @@ def flush_locked(
 
     events = client._read_spool(path, dir_fd=dir_fd)
     if not events:
+        _clear_stuck(client, path, dir_fd)
         if dir_fd is not None:
             try:
                 os.unlink(path.name, dir_fd=dir_fd)

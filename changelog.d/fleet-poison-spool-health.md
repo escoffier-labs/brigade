@@ -1,1 +1,3 @@
 - Surface a durable fleet status warning when poison events leave the local event spool stuck, and clear it after delivery resumes.
+- Keep fleet status usable with a relative BRIGADE_HOME and environment hub configuration, and send stuck-head warnings to stderr with manual intervention guidance.
+- Clear stale spool health markers under the spool lock when the queue is empty or missing, and ignore missing-spool markers during status reads.
