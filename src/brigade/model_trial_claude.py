@@ -701,7 +701,9 @@ class _StderrCapture:
     Only the last ``STDERR_TAIL`` redacted bytes survive. Total output past ``MAX_STDERR_BYTES`` is
     an overflow the caller turns into a failed cell. On POSIX, ``deadline`` bounds the drain with
     a monotonic timestamp; ``expired`` records when that deadline ended it. ``failed`` records an
-    I/O or wait failure. ``stopping`` interrupts the polling wait during teardown.
+    I/O or wait failure. ``stopping`` interrupts the polling wait during teardown; ``eof`` records
+    that the stream really ended, so a reader stopped while the pipe was still open is not mistaken
+    for a clean finish.
     """
 
     def __init__(self, token: str) -> None:
@@ -712,6 +714,7 @@ class _StderrCapture:
         self.overflow = False
         self.expired = False
         self.failed = False
+        self.eof = False
         self.deadline: float | None = None
         self.stopping = threading.Event()
 
@@ -727,16 +730,24 @@ class _StderrCapture:
             if os.name == "posix" and self.deadline is not None:
                 poller = select.poll()
                 poller.register(pipe.fileno(), select.POLLIN | select.POLLHUP | select.POLLERR)
-            while not self.stopping.is_set():
+            while True:
                 if poller is not None and self.deadline is not None:
-                    remaining = self.deadline - time.monotonic()
-                    if remaining <= 0:
-                        self.expired = True
-                        break
-                    if not poller.poll(max(1, int(min(remaining, 0.05) * 1000) + 1)):
-                        continue
+                    if self.stopping.is_set():
+                        # Teardown: drain what is already buffered, then stop without waiting.
+                        if not poller.poll(0):
+                            break
+                    else:
+                        remaining = self.deadline - time.monotonic()
+                        if remaining <= 0:
+                            self.expired = True
+                            break
+                        if not poller.poll(max(1, int(min(remaining, 0.05) * 1000) + 1)):
+                            continue
+                elif self.stopping.is_set():
+                    break
                 chunk = pipe.read1(65536)  # type: ignore[attr-defined]
                 if not chunk:
+                    self.eof = True
                     break
                 self.total += len(chunk)
                 if self.total > MAX_STDERR_BYTES and not self.overflow:
@@ -1235,7 +1246,9 @@ def _run_process(
             capture.stopping.set()
             drainer.join(timeout=EXIT_GRACE)
         finally:
-            held_pipes = held_pipes or (capture.expired and not timed_out.is_set())
+            # A reader that teardown stopped before EOF means a descendant still holds stderr.
+            stopped_open = capture.stopping.is_set() and not capture.eof and not capture.failed
+            held_pipes = held_pipes or ((capture.expired or stopped_open) and not timed_out.is_set())
             if drainer.is_alive() or capture.failed:
                 cleanup_failed = True
             for pipe in (child.stdout, child.stderr):

@@ -1161,7 +1161,8 @@ def test_stderr_reader_stops_promptly_on_early_teardown_with_an_inherited_pipe(t
         assert time.monotonic() - started < 2
         assert observer.failure == "malformed_stream"
         assert run.stderr == b"diagnostic\n"
-        assert not run.timed_out and not run.cleanup_failed and not run.held_pipes
+        # Teardown stopped the reader while a descendant still held stderr: that must not pass.
+        assert not run.timed_out and not run.cleanup_failed and run.held_pipes
     finally:
         if pid_file.exists():
             try:
@@ -2060,6 +2061,7 @@ def test_a_drainer_that_outlives_the_join_keeps_the_work_dir(tmp_path, monkeypat
         overflow = False
         expired = False
         failed = False
+        eof = False
         deadline = None
         tail = b""
 
