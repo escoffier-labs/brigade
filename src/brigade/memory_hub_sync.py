@@ -12,6 +12,7 @@ refuses an admin credential (`memory_hub_client.refuse_admin`).
 from __future__ import annotations
 
 import contextlib
+import logging
 import re
 import time
 from datetime import datetime, timezone
@@ -21,6 +22,8 @@ from typing import Any, Callable, Iterator
 from . import memory_hub_client as hubc
 from . import memory_hub_store as store
 from .inbox_lock import InboxLockTimeout
+
+_LOG = logging.getLogger(__name__)
 
 SPOOL_MAX_AGE_MS = 28 * 24 * 3600 * 1000
 CLOCK_SKEW_WARN_SECONDS = 60
@@ -204,7 +207,10 @@ def _forget_search_refusals(target: Path, readable: set[str]) -> None:
     if not readable:
         return
     try:
-        store.forget_refused_scopes(target, tuple(sorted(readable)), now=time.time())
+        with _state_lock(target):
+            store.forget_refused_scopes(target, tuple(sorted(readable)), now=time.time())
+    except InboxLockTimeout:
+        _LOG.debug("hub state lock timed out; skipped forgetting refused scopes")
     except OSError:
         pass
 

@@ -1,0 +1,1 @@
+- Preserve concurrent refused-scope updates by writing them under the bounded hub state lock.

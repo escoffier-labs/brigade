@@ -24,6 +24,7 @@ nothing here writes it to disk. The caller's search log keeps the #2196 rules.
 from __future__ import annotations
 
 import json
+import logging
 import sys
 import time
 from dataclasses import dataclass
@@ -33,11 +34,13 @@ from typing import Any
 from . import memory_bm25
 from . import memory_hub_client as hubc
 from . import memory_hub_store as store
+from .inbox_lock import InboxLockTimeout
 
 RRF_K = 60
 WIDE = 200
 HUB_LIMIT_MAX = 20  # the hub's `search` limit
 _SOURCE_ORDER = {"hub": 0, "local": 1, "replica": 2}
+_LOG = logging.getLogger(__name__)
 
 
 def enabled(target: Path) -> bool:
@@ -278,16 +281,29 @@ def _merge_scope_replies(replies: list[dict[str, Any]], limit: int) -> dict[str,
 def _remember_refused(target: Path, scopes: tuple[str, ...], *, now: float) -> None:
     """Remember a refusal for a later search. A cache write never fails the search."""
     try:
-        store.remember_refused_scopes(target, scopes, now=now)
+        with _refused_state_lock(target):
+            store.remember_refused_scopes(target, scopes, now=now)
+    except InboxLockTimeout:
+        _LOG.debug("hub state lock timed out; skipped recording refused scopes")
     except OSError:
         pass
 
 
 def _forget_refused(target: Path, scopes: tuple[str, ...], *, now: float) -> None:
     try:
-        store.forget_refused_scopes(target, scopes, now=now)
+        with _refused_state_lock(target):
+            store.forget_refused_scopes(target, scopes, now=now)
+    except InboxLockTimeout:
+        _LOG.debug("hub state lock timed out; skipped forgetting refused scopes")
     except OSError:
         pass
+
+
+def _refused_state_lock(target: Path):
+    """Use the pull state writer's bounded lock acquisition."""
+    from .memory_hub_sync import _state_lock
+
+    return _state_lock(target)
 
 
 def _search_readable_scopes(

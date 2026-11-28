@@ -11,6 +11,8 @@ import shutil
 import os
 import stat
 import threading
+import time
+from contextlib import contextmanager
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +25,7 @@ from brigade import memory_hub_client as hubc
 from brigade import memory_hub_search as hub_search
 from brigade import memory_hub_store as store
 from brigade import memory_hub_sync as sync
+from brigade.inbox_lock import InboxLockTimeout
 
 # Built at runtime: fixtures, not credentials.
 NODE_CREDENTIAL = "-".join(("fixture", "node", "credential", "0123456789"))
@@ -915,6 +918,48 @@ def test_the_refused_scope_memory_is_bounded_and_private(tmp_path):
         # living in the same private hub root as every other hub state file.
         return
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_concurrent_refused_scope_writers_keep_both_scopes(tmp_path, monkeypatch):
+    barrier = threading.Barrier(2)
+    original_write = store.write_json
+
+    def slow_write(path, value):
+        time.sleep(0.05)
+        original_write(path, value)
+
+    monkeypatch.setattr(store, "write_json", slow_write)
+    errors = []
+
+    def remember(scope):
+        try:
+            barrier.wait()
+            hub_search._remember_refused(tmp_path, (scope,), now=1_000.0)
+        except BaseException as exc:
+            errors.append(exc)
+
+    writers = [threading.Thread(target=remember, args=(scope,)) for scope in ("repo:a", "repo:b")]
+    for writer in writers:
+        writer.start()
+    for writer in writers:
+        writer.join()
+
+    assert errors == []
+    assert set(store.refused_scopes(tmp_path, now=1_000.0)) == {"repo:a", "repo:b"}
+
+
+def test_refused_scope_lock_timeout_skips_write(tmp_path, monkeypatch, caplog):
+    @contextmanager
+    def timed_out(target):
+        raise InboxLockTimeout("busy")
+        yield
+
+    monkeypatch.setattr(hub_search, "_refused_state_lock", timed_out)
+    with caplog.at_level("DEBUG", logger=hub_search.__name__):
+        hub_search._remember_refused(tmp_path, ("repo:a",), now=1_000.0)
+
+    assert store.refused_scopes(tmp_path, now=1_000.0) == {}
+    assert "skipped recording refused scopes" in caplog.text
 
 
 def test_a_stored_refusal_expiry_is_clamped_to_the_ttl(tmp_path):

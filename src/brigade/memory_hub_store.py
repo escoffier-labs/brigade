@@ -623,7 +623,7 @@ def refused_scopes(target: Path, *, now: float) -> dict[str, float]:
 def remember_refused_scopes(
     target: Path, scopes: tuple[str, ...], *, now: float, ttl: float = REFUSED_SCOPES_TTL_SECONDS
 ) -> None:
-    """Remember `scopes` as refused for `ttl`, bounded to the newest entries."""
+    """Remember `scopes` as refused for `ttl`, bounded to the newest entries. Hold `locked`."""
     expires = now + ttl
     remembered = refused_scopes(target, now=now)
     for name in scopes:
@@ -634,7 +634,7 @@ def remember_refused_scopes(
 
 
 def forget_refused_scopes(target: Path, scopes: tuple[str, ...], *, now: float) -> None:
-    """Drop remembered refusals for scopes the hub has just answered."""
+    """Drop remembered refusals for scopes the hub has just answered. Hold `locked`."""
     remembered = refused_scopes(target, now=now)
     kept = {name: expires for name, expires in remembered.items() if name not in scopes}
     if kept == remembered:
