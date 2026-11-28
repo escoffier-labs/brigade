@@ -634,6 +634,11 @@ def _consume(args: argparse.Namespace) -> int:
     except (OSError, ValueError, TypeError, IndexError, RecursionError, RuntimeError):
         return _refuse(args, "input_refused")
     if not repos:
+        if args.json:
+            print(json.dumps({"dropped": dropped, "passes": []}, sort_keys=True, indent=2))
+        else:
+            for item in dropped:
+                print(f"dropped  {_text(item['identity'])}  {_text(item['reason'])}")
         return _refuse(args, "no_local_repositories")
     try:
         passes = consumer.consume(

@@ -1,2 +1,4 @@
 - Report local campaign repositories dropped because their identities cannot be resolved.
 - Show a campaign member's park kind in text and JSON output.
+- Preserve dropped repository diagnostics when campaign consume refuses an entirely unresolved selection.
+- Limit campaign park kinds to review, checks, merge, and blocked waits; render other next actions as a dash.

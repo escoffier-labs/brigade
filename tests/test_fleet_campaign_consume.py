@@ -556,6 +556,38 @@ def test_consume_reports_unresolvable_repository_in_text_and_json(tmp_path, monk
     }
 
 
+@pytest.mark.parametrize("json_output", [False, True])
+def test_consume_reports_all_dropped_repositories_before_refusing(tmp_path, monkeypatch, capsys, json_output):
+    from brigade import cli
+
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "repos.toml").write_text(
+        '[[repo]]\nid="missing-one"\npath="missing-one"\n[[repo]]\nid="missing-two"\npath="missing-two"\n'
+    )
+
+    def unexpected_consume(*args, **kwargs):
+        pytest.fail("an empty repository selection must not reach the consumer")
+
+    monkeypatch.setattr(consumer, "consume", unexpected_consume)
+    command = ["fleet", "campaign", "consume", KEY, "--target", str(tmp_path), "--worker", "coder"]
+    assert cli.main([*command, *(["--json"] if json_output else [])]) == 2
+    captured = capsys.readouterr()
+    if json_output:
+        assert json.loads(captured.out) == {
+            "dropped": [
+                {"identity": identity, "reason": "repository_identity_unresolved"}
+                for identity in ("missing-one", "missing-two")
+            ],
+            "passes": [],
+        }
+        assert json.loads(captured.err) == {"error": "no_local_repositories"}
+    else:
+        assert captured.out.splitlines() == [
+            f"dropped  {identity}  repository_identity_unresolved" for identity in ("missing-one", "missing-two")
+        ]
+        assert captured.err == "error: no_local_repositories\n"
+
+
 def test_receipt_writer_appends_one_json_line_per_step(tmp_path):
     emit = consumer.receipt_writer(tmp_path, KEY)
     emit({"event": "take", "repo": "acme/one"})

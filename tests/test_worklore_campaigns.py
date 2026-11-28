@@ -1,3 +1,4 @@
+import json
 import sqlite3
 
 import pytest
@@ -406,3 +407,32 @@ def test_two_connections_creating_the_same_key_converge_on_one_campaign(tmp_path
     assert two["added"] == ["acme/extra-b"] and two["existing"] == ["acme/one"]
     assert first.execute("SELECT COUNT(*) FROM work_campaigns").fetchone()[0] == 1
     assert first.execute("SELECT COUNT(*) FROM work_campaign_members").fetchone()[0] == 3
+
+
+@pytest.mark.parametrize(
+    "next_action",
+    [
+        None,
+        {},
+        "implement",
+        *(
+            {"kind": kind}
+            for kind in ("await-review", "await-checks", "await-merge", "blocked", "implement", "verify", "done")
+        ),
+    ],
+)
+def test_member_park_kind_only_exposes_park_actions(tmp_path, monkeypatch, capsys, next_action):
+    from brigade import cli, worklore_client
+
+    conn = _conn(tmp_path)
+    _create(conn, _body(repos=("acme/one",)))
+    monkeypatch.setattr(campaigns, "_holder", lambda *args: {"state": "owned", "next_action": next_action})
+    payload = campaigns.show_campaign(conn, "camp-1")
+    kind = next_action.get("kind") if isinstance(next_action, dict) else None
+    expected = kind if kind in ("await-review", "await-checks", "await-merge", "blocked") else None
+    assert payload["members"][0]["park_kind"] == expected
+    monkeypatch.setattr(worklore_client, "get_campaign", lambda key: payload)
+    assert cli.main(["fleet", "campaign", "show", "camp-1"]) == 0
+    assert f"  park {expected or '-'}  " in capsys.readouterr().out
+    assert cli.main(["fleet", "campaign", "show", "camp-1", "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["members"][0]["park_kind"] == expected
