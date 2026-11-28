@@ -1,6 +1,6 @@
 ---
 name: t3-governed-delegation
-description: Use when a T3 Code parent session delegates child tasks under Brigade governance - the exact t3 open, claim, accepted, observe, cancel, ack and finalize order, how task_status delivery differs from Brigade acknowledgement, and why a lost delegate reply must be held instead of resubmitted. Never resubmit delegate_task after a lost reply and never treat task_status as Brigade acknowledgement.
+description: Use when a T3 Code parent session delegates child tasks under Brigade governance - the exact t3 open, claim, accepted, release-claim, observe, cancel, ack and finalize order, how task_status delivery differs from Brigade acknowledgement, and why a lost delegate reply must be held instead of resubmitted. Never resubmit delegate_task after a lost reply and never treat task_status as Brigade acknowledgement.
 allowed-tools: Read, Grep, Bash(brigade t3:*), Bash(brigade roster:*)
 compatibility: A T3 Code parent session with native orchestrator_capabilities, delegate_task, task_status and task_cancel tools, against a workspace enrolled by brigade t3 open.
 ---
@@ -21,13 +21,14 @@ Placeholders: `<run>` (run id from `t3 open`), `<task>` (task id), `<parent-thre
    - `brigade t3 claim <run> <task> --parent-thread <parent-thread>`
    - Submit the exact printed `delegate_task` arguments with your own native tool.
    - `brigade t3 accepted <run> <task> --parent-thread <parent-thread> --native-json <result.json>`
+   - Only when the claim is uncorrelated and your exported parent activity log shows no `delegate_task` call for it, release the claim with `brigade t3 release-claim <run> <task> --parent-thread <parent-thread> --evidence <activity.json> --confirm-no-delegate`. It frees exactly that claim's slot and never relaunches; never run it for a claim whose launch may have reached T3.
 4. On a completion wake, call the native `task_status` tool, save the projection, then run
    `brigade t3 observe <run> <task> --parent-thread <parent-thread> --native-json <result.json>`.
 5. When cancellation is needed, run `brigade t3 cancel <run> <task> --parent-thread <parent-thread>`, submit the printed `task_cancel` arguments, then call `task_status` and `brigade t3 observe` with the new projection.
 6. For each terminal result, run `brigade t3 ack <run> <task> --result-id <id>`.
 7. Run `brigade t3 finalize <run>`. It is never automatic.
 
-Inspect progress with `brigade t3 status <run> --json`. It prints fixed tokens only: state, held reason, correlated, terminal, acked, cancel-requested, attempt and a seat digest.
+Inspect progress with `brigade t3 status <run> --json`. It prints fixed tokens only: state, held reason, correlated, terminal, acked, released, cancel-requested, attempt and a seat digest.
 
 ## Work T3 cannot run
 

@@ -574,6 +574,7 @@ def test_correlation_events_and_status_carry_no_child_ids_or_text(tmp_path, caps
         "correlated",
         "terminal",
         "acked",
+        "released",
         "cancel_requested",
         "attempt",
         "seat_digest",
@@ -626,7 +627,16 @@ def test_new_native_event_shapes_are_closed():
 
 def test_skill_template_names_every_verb_and_the_ack_boundary():
     text = SKILL.read_text(encoding="utf-8")
-    for verb in ("t3 open", "t3 claim", "t3 accepted", "t3 observe", "t3 cancel", "t3 ack", "t3 finalize"):
+    for verb in (
+        "t3 open",
+        "t3 claim",
+        "t3 accepted",
+        "t3 release-claim",
+        "t3 observe",
+        "t3 cancel",
+        "t3 ack",
+        "t3 finalize",
+    ):
         assert verb in text
     assert "acknowledges T3 delivery" in text and "Brigade `ack` is separate" in text
     assert "do not resubmit `delegate_task`" in text.lower() or "do not resubmit `delegate_task`" in text

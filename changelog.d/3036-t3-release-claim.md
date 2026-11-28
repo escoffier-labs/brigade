@@ -1,1 +1,3 @@
 - `brigade t3 release-claim` releases one uncorrelated governed claim after the operator confirms no `delegate_task` call and supplies a checked parent activity log, records an audited journal fact, and frees exactly that claim's native slot.
+- Release evidence must carry explicit offsets and a time of day, is read with second precision when it omits fractional seconds, and refuses repeated keys or non-finite numbers.
+- A malformed or mismatched native reply after a release refuses without recording a hold, `hold-resolve --abandon` refuses an already released claim, and `brigade t3 status` reports a `released` flag per task.
