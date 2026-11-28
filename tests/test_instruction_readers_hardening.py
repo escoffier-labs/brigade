@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 
+from tests._fifo import make_fifo
 from brigade import budgets_cmd, doctor, dogfood_cmd, instruction_inventory, memory_care_instructions, work_cmd
 from brigade import memory_care_tend
 from brigade.bounded_read import BoundedRead
@@ -399,7 +400,7 @@ def _non_file(ws: Path, kind: str) -> None:
     if kind == "directory":
         path.mkdir()
     elif kind == "fifo":
-        os.mkfifo(path)
+        make_fifo(path)
         assert stat.S_ISFIFO(os.stat(path).st_mode)
     else:
         path.symlink_to(ws / "nowhere.md")

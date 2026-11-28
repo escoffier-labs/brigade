@@ -253,7 +253,10 @@ invalidates earlier evidence. Route support then requires all of these:
 It must be finite, no more than one second ahead of the local clock (a coarse
 clock tick can trail a just-written report), and no more than the shared
 30-second operation TTL old. File mtime never establishes freshness. Stale or future
-reports are `unknown`.
+reports are `unknown`. Each T3 route-support evidence row keeps its local
+`observed_at` and `age_seconds`, and also reports the parent's `reported_at`
+with `reported_age_seconds` computed against the same evaluation clock used by
+the freshness gate. Text output shows both ages.
 
 Isolation, admission and capacity come from Brigade governance, not the
 parent. Isolation passes only for `--isolation worktree` when every selected

@@ -20,7 +20,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping, Protocol, Sequence
 
-from .worklore_client import WorkloreClientError, new_ownership_nonce
+from .worklore_client import (
+    LIST_MAX_ITEMS,
+    LIST_MAX_PAGES,
+    WorkloreClientError,
+    WorkloreListingError,
+    new_ownership_nonce,
+)
 
 _HELD = frozenset({"owned", "handoff-pending"})
 # A checkpoint with one of these next actions means the run finished and a person or a
@@ -44,7 +50,8 @@ class Hub(Protocol):
     """The Worklore client calls the consumer uses; ``worklore_client`` satisfies it."""
 
     def get_campaign(self, campaign_key: str) -> dict[str, Any]: ...
-    def get_item(self, work_id: str) -> dict[str, Any]: ...
+    def get_item(self, work_id: str, *, links_cursor: str | None = None) -> dict[str, Any]: ...
+    def list_events(self, work_id: str, *, cursor: str | None = None) -> dict[str, Any]: ...
     def get_ownership(self, work_id: str) -> dict[str, Any]: ...
     def ownership_action(
         self, work_id: str, body: Mapping[str, Any], *, if_match: object, idempotency_key: str, holder_nonce: str
@@ -288,6 +295,36 @@ def _hand_back(hub: Hub, member: Mapping[str, Any], nonce: str, generation: int,
     return Pass("refused", repo, work_id, generation, detail=detail)
 
 
+def _complete_rows(hub: Hub, work_id: str, payload: dict[str, Any], *, events: bool = False) -> list[Any]:
+    """Read item-scoped evidence to exhaustion, refusing broken or unbounded pagination."""
+    key, cursor_key = ("events", "next_cursor") if events else ("links", "links_next_cursor")
+    rows: list[Any] = []
+    seen: set[str] = set()
+    for _ in range(LIST_MAX_PAGES):
+        page = payload.get(key)
+        if not isinstance(page, list):
+            raise WorkloreListingError(f"campaign evidence {key} must be an array")
+        rows.extend(page)
+        if len(rows) > LIST_MAX_ITEMS:
+            raise WorkloreListingError("campaign evidence exceeded item bound")
+        cursor = payload.get(cursor_key)
+        if cursor is None:
+            return rows
+        if not isinstance(cursor, str) or not cursor or cursor in seen:
+            raise WorkloreListingError("campaign evidence cursor did not advance")
+        seen.add(cursor)
+        payload = hub.list_events(work_id, cursor=cursor) if events else hub.get_item(work_id, links_cursor=cursor)
+    raise WorkloreListingError("campaign evidence exceeded page bound")
+
+
+def _fleet_runs(hub: Hub, work_id: str, payload: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        row
+        for row in _complete_rows(hub, work_id, payload)
+        if isinstance(row, dict) and row.get("link_type") == "fleet-run"
+    ]
+
+
 def _work(
     hub: Hub,
     campaign: Mapping[str, Any],
@@ -305,14 +342,28 @@ def _work(
     now: Callable[[], datetime],
 ) -> Pass:
     work_id, repo, generation = str(member["work_id"]), str(member["repo"]), int(grant["generation"])
+    if reclaim:
+        # A previous holder may have linked a run; until its evidence is read, nothing proves none
+        # is running. A fresh take has no previous holder, so an early Hub error releases it.
+        progress["launch"] = Launch("started")
     payload = hub.get_item(work_id)
     item = payload["item"]
+    runs = _fleet_runs(hub, work_id, payload)
     if reclaim:
         # The previous holder expired. If it linked a run the Hub never counted, that run may still
         # be going or may have finished. Do not start a second one; an operator decides.
-        runs = [x for x in payload.get("links", []) if isinstance(x, dict) and x.get("link_type") == "fleet-run"]
-        if len(runs) > int(item.get("attempt_count", 0)):
-            detail = "a previous generation linked a run with no failed attempt recorded; it may be running or finished"
+        events = _complete_rows(hub, work_id, hub.list_events(work_id), events=True)
+        started = {
+            event["run_id"]
+            for event in events
+            if isinstance(event, dict)
+            and event.get("work_id") == work_id
+            and event.get("event_type") == "attempt-started"
+            and isinstance(event.get("run_id"), str)
+        }
+        linked_runs = {str(run.get("external_key", "")).split("/", 1)[-1] for run in runs}
+        if not linked_runs <= started:
+            detail = "a previous generation linked a run with no attempt event recorded; it may be running or finished"
             emit(
                 {"event": "previous-run", "repo": repo, "work_id": work_id, "generation": generation, "detail": detail}
             )
@@ -327,6 +378,7 @@ def _work(
                 detail + "; review it before rerunning",
             )
             return Pass("previous-run", repo, work_id, generation, detail=detail)
+    progress.pop("launch", None)
     budget, lease_text = _budget_seconds(campaign, grant, now())
     if budget < MIN_RUN_SECONDS:
         needed = int(MIN_RUN_SECONDS + LEASE_MARGIN_SECONDS)
@@ -334,6 +386,8 @@ def _work(
             f"lease too short to start: {lease_text}, need at least {needed} seconds; raise lease_seconds in the offer"
         )
         return _hand_back(hub, member, nonce, generation, emit, detail)
+    known_runs = {str(run.get("external_key")) for run in runs}
+    progress["launch"] = Launch("started")
     try:
         launch = launcher(
             repos[repo],
@@ -346,8 +400,28 @@ def _work(
             acceptance=list(campaign.get("acceptance", [])),
             deadline_seconds=budget,
         )
-    except (OSError, ValueError) as exc:
-        launch = Launch("refused", detail=type(exc).__name__)
+    except Exception as exc:
+        try:
+            current = hub.get_item(work_id)
+            linked = [
+                link
+                for link in _fleet_runs(hub, work_id, current)
+                if isinstance(link, dict)
+                and link.get("link_type") == "fleet-run"
+                and str(link.get("external_key")) not in known_runs
+            ]
+        except Exception:
+            raise exc from None
+        if linked:
+            external_key = str(linked[-1].get("external_key", ""))
+            run_id = external_key.split("/", 1)[-1] or None
+            progress["launch"] = Launch("error", run_id=run_id, detail=type(exc).__name__)
+            raise
+        progress.pop("launch", None)
+        if isinstance(exc, (OSError, ValueError)):
+            launch = Launch("refused", detail=type(exc).__name__)
+        else:
+            raise
     progress["launch"] = launch
     emit({"event": "launch", "repo": repo, "work_id": work_id, "generation": generation, **_launch_fields(launch)})
     try:
@@ -481,6 +555,7 @@ def _prerequisites(repo_path: Path, worker: str) -> str | None:
 def _local_task(repo_path: Path, text: str, work_id: str, acceptance: Sequence[str]) -> tuple[str | None, str]:
     """The one local task for this campaign work id, reopened if an earlier pass cancelled it."""
     from .work_cmd import helpers
+    from .work_cmd import claiming
     from .work_cmd.ledger import locking, tasks_plans
 
     with locking._task_ledger_lock(repo_path):
@@ -491,7 +566,7 @@ def _local_task(repo_path: Path, text: str, work_id: str, acceptance: Sequence[s
                     return str(task["id"]), ""
                 if task.get("status") != "cancelled":
                     return None, f"local task for this member is {task.get('status')}"
-                task["status"], task["updated_at"] = "pending", helpers._now().isoformat()
+                claiming._clear_claim(task, now=helpers._now().isoformat())
                 locking._write_task_ledger(repo_path, ledger)
                 return str(task["id"]), ""
         task, _ = tasks_plans._apply_add_task_to_ledger(
@@ -507,17 +582,23 @@ def _local_task(repo_path: Path, text: str, work_id: str, acceptance: Sequence[s
         return str(task["id"]), ""
 
 
-def _retire_task(repo_path: Path, task_id: str) -> None:
-    """Cancel the local task unless it is still running, so a plain dispatch cannot pick it up."""
+def _retire_task(repo_path: Path, task_id: str, consumer: str) -> str | None:
+    """Cancel a pending local task unless another consumer holds its claim."""
     from .work_cmd import helpers
+    from .work_cmd import claiming
     from .work_cmd.ledger import locking
 
     with locking._task_ledger_lock(repo_path):
         ledger = locking._read_task_ledger(repo_path)
         for task in ledger["tasks"]:
             if isinstance(task, dict) and task.get("id") == task_id and task.get("status") == "pending":
+                claim = claiming.claim_record(task)
+                if claim is not None and claim["actor"] != consumer:
+                    return f"task {task_id} is claimed by {claim['actor']}"
                 task["status"], task["updated_at"] = "cancelled", helpers._now().isoformat()
                 locking._write_task_ledger(repo_path, ledger)
+                return None
+    return None
 
 
 def _dispatch_detail(out: str, err: str, code: int, task_id: str) -> str:
@@ -536,10 +617,10 @@ def _dispatch_detail(out: str, err: str, code: int, task_id: str) -> str:
     return f"dispatch exit {code}: {detail or (lines[-1] if lines else 'no intent was created')}"[:300]
 
 
-def _retire_quietly(repo_path: Path, task_id: str) -> None:
+def _retire_quietly(repo_path: Path, task_id: str, consumer: str) -> None:
     """Cancel the local task, best effort. A cleanup failure must never hide a run that happened."""
     with contextlib.suppress(Exception):
-        _retire_task(repo_path, task_id)
+        _retire_task(repo_path, task_id, consumer)
 
 
 def launch_local(
@@ -574,7 +655,7 @@ def launch_local(
         # Setup (prerequisites, the ledger lock) spends lease too; the child gets only what is left.
         deadline_seconds -= time.monotonic() - started
         if deadline_seconds <= 0:
-            _retire_quietly(repo_path, task_id)
+            _retire_quietly(repo_path, task_id, worker)
             return Launch("refused", detail="lease used up during setup")
     try:
         seen = {row["intent_id"] for _, row in dispatch_state.intents(repo_path)}
@@ -594,7 +675,7 @@ def launch_local(
             if row["task_id"] == task_id and row["intent_id"] not in seen
         ]
     finally:
-        _retire_quietly(repo_path, task_id)
+        _retire_quietly(repo_path, task_id, worker)
     if not fresh:
         return Launch("refused", detail=_dispatch_detail(out.getvalue(), err.getvalue(), code, task_id))
     row = max(fresh, key=lambda r: r["attempt_no"])

@@ -200,6 +200,12 @@ def run_claim(
                             current, candidate, batch_ref, evidence, recorded
                         ),
                         reclaim_pending=False,
+                        durable_write_exists=lambda candidate: run_budget.has_durable_dispatch_write(
+                            ops.read_events(run_dir),
+                            seat=seat,
+                            attempt=candidate,
+                            task_attempt=(task_id, None),
+                        ),
                     )
                 except run_budget.BudgetPolicyError as exc:
                     code = "capacity-denied" if not exc.exhausted else "budget-exhausted"

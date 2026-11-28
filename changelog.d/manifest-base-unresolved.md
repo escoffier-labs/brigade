@@ -1,0 +1,1 @@
+- Report an unresolved verify manifest base, including attempted references and remediation, instead of claiming that local manifests are absent.

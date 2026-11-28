@@ -205,7 +205,43 @@ def test_work_brief_json_omits_a_timed_out_section(tmp_path, monkeypatch, capsys
     assert "pantry" not in payload
 
 
-def test_work_brief_fails_closed_on_corrupt_task_ledger(tmp_path, capsys):
+def test_work_brief_json_omits_all_failed_session_fields(tmp_path, monkeypatch, capsys):
+    from brigade.work_cmd import helpers
+
+    def failed_sessions(*_args, **_kwargs):
+        raise OSError("session read failed")
+
+    monkeypatch.setattr(helpers, "_collect_sessions", failed_sessions)
+
+    assert work_cmd.brief(target=tmp_path, json_output=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert "latest_session" not in payload
+    assert "recent_sessions" not in payload
+    assert "skipped_sessions" not in payload
+
+
+def test_work_brief_json_omits_failed_next_task_source(tmp_path, monkeypatch, capsys):
+    from brigade.work_cmd.session import briefing
+
+    def failed_next_task(*_args, **_kwargs):
+        raise OSError("next task read failed")
+
+    monkeypatch.setattr(briefing, "_resolve_next_task", failed_next_task)
+
+    assert work_cmd.brief(target=tmp_path, json_output=True) == 0
+
+    payload = json.loads(capsys.readouterr().out)
+    assert "next_source" not in payload
+
+
+@pytest.mark.parametrize("threaded", [False, True])
+def test_work_brief_fails_closed_on_corrupt_task_ledger(tmp_path, capsys, monkeypatch, threaded):
+    if threaded:
+        from brigade.daily_cmd import config
+
+        monkeypatch.delattr(config.signal, "SIGALRM", raising=False)
+
     tasks_path = tmp_path / ".brigade" / "work" / "tasks.json"
     tasks_path.parent.mkdir(parents=True)
     tasks_path.write_text("{not valid json")

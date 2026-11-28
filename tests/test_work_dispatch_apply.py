@@ -490,11 +490,39 @@ def test_ctrl_c_terminates_children_and_releases_claim(apply_target, capsys, mon
 
 
 @requires_dispatch_apply
-def test_deadline_cancels_child(apply_target, capsys, monkeypatch):
+def test_real_child_is_stopped_when_work_dispatch_deadline_passes(apply_target, capsys, monkeypatch):
+    from datetime import datetime, timezone
+    from types import SimpleNamespace
+
+    from brigade.work_cmd import dispatch, dispatch_apply as apply
+
+    started = datetime.now(timezone.utc)
+    running_seen = False
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return started
+
+    def monotonic():
+        nonlocal running_seen
+        for intent in _intents(apply_target):
+            if intent.get("run_dir"):
+                meta = localio.read_json_dict(Path(intent["run_dir"]) / "run.json")
+                running_seen |= bool(meta and meta.get("status") == "running")
+        return 2.0 if running_seen else 0.0
+
+    monkeypatch.setattr(dispatch, "datetime", Clock)
+    monkeypatch.setattr(apply, "datetime", Clock)
+    monkeypatch.setattr(apply, "time", SimpleNamespace(monotonic=monotonic, sleep=time.sleep))
     monkeypatch.setenv("FAKE_DISPATCH_SLEEP", "60")
-    _apply(apply_target, capsys, "--deadline", "0.3", expected=1)
+    _apply(apply_target, capsys, "--deadline", "1.0", expected=1)
     (intent,) = _intents(apply_target)
+    assert running_seen
+    assert (Path(intent["run_dir"]) / "launch-count").read_text() == "launch\n"
     assert intent["terminal"]["run_status"] == "timeout"
+    assert intent["terminal"]["failure_kind"] == "budget-exhausted"
+    assert isinstance(intent["pid"], int) and intent["pid"] > 0
     assert not runguard._pid_is_active(intent["pid"])
 
 

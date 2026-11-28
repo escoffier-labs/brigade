@@ -1,0 +1,5 @@
+- Treat persistently unreadable Windows lock metadata as live outside lock release.
+- A dead-owner lock with persistently access-denied metadata reads as live and needs manual removal.
+- Convert lock metadata inspection errors consistently so reconciliation returns an invalid verdict instead of raising an operating system error.
+- Preserve release-time tolerance for delete-pending metadata while keeping lock and lane owner observations fail-closed.
+- Recognize this process's gated Windows lock release and completed directory removal during denied snapshots so cleanup does not wait on its own deleting metadata.

@@ -92,8 +92,7 @@ def record_event(target: Path, event: str, payload: dict[str, Any], *, now: floa
 
     if not lesson_admission.AUTOMATIC_LESSON_ADMISSION:
         # Nothing consumes observations until hub-anchored admission lands (#2620),
-        # so hooks record nothing and keep no prompt text.
-        discard_prompts(target)
+        # so hooks leave both the observation state and prompt spool untouched.
         return "lesson_admission_awaits_hub_anchor"
     if receipt_signing.load_workspace_key(target) is None:
         discard_prompts(target)

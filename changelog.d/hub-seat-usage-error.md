@@ -1,0 +1,1 @@
+- Return the specific model roster metadata error from the Hub seat usage route instead of a generic server error.

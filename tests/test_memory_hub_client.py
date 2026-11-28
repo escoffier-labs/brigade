@@ -11,6 +11,8 @@ import shutil
 import os
 import stat
 import threading
+import time
+from contextlib import contextmanager
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from pathlib import Path
@@ -23,6 +25,7 @@ from brigade import memory_hub_client as hubc
 from brigade import memory_hub_search as hub_search
 from brigade import memory_hub_store as store
 from brigade import memory_hub_sync as sync
+from brigade.inbox_lock import InboxLockTimeout
 
 # Built at runtime: fixtures, not credentials.
 NODE_CREDENTIAL = "-".join(("fixture", "node", "credential", "0123456789"))
@@ -511,6 +514,53 @@ def test_put_and_pull_round_trip_with_chunked_cards(hub, tmp_path):
     assert [c["action"] for c in hub.calls[before:]] == ["status", "log", "status"]
 
 
+def test_interrupted_cold_rebuild_resumes_each_scope_from_its_watermark(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, mode="read")
+    _put(hub, "fleet", "first", "first fleet card")
+    _put(hub, "fleet", "second", "second fleet card")
+    _put(hub, "repo:test/app", "new", "newly readable card")
+    fleet_only = dataclasses.replace(settings(target), read_scopes=("fleet",))
+    monkeypatch.setattr(sync, "LOG_PAGE", 1)
+    monkeypatch.setattr(sync, "SAVE_EVERY_PAGES", 1)
+    original_log = hub.do_log
+    log_calls = 0
+
+    def interrupt_second_page(body):
+        nonlocal log_calls
+        log_calls += 1
+        if log_calls == 2:
+            raise ConnectionRefusedError("interrupted rebuild")
+        return original_log(body)
+
+    hub.do_log = interrupt_second_page
+    with pytest.raises(hubc.HubUnavailable):
+        sync.pull(target, client(hub), fleet_only)
+    building = store.building(target)
+    assert building.meta["seq"] == 1
+    assert building.meta["backfill_watermarks"] == {"fleet": 1}
+
+    hub.do_log = original_log
+    before = len(hub.calls)
+    sync.pull(target, client(hub), settings(target))
+    resumed = hub.calls[before:]
+    assert [call["after_seq"] for call in resumed if call["action"] == "log"][:2] == [0, 1]
+    card_reads = [(call["scope"], call["card_id"]) for call in resumed if call["action"] == "card"]
+    assert ("fleet", "first") not in card_reads
+    assert {("fleet", "second"), ("repo:test/app", "new")} <= set(card_reads)
+
+
+def test_old_format_replica_without_backfill_watermarks_still_loads(hub, tmp_path):
+    target = workspace(tmp_path, mode="read")
+    replica = store.start_building(target, hub=client(hub).identity, log_epoch=hub.epoch, principal="node-1")
+    replica.meta.update(seq=7, read_scopes=["fleet"])
+    replica.save()
+
+    loaded = store.building(target)
+    assert "backfill_watermarks" not in loaded.meta
+    assert loaded.backfill_watermark("fleet", covered=True) == 7
+    assert loaded.backfill_watermark("repo:test/app", covered=False) == 0
+
+
 def test_replica_and_spool_are_private(hub, tmp_path):
     target = workspace(tmp_path, mode="sync", one="# One\n")
     hub.mode = "down"
@@ -579,6 +629,89 @@ def test_conflicting_offline_edit_becomes_a_proposal(hub, tmp_path):
     assert hub.cards[("repo:test/app", "one")]["text"] == "theirs\n"
     # The card stays out of later pushes while its proposal is open.
     assert sync.push(target, client(hub), settings(target))["published"] == []
+
+
+def test_base_mismatch_with_matching_current_hash_records_publication(hub, tmp_path):
+    text = "# One\nunchanged\n"
+    target = workspace(tmp_path, mode="sync", one=text)
+    sync.push(target, client(hub), settings(target), yes=True)
+    hub.epoch = hubc.event_id()
+
+    hub.calls.clear()
+    report = sync.push(target, client(hub), settings(target), yes=True)
+
+    assert [call for call in hub.calls if call["action"] == "card"] == [
+        {"action": "card", "scope": "repo:test/app", "card_id": "one", "offset": 0}
+    ]
+    assert report["published"] == [{"card_id": "one", "revision": 1}]
+    assert report["proposals"] == []
+    assert not list(store.proposals(target))
+    published = store.published(target)[client(hub).identity]["repo:test/app"]["one"]
+    assert published["written"] is False
+    assert (published["revision"], published["content_hash"], published["log_epoch"]) == (
+        1,
+        hubc.content_hash(text),
+        hub.epoch,
+    )
+
+
+@pytest.mark.parametrize("confirmation", ["retired", "changed", "epoch-changed", "forbidden", "unavailable"])
+def test_matching_hash_requires_a_live_current_head(hub, tmp_path, monkeypatch, confirmation):
+    text = "# One\nunchanged\n"
+    target = workspace(tmp_path, mode="sync", one=text)
+    sync.push(target, client(hub), settings(target), yes=True)
+    previous = copy.deepcopy(store.published(target))
+    hub.epoch = hubc.event_id()
+    if confirmation == "retired":
+        _retire(hub, "one")
+    read = hub.do_card
+
+    def confirm(body):
+        if confirmation == "forbidden":
+            return 403, {"code": "memory_grant_missing"}
+        if confirmation == "unavailable":
+            raise ConnectionRefusedError("synthetic unavailable hub")
+        status, reply = read(body)
+        if confirmation == "changed":
+            reply["card"]["revision"] += 1
+        if confirmation == "epoch-changed":
+            reply["log_epoch"] = hubc.event_id()
+        return status, reply
+
+    monkeypatch.setattr(hub, "do_card", confirm)
+    hub.calls.clear()
+    report = sync.push(target, client(hub), settings(target), yes=True)
+
+    assert report["published"] == []
+    assert [proposal["reason"] for proposal in report["proposals"]] == ["memory_base_mismatch"]
+    assert store.published(target) == previous
+    assert [call for call in hub.calls if call["action"] == "card"] == [
+        {"action": "card", "scope": "repo:test/app", "card_id": "one", "offset": 0}
+    ]
+
+
+def test_base_mismatch_with_different_current_hash_opens_proposal(hub, tmp_path):
+    target = workspace(tmp_path, mode="sync", one="# One\nlocal\n")
+    sync.push(target, client(hub), settings(target), yes=True)
+    hub.epoch = hubc.event_id()
+    (target / "memory" / "cards" / "one.md").write_text("# One\nchanged\n", encoding="utf-8")
+
+    report = sync.push(target, client(hub), settings(target), yes=True)
+
+    assert report["published"] == []
+    assert [proposal["reason"] for proposal in report["proposals"]] == ["memory_base_mismatch"]
+
+
+def test_base_mismatch_without_current_hash_opens_proposal(hub, tmp_path):
+    target = workspace(tmp_path, mode="sync", one="# One\nlocal\n")
+    sync.push(target, client(hub), settings(target), yes=True)
+    hub.epoch = hubc.event_id()
+    hub.put_reply = (409, {"code": "memory_base_mismatch", "current_revision": 7})
+
+    report = sync.push(target, client(hub), settings(target), yes=True)
+
+    assert report["published"] == []
+    assert [proposal["reason"] for proposal in report["proposals"]] == ["memory_base_mismatch"]
 
 
 def test_a_spooled_write_is_withheld_once_its_card_turns_private(hub, tmp_path):
@@ -915,6 +1048,135 @@ def test_the_refused_scope_memory_is_bounded_and_private(tmp_path):
         # living in the same private hub root as every other hub state file.
         return
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_concurrent_refused_scope_writers_keep_both_scopes(tmp_path, monkeypatch):
+    barrier = threading.Barrier(2)
+    original_write = store.write_json
+
+    def slow_write(path, value):
+        time.sleep(0.05)
+        original_write(path, value)
+
+    monkeypatch.setattr(store, "write_json", slow_write)
+    errors = []
+
+    def remember(scope):
+        try:
+            barrier.wait()
+            hub_search._remember_refused(tmp_path, (scope,), now=1_000.0)
+        except BaseException as exc:
+            errors.append(exc)
+
+    writers = [threading.Thread(target=remember, args=(scope,)) for scope in ("repo:a", "repo:b")]
+    for writer in writers:
+        writer.start()
+    for writer in writers:
+        writer.join()
+
+    assert errors == []
+    assert set(store.refused_scopes(tmp_path, now=1_000.0)) == {"repo:a", "repo:b"}
+
+
+def test_refused_scope_lock_timeout_skips_write(tmp_path, monkeypatch, caplog):
+    @contextmanager
+    def timed_out(target, **kwargs):
+        raise InboxLockTimeout("busy")
+        yield
+
+    monkeypatch.setattr(hub_search, "_refused_state_lock", timed_out)
+    with caplog.at_level("DEBUG", logger=hub_search.__name__):
+        hub_search._remember_refused(tmp_path, ("repo:a",), now=1_000.0)
+
+    assert store.refused_scopes(tmp_path, now=1_000.0) == {}
+    assert "skipped recording refused scopes" in caplog.text
+
+
+@pytest.mark.parametrize("scopes", [("principal:alice",), ("principal:alice", "repo:a")])
+def test_search_state_lock_contention_stays_within_budget(hub, tmp_path, scopes):
+    target = workspace(tmp_path, read_scopes=scopes)
+    _put(hub, "repo:a", "needle", "needle")
+    with store.locked(target):
+        started = time.monotonic()
+        payload = hub_search.search_payload(target, "needle", settings=settings(target))
+        elapsed = time.monotonic() - started
+    assert elapsed < hubc.SEARCH_BUDGET_SECONDS
+    assert payload["retrieval"]["skipped_scopes"] == ["principal:alice"]
+    assert "unprobed_scopes" not in payload["retrieval"]
+    if "repo:a" in scopes:
+        assert [match["card_id"] for match in payload["matches"]] == ["needle"]
+    assert not (store.root(target) / store.REFUSED_SCOPES).exists()
+
+
+def test_successful_search_creates_no_hub_state(hub, tmp_path, monkeypatch):
+    target = workspace(tmp_path, read_scopes=("repo:a",))
+
+    def unexpected_lock(*args, **kwargs):
+        pytest.fail("a successful search without refusals must not lock state")
+
+    monkeypatch.setattr(hub_search, "_refused_state_lock", unexpected_lock)
+    payload = hub_search.search_payload(target, "needle", settings=settings(target))
+    assert payload["retrieval"]["hub"] == "ok"
+    assert not store.root(target).exists()
+
+
+@pytest.mark.parametrize("forget", [hub_search._forget_refused, sync._forget_search_refusals])
+@pytest.mark.parametrize("state", [None, {}, {"repo:other": 1_600.0}, {"repo:a": 900.0}])
+def test_forgetting_without_live_matching_refusals_takes_no_lock(tmp_path, monkeypatch, forget, state):
+    monkeypatch.setattr(sync.time, "time", lambda: 1_000.0)
+    path = store.root(tmp_path) / store.REFUSED_SCOPES
+    if state is not None:
+        store.ensure_root(tmp_path)
+        store.write_json(path, {"scopes": state})
+    before = path.read_bytes() if path.exists() else None
+
+    def unexpected_lock(*args, **kwargs):
+        pytest.fail("forgetting without a matching refusal must not lock state")
+
+    monkeypatch.setattr(hub_search, "_refused_state_lock", unexpected_lock)
+    monkeypatch.setattr(sync, "_state_lock", unexpected_lock)
+    if forget is hub_search._forget_refused:
+        forget(tmp_path, ("repo:a",), now=1_000.0)
+    else:
+        forget(tmp_path, {"repo:a"})
+    assert (path.read_bytes() if path.exists() else None) == before
+    if state is None:
+        assert not store.root(tmp_path).exists()
+
+
+@pytest.mark.parametrize("forget", [hub_search._forget_refused, sync._forget_search_refusals])
+def test_forgetting_reloads_refusals_after_lock_acquisition(tmp_path, monkeypatch, forget):
+    monkeypatch.setattr(sync.time, "time", lambda: 1_000.0)
+    store.remember_refused_scopes(tmp_path, ("repo:a",), now=1_000.0)
+
+    @contextmanager
+    def concurrent_update(target, **kwargs):
+        with store.locked(target):
+            store.remember_refused_scopes(target, ("repo:b",), now=1_000.0)
+            yield
+
+    monkeypatch.setattr(hub_search, "_refused_state_lock", concurrent_update)
+    monkeypatch.setattr(sync, "_state_lock", concurrent_update)
+    if forget is hub_search._forget_refused:
+        forget(tmp_path, ("repo:a",), now=1_000.0)
+    else:
+        forget(tmp_path, {"repo:a"})
+    assert set(store.refused_scopes(tmp_path, now=1_000.0)) == {"repo:b"}
+
+
+def test_refusal_lock_wait_is_capped_by_remaining_search_budget(tmp_path, monkeypatch):
+    original = store.locked
+    waits = []
+
+    def recording_lock(target, *, deadline_seconds):
+        waits.append(deadline_seconds)
+        return original(target, deadline_seconds=deadline_seconds)
+
+    monkeypatch.setattr(store, "locked", recording_lock)
+    monkeypatch.setattr(hub_search, "_monotonic", lambda: 1_000.0)
+    with hub_search._refused_state_lock(tmp_path, deadline=1_000.02):
+        pass
+    assert waits == [pytest.approx(0.02)]
 
 
 def test_a_stored_refusal_expiry_is_clamped_to_the_ttl(tmp_path):
@@ -1816,6 +2078,8 @@ def test_one_deadline_bounds_sequential_pull_state_lock_waits(hub, tmp_path, mon
 def test_uncontended_pull_keeps_the_full_shared_lock_budget(hub, tmp_path, monkeypatch):
     target = workspace(tmp_path, mode="read")
     _put(hub, "repo:test/app", "theirs", "theirs")
+    # A live refusal makes the pull clear it, so the cleanup lock is taken too.
+    store.remember_refused_scopes(target, ("repo:test/app",), now=time.time())
     original = store.locked
     waits: list[float] = []
     lock_depth = [0]

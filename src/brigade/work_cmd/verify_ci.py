@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -15,9 +16,10 @@ from .. import localio
 from . import helpers
 
 DEFAULT_CHECK_NAME = "ci-gate"
+_CI_APP_SLUG = "github-actions"
 _SCHEMA = "brigade.verify_ci.v1"
 _RECORD_DIR = ".brigade/work/verify-ci"
-# Brigade runtime state is never the work product, so it does not make a tree dirty.
+# Untracked Brigade runtime state is never the work product, so it does not make a tree dirty.
 _STATE_DIR = ".brigade/work"
 _SHA = re.compile(r"[0-9a-f]{40}(?:[0-9a-f]{24})?")
 _EXIT_CODES = {"passed": 0, "failed": 1, "pending": 2, "unknown": 2}
@@ -34,9 +36,9 @@ def _head_identity(target: Path) -> tuple[str, str] | None:
     return (head, tree) if tree and _SHA.fullmatch(tree) else None
 
 
-def _github_repository(target: Path) -> str | None:
+def _github_repository(target: Path, remote_name: str = "origin") -> str | None:
     try:
-        remote = helpers._git_value(target, "remote", "get-url", "origin") or ""
+        remote = helpers._git_value(target, "remote", "get-url", remote_name) or ""
         if remote.startswith("git@github.com:"):
             path = remote.removeprefix("git@github.com:")
         else:
@@ -50,6 +52,26 @@ def _github_repository(target: Path) -> str | None:
     if re.fullmatch(r"[a-zA-Z0-9-]+/[a-zA-Z0-9_.-]+", repository) is None or repository.split("/")[1] in {".", ".."}:
         return None
     return repository
+
+
+def _missing_origin_reason(target: Path) -> str:
+    remotes = (helpers._git_value(target, "remote") or "").splitlines()
+    source = next((name for name in remotes if _github_repository(target, name) is not None), None)
+    prefix = "No GitHub origin remote was found. "
+    if remotes:
+        prefix += f"Existing remotes: {', '.join(remotes)}. "
+    if source is None:
+        if "origin" in remotes:
+            # origin exists but is not GitHub, so `remote add` would fail with "already exists".
+            return (
+                prefix
+                + "Point origin at GitHub with: git remote set-url origin https://github.com/OWNER/REPOSITORY.git"
+            )
+        return prefix + "Add one with: git remote add origin https://github.com/OWNER/REPOSITORY.git"
+    if "origin" in remotes:
+        url = helpers._git_value(target, "remote", "get-url", source) or ""
+        return prefix + f"Point origin at GitHub with: git remote set-url origin {shlex.quote(url)}"
+    return prefix + f"Rename {source} to origin with: git remote rename {shlex.quote(source)} origin"
 
 
 def _named_runs(output: str, check_name: str) -> list[dict[str, Any]]:
@@ -68,6 +90,14 @@ def _named_runs(output: str, check_name: str) -> list[dict[str, Any]]:
                     raise ValueError("expected a check run id")
                 runs.append(run)
     return runs
+
+
+def _trusted_ci_run(run: dict[str, Any]) -> bool:
+    # The commits check-runs response identifies the app, not the workflow.
+    # Another workflow in this repo using the Actions app can still post ci-gate;
+    # verifying the workflow origin is the remaining half of #2851.
+    app = run.get("app")
+    return isinstance(app, dict) and app.get("slug") == _CI_APP_SLUG
 
 
 def _fetch_check(target: Path, repository: str, head: str, check_name: str) -> dict[str, Any]:
@@ -112,6 +142,12 @@ def _fetch_check(target: Path, repository: str, head: str, check_name: str) -> d
         return {"reason": "GitHub returned an unreadable check-run response."}
     if not runs:
         return {"reason": "No check run with that name was found for HEAD."}
+
+    if check_name == DEFAULT_CHECK_NAME:
+        trusted_runs = [run for run in runs if _trusted_ci_run(run)]
+        if not trusted_runs:
+            return {"reason": ("The ci-gate check runs for HEAD are untrusted: none came from the GitHub Actions app.")}
+        runs = trusted_runs
 
     # A cancelled run says nothing about the commit. A push to main, for example,
     # often starts a second run for a commit the merge queue already tested, and
@@ -160,7 +196,7 @@ def _record_path(target: Path, head: str, check_name: str = DEFAULT_CHECK_NAME) 
 
 def _tree_state(target: Path, head: str, tree: str) -> str:
     """Return ``clean``, ``dirty`` or ``unreadable`` for the working tree against HEAD."""
-    live = localio.tree_fingerprint_with_head(target, extra_evidence_paths=(_STATE_DIR,))
+    live = localio.tree_fingerprint_with_head(target, extra_untracked_paths=(_STATE_DIR,))
     if None in live:
         return "unreadable"
     return "clean" if live == (tree, head) else "dirty"
@@ -185,7 +221,7 @@ def verify_ci(*, target: Path, check_name: str = DEFAULT_CHECK_NAME, json_output
     fetched = (
         _fetch_check(target, repository, head, check_name)
         if repository is not None
-        else {"reason": "No GitHub origin remote was found."}
+        else {"reason": _missing_origin_reason(target)}
     )
     record = {
         "schema": _SCHEMA,

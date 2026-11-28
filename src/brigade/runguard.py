@@ -271,10 +271,31 @@ def _pid_is_active(pid: int) -> bool:
 
 @dataclass(frozen=True)
 class _LockSnapshot:
-    """One read of a lock directory: its identity and whether its owner is dead."""
+    """One read of a lock directory: its identity and whether to attempt gated recovery."""
 
     fingerprint: tuple[int, int, object]
     stale: bool
+
+
+def _lock_snapshot_read_error(path: Path, info: os.stat_result, exc: OSError) -> _LockSnapshot | None:
+    if getattr(exc, "winerror", None) == nt_process.ERROR_ACCESS_DENIED:
+        releasing = False
+        try:
+            visible = path.lstat()
+        except FileNotFoundError:
+            # The bounded metadata open may have overlapped a completed release.
+            return None
+        except OSError:
+            pass  # An unverified disappearance cannot authorize stale recovery.
+        else:
+            releasing = (visible.st_dev, visible.st_ino) == (info.st_dev, info.st_ino) and (
+                runguard_release.snapshot_is_releasing(path, info)
+            )
+        return _LockSnapshot(
+            fingerprint=(info.st_dev, info.st_ino, None),
+            stale=releasing,
+        )
+    raise RunLockError(f"could not inspect run lock {path}: {exc}") from exc
 
 
 def _lock_snapshot(path: Path) -> _LockSnapshot | None:
@@ -297,8 +318,11 @@ def _lock_snapshot(path: Path) -> _LockSnapshot | None:
     except (FileNotFoundError, NotADirectoryError, ValueError):
         pass
     except OSError as exc:
-        raise RunLockError(f"could not inspect run lock {path}: {exc}") from exc
-    owner = _read_lock_owner(path)
+        return _lock_snapshot_read_error(path, info, exc)
+    try:
+        owner = _read_lock_owner(path, propagate_access_denied=True)
+    except OSError as exc:
+        return _lock_snapshot_read_error(path, info, exc)
     owner_pid = owner.get("pid") if owner is not None else None
     if isinstance(owner_pid, int):
         recorded_pids.append(owner_pid)
@@ -337,10 +361,14 @@ def read_lock_owner(path: Path | str | None) -> dict[str, object] | None:
         return None
 
 
-def _read_lock_owner(path: Path) -> dict[str, object] | None:
+def _read_lock_owner(path: Path, *, propagate_access_denied: bool = False) -> dict[str, object] | None:
     try:
         payload = json.loads(nt_process.read_text_sharing_delete(path / "owner.json"))
-    except (OSError, json.JSONDecodeError, UnicodeDecodeError, RecursionError):
+    except OSError as exc:
+        if propagate_access_denied and getattr(exc, "winerror", None) == nt_process.ERROR_ACCESS_DENIED:
+            raise
+        return None
+    except (json.JSONDecodeError, UnicodeDecodeError, RecursionError):
         return None
     return payload if isinstance(payload, dict) else None
 
@@ -420,6 +448,9 @@ def _claim_stale_lock(
     # own lock, and C's rename then takes B's live lock out of sight (B crashes
     # on `stat`, or B's lock is stranded under C's claim name while another
     # acquirer publishes beside it). A busy gate returns BUSY, never None: the lock may still be dead.
+    # A snapshot of metadata our Windows release is withholding also needs this
+    # gate: release must finish moving the directory or restoring its live owner
+    # before the re-judge below can authorize any claim.
     judged = _lock_snapshot(path)
     if judged is None or not judged.stale:
         return None

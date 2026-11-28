@@ -316,6 +316,22 @@ pub fn migrate(c: &Connection, now_ms: i64) -> Result<(), String> {
             return Err(format!("memory schema is missing {table}"));
         }
     }
+    for index in [
+        "memory_proposals_principal_quota",
+        "memory_proposals_scope_quota",
+    ] {
+        let present: Option<i64> = c
+            .query_row(
+                "SELECT 1 FROM sqlite_master WHERE type='index' AND name=?1",
+                [index],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(err)?;
+        if present.is_none() {
+            return Err(format!("memory schema is missing {index}"));
+        }
+    }
     log_epoch(c).map_err(err)?;
     Ok(())
 }

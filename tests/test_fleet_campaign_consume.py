@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -38,8 +39,13 @@ class Node:
     def get_campaign(self, campaign_key):
         return self._send("GET", f"/work/campaigns/{quote(campaign_key, safe='')}")
 
-    def get_item(self, work_id):
-        return self._send("GET", f"/work/items/{work_id}")
+    def get_item(self, work_id, *, links_cursor=None):
+        query = "" if links_cursor is None else f"?links_cursor={quote(links_cursor, safe='')}"
+        return self._send("GET", f"/work/items/{work_id}{query}")
+
+    def list_events(self, work_id, *, cursor=None):
+        query = "" if cursor is None else f"?cursor={quote(cursor, safe='')}"
+        return self._send("GET", f"/work/items/{work_id}/events{query}")
 
     def get_ownership(self, work_id):
         return self._send("GET", f"/work/items/{work_id}/ownership")
@@ -259,6 +265,8 @@ def test_successful_run_leaves_the_member_open_and_is_not_rerun(hub):
     assert item["status"] not in {"completed", "canceled", "archived"} and item["attempt_count"] == 0
     parked = Node(conn, "node-a").get_ownership(work_id)["ownership"]
     assert parked["next_action"]["kind"] == "await-review"
+    shown = Node(conn, "node-a").get_campaign(KEY)["members"]
+    assert next(member for member in shown if member["work_id"] == work_id)["park_kind"] == "await-review"
     assert parked["evidence_refs"][0]["ref"] == passes[0].run_id
     assert "brigade/dispatch/task-1" in parked["next_action"]["resume_condition"]
     # Every step left a Hub event, and the local receipt names the same steps.
@@ -404,6 +412,76 @@ def test_reclaimed_member_whose_previous_generation_linked_a_run_is_not_launched
     assert [p.outcome for p in run(conn, "node-b", now, again)[0]] == ["idle"]
 
 
+def test_reclaimed_member_uses_attempt_events_after_operator_reset(hub):
+    conn, _, clock, now = hub
+    work_id = member_ids(conn)["acme/one"]
+    first = Runs(conn, "node-a", state="failed")
+    assert [p.outcome for p in run(conn, "node-a", now, first, watch=False)[0]] == ["failed"]
+    item = Node(conn, "node-a").get_item(work_id)["item"]
+    status, reset = call(
+        conn,
+        f"/work/items/{work_id}/attempts",
+        {"action": "reset"},
+        admin=True,
+        headers={"If-Match": str(item["version"])},
+        method="POST",
+    )
+    assert status == 200 and reset["item"]["attempt_count"] == 0
+    owner = Node(conn, "node-a")
+    ownership = owner.get_ownership(work_id)["ownership"]
+    owner.ownership_action(
+        work_id,
+        {"action": "take", "generation": ownership["generation"]},
+        if_match=ownership["revision"],
+        idempotency_key="operator-reset-reclaim",
+        holder_nonce=consumer.new_ownership_nonce(),
+    )
+    other_ids = [member_id for member_id in member_ids(conn).values() if member_id != work_id]
+    conn.execute("UPDATE work_items SET status='completed' WHERE work_id IN (?, ?)", other_ids)
+    conn.commit()
+    clock[0] = "2026-01-01T00:02:00+00:00"
+    later = Runs(conn, "node-b")
+    passes, _ = run(conn, "node-b", now, later, watch=False)
+    assert [p.outcome for p in passes] == ["parked"] and later.launched == ["acme/one"]
+
+
+def test_launcher_that_links_a_run_then_raises_is_reported_and_not_relaunched(hub, tmp_path):
+    conn, _, clock, now = hub
+    work_id = member_ids(conn)["acme/one"]
+    node = Node(conn, "node-a")
+    holds_path = tmp_path / "holds.json"
+
+    def launch_then_raise(*args, **kwargs):
+        run_id = "run-node-a-created"
+        conn.execute(
+            "INSERT INTO events (node_id, run_id, sequence, digest, state, ts, received_at) "
+            "VALUES ('node-a', ?, 1, 'd', 'running', 'now', 'now')",
+            (run_id,),
+        )
+        conn.commit()
+        node.link_execution(
+            work_id, {"node_id": "node-a", "run_id": run_id}, generation=1, holder_nonce=node.nonces[-1]
+        )
+        raise RuntimeError("receipt failed")
+
+    passes, events = run(
+        conn,
+        "node-a",
+        now,
+        launch_then_raise,
+        watch=False,
+        hub_override=node,
+        holds=consumer.Holds(holds_path),
+    )
+    assert [(p.outcome, p.run_id, p.detail) for p in passes] == [("error", "run-node-a-created", "RuntimeError")]
+    assert events[-1]["event"] == "error"
+    assert Node(conn, "node-a").get_ownership(work_id)["ownership"]["next_action"]["kind"] == "blocked"
+    clock[0] = "2026-01-01T00:10:00+00:00"
+    later = Runs(conn, "node-b")
+    run(conn, "node-b", now, later, holds=consumer.Holds(holds_path))
+    assert "acme/one" not in later.launched
+
+
 @pytest.mark.parametrize("state", ["failed", "lost_race"])
 def test_failed_intent_with_no_run_id_counts_an_attempt_and_is_not_repeated(hub, tmp_path, state):
     conn, _, _, now = hub
@@ -514,7 +592,7 @@ def test_consume_json_exits_nonzero_when_a_pass_failed(tmp_path, monkeypatch, ca
     from brigade import cli, fleet_client
     from brigade.cli import fleet_campaign
 
-    monkeypatch.setattr(fleet_campaign, "_local_repos", lambda target: {"acme/one": tmp_path})
+    monkeypatch.setattr(fleet_campaign, "_local_repos", lambda target: ({"acme/one": tmp_path}, []))
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda target: "node-a")
     monkeypatch.setattr(
         consumer, "consume", lambda hub, **kw: [consumer.Pass("failed", "acme/one", "w-1", 1, "r-1", "boom")]
@@ -525,6 +603,64 @@ def test_consume_json_exits_nonzero_when_a_pass_failed(tmp_path, monkeypatch, ca
     assert (
         cli.main(["fleet", "campaign", "consume", KEY, "--target", str(tmp_path), "--worker", "coder", "--json"]) == 0
     )
+
+
+def test_consume_reports_unresolvable_repository_in_text_and_json(tmp_path, monkeypatch, capsys):
+    from brigade import cli, fleet_client
+
+    valid = tmp_path / "valid"
+    valid.mkdir()
+    subprocess.run(["git", "-C", str(valid), "init", "-q"], check=True)
+    subprocess.run(
+        ["git", "-C", str(valid), "remote", "add", "origin", "https://github.com/acme/valid.git"], check=True
+    )
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "repos.toml").write_text(
+        '[[repo]]\nid="valid"\npath="valid"\n[[repo]]\nid="missing"\npath="missing"\n'
+    )
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda target: "node-a")
+    monkeypatch.setattr(consumer, "consume", lambda hub, **kw: [])
+
+    command = ["fleet", "campaign", "consume", KEY, "--target", str(tmp_path), "--worker", "coder"]
+    assert cli.main(command) == 0
+    assert capsys.readouterr().out.strip() == "dropped  missing  repository_identity_unresolved"
+    assert cli.main([*command, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "dropped": [{"identity": "missing", "reason": "repository_identity_unresolved"}],
+        "passes": [],
+    }
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_consume_reports_all_dropped_repositories_before_refusing(tmp_path, monkeypatch, capsys, json_output):
+    from brigade import cli
+
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "repos.toml").write_text(
+        '[[repo]]\nid="missing-one"\npath="missing-one"\n[[repo]]\nid="missing-two"\npath="missing-two"\n'
+    )
+
+    def unexpected_consume(*args, **kwargs):
+        pytest.fail("an empty repository selection must not reach the consumer")
+
+    monkeypatch.setattr(consumer, "consume", unexpected_consume)
+    command = ["fleet", "campaign", "consume", KEY, "--target", str(tmp_path), "--worker", "coder"]
+    assert cli.main([*command, *(["--json"] if json_output else [])]) == 2
+    captured = capsys.readouterr()
+    if json_output:
+        assert json.loads(captured.out) == {
+            "dropped": [
+                {"identity": identity, "reason": "repository_identity_unresolved"}
+                for identity in ("missing-one", "missing-two")
+            ],
+            "passes": [],
+        }
+        assert json.loads(captured.err) == {"error": "no_local_repositories"}
+    else:
+        assert captured.out.splitlines() == [
+            f"dropped  {identity}  repository_identity_unresolved" for identity in ("missing-one", "missing-two")
+        ]
+        assert captured.err == "error: no_local_repositories\n"
 
 
 def test_receipt_writer_appends_one_json_line_per_step(tmp_path):
@@ -556,6 +692,58 @@ def test_launch_local_runs_only_its_own_task_through_dispatch_apply(apply_target
     assert len(intents) == 1
 
 
+def _campaign_ledger_task(target, work_id="wl-retire"):
+    task_id, reason = consumer._local_task(target, "Campaign work", work_id, [])
+    assert task_id is not None and reason == ""
+    return task_id
+
+
+def _set_task_claim(target, task_id, actor):
+    with locking._task_ledger_lock(target):
+        task_ledger = locking._read_task_ledger(target)
+        task = next(row for row in task_ledger["tasks"] if row["id"] == task_id)
+        task["claim"] = {"claim_id": "claim-1", "actor": actor, "claimed_at": "2026-01-01T00:00:00+00:00"}
+        locking._write_task_ledger(target, task_ledger)
+
+
+def test_retire_cancels_an_unclaimed_pending_task(apply_target):  # noqa: F811
+    task_id = _campaign_ledger_task(apply_target)
+
+    assert consumer._retire_task(apply_target, task_id, "coder") is None
+    task = next(row for row in locking._read_task_ledger(apply_target)["tasks"] if row["id"] == task_id)
+    assert task["status"] == "cancelled"
+
+
+def test_retire_skips_a_pending_task_claimed_by_another_consumer(apply_target):  # noqa: F811
+    task_id = _campaign_ledger_task(apply_target)
+    _set_task_claim(apply_target, task_id, "reviewer")
+
+    assert consumer._retire_task(apply_target, task_id, "coder") == f"task {task_id} is claimed by reviewer"
+    task = next(row for row in locking._read_task_ledger(apply_target)["tasks"] if row["id"] == task_id)
+    assert task["status"] == "pending"
+
+
+def test_retire_cancels_a_pending_task_claimed_by_this_consumer(apply_target):  # noqa: F811
+    task_id = _campaign_ledger_task(apply_target)
+    _set_task_claim(apply_target, task_id, "coder")
+
+    assert consumer._retire_task(apply_target, task_id, "coder") is None
+    task = next(row for row in locking._read_task_ledger(apply_target)["tasks"] if row["id"] == task_id)
+    assert task["status"] == "cancelled"
+
+
+def test_reopening_a_campaign_task_clears_its_claim(apply_target):  # noqa: F811
+    task_id = _campaign_ledger_task(apply_target)
+    _set_task_claim(apply_target, task_id, "coder")
+    assert consumer._retire_task(apply_target, task_id, "coder") is None
+
+    reopened_id, reason = consumer._local_task(apply_target, "Campaign work", "wl-retire", [])
+
+    task = next(row for row in locking._read_task_ledger(apply_target)["tasks"] if row["id"] == task_id)
+    assert (reopened_id, reason, task["status"]) == (task_id, "", "pending")
+    assert "claim" not in task and "assignee" not in task
+
+
 def test_cli_refuses_without_local_repositories_before_touching_the_hub(tmp_path, capsys):
     from brigade import cli
 
@@ -574,8 +762,152 @@ def test_unreadable_holds_refuse_the_pass_instead_of_forgetting_holds(tmp_path, 
 
 
 def test_a_failing_task_cleanup_never_hides_the_run(tmp_path, monkeypatch):
-    def fail(repo_path, task_id):
+    def fail(repo_path, task_id, consumer_name):
         raise OSError("ledger lock timed out")
 
     monkeypatch.setattr(consumer, "_retire_task", fail)
-    consumer._retire_quietly(tmp_path, "task-1")
+    consumer._retire_quietly(tmp_path, "task-1", "coder")
+
+
+def seed_link(conn, work_id, index, *, fleet=True):
+    """Insert synthetic historical evidence without dispatching a real run."""
+    conn.execute(
+        "INSERT INTO work_links (link_id, work_id, link_type, external_key, source_policy, "
+        "source_acceptance_json, synced_at) VALUES (?, ?, ?, ?, 'context', '[]', ?)",
+        (
+            f"synthetic-{index:03}",
+            work_id,
+            "fleet-run" if fleet else "url",
+            f"node-a/history-{index}" if fleet else f"fixture-{index}",
+            "2025-01-01T00:00:00+00:00",
+        ),
+    )
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_reclaim_matches_distinct_runs_against_complete_started_history(hub, missing):
+    from brigade import worklore_store as store
+
+    conn, _, clock, now = hub
+    work_id = member_ids(conn)["acme/one"]
+    node = Node(conn, "node-a")
+    with pytest.raises(Killed):
+        run(conn, "node-a", now, Runs(conn, "node-a", die=True), watch=False, hub_override=node)
+    for index in range(30):
+        seed_link(conn, work_id, index)
+        # Failed and duplicate started events must never stand in for another run's start.
+        for event_type in ("attempt-started", "attempt-started", "attempt-failed"):
+            if missing and index == 29 and event_type == "attempt-started":
+                continue
+            store._append_event(
+                conn,
+                work_id=work_id,
+                event_type=event_type,
+                from_status=None,
+                to_status=None,
+                actor_type="node",
+                actor_id="node-a",
+                node_id="node-a",
+                run_id=f"history-{index}",
+                now=clock[0],
+            )
+    conn.commit()
+    assert len(node.get_item(work_id)["recent_events"]) == 20
+    assert node.list_events(work_id)["next_cursor"]
+    clock[0] = "2026-01-01T00:02:00+00:00"
+    later = Runs(conn, "node-b", state="refused")
+    passes, _ = run(conn, "node-b", now, later, watch=False, repos={"acme/one": REPOS["acme/one"]})
+    assert [p.outcome for p in passes] == (["previous-run"] if missing else ["refused"])
+    assert later.launched == ([] if missing else ["acme/one"])
+
+
+def test_launcher_link_beyond_first_page_is_not_released(hub, tmp_path):
+    conn, _, _, now = hub
+    work_id = member_ids(conn)["acme/one"]
+    node = Node(conn, "node-a")
+    for index in range(55):
+        seed_link(conn, work_id, index, fleet=False)
+    conn.commit()
+
+    def launch(*args, **kwargs):
+        launched = Runs(conn, "node-a")(*args, **kwargs)
+        node.link_execution(
+            work_id,
+            {"node_id": "node-a", "run_id": launched.run_id},
+            generation=1,
+            holder_nonce=node.nonces[-1],
+        )
+        assert all(link["link_type"] != "fleet-run" for link in node.get_item(work_id)["links"])
+        raise ValueError("synthetic launcher failure")
+
+    holds = consumer.Holds(tmp_path / "holds.json")
+    passes, _ = run(conn, "node-a", now, launch, watch=False, hub_override=node, holds=holds)
+    assert passes[0].outcome == "error" and passes[0].run_id
+    assert work_id in holds
+    assert node.get_ownership(work_id)["ownership"]["next_action"]["kind"] == "blocked"
+
+
+def test_nested_evidence_read_failure_preserves_launch_error(hub, monkeypatch, tmp_path):
+    conn, _, _, now = hub
+    work_id = member_ids(conn)["acme/one"]
+    node = Node(conn, "node-a")
+
+    def unreadable(*args, **kwargs):
+        raise OSError("synthetic evidence failure")
+
+    def launch(*args, **kwargs):
+        monkeypatch.setattr(node, "get_item", unreadable)
+        raise RuntimeError("synthetic launcher failure")
+
+    holds = consumer.Holds(tmp_path / "holds.json")
+    passes, _ = run(conn, "node-a", now, launch, watch=False, hub_override=node, holds=holds)
+    assert passes[0].outcome == "error" and passes[0].detail == "RuntimeError"
+    assert work_id in holds
+    assert node.get_ownership(work_id)["ownership"]["next_action"]["kind"] == "blocked"
+
+
+def test_fresh_take_with_unreadable_item_is_released_not_held(hub, monkeypatch, tmp_path):
+    conn, _, _, now = hub
+    work_id = member_ids(conn)["acme/one"]
+    node = Node(conn, "node-a")
+
+    def unreadable(*args, **kwargs):
+        raise OSError("synthetic item read failure")
+
+    monkeypatch.setattr(node, "get_item", unreadable)
+    launched = []
+    holds = consumer.Holds(tmp_path / "holds.json")
+    run(conn, "node-a", now, lambda *a, **k: launched.append(a), watch=False, hub_override=node, holds=holds)
+    assert launched == []
+    assert work_id not in holds
+
+
+@pytest.mark.parametrize("evidence", ["events", "links"])
+def test_unreadable_reclaim_evidence_holds_member(hub, monkeypatch, tmp_path, evidence):
+    conn, _, clock, now = hub
+    node = Node(conn, "node-a")
+    work_id = member_ids(conn)["acme/one"]
+    with pytest.raises(Killed):
+        run(conn, "node-a", now, Runs(conn, "node-a", die=True), watch=False, hub_override=node)
+    clock[0] = "2026-01-01T00:02:00+00:00"
+    later = Node(conn, "node-b")
+
+    def unreadable(*args, **kwargs):
+        raise WorkloreClientError("synthetic evidence unavailable", code="forbidden")
+
+    monkeypatch.setattr(later, "list_events" if evidence == "events" else "get_item", unreadable)
+    holds = consumer.Holds(tmp_path / "holds.json")
+    launch = Runs(conn, "node-b")
+    passes, _ = run(
+        conn,
+        "node-b",
+        now,
+        launch,
+        watch=False,
+        hub_override=later,
+        holds=holds,
+        repos={"acme/one": REPOS["acme/one"]},
+    )
+    assert passes[0].outcome == "error" and not launch.launched
+    assert work_id in holds
+    assert later.get_ownership(work_id)["ownership"]["next_action"]["kind"] == "blocked"

@@ -334,12 +334,60 @@ def test_holder_read_refuses_an_expired_campaign_lease_like_a_holder_write(ledge
     assert call(conn, path, method="GET")[0] == 200
 
 
-def test_string_exclusions_in_an_offer_fail_closed(ledger, monkeypatch):
+@pytest.mark.parametrize(
+    "exclusions,repo,excluded",
+    [
+        ([7], "acme/one", True),
+        (["acme/excluded"], "acme/excluded", True),
+        (["acme/excluded"], "acme/one", False),
+        ([], "acme/one", False),
+    ],
+)
+def test_stored_offer_exclusions_are_validated_before_selection(ledger, exclusions, repo, excluded):
     conn, _, _ = ledger
     create(conn)
+    work_id = members(conn)[repo]
+    campaign_id = campaigns.show_campaign(conn, "camp-1")["campaign"]["work_id"]
+    event = conn.execute(
+        "SELECT detail_json FROM work_events WHERE work_id=? AND event_type='campaign-offered'", (campaign_id,)
+    ).fetchone()
+    detail = json.loads(event[0])
+    detail["offer"]["exclusions"] = exclusions
+    conn.execute(
+        "UPDATE work_events SET detail_json=? WHERE work_id=? AND event_type='campaign-offered'",
+        (json.dumps(detail), campaign_id),
+    )
+    conn.commit()
+    assert campaigns.member_excluded(conn, work_id) is excluded
+
+
+@pytest.mark.parametrize(
+    "detail",
+    ["[]", "null", "broken-json", "{}", '{"offer": []}', json.dumps({"offer": {**OFFER, "unexpected": True}})],
+)
+def test_take_refuses_invalid_stored_offer_detail(ledger, detail):
+    conn, _, _ = ledger
+    made = create(conn)
     work_id = members(conn)["acme/one"]
-    monkeypatch.setattr(campaigns, "campaign_offer", lambda *_: {"offer": {"exclusions": "acme/other"}})
-    assert campaigns.member_excluded(conn, work_id) is True
+    conn.execute(
+        "UPDATE work_events SET detail_json=? WHERE work_id=? AND event_type='campaign-offered'",
+        (detail, made["campaign"]["work_id"]),
+    )
+    conn.commit()
+    before = store.list_events(conn, work_id)
+    status, refusal = act(conn, work_id)
+    assert status == 400 and refusal["code"] == "field-bound"
+    assert store.list_events(conn, work_id) == before
+    assert snapshot(conn, work_id)["state"] == "unowned"
+
+
+def test_take_validates_the_stored_offer_before_admission(ledger, monkeypatch):
+    conn, _, _ = ledger
+    create(conn)
+    malformed = {**OFFER, "exclusions": [7]}
+    monkeypatch.setattr(campaigns, "campaign_offer", lambda *_: {"event_id": "offer-1", "offer": malformed})
+    status, refusal = act(conn, members(conn)["acme/one"])
+    assert status == 400 and refusal["code"] == "field-bound"
 
 
 def test_expired_running_member_can_be_reclaimed_but_attempt_limit_still_applies(ledger):
@@ -1063,10 +1111,18 @@ def test_burn_queue_never_selects_a_campaign_member_the_offer_excludes(ledger):
 def test_unreadable_offer_fails_closed_for_selection(ledger):
     conn, _, _ = ledger
     create(conn)
-    ids = members(conn)
-    conn.execute("UPDATE work_events SET detail_json='[]' WHERE event_type='campaign-offered'")
+    first = members(conn)
+    create(conn, key="camp-2")
+    second = {m["repo"]: m["work_id"] for m in campaigns.show_campaign(conn, "camp-2")["members"]}
+    campaign_id = campaigns.show_campaign(conn, "camp-1")["campaign"]["work_id"]
+    conn.execute(
+        "UPDATE work_events SET detail_json='[]' WHERE work_id=? AND event_type='campaign-offered'", (campaign_id,)
+    )
     conn.commit()
-    assert campaigns.member_excluded(conn, ids["acme/one"]) is True
+    make_members_selectable(conn, [*first.values(), *second.values()])
+    selected = {item["work_id"] for item in store.burn_queue(conn)["items"]}
+    assert campaigns.member_excluded(conn, first["acme/one"]) is True
+    assert {second["acme/one"], second["acme/two"]} <= selected
 
 
 def test_exclusion_bucket_blocks_an_otherwise_eligible_item_only_when_excluded():
