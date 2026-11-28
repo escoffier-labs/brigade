@@ -1409,7 +1409,7 @@ def dispatch(
                 fallback_agent,
                 assignment,
                 prior_results=prior_results,
-                read_only=read_only,
+                read_only=worker_read_only,
                 direct=direct,
                 code_graph=code_graph,
                 drift_impact=drift_impact,
