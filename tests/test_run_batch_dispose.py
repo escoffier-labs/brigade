@@ -136,6 +136,26 @@ def test_delete_branch_after_integrate_deletes_only_the_task_branch(site, capsys
     assert facts(site, "task.disposed")[0].payload["branch_kept"] == "kept"
 
 
+@pytest.mark.parametrize("confirm", [False, True])
+@pytest.mark.parametrize("delete_branch", [False, True])
+def test_successful_branch_delete_is_reported_on_later_runs(site, capsys, monkeypatch, confirm, delete_branch):
+    run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}})
+    rc, integrated = integrate(site, capsys, "a")
+    assert rc == 0, integrated
+    rc, first = dispose(site, capsys, "a", confirm=True, delete_branch=True)
+    assert rc == 0, first
+    assert branch_tip(site) is None
+    journal = run_lifecycle._journal_path(site.run_dir())
+    before = journal.read_bytes()
+
+    rc, payload = dispose(site, capsys, "a", confirm=confirm, delete_branch=delete_branch)
+    assert rc == 0, payload
+    assert task_row(payload, "a")["status"] == "already-disposed"
+    assert task_row(payload, "a")["branch_kept"] == "deleted"
+    assert journal.read_bytes() == before
+    assert facts(site, "task.disposed")[0].payload["branch_kept"] == "kept"
+
+
 def test_crash_during_branch_delete_leaves_disposal_for_retry(site, capsys, monkeypatch):
     run_batch(site, capsys, monkeypatch, {"a": {"alpha.txt": "alpha\n"}})
     rc, integrated = integrate(site, capsys, "a")

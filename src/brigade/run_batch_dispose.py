@@ -675,13 +675,15 @@ def _dispose_one(
     task_id = state.handle.spec.task_id
     path = run_batch_workspace.expected_path(workspace, run_dir.name, task_id)
     if state.disposal is not None:
+        # The immutable disposal fact precedes deletion; report the current ref.
+        branch = run_batch_workspace.branch_name(run_dir.name, task_id)
+        branch_kept = BRANCH_KEPT if _ref(workspace, f"refs/heads/{branch}") is not None else BRANCH_DELETED
         if not confirm:
-            return _row(task_id, STATUS_ALREADY, mode=state.disposal.mode, branch_kept=state.disposal.branch_kept)
+            return _row(task_id, STATUS_ALREADY, mode=state.disposal.mode, branch_kept=branch_kept)
         # A crash between the fact and the lease release leaves an empty
         # reservation behind. Take the task lock so no live worker owns it, then
         # release the lease and retry only the optional branch delete.
         refusal: DisposeError | None = None
-        branch_kept = state.disposal.branch_kept
         with _run_lock(path, run_dir, code=TASK_BUSY, detail=f"another caller holds task {task_id}'s run lock"):
             if delete_branch and state.disposal.mode == MODE_INTEGRATED:
                 try:
@@ -695,7 +697,7 @@ def _dispose_one(
                 task_id,
                 STATUS_REFUSED,
                 mode=state.disposal.mode,
-                branch_kept=state.disposal.branch_kept,
+                branch_kept=branch_kept,
                 refusal=refusal,
             )
         return _row(task_id, STATUS_ALREADY, mode=state.disposal.mode, branch_kept=branch_kept)
