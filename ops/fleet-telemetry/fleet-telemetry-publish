@@ -60,55 +60,87 @@ def _load() -> float:
 
 def _cpu_ticks(path: Path) -> tuple[int, int]:
     with path.open(encoding="ascii") as stream:
-        # Guest counters are already included in user and nice.
-        ticks = [int(value) for value in stream.readline().split()[1:9]]
+        fields = stream.readline().split()
+    if len(fields) < 9 or fields[0] != "cpu":
+        raise ValueError("missing aggregate CPU counters")
+    # Guest counters are included in user and nice. Steal counts as busy.
+    ticks = [int(value) for value in fields[1:9]]
     return sum(ticks), ticks[3] + ticks[4]
 
 
-def _cpu_util(path: Path) -> float:
-    total_before, idle_before = _cpu_ticks(path)
-    time.sleep(1)
-    total_after, idle_after = _cpu_ticks(path)
-    total = total_after - total_before
-    idle = idle_after - idle_before
-    return min(1.0, max(0.0, (total - idle) / total)) if total > 0 else 0.0
+def _cpu_util(path: Path) -> float | None:
+    try:
+        total_before, idle_before = _cpu_ticks(path)
+        time.sleep(1)
+        total_after, idle_after = _cpu_ticks(path)
+        total = total_after - total_before
+        idle = idle_after - idle_before
+        if total <= 0:
+            return None
+        return round(min(1.0, max(0.0, (total - idle) / total)), 3)
+    except (OSError, ValueError, OverflowError):
+        return None
 
 
-def _memory_and_swap(path: Path) -> tuple[float, float]:
+def _swap_pressure(text: str) -> float | None:
     fields = {}
-    for line in path.read_text(encoding="ascii").splitlines():
+    for line in text.splitlines():
         key, _, value = line.partition(":")
-        if key in {"MemTotal", "MemAvailable", "SwapTotal", "SwapFree"}:
-            fields[key] = int(value.split()[0])
-    memory = (fields["MemTotal"] - fields["MemAvailable"]) / fields["MemTotal"]
-    swap_total = fields["SwapTotal"]
-    swap = (swap_total - fields["SwapFree"]) / swap_total if swap_total else 0.0
-    return min(1.0, max(0.0, memory)), min(1.0, max(0.0, swap))
+        if key in {"SwapTotal", "SwapFree"}:
+            parts = value.split()
+            try:
+                fields[key] = int(parts[0]) if parts else None
+            except ValueError:
+                fields[key] = None
+    total = fields.get("SwapTotal")
+    free = fields.get("SwapFree")
+    if total == 0:
+        return 0.0
+    if total is None or total < 0 or free is None or free < 0:
+        return None
+    return max(0, total - free) / total
+
+
+def _memory_and_swap(path: Path) -> tuple[float | None, float | None]:
+    from brigade.fleet_node_memory import parse_meminfo
+
+    try:
+        text = path.read_text(encoding="ascii", errors="replace")
+    except OSError:
+        return None, None
+    try:
+        memory = parse_meminfo(text)
+    except OverflowError:
+        memory = None
+    return memory, _swap_pressure(text)
 
 
 def _load_fields(proc: Path) -> dict[str, object]:
-    load_avg = _load()
-    try:
-        cpu = _cpu_util(proc / "stat")
-        memory, swap = _memory_and_swap(proc / "meminfo")
-    except FileNotFoundError:
-        return {"load": load_avg, "status": "busy" if load_avg >= CPU_BUSY else "available"}
+    stat, meminfo = proc / "stat", proc / "meminfo"
+    if not stat.exists() and not meminfo.exists():
+        load = _load()
+        return {"load": load, "status": "busy" if load >= CPU_BUSY else "available"}
+
+    cpu = _cpu_util(stat)
+    memory, swap = _memory_and_swap(meminfo)
+    load = _load() if cpu is None else cpu
     reasons = []
-    if cpu >= CPU_BUSY:
-        reasons.append("cpu_util")
-    if memory >= MEMORY_BUSY:
-        reasons.append("memory_pressure")
-    if swap >= SWAP_BUSY and memory >= SWAP_MEMORY_FLOOR:
-        reasons.append("swap_pressure")
-    return {
-        "load": cpu,
-        "cpu_util": cpu,
-        "load_avg_ratio": load_avg,
-        "memory_pressure": memory,
-        "swap_pressure": swap,
-        "status": "busy" if reasons else "available",
-        "busy_reasons": reasons,
-    }
+    fields: dict[str, object] = {"load": load}
+    if cpu is not None:
+        fields["cpu_util"] = cpu
+    if load >= CPU_BUSY:
+        reasons.append("load" if cpu is None else "cpu_util")
+    if memory is not None:
+        fields["memory_pressure"] = memory
+        if memory >= MEMORY_BUSY:
+            reasons.append("memory_pressure")
+    if swap is not None:
+        fields["swap_pressure"] = swap
+        if swap >= SWAP_BUSY and memory is not None and memory >= SWAP_MEMORY_FLOOR:
+            reasons.append("swap_pressure")
+    fields["status"] = "busy" if reasons else "available"
+    fields["busy_reasons"] = reasons  # Informational only. The Hub does not store this list.
+    return fields
 
 
 def _t3_agent_command() -> list[str] | None:
@@ -182,10 +214,11 @@ def main(argv: list[str] | None = None) -> int:
         if shutil.which(_executable_for(str(cli_ref))):
             usable.append(name)
 
+    load_fields = _load_fields(Path("/proc"))
     body = {
         "observed_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         "ttl_seconds": TTL_SECONDS,
-        **_load_fields(Path("/proc")),
+        **load_fields,
         "running": {"session_ids": [], "run_ids": []},
         "active_claims": [],
         "usable_seats": usable,

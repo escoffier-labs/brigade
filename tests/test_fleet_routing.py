@@ -588,7 +588,7 @@ def test_telemetry_rejects_invalid_pressure(conn, field, value):
         _observe(conn, NODE_LINUX, **{field: value})
 
 
-def test_v51_telemetry_migration_preserves_legacy_report(conn):
+def test_v51_telemetry_repairs_in_place_and_preserves_legacy_report(conn):
     _observe(conn, NODE_LINUX, load=0.2)
     path = conn.execute("PRAGMA database_list").fetchone()[2]
     with conn:
@@ -597,7 +597,7 @@ def test_v51_telemetry_migration_preserves_legacy_report(conn):
         conn.execute("PRAGMA user_version=51")
     migrated = fleet_hub.init_db(path)
     try:
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 51
         telemetry = fleet_hub_routing._telemetry(migrated, NODE_LINUX)
         assert telemetry["load"] == 0.2
         assert telemetry["memory_pressure"] is None and telemetry["swap_pressure"] is None

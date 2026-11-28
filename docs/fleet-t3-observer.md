@@ -218,11 +218,10 @@ column adds it on the first report that arrives, and `required.json` lists the
 pre-memory shape as a reviewed variant, so the Rust engine stays ready before
 and after that upgrade.
 
-Placement takes the maximum of CPU load, the session ratio and memory. A machine
-with no fresh reading is left out of that maximum and gets the informational
-reason `memory-unknown`, which never changes `eligible`. A machine over the
-threshold on memory alone is shed with `machine-load-shed`. The recommendation's
-`load_inputs.memory` is null when unknown.
+Placement uses this reading alongside the publisher's `memory_pressure`, when
+available. The recommendation's `load_inputs.memory` is null when the observer's
+reading is unknown. The informational reason `memory-unknown` means neither
+memory reading was available. It never changes `eligible`.
 
 Rollout order: upgrade the Hub first, then each node's observer. An old Hub
 rejects the unknown `memory_used` field. If a node does run ahead of its Hub, the
@@ -269,14 +268,19 @@ Placement reuses the routing candidate evaluator and adds three checks:
   for the repository, the lowest project id is chosen, the recommendation
   carries `project_choices`, and that candidate gets the informational reason
   `multiple-projects` (it never changes `eligible`).
-- Effective load is the higher of the node-reported CPU `load` and the
-  Hub-counted live sessions on the node divided by the machine's policy
-  `concurrency`. Missing or stale telemetry, or a null `load`, excludes the
-  machine (`machine-unknown-telemetry`, `machine-stale-telemetry`,
+- Effective load is the maximum of the node's CPU `load`, the live session
+  count divided by the machine's policy `concurrency` (with any configured
+  session weighting), and the available memory inputs. The Linux telemetry
+  publisher measures CPU utilization over about one second, counting I/O wait
+  as idle. When CPU sampling is unavailable, `load` falls back to one-minute
+  load average divided by CPU count, capped at 1. The publisher can also report
+  `memory_pressure` (the fraction of RAM unavailable) and `swap_pressure`
+  (the fraction of swap used). Swap pressure enters the maximum only when the
+  publisher reports memory pressure of at least 0.80.
+- Missing or stale telemetry, or a null `load`, excludes the machine
+  (`machine-unknown-telemetry`, `machine-stale-telemetry`,
   `machine-load-unknown`). If the Hub cannot read its live session counts, no
-  machine is eligible (`sessions-unknown`) rather than reading as zero. A node's
-  reported memory-used fraction is a third input to the maximum (see Memory
-  reading above); a missing reading adds only the informational `memory-unknown`.
+  machine is eligible (`sessions-unknown`).
 - A machine at or over the threshold (default 0.70, range 0 to 1) is shed
   (`machine-load-shed`).
 
@@ -301,8 +305,11 @@ stale or null telemetry) is never placeable, and `place` returns the named error
 The response schema is `brigade.fleet_placement.v1`. Only the recommended
 machine carries its `environment_id` and `project_id`, and the block has no node
 id: a caller launching a child agent needs the machine, `environment_id`,
-`project_id` and `expires_at`. Every candidate carries its eligibility,
-effective load and reasons only. `expires_at` is the earliest of the telemetry
+`project_id` and `expires_at`. Candidates carry eligibility, effective load,
+reasons and session-weight inputs. The caller's own candidate can also show
+publisher memory and swap pressure. Peer candidate rows omit both measurements.
+The recommendation's `load_inputs` includes the pressure readings and uses
+null for unavailable values. `expires_at` is the earliest of the telemetry
 expiry, the inventory expiry and two minutes after `decided_at`. A caller that
 already holds an open database transaction gets
 `placement-unavailable: open-transaction`, because the read snapshot is rolled

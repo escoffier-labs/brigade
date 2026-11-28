@@ -134,10 +134,6 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     """v20 -> v21: routing telemetry, decisions, reservations, and intents."""
     fleet_quota.ensure_schema(conn)
     conn.execute(_TELEMETRY_SCHEMA)
-    columns = {row[1] for row in conn.execute("PRAGMA table_info(fleet_machine_telemetry)")}
-    for column in ("memory_pressure", "swap_pressure"):
-        if column not in columns:
-            conn.execute(f"ALTER TABLE fleet_machine_telemetry ADD COLUMN {column} REAL")
     conn.execute(_DECISIONS_SCHEMA)
     conn.execute(_RESERVATIONS_SCHEMA)
     conn.execute(_INTENTS_SCHEMA)

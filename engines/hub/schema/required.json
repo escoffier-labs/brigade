@@ -12808,7 +12808,7 @@
     "fleet_read_visibility_nodes_insert": "CREATE TRIGGER fleet_read_visibility_nodes_insert AFTER INSERT ON nodes BEGIN UPDATE fleet_read_snapshot_rows SET visible=(((caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END)))) AND (kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)))) WHERE (recipient=NEW.node_id OR caller=NEW.node_id) AND 1; END",
     "fleet_read_visibility_nodes_update": "CREATE TRIGGER fleet_read_visibility_nodes_update AFTER UPDATE OF revoked_at ON nodes BEGIN UPDATE fleet_read_snapshot_rows SET visible=(((caller NOT GLOB 'agent:*' AND EXISTS (SELECT 1 FROM nodes c WHERE c.node_id=caller AND c.revoked_at IS NULL)) OR (recipient != caller AND EXISTS (SELECT 1 FROM fleet_message_principals c WHERE c.principal_id=caller AND c.revoked_at IS NULL AND (c.role='agent' OR (c.role='teammate' AND kind IN ('nodes','principals')))) AND EXISTS (SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END)))) AND (kind='claims' OR (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p WHERE p.principal_id=recipient AND p.revoked_at IS NULL AND p.role IN ('agent','teammate'))) OR (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n WHERE n.node_id=recipient AND n.revoked_at IS NULL)))) WHERE (recipient=OLD.node_id OR recipient=NEW.node_id OR caller=OLD.node_id OR caller=NEW.node_id) AND 1; END"
   },
-  "user_version": 52,
+  "user_version": 51,
   "variants": {
     "action_broker_grants": [
       {
@@ -18808,6 +18808,148 @@
           }
         },
         "sql": "CREATE TABLE fleet_machine_telemetry (node_id TEXT NOT NULL PRIMARY KEY, machine TEXT, observed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, status TEXT NOT NULL, load REAL, running TEXT NOT NULL, active_claims TEXT NOT NULL, usable_seats TEXT NOT NULL, credential_state TEXT NOT NULL, observed_id TEXT NOT NULL, updated_at TEXT NOT NULL, memory_pressure REAL, swap_pressure REAL)"
+      },
+      {
+        "autoincrement": false,
+        "checks": [],
+        "column_order": [
+          "node_id",
+          "machine",
+          "observed_at",
+          "ttl_seconds",
+          "status",
+          "load",
+          "running",
+          "active_claims",
+          "usable_seats",
+          "credential_state",
+          "observed_id",
+          "updated_at"
+        ],
+        "columns": [
+          [
+            "active_claims",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "credential_state",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "load",
+            "REAL",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "machine",
+            "TEXT",
+            0,
+            null,
+            0,
+            0
+          ],
+          [
+            "node_id",
+            "TEXT",
+            1,
+            null,
+            1,
+            0
+          ],
+          [
+            "observed_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "observed_id",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "running",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "status",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "ttl_seconds",
+            "INTEGER",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "updated_at",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ],
+          [
+            "usable_seats",
+            "TEXT",
+            1,
+            null,
+            0,
+            0
+          ]
+        ],
+        "foreign_keys": [],
+        "indexes": {
+          "sqlite_autoindex_fleet_machine_telemetry_1": {
+            "columns": [
+              [
+                0,
+                "node_id",
+                0,
+                "BINARY",
+                1
+              ],
+              [
+                1,
+                null,
+                0,
+                "BINARY",
+                0
+              ]
+            ],
+            "origin": "pk",
+            "partial": 0,
+            "sql": "",
+            "unique": 1
+          }
+        },
+        "sql": "CREATE TABLE fleet_machine_telemetry (node_id TEXT NOT NULL PRIMARY KEY, machine TEXT, observed_at TEXT NOT NULL, ttl_seconds INTEGER NOT NULL, status TEXT NOT NULL, load REAL, running TEXT NOT NULL, active_claims TEXT NOT NULL, usable_seats TEXT NOT NULL, credential_state TEXT NOT NULL, observed_id TEXT NOT NULL, updated_at TEXT NOT NULL)"
       }
     ],
     "fleet_mcp_reports": [
