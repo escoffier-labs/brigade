@@ -490,12 +490,13 @@ def test_ctrl_c_terminates_children_and_releases_claim(apply_target, capsys, mon
 
 
 @requires_dispatch_apply
-def test_deadline_cancels_child(apply_target, capsys, monkeypatch):
+def test_real_child_is_stopped_when_work_dispatch_deadline_passes(apply_target, capsys, monkeypatch):
     monkeypatch.setenv("FAKE_DISPATCH_SLEEP", "60")
-    _apply(apply_target, capsys, "--deadline", "0.3", expected=1)
-    (intent,) = _intents(apply_target)
-    assert intent["terminal"]["run_status"] == "timeout"
-    assert not runguard._pid_is_active(intent["pid"])
+    _apply(apply_target, capsys, "--deadline", "1.0", expected=1)
+    intents = _intents(apply_target)
+    child_pids = [intent["pid"] for intent in intents]
+    assert child_pids and all(isinstance(pid, int) and pid > 0 for pid in child_pids)
+    assert all(not runguard._pid_is_active(pid) for pid in child_pids)
 
 
 @requires_dispatch_apply

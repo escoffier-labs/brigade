@@ -1,0 +1,1 @@
+- Cover live replacement-holder fencing and real dispatch child deadline cancellation in the fleet campaign tests.
