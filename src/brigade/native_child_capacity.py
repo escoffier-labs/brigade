@@ -5,7 +5,8 @@ bounds concurrent governed native tasks. One unit occupies for every durable lau
 claim in every native-enrolled run under the workspace runs root. A unit stays
 live until a trusted terminal result proves quiescence and that exact result is
 acknowledged. A binding abandoned before any launch claim charged nothing and
-occupies nothing.
+occupies nothing. An audited operator release of one uncorrelated claim frees
+exactly that claim and nothing else.
 
 The scanner never takes a run lock. It reads with bounded, no-follow reads and
 marks its answer non-authoritative on any malformed, unreadable, replaced or
@@ -44,6 +45,7 @@ CAPACITY_UNKNOWN = "capacity-unknown"
 
 HOLD_EVENT = "task.native-held"
 HOLD_RESOLVED_EVENT = "task.native-hold-resolved"
+RELEASED_EVENT = "task.native-released"
 LAUNCH_CLAIM = "task.launch-claimed"
 _NATIVE_KIND_PREFIX = "native-"
 # Native adapters derive run IDs as <host>-<request SHA-256>. Batch has its
@@ -60,6 +62,7 @@ _READ_EVENT_TYPES = frozenset(
         "task.acknowledged",
         HOLD_EVENT,
         HOLD_RESOLVED_EVENT,
+        RELEASED_EVENT,
         RESOURCE_EVENT,
     }
 )
@@ -188,6 +191,7 @@ def _live_claims(events: Sequence[run_journal.RunEvent]) -> dict[str, tuple[str,
     acknowledged: dict[str, object] = {}
     held: dict[str, str] = {}
     resources: dict[str, str] = {}
+    released: set[str] = set()
     for event in events:
         if event.event_type not in _READ_EVENT_TYPES:
             continue
@@ -202,6 +206,12 @@ def _live_claims(events: Sequence[run_journal.RunEvent]) -> dict[str, tuple[str,
             if task_id in claims:
                 raise _Unverified("payload")
             claims[task_id] = (seat, payload.get("attempt_id"))
+        elif event.event_type == RELEASED_EVENT:
+            # A release names the claimed attempt it frees. It never names a
+            # task without a claim, and a stale attempt cannot release another.
+            if task_id not in claims or payload.get("attempt_id") != claims[task_id][1]:
+                raise _Unverified("payload")
+            released.add(task_id)
         elif event.event_type == "task.observed":
             # An observation counts only for the launch claim it belongs to.
             if task_id not in claims or payload.get("attempt_id") != claims[task_id][1]:
@@ -238,6 +248,8 @@ def _live_claims(events: Sequence[run_journal.RunEvent]) -> dict[str, tuple[str,
             held.pop(task_id, None)
     live: dict[str, tuple[str, str]] = {}
     for task_id, (seat, _attempt) in claims.items():
+        if task_id in released:
+            continue
         reason = held.get(task_id)
         resource = resources.get(task_id)
         # Start uncertainty records history. Current task evidence still

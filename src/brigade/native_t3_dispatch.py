@@ -19,8 +19,13 @@ never authenticated acceptance.
 
 from __future__ import annotations
 
+import hashlib
+import json
+import os
 import re
+import stat
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, NamedTuple, Sequence
 from urllib.parse import quote, unquote
@@ -42,16 +47,21 @@ from .native_t3_host import HOST
 
 SCHEMA = "brigade.t3_claim.v1"
 CORRELATION_SCHEMA = "brigade.t3_correlation.v1"
+RELEASE_SCHEMA = "brigade.t3_release_claim.v1"
 CLAIM_EVENT = journal_core.CLAIM_EVENT
 CORRELATION_EVENT = "task.native-correlated"
 HELD_EVENT = journal_core.HELD_EVENT
 HOLD_RESOLVED_EVENT = journal_core.HOLD_RESOLVED_EVENT
+RELEASED_EVENT = journal_core.RELEASED_EVENT
 PARENT_REPORTED = "parent-reported"
 OPERATOR_ASSERTED = "operator-asserted"
 ABANDONED = journal_core.ABANDONED
 ACCEPT_CONFLICT = journal_core.ACCEPT_CONFLICT
 HELD_RUN_STATUS = journal_core.HELD_RUN_STATUS
 _MAX_DIAGNOSTIC = journal_core.MAX_DIAGNOSTIC
+_MAX_EVIDENCE_BYTES = 8_388_608
+_EVIDENCE_TOP_KEYS = frozenset({"parent_thread", "events"})
+_EVIDENCE_RECORD_KEYS = frozenset({"ts", "tool", "thread_id"})
 _INTENT_DOMAIN = "brigade.native-t3.intent.v1"
 _HANDLE_DOMAIN = "brigade.native-t3.handle.v1"
 _EVIDENCE_DOMAIN = "brigade.native-t3.evidence.v1"
@@ -868,6 +878,7 @@ def accepted(*, workspace: Path, run_id: str, task_id: str, parent_thread: str, 
     with enrollment.owned_run(workspace, run_dir):
         _run_meta(workspace, run_dir)
         events, verified, binding = _durable_claim(workspace, run_dir, task_id, parent_thread)
+        _hold_late_reply(workspace, run_dir, events, task_id, binding.attempt_id)
         held = _held(events, task_id)
         if held is not None:
             raise _refuse("task-held", f"the task is held ({held})")
@@ -914,6 +925,8 @@ def hold_resolve(
             "task_id": task_id,
             "attempt_id": binding.attempt_id,
         }
+        if payload is not None:
+            _hold_late_reply(workspace, run_dir, events, task_id, binding.attempt_id)
         if abandon:
             replay = held == ABANDONED
             if not replay:
@@ -985,6 +998,251 @@ def _resolve_hold(
     }
 
 
+def _evidence_bytes(path: Path) -> bytes:
+    """Read one bounded regular evidence file without following a final link."""
+    target = path.expanduser()
+    try:
+        before = os.lstat(target)
+    except OSError:
+        raise _refuse("evidence-missing", "the evidence file is not readable") from None
+    if stat.S_ISLNK(before.st_mode) or not stat.S_ISREG(before.st_mode):
+        raise _refuse("evidence-unreadable", "the evidence file is not a regular file")
+    if before.st_size > _MAX_EVIDENCE_BYTES:
+        raise _refuse("evidence-too-large", "the evidence file exceeds the size bound")
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+    try:
+        descriptor = os.open(target, flags)
+    except OSError:
+        raise _refuse("evidence-missing", "the evidence file is not readable") from None
+    try:
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise _refuse("evidence-unreadable", "the evidence file is not a regular file")
+        chunks: list[bytes] = []
+        remaining = _MAX_EVIDENCE_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    except OSError:
+        raise _refuse("evidence-missing", "the evidence file is not readable") from None
+    finally:
+        os.close(descriptor)
+    raw = b"".join(chunks)
+    if len(raw) > _MAX_EVIDENCE_BYTES:
+        raise _refuse("evidence-too-large", "the evidence file exceeds the size bound")
+    return raw
+
+
+def _evidence_record(value: object) -> Mapping[str, Any]:
+    """Validate one closed activity record: ``ts``, ``tool`` and ``thread_id``."""
+    if not isinstance(value, Mapping) or set(value) - _EVIDENCE_RECORD_KEYS:
+        raise _refuse("evidence-invalid", "an evidence record is not usable")
+    for field in ("ts", "tool", "thread_id"):
+        if field in value and type(value[field]) is not str:
+            raise _refuse("evidence-invalid", "an evidence record field is not usable")
+    return value
+
+
+def _evidence_rows(raw: bytes) -> tuple[str | None, tuple[Mapping[str, Any], ...]]:
+    """Parse a JSON object, a JSON array or JSON Lines, and name the thread."""
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError:
+        raise _refuse("evidence-invalid", "the evidence file is not UTF-8 text") from None
+    stripped = text.strip()
+    if not stripped:
+        raise _refuse("evidence-invalid", "the evidence file is empty")
+    try:
+        document: object = json.loads(stripped)
+    except (ValueError, RecursionError):
+        document = None
+    if document is not None:
+        if isinstance(document, Mapping):
+            if set(document) != _EVIDENCE_TOP_KEYS:
+                if document and set(document) <= _EVIDENCE_RECORD_KEYS:
+                    # A single-line JSON Lines export parses as one record.
+                    return None, (_evidence_record(document),)
+                raise _refuse("evidence-invalid", "the evidence document is not usable")
+            header = document["parent_thread"]
+            if type(header) is not str or not journal.provider_reference(header):
+                raise _refuse("evidence-invalid", "the evidence parent thread is not usable")
+            events = document["events"]
+            if not isinstance(events, list):
+                raise _refuse("evidence-invalid", "the evidence events are not a list")
+            return header, tuple(_evidence_record(row) for row in events)
+        if isinstance(document, list):
+            return None, tuple(_evidence_record(row) for row in document)
+        raise _refuse("evidence-invalid", "the evidence document is not usable")
+    rows: list[Mapping[str, Any]] = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except (ValueError, RecursionError):
+            raise _refuse("evidence-invalid", "the evidence file is not valid JSON lines") from None
+        rows.append(_evidence_record(row))
+    if not rows:
+        raise _refuse("evidence-invalid", "the evidence file is empty")
+    return None, tuple(rows)
+
+
+def _evidence_thread(header_thread: str | None, rows: Sequence[Mapping[str, Any]], parent_thread: str) -> None:
+    """Require the evidence names exactly the declared parent thread."""
+    if header_thread is not None and header_thread != parent_thread:
+        raise _refuse("evidence-thread-mismatch", "the evidence names another parent thread")
+    named = header_thread is not None
+    for row in rows:
+        thread = row.get("thread_id")
+        if thread is None:
+            continue
+        named = True
+        if thread != parent_thread:
+            raise _refuse("evidence-thread-mismatch", "the evidence names another parent thread")
+    if not named:
+        raise _refuse("evidence-thread-missing", "the evidence does not name a parent thread")
+
+
+def _evidence_moment(value: object) -> datetime | None:
+    if type(value) is not str:
+        return None
+    try:
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return moment if moment.tzinfo is not None else moment.replace(tzinfo=timezone.utc)
+
+
+def _require_no_delegate_call(rows: Sequence[Mapping[str, Any]], start: datetime) -> None:
+    """Refuse when any delegate call is at or after the claim time.
+
+    A record whose timestamp is missing or unparseable cannot be placed before
+    the claim, so it counts as inside the window and never releases a claim.
+    """
+    for row in rows:
+        if row.get("tool") != "delegate_task":
+            continue
+        moment = _evidence_moment(row.get("ts"))
+        if moment is None or moment >= start:
+            raise _refuse("evidence-conflict", "the evidence shows a delegate_task call in the claim window")
+
+
+def _claim_recorded_at(events: Sequence[run_journal.RunEvent], task_id: str) -> datetime:
+    for event in events:
+        if event.event_type == CLAIM_EVENT and event.payload.get("task_id") == task_id:
+            moment = _evidence_moment(event.recorded_at)
+            if moment is None:
+                raise _refuse("journal-refused", "the claim time is not readable")
+            return moment
+    raise _refuse("no-claim", "the task has no durable governed claim")
+
+
+def _reply_recorded(events: Sequence[run_journal.RunEvent], task_id: str, attempt_id: str) -> bool:
+    """True when a correlation or an observation already names this attempt."""
+    if _correlation(events, task_id) is not None:
+        return True
+    return any(
+        event.event_type == "task.observed"
+        and event.payload.get("task_id") == task_id
+        and event.payload.get("attempt_id") == attempt_id
+        for event in events
+    )
+
+
+def _hold_late_reply(
+    workspace: Path, run_dir: Path, events: Sequence[run_journal.RunEvent], task_id: str, attempt_id: str
+) -> None:
+    """Record an accept-conflict hold when a released attempt receives a reply."""
+    release = journal_core.released(events, task_id)
+    if release is None or release.get("attempt_id") != attempt_id:
+        return
+    evidence = release.get("evidence_sha256")
+    if not journal.digest(evidence):
+        raise _refuse("journal-refused", "the release record is not usable")
+    _record_held(workspace, run_dir, task_id, attempt_id, ACCEPT_CONFLICT, str(evidence))
+    raise _refuse("accept-conflict", "the released claim received a late native reply")
+
+
+def release_claim(
+    *,
+    workspace: Path,
+    run_id: str,
+    task_id: str,
+    parent_thread: str,
+    evidence: Path,
+    confirm_no_delegate: bool,
+) -> dict[str, Any]:
+    """Release one uncorrelated claim after an operator assertion and evidence check.
+
+    The verb frees exactly one native slot for that claim. It refuses any
+    correlated, terminal, acknowledged, held or already released task, and it
+    never changes another task's slot.
+    """
+    workspace = workspace.expanduser().resolve()
+    if not confirm_no_delegate:
+        raise _refuse("confirm-required", "the release requires --confirm-no-delegate")
+    if not journal.provider_reference(parent_thread):
+        raise _refuse("invalid-identity", "the parent thread identity is not valid")
+    run_dir = _context(workspace, run_id, task_id)
+    now = datetime.now(timezone.utc)
+    try:
+        with capacity.capacity_lock(workspace):
+            with enrollment.owned_run(workspace, run_dir):
+                _run_meta(workspace, run_dir)
+                events, verified, binding = _durable_claim(workspace, run_dir, task_id, parent_thread)
+                if journal_core.released(events, task_id) is not None:
+                    raise _refuse("already-released", "the claim was already released")
+                held = _held(events, task_id)
+                if held is not None:
+                    raise _refuse("task-held", f"the task is held ({held})")
+                result = verified.result
+                if result.status in journal.TERMINAL or result.result_id is not None:
+                    raise _refuse("task-terminal", "the claim is already terminal")
+                if result.acknowledged:
+                    raise _refuse("task-acked", "the claim result is already acknowledged")
+                if _reply_recorded(events, task_id, binding.attempt_id):
+                    raise _refuse("native-reply-recorded", "the claim already has a native reply record")
+                raw = _evidence_bytes(evidence)
+                header_thread, rows = _evidence_rows(raw)
+                _evidence_thread(header_thread, rows, parent_thread)
+                _require_no_delegate_call(rows, _claim_recorded_at(events, task_id))
+                released_at = run_events.format_recorded_at(now)
+                evidence_sha256 = hashlib.sha256(raw).hexdigest()
+                _append(
+                    workspace,
+                    run_dir,
+                    RELEASED_EVENT,
+                    {
+                        "task_id": task_id,
+                        "attempt_id": binding.attempt_id,
+                        "dispatch_attempt": binding.dispatch_attempt,
+                        "parent_thread": parent_thread,
+                        "operator_assertion": True,
+                        "released_at": released_at,
+                        "evidence_sha256": evidence_sha256,
+                        "evidence_bytes": len(raw),
+                    },
+                    key=_key("released", task_id, binding.attempt_id),
+                )
+                return {
+                    "schema": RELEASE_SCHEMA,
+                    "run_id": run_dir.name,
+                    "task_id": task_id,
+                    "attempt_id": binding.attempt_id,
+                    "dispatch_attempt": binding.dispatch_attempt,
+                    "parent_thread": parent_thread,
+                    "operator_assertion": True,
+                    "released_at": released_at,
+                    "evidence_sha256": evidence_sha256,
+                    "evidence_bytes": len(raw),
+                    "state": "released",
+                }
+    except capacity.CapacityError as exc:
+        raise _refuse(exc.code, str(exc)) from None
+
+
 def claim_cli(args: Any) -> int:
     return _emit(
         lambda: claim(workspace=args.target, run_id=args.run_id, task_id=args.task_id, parent_thread=args.parent_thread)
@@ -1011,5 +1269,18 @@ def hold_resolve_cli(args: Any) -> int:
             task_id=args.task_id,
             payload=None if args.abandon else _read_native(args.native_json),
             abandon=args.abandon,
+        )
+    )
+
+
+def release_claim_cli(args: Any) -> int:
+    return _emit(
+        lambda: release_claim(
+            workspace=args.target,
+            run_id=args.run_id,
+            task_id=args.task_id,
+            parent_thread=args.parent_thread,
+            evidence=args.evidence,
+            confirm_no_delegate=args.confirm_no_delegate,
         )
     )

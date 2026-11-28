@@ -201,13 +201,14 @@ _STATUS_NEUTRAL_EVENT_TYPES: frozenset[str] = frozenset(
         # A recorded cancel intent blocks a future launch; it never changes the
         # aggregate run status by itself.
         "task.cancel-requested",
-        # Governed native T3 claim, correlation and hold facts change task
-        # custody, not the aggregate run status.
+        # Governed native T3 claim, correlation, hold and release facts change
+        # task custody, not the aggregate run status.
         "task.native-claimed",
         "task.native-correlated",
         "task.native-held",
         "task.native-cancel-requested",
         "task.native-hold-resolved",
+        "task.native-released",
         "task.native-capacity",
         "control.requested",
         "control.observed",

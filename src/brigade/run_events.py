@@ -272,6 +272,18 @@ EVENT_TYPES.update(
         "task.native-held": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
         "task.native-cancel-requested": frozenset({"task_id", "attempt_id", "handle_digest", "cancel_key"}),
         "task.native-hold-resolved": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
+        "task.native-released": frozenset(
+            {
+                "task_id",
+                "attempt_id",
+                "dispatch_attempt",
+                "parent_thread",
+                "operator_assertion",
+                "released_at",
+                "evidence_sha256",
+                "evidence_bytes",
+            }
+        ),
         "task.native-capacity": frozenset({"task_id", "attempt_id", "reason", "worktree_retained"}),
         # Native T3 enrollment holds one immutable delegation input asset
         # outside the journal. Only its relative name and digests are retained
@@ -333,6 +345,7 @@ _NATIVE_T3_EVENT_TYPES = frozenset(
         "task.native-held",
         "task.native-cancel-requested",
         "task.native-hold-resolved",
+        "task.native-released",
         "task.native-capacity",
     }
 )
@@ -384,6 +397,18 @@ _REQUIRED_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "task.native-held": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
     "task.native-cancel-requested": frozenset({"task_id", "attempt_id", "handle_digest", "cancel_key"}),
     "task.native-hold-resolved": frozenset({"task_id", "attempt_id", "reason", "evidence_digest"}),
+    "task.native-released": frozenset(
+        {
+            "task_id",
+            "attempt_id",
+            "dispatch_attempt",
+            "parent_thread",
+            "operator_assertion",
+            "released_at",
+            "evidence_sha256",
+            "evidence_bytes",
+        }
+    ),
     "task.native-capacity": frozenset({"task_id", "attempt_id", "reason"}),
 }
 
@@ -462,6 +487,8 @@ def canonical_bytes(obj: Any) -> bytes:
             field = None
             if obj.get("event_type") == "task.native-capacity" and payload.get("reason") == "start-failed":
                 field = "worktree_retained"
+            elif obj.get("event_type") == "task.native-released" and payload.get("operator_assertion") is True:
+                field = "operator_assertion"
             elif (
                 obj.get("event_type") == "task.observed"
                 and payload.get("status") in ("completed", "failed")
@@ -649,6 +676,22 @@ def _validate_native_t3_payload(event_type: str, payload: Mapping[str, Any]) -> 
             if not run_task_journal.digest(payload.get(field)):
                 raise CanonicalizationError(f"task.native-cancel-requested {field} is invalid")
         return
+    if event_type == "task.native-released":
+        attempt = payload.get("dispatch_attempt")
+        if type(attempt) is not int or attempt < 1:
+            raise CanonicalizationError("task.native-released dispatch attempt is invalid")
+        if not run_task_journal.provider_reference(payload.get("parent_thread")):
+            raise CanonicalizationError("task.native-released parent thread is invalid")
+        if payload.get("operator_assertion") is not True:
+            raise CanonicalizationError("task.native-released operator assertion is invalid")
+        if not is_valid_recorded_at(payload.get("released_at")):
+            raise CanonicalizationError("task.native-released time is invalid")
+        if not run_task_journal.digest(payload.get("evidence_sha256")):
+            raise CanonicalizationError("task.native-released evidence digest is invalid")
+        size = payload.get("evidence_bytes")
+        if type(size) is not int or size < 0:
+            raise CanonicalizationError("task.native-released evidence size is invalid")
+        return
     if event_type == "task.native-capacity":
         from .native_child_observations import RESOURCE_STATES
 
@@ -695,6 +738,10 @@ def _validate_payload(event_type: str, payload: Any) -> None:
         if event_type == "task.native-capacity" and key == "worktree_retained":
             if payload.get("reason") != "start-failed" or type(value) is not bool:
                 raise CanonicalizationError("task.native-capacity worktree_retained requires a start-failed boolean")
+            continue
+        if event_type == "task.native-released" and key == "operator_assertion":
+            if value is not True:
+                raise CanonicalizationError("task.native-released operator assertion requires true")
             continue
         if value is None:
             continue

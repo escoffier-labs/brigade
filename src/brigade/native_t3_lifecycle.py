@@ -101,6 +101,7 @@ def observe(*, workspace: Path, run_id: str, task_id: str, parent_thread: str, p
     with enrollment.owned_run(workspace, run_dir):
         dispatch._run_meta(workspace, run_dir)
         events, verified, binding = dispatch._durable_claim(workspace, run_dir, task_id, parent_thread)
+        dispatch._hold_late_reply(workspace, run_dir, events, task_id, binding.attempt_id)
         held = dispatch._held(events, task_id)
         if held is not None:
             raise dispatch._refuse("task-held", f"the task is held ({held})")

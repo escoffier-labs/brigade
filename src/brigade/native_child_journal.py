@@ -27,6 +27,7 @@ from .native_child_host import NativeChildError, NativeChildHost
 CLAIM_EVENT = "task.native-claimed"
 HELD_EVENT = "task.native-held"
 HOLD_RESOLVED_EVENT = "task.native-hold-resolved"
+RELEASED_EVENT = "task.native-released"
 ABANDONED = "abandoned-unknown"
 ACCEPT_CONFLICT = "accept-conflict"
 HELD_RUN_STATUS = "held"
@@ -199,6 +200,20 @@ def claim_binding(events: Sequence[run_journal.RunEvent], task_id: str) -> Claim
         )
     except (KeyError, ValueError):
         raise refuse("journal-refused", "the claim binding is not usable") from None
+
+
+def released(events: Sequence[run_journal.RunEvent], task_id: str) -> Mapping[str, Any] | None:
+    """Return the durable operator release fact for a task, if one exists."""
+    payload = latest(events, RELEASED_EVENT, task_id)
+    if payload is None:
+        return None
+    if (
+        not journal.digest(payload.get("attempt_id"))
+        or payload.get("operator_assertion") is not True
+        or not journal.digest(payload.get("evidence_sha256"))
+    ):
+        raise refuse("journal-refused", "the release record is not usable")
+    return payload
 
 
 def held(events: Sequence[run_journal.RunEvent], task_id: str) -> str | None:
