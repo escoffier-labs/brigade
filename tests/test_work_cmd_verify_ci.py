@@ -199,6 +199,40 @@ def test_ci_refuses_dirty_tree_without_query_or_record(checkout, capsys):
     assert not _record(target, head).exists()
 
 
+@pytest.mark.parametrize("dirty_location", [None, "inside", "outside"])
+def test_ci_checks_entire_repository_when_target_is_subdirectory(checkout, monkeypatch, capsys, dirty_location):
+    repository, _, _ = checkout
+    target = repository / "component"
+    target.mkdir()
+    (target / "inside.txt").write_text("clean\n", encoding="utf-8")
+    (repository / "outside.txt").write_text("clean\n", encoding="utf-8")
+    _git(repository, "add", ".")
+    _git(
+        repository,
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "-m",
+        "add component",
+    )
+    head = _git(repository, "rev-parse", "HEAD")
+    _fake_gh(monkeypatch, head, _check(head))
+    if dirty_location == "inside":
+        (target / "inside.txt").write_text("dirty\n", encoding="utf-8")
+    elif dirty_location == "outside":
+        (repository / "outside.txt").write_text("dirty\n", encoding="utf-8")
+
+    expected = 0 if dirty_location is None else 2
+    assert _ci(target) == expected
+    captured = capsys.readouterr()
+    if dirty_location == "outside":
+        assert "outside --target" in captured.err
+    elif dirty_location == "inside":
+        assert "working tree differs from HEAD" in captured.err
+
+
 @pytest.mark.parametrize(
     "remote",
     [

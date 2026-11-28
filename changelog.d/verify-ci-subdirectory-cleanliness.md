@@ -1,0 +1,1 @@
+- Reject a clean verify CI target subdirectory when the repository has changes outside that target.
