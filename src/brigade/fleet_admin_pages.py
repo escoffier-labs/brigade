@@ -508,7 +508,9 @@ def _overview_live_work(view: deck.DeckView, station: deck.StationView) -> str:
     )
 
 
-def _overview_machine_load(view: deck.DeckView, machine: deck.MachineState | None, status: str) -> str:
+def _overview_machine_load(
+    view: deck.DeckView, station: deck.StationView, machine: deck.MachineState | None, status: str
+) -> str:
     if machine is None:
         return "Load unknown"
     try:
@@ -528,7 +530,7 @@ def _overview_machine_load(view: deck.DeckView, machine: deck.MachineState | Non
         signals.append("node reports busy")
     if status in {"offline", "stale"}:
         return "Load unknown"
-    if signals and (status in {"working", "limited"} or node_busy):
+    if signals and (node_busy or station.busy or station.sessions):
         return "Busy because: " + ", ".join(signals)
     return ", ".join(f"{label} {value:.0%}" for label, value in inputs if label in {"CPU", "memory"}) or "Load unknown"
 
@@ -567,7 +569,7 @@ def render_overview_machines(view: deck.DeckView, now: datetime) -> str:
             + "</small></div>"
             + _overview_live_work(view, station)
             + '<div class="overview-machine-load"><b>'
-            + _esc(_overview_machine_load(view, machine, status))
+            + _esc(_overview_machine_load(view, station, machine, status))
             + '</b></div><div class="overview-machine-age"><span>Telemetry</span><b>'
             + _esc(age)
             + "</b>"

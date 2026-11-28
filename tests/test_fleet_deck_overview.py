@@ -1654,6 +1654,14 @@ def test_machine_row_leads_with_live_work_and_harness_split():
     assert "No live work" in html
 
 
+def test_machine_row_notes_that_linked_and_cloud_counts_can_overlap():
+    from brigade import fleet_admin_pages as pages
+
+    view = _sessions_view([_live_session(NODE_A, "s1")])
+    view = replace(view, session_breakdown={NODE_A: (("claude", 1, 1, 1),)})
+    assert "(1 T3-linked, 1 cloud) (may overlap)" in pages.render_overview_machines(view, NOW)
+
+
 def test_machine_row_keeps_managed_work_visible_when_no_agents_run():
     from brigade import fleet_admin_pages as pages
 
@@ -1674,14 +1682,15 @@ def test_machine_row_orders_busy_inputs_by_load():
     assert "CPU 3%, memory 26%" in html
 
 
-def test_idle_machine_with_high_cpu_shows_calm_readings():
+@pytest.mark.parametrize(("reason", "label"), [("idle-capacity", "idle"), ("machine-disabled", "disabled")])
+def test_machine_without_work_at_high_cpu_shows_calm_readings(reason, label):
     from brigade import fleet_admin_pages as pages
 
     view = _sessions_view([])
-    plane = _plane([_machine("alpha", NODE_A, load="0.96")])
+    plane = _plane([_machine("alpha", NODE_A, state="available", unused_reason=reason, load="0.96")])
     view = replace(view, control_plane=plane, machine_pressure={NODE_A: (0.20, 0)})
     html = pages.render_overview_machines(view, NOW)
-    assert ">idle<" in html and "No live work" in html
+    assert f">{label}<" in html and "No live work" in html
     assert "CPU 96%, memory 20%" in html
     assert "Busy because:" not in html
 
