@@ -1,0 +1,2 @@
+- Keep recovery gates inside `.brigade` for ordinary checkouts named `.run-locks`, while preserving external gates for reserved worktree leases.
+- Ignore status-section alarms delivered after the section finishes so daily status retains its result and restores the previous alarm handler and timer.

@@ -555,13 +555,19 @@ def _bounded_status_call(
     previous_handler = signal.getsignal(signal.SIGALRM)
     previous_timer = signal.getitimer(signal.ITIMER_REAL)
 
+    armed = True
+
     def _raise_timeout(_signum, _frame):
-        raise _DailyStatusSectionTimeout(label)
+        if armed:
+            raise _DailyStatusSectionTimeout(label)
 
     signal.signal(signal.SIGALRM, _raise_timeout)
     signal.setitimer(signal.ITIMER_REAL, timeout)
     try:
-        result = func()
+        try:
+            result = func()
+        finally:
+            armed = False
         elapsed = int((time.monotonic() - start) * 1000)
         return result, _status_section_check(label, "ok", "completed", elapsed, prefix=check_prefix)
     except _DailyStatusSectionTimeout:
