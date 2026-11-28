@@ -1,0 +1,1 @@
+- Clarify that claim expiry webhooks exclude leases that lapsed before the subscription was created.
