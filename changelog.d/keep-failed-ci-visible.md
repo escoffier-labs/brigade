@@ -1,0 +1,1 @@
+- Keep a recorded CI failure visible at closeout when local changes exist, while noting that those changes are not covered.
