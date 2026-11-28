@@ -1,0 +1,1 @@
+- Resume interrupted memory Hub cold rebuilds from each scope's saved backfill position while starting newly readable scopes from the beginning.
