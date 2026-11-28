@@ -101,8 +101,8 @@ class Holds:
         self.path = path
         self.rows: dict[str, Any] = {}
         if path is not None:
-            with held_file_lock(path.with_suffix(".lock"), deadline_seconds=2):
-                self.rows = self._read()
+            # Writers atomically replace the snapshot; readers need no writable lock file.
+            self.rows = self._read()
 
     def _read(self) -> dict[str, Any]:
         assert self.path is not None
@@ -120,9 +120,8 @@ class Holds:
     def __contains__(self, work_id: object) -> bool:
         if self.path is None:
             return work_id in self.rows
-        with held_file_lock(self.path.with_suffix(".lock"), deadline_seconds=2):
-            self.rows = self._read()
-            return work_id in self.rows
+        self.rows = self._read()
+        return work_id in self.rows
 
     def add(self, work_id: str, reason: str, at: datetime) -> None:
         row = {"reason": reason, "at": at.isoformat()}
