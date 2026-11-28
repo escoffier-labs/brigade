@@ -1,0 +1,1 @@
+- Add focused coverage that memory index merges remove deleted and superseded postings while preserving live cards.
