@@ -1,0 +1,1 @@
+- Keep lesson review hooks quiet and leave earlier observations inert while automatic admission is unavailable.

@@ -215,6 +215,16 @@ def run(target: Path, *, now: float | None = None) -> dict[str, Any]:
     cfg = activity.config(target)
     if not cfg["enabled"]:
         return {"status": "disabled"}
+    if not admission.AUTOMATIC_LESSON_ADMISSION:
+        # Drop prepared work from an earlier enabled period once. Observations
+        # remain inert and can be reviewed if admission returns.
+        with held_file_lock(activity.root(target) / "state.lock", deadline_seconds=1):
+            state = activity.load(target)
+            if "pending" in state or "attempt" in state:
+                state.pop("pending", None)
+                state.pop("attempt", None)
+                activity.save(target, state)
+        return {"status": admission.ANCHOR_STATUS}
     try:
         if receipt_signing.load_workspace_key(target) is None:
             activity.discard_prompts(target)
