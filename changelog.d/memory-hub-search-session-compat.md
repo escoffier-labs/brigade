@@ -1,0 +1,1 @@
+- Retry memory Hub searches without session fields when an older Hub rejects those fields.

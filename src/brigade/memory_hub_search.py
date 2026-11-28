@@ -38,6 +38,7 @@ RRF_K = 60
 WIDE = 200
 HUB_LIMIT_MAX = 20  # the hub's `search` limit
 _SOURCE_ORDER = {"hub": 0, "local": 1, "replica": 2}
+_HUBS_WITHOUT_SEARCH_SESSIONS: set[str] = set()
 
 
 def enabled(target: Path) -> bool:
@@ -224,20 +225,33 @@ def _hub_search(
     deadline: float,
 ) -> dict[str, Any]:
     """One `search` call inside the whole search's deadline."""
-    remaining = deadline - _monotonic()
-    if remaining <= 0:
-        raise hubc.HubUnavailable("timeout")
     from .memory_retrieval_eval.live import interactive_session
 
-    return client.call(
-        "search",
-        timeout=remaining,
+    fields: dict[str, Any] = dict(
         query=query,
         limit=limit,
         query_source=query_source,
         scopes=list(scopes),
-        **interactive_session(),
     )
+    if client.identity not in _HUBS_WITHOUT_SEARCH_SESSIONS:
+        fields.update(interactive_session())
+
+    def call() -> dict[str, Any]:
+        remaining = deadline - _monotonic()
+        if remaining <= 0:
+            raise hubc.HubUnavailable("timeout")
+        return client.call("search", timeout=remaining, **fields)
+
+    try:
+        return call()
+    except hubc.HubRefusal as exc:
+        session_fields = fields.keys() & {"session_id", "session_kind"}
+        if exc.code != "memory_query_invalid" or not session_fields:
+            raise
+        _HUBS_WITHOUT_SEARCH_SESSIONS.add(client.identity)
+        for name in session_fields:
+            fields.pop(name)
+        return call()
 
 
 def _missing_grant(exc: hubc.HubRefusal) -> bool:
