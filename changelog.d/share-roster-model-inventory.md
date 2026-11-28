@@ -1,3 +1,4 @@
 - Reuse model inventory listings across roster readiness seats only when their commands and effective environments match.
 - Let model listings for different environments and commands progress independently, with a fresh timeout budget after acquiring their cache lock.
 - Deduplicate concurrent model resolution for a shared listing, refresh inventory after seat invalidation, and retry unsuccessful listings on the next roster pass.
+- Redact seat environment reference values from failed model inventory diagnostics before caching them for roster doctor, preserving non-secret context.

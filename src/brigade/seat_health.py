@@ -625,7 +625,12 @@ class SeatHealthProbe:
                 )
             else:
                 inspected = self._inventory_inspector.inspect(
-                    seat.cli, requested, command, timeout_seconds=timeout_seconds, env=inventory_env
+                    seat.cli,
+                    requested,
+                    command,
+                    timeout_seconds=timeout_seconds,
+                    env=inventory_env,
+                    secret_targets=agents.secret_ref_targets(seat.env or {}),
                 )
             if inspected is not None:
                 if inspected.state == "exact":

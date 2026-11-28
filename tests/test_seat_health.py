@@ -756,3 +756,32 @@ def test_invalidate_during_listing_does_not_restore_old_cache(monkeypatch):
     result = probe.probe(seat, value, allow_model_smoke=False)
     assert not result.cached
     assert len(calls) == 2
+
+
+def test_model_listing_failure_detail_redacts_seat_ref_value(monkeypatch, tmp_path):
+    from tests._home import set_home
+
+    set_home(monkeypatch, tmp_path)
+    synthetic_value = "synthetic-seat-listing-secret"
+    monkeypatch.setenv("SYNTHETIC_SEAT_SECRET", synthetic_value)
+    seat = roster.Agent(
+        "primary",
+        "grok",
+        "plan",
+        model="grok-test",
+        env={"LISTING_TOKEN_REF": "SYNTHETIC_SEAT_SECRET", "MODEL_SOURCE": "synthetic-source"},
+    )
+    value = roster.Roster("primary", {"primary": seat})
+
+    def run(argv, **kwargs):
+        if argv[-1] == "models":
+            assert kwargs["env"]["LISTING_TOKEN"] == synthetic_value
+            return proc.Result(1, "", f"listing unavailable: {synthetic_value}; source=synthetic-source")
+        return proc.Result(0, "", "")
+
+    monkeypatch.setattr(proc, "run", run)
+    result = SeatHealthProbe(collect_executable_version=False).probe(seat, value, allow_model_smoke=False)
+    check = next(check for check in result.checks if check.name == "model-reachability")
+    assert check.status == "degraded"
+    assert "listing unavailable: [LISTING_TOKEN]; source=synthetic-source" in check.detail
+    assert synthetic_value not in check.detail
