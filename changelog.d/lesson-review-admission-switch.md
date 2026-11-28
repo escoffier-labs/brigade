@@ -1,0 +1,2 @@
+- Keep lesson review hooks quiet and leave earlier observations inert while automatic admission is unavailable.
+- Clear leftover lesson prompt text when admission is off and preserve coalesced, rejected, and retry outcomes for cleanup failures.
