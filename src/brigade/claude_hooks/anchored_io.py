@@ -297,6 +297,30 @@ class SessionDirectory:
                     raise
             raise
 
+    def replace_bytes_unsynced(self, name: str, data: bytes) -> None:
+        """Publish a small advisory file without following names or syncing it."""
+        name = dirfd.validate_component(name)
+        temporary = f".{name}.{uuid.uuid4().hex}.tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
+        created = False
+        try:
+            self.validate()
+            fd = dirfd.open_child_file(self.fd, temporary, flags, 0o600)
+            created = True
+            try:
+                self.validate_file(temporary, fd)
+                _write_all(fd, data)
+                self.validate()
+                dirfd.replace_children(self.fd, temporary, name)
+            finally:
+                os.close(fd)
+        except BaseException:
+            if created:
+                with contextlib.suppress(OSError):
+                    dirfd.unlink_child(self.fd, temporary)
+            raise
+
     @contextlib.contextmanager
     def held_lock(self, name: str, *, deadline_seconds: float) -> Iterator[None]:
         if self.lock is not None:

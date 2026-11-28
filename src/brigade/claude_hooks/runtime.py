@@ -31,7 +31,9 @@ from . import (
     envelope,
     fleet_inbox,
     heartbeat,
+    hook_steps,
     hub_recall,
+    latched_stop,
     manifest_loop,
     presence,
     producer_session,
@@ -1874,6 +1876,10 @@ def _normalize_state(
         normalized["hook_timeout_count"] = timeout_count
     normalized["hook_latched"] = payload.get("hook_latched") is True
     normalized["hook_latch_announced"] = payload.get("hook_latch_announced") is True
+    for key in ("latched_stop_blocked_at", "ended_unverified_after_latch"):
+        stamp = localio.parse_iso_datetime(payload.get(key))
+        if stamp is not None and stamp <= now:
+            normalized[key] = stamp.isoformat()
     session_repos = payload.get("session_repos")
     if isinstance(session_repos, list) and all(isinstance(item, str) for item in session_repos):
         normalized["session_repos"] = list(session_repos)
@@ -2452,6 +2458,7 @@ def _handle_event(
                 or stop_state.get("last_write_at")
                 or stop_state.get("started_at")
             )
+            hook_steps.mark(stop_target, session_id, event, "stop-receipt-gate")
             gate = StopGate(stop_target, deadline=policy_deadline)
             if notice := gate.notice():
                 policy_notes.append(notice)
@@ -2479,6 +2486,7 @@ def _handle_event(
                 blocking_failures.append(gate.block_guidance(replacement, receipt_threshold))
             elif not _handoff_since(stop_target, stop_state.get("started_at")):
                 handoff_target = stop_target
+            hook_steps.mark(stop_target, session_id, event, "stop-manifest-gate")
             manifest_failures += manifest_loop.stop_failures(
                 stop_target,
                 stop_state,
@@ -2736,6 +2744,7 @@ def _hook_run_body_unchecked(
     latched = False
     announce = False
     if log_target is not None:
+        hook_steps.mark(log_target, session_id, event, "state-read")
         latched, announce = _read_hook_latch(log_target, session_id)
     if on_prologue is not None:
         on_prologue(
@@ -2747,6 +2756,18 @@ def _hook_run_body_unchecked(
             }
         )
     if latched and log_target is not None:
+        if event == "SessionStart" and payload.get("source") in _TASK_BOUNDARY_SOURCES:
+            return latched_stop.handle_task_boundary(log_target, session_id, payload)
+        if event == "Stop":
+            hook_steps.mark(log_target, session_id, event, "stop-receipt-gate")
+            result = latched_stop.handle(log_target, session_id, payload)
+            return {
+                "kind": "ok",
+                "result": result,
+                "log_target": str(log_target),
+                "claim_path": None,
+                "session_id": session_id,
+            }
         if announce and _claim_timeout_announce(log_target, session_id):
             envelope.append_log(log_target, f"{event}: latched after repeated timeouts")
             return {
@@ -2776,6 +2797,8 @@ def _hook_run_body_unchecked(
             budget.attribution_incomplete = budget.unreadable = True
             result = _isolated_handle_payload(event, payload, pin=pin)
     else:
+        if log_target is not None:
+            hook_steps.mark(log_target, session_id, event, "classify")
         result = _isolated_handle_payload(event, payload, pin=pin)
     result, claim_path = _strip_claim(result)
     if log_target is not None:
@@ -3165,7 +3188,9 @@ def _append_error_diagnostic(event: str, log_target: Path | None, exc: BaseExcep
 
 def _bounded_timeout_followup(event: str, log_target: Path, session_id: str, exc: BaseException) -> str:
     """Compatibility wrapper: timeout follow-up lives in session_state."""
-    return _bounded_timeout_followup_impl(event, log_target, session_id, exc)
+    return _bounded_timeout_followup_impl(
+        event, log_target, session_id, exc, step=lambda: hook_steps.read(log_target, session_id, event)
+    )
 
 
 def _bounded_release_claim(path: Path | None) -> None:

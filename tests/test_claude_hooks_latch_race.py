@@ -15,14 +15,17 @@ import os
 import signal
 import threading
 import time
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-from brigade.claude_hooks import envelope, runtime
+from brigade import verify_manifest_git
+from brigade.claude_hooks import anchored_io, envelope, hook_steps, latch_doctor, latched_stop, runtime, session_state
 from brigade.work_cmd import inbox_lock
 from tests import thread_sync
+from tests.test_claude_hooks_state_containment import _directory_link
 from tests.test_claude_hooks_user_target import PACKAGE_REF, _payload, _wired_claude
 
 
@@ -48,6 +51,220 @@ def _persisted_timeout_count(target: Path, session_id: str) -> int:
         session_state._journal_timeout_count(target, session_id),
         session_state._pending_timeout_count(target, session_id),
     )
+
+
+def _latched_writer(target: Path, session_id: str = "latched-stop") -> dict:
+    now = runtime.localio.utc_now_iso()
+    state = {
+        "session_id": session_id,
+        "session_fingerprint": runtime._session_fingerprint(session_id),
+        "target": str(target),
+        "started_at": now,
+        "last_write_at": now,
+        "write_observed": True,
+        "hook_timeout_count": 2,
+        "hook_latched": True,
+        "hook_latch_announced": True,
+    }
+    runtime.write_session_state(target, session_id, state)
+    return _payload(target, "Stop", session_id=session_id)
+
+
+def test_latched_strict_stop_blocks_once_and_doctor_reports_unverified(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target)
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: False)
+
+    first = runtime._hook_run_body("Stop", payload, pin_target=target)
+    assert first["result"]["decision"] == "block"
+    assert "hooks switched off after two timeouts" in first["result"]["reason"]
+    second = runtime._hook_run_body("Stop", payload, pin_target=target)
+    assert second["result"] is None
+    assert "ended_unverified_after_latch" in runtime.read_session_state(target, "latched-stop")
+    assert "1 ended unverified after latch" in latch_doctor.check(target)[2]
+
+
+def test_latched_stop_with_covering_receipt_passes(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target)
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: True)
+
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"] is None
+    assert "ended_unverified_after_latch" not in runtime.read_session_state(target, "latched-stop")
+
+
+@pytest.mark.parametrize("failure", ["raises", "times_out"])
+def test_latched_receipt_lookup_failure_blocks_only_once(tmp_path: Path, monkeypatch, failure: str) -> None:
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target)
+    if failure == "raises":
+
+        def lookup(*_args, **_kwargs):
+            raise OSError("unreadable")
+
+        monkeypatch.setattr(runtime, "_receipt_since", lookup)
+    else:
+        from brigade.work_cmd import verify_gate
+
+        monkeypatch.setattr(verify_gate.StopGate, "timed_out", property(lambda _self: True))
+
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"]["decision"] == "block"
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"] is None
+
+
+def test_latched_stop_without_write_or_strict_mode_is_silent(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target)
+    state = runtime.read_session_state(target, "latched-stop")
+    state["write_observed"] = False
+    runtime.write_session_state(target, "latched-stop", state)
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"] is None
+
+    state["write_observed"] = True
+    runtime.write_session_state(target, "latched-stop", state)
+    monkeypatch.setattr(runtime.work_mode, "is_strict", lambda _target: False)
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"] is None
+
+
+def test_latched_stop_active_stop_records_unverified_end(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target, "active-stop")
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: False)
+
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"]["decision"] == "block"
+    active = _payload(target, "Stop", session_id="active-stop", stop_hook_active=True)
+    assert runtime._hook_run_body("Stop", active, pin_target=target)["result"] is None
+    state = runtime.read_session_state(target, "active-stop")
+    assert "ended_unverified_after_latch" in state
+    assert "1 ended unverified after latch" in latch_doctor.check(target)[2]
+
+
+@pytest.mark.parametrize("covered", [False, True])
+def test_latched_stop_active_stop_records_only_without_receipt(tmp_path: Path, monkeypatch, covered: bool) -> None:
+    target = _wired_claude(tmp_path)
+    _latched_writer(target, "active-stop")
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: covered)
+
+    active = _payload(target, "Stop", session_id="active-stop", stop_hook_active=True)
+    assert runtime._hook_run_body("Stop", active, pin_target=target)["result"] is None
+    state = runtime.read_session_state(target, "active-stop")
+    assert "latched_stop_blocked_at" not in state
+    assert ("ended_unverified_after_latch" in state) is (not covered)
+
+
+def test_latched_stop_records_unverified_after_journal_only_claim(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target, "journal-only-stop")
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: False)
+    original_save = latched_stop._save
+    monkeypatch.setattr(latched_stop, "_save", lambda *_args, **_kwargs: False)
+
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"]["decision"] == "block"
+    assert "latched_stop_blocked_at" not in runtime.read_session_state(target, "journal-only-stop")
+
+    monkeypatch.setattr(latched_stop, "_save", original_save)
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"] is None
+    assert "ended_unverified_after_latch" in runtime.read_session_state(target, "journal-only-stop")
+
+
+def test_latched_stop_counts_pending_write_as_write(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target, "pending-write-stop")
+    now = runtime.localio.utc_now()
+    pending = now - timedelta(seconds=50)
+    receipt = now - timedelta(seconds=75)
+    state = runtime.read_session_state(target, "pending-write-stop")
+    state.pop("last_write_at", None)
+    state["started_at"] = (now - timedelta(seconds=100)).isoformat()
+    state["write_observed"] = False
+    state["pending_write_at"] = pending.isoformat()
+    runtime.write_session_state(target, "pending-write-stop", state)
+
+    thresholds: list[datetime | None] = []
+
+    def receipt_since(_target, started_at, **_kwargs):
+        stamp = runtime.localio.parse_iso_datetime(started_at)
+        thresholds.append(stamp)
+        # A receipt older than the pending write must not cover this session.
+        return stamp is not None and stamp <= receipt
+
+    monkeypatch.setattr(runtime, "_receipt_since", receipt_since)
+    monkeypatch.setattr(runtime, "_shared_tree_block_is_foreign", lambda *_args, **_kwargs: False)
+
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"]["decision"] == "block"
+    assert thresholds and thresholds[0] >= pending
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"] is None
+
+
+def test_latched_task_boundary_keeps_timeout_history(tmp_path: Path) -> None:
+    target = _wired_claude(tmp_path)
+    session_id = "clear-latched"
+    runtime._record_hook_timeout(target, session_id, event="Stop", step="stop-receipt-gate")
+    state = runtime.read_session_state(target, session_id)
+    state["hook_timeout_count"] = 2
+    state["hook_latched"] = True
+    runtime.write_session_state(target, session_id, state)
+
+    start = _payload(target, "SessionStart", session_id=session_id, source="clear")
+    assert runtime._hook_run_body("SessionStart", start, pin_target=target)["kind"] == "latched_silent"
+    after = runtime.read_session_state(target, session_id)
+    assert after["hook_timeout_history"][-1]["step"] == "stop-receipt-gate"
+    assert "last timeout Stop/stop-receipt-gate" in latch_doctor.check(target)[2]
+
+
+def test_latched_claim_integrity_refusal_propagates(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target, "integrity-stop")
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: False)
+
+    def refused(*_args, **_kwargs):
+        raise anchored_io.SessionIntegrityError("refused")
+
+    monkeypatch.setattr(session_state, "claim_latched_stop", refused)
+    body = runtime._hook_run_body("Stop", payload, pin_target=target)
+    assert body["result"] == anchored_io.integrity_envelope("Stop")
+
+
+def test_latched_claim_oserror_still_fails_open(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target, "oserror-stop")
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: False)
+
+    def unreadable(*_args, **_kwargs):
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(session_state, "claim_latched_stop", unreadable)
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"] is None
+
+
+def test_latched_claim_near_journal_cap_fails_open(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target, "capped-stop")
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: False)
+    journal = session_state._journal_path(target, "capped-stop")
+    journal.write_bytes(b"x" * (session_state._TIMEOUT_JOURNAL_MAX_BYTES - 8))
+    before = journal.stat().st_size
+
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"] is None
+    assert journal.stat().st_size == before
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"] is None
+    assert journal.stat().st_size == before
+
+
+def test_timeout_step_marker_is_closed_and_missing_is_unknown(tmp_path: Path) -> None:
+    target = _wired_claude(tmp_path)
+    hook_steps.mark(target, "step-session", "Stop", "stop-receipt-gate")
+    assert hook_steps.read(target, "step-session", "Stop") == "stop-receipt-gate"
+    assert hook_steps.read(target, "missing", "Stop") == "unknown"
+    hook_steps.mark(target, "step-session", "Stop", "secret command text")
+    assert hook_steps.read(target, "step-session", "Stop") == "unknown"
+
+    runtime._record_hook_timeout(target, "recorded-step", event="Stop", step="stop-receipt-gate")
+    recorded = runtime.read_session_state(target, "recorded-step")
+    assert recorded["hook_timeout_history"][-1]["event"] == "Stop"
+    assert recorded["hook_timeout_history"][-1]["step"] == "stop-receipt-gate"
+    journal = runtime._state_path(target, "recorded-step").with_suffix(".json.timeouts").read_text()
+    assert " Stop stop-receipt-gate" in journal
 
 
 def test_session_state_helpers_resolve_runtime_primitives_at_call_time(tmp_path: Path, monkeypatch) -> None:
@@ -1146,3 +1363,302 @@ def test_concurrent_hook_run_bodies_one_latched_one_silent(tmp_path: Path) -> No
         thread.join()
 
     _assert_one_latched_one_silent(kinds, target, "s")
+
+
+def test_overlapping_latched_stops_claim_one_block(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target, "overlap-stop")
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(runtime, "_shared_tree_block_is_foreign", lambda *_args, **_kwargs: False)
+    barrier = threading.Barrier(2)
+    original = session_state.claim_latched_stop
+
+    def claim(*args, **kwargs):
+        barrier.wait(timeout=2)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(session_state, "claim_latched_stop", claim)
+    results: list[dict | None] = []
+    threads = [
+        threading.Thread(
+            target=lambda: results.append(runtime._hook_run_body("Stop", payload, pin_target=target)["result"])
+        )
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sum(result is not None and result.get("decision") == "block" for result in results) == 1
+
+
+def test_step_marker_malformed_and_oversized_are_unknown(tmp_path: Path) -> None:
+    target = _wired_claude(tmp_path)
+    hook_steps.mark(target, "bad-step", "Stop", "state-read")
+    marker = runtime._state_path(target, "bad-step").with_suffix(".json.step")
+    marker.write_bytes(b"{" + b"x" * 256)
+    assert hook_steps.read(target, "bad-step", "Stop") == "unknown"
+    marker.write_bytes(b"not json")
+    assert hook_steps.read(target, "bad-step", "Stop") == "unknown"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory mode")
+def test_step_marker_creates_private_sessions_directory(tmp_path: Path) -> None:
+    target = tmp_path / "repo"
+    target.mkdir()
+    hook_steps.mark(target, "fresh-step", "Stop", "state-read")
+    mode = runtime._sessions_root(target).stat().st_mode & 0o777
+    assert mode == 0o700
+
+
+@pytest.mark.parametrize("record", ["commands", "legacy"])
+def test_latched_stop_blocks_on_a_pending_bash_write(tmp_path: Path, monkeypatch, record: str) -> None:
+    """A pending Bash start is a write, and a receipt older than it does not cover it."""
+    target = _wired_claude(tmp_path)
+    now = datetime.now(UTC)
+    started = (now - timedelta(minutes=10)).isoformat()
+    pending = now - timedelta(minutes=1)
+    receipt_at = now - timedelta(minutes=5)
+    session_id = f"pending-write-{record}"
+    state = {
+        "session_id": session_id,
+        "session_fingerprint": runtime._session_fingerprint(session_id),
+        "target": str(target),
+        "started_at": started,
+        "last_write_at": started,
+        "write_observed": False,
+        "hook_timeout_count": 2,
+        "hook_latched": True,
+        "hook_latch_announced": True,
+    }
+    if record == "commands":
+        state["pending_bash_commands"] = {"tool-1": ["baseline", pending.isoformat()]}
+    else:
+        state["pending_bash_fingerprint"] = "baseline"
+        state["pending_bash_started_at"] = pending.isoformat()
+    runtime.write_session_state(target, session_id, state)
+    boundaries: list[object] = []
+
+    def receipt_since(_target, boundary, **_kwargs):
+        parsed = runtime.localio.parse_iso_datetime(boundary)
+        boundaries.append(parsed)
+        return parsed <= receipt_at
+
+    monkeypatch.setattr(runtime, "_receipt_since", receipt_since)
+    payload = _payload(target, "Stop", session_id=session_id)
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"]["decision"] == "block"
+    assert boundaries[0] == pending
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"] is None
+
+
+@pytest.mark.parametrize("failure", ["refused", "lock_timeout"])
+def test_latched_stop_blocks_once_when_the_state_write_fails(tmp_path: Path, monkeypatch, failure: str) -> None:
+    """The journal claim alone still lets the first Stop block, and only the first."""
+    target = _wired_claude(tmp_path)
+    session_id = f"write-{failure}"
+    payload = _latched_writer(target, session_id)
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: False)
+    if failure == "refused":
+        monkeypatch.setattr(runtime, "_write_session_state_preserving_latch", lambda *_args, **_kwargs: False)
+    else:
+
+        @contextlib.contextmanager
+        def held(*_args, **_kwargs):
+            raise inbox_lock.InboxLockTimeout("held")
+            yield
+
+        monkeypatch.setattr(runtime, "_session_state_lock", held)
+
+    results = [runtime._hook_run_body("Stop", payload, pin_target=target)["result"] for _ in range(2)]
+    assert [(result or {}).get("decision") == "block" for result in results] == [True, False]
+    assert "latched_stop_blocked_at" not in runtime.read_session_state(target, session_id)
+
+
+def test_latched_stop_without_a_journal_claim_does_not_block(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target, "claim-failed")
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: False)
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("journal unavailable")
+
+    monkeypatch.setattr(session_state, "claim_latched_stop", refuse)
+    for _ in range(2):
+        assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"] is None
+
+
+def test_second_latched_stop_after_a_covering_receipt_is_not_unverified(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target, "late-receipt")
+    covered = [False]
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: covered[0])
+
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"]["decision"] == "block"
+    covered[0] = True
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"] is None
+    assert "ended_unverified_after_latch" not in runtime.read_session_state(target, "late-receipt")
+    assert "0 ended unverified after latch" in latch_doctor.check(target)[2]
+
+
+def test_latched_stop_receipt_deadline_counts_as_no_receipt(tmp_path: Path, monkeypatch) -> None:
+    """One expired deadline is the blocking result, without a receipt lookup."""
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target, "expired-look")
+    looks: list[bool] = []
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: looks.append(True) or True)
+    ticks = iter([0.0])
+    monkeypatch.setattr(latched_stop, "time", SimpleNamespace(monotonic=lambda: next(ticks, 1e12)))
+
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"]["decision"] == "block"
+    assert looks == []
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"] is None
+
+
+def test_latched_stop_with_no_receipts_starts_no_git(tmp_path: Path, monkeypatch) -> None:
+    """An empty receipt set is decided before any policy or tree work reaches git."""
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target, "no-receipts")
+    assert list(runtime._iter_verify_receipts(target)) == []
+    calls: list[tuple[str, ...]] = []
+    real = verify_manifest_git._git
+
+    def spy(git_target, *args, **kwargs):
+        calls.append(args)
+        return real(git_target, *args, **kwargs)
+
+    monkeypatch.setattr(verify_manifest_git, "_git", spy)
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"]["decision"] == "block"
+    assert calls == []
+
+
+def test_latched_stop_waives_a_foreign_shared_tree_drift(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    payload = _latched_writer(target, "shared-tree")
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(runtime, "_shared_tree_block_is_foreign", lambda *_args, **_kwargs: True)
+
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"] is None
+    assert "latched_stop_blocked_at" not in runtime.read_session_state(target, "shared-tree")
+    monkeypatch.setattr(runtime, "_shared_tree_block_is_foreign", lambda *_args, **_kwargs: False)
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"]["decision"] == "block"
+
+
+def test_task_boundary_keeps_the_latch_and_rearms_one_block(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    session_id = "task-boundary"
+    _latched_writer(target, session_id)
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: False)
+    stop = _payload(target, "Stop", session_id=session_id)
+
+    start = runtime._hook_run_body(
+        "SessionStart", _payload(target, "SessionStart", session_id=session_id, source="clear"), pin_target=target
+    )
+    assert start["kind"] == "latched_silent"
+    assert start["result"] == envelope.empty_envelope("SessionStart")
+    state = runtime.read_session_state(target, session_id)
+    assert state["hook_latched"] is True
+    assert state["task_epoch"]
+    assert runtime._hook_run_body("Stop", stop, pin_target=target)["result"] is None
+
+    now = runtime.localio.utc_now_iso()
+    state.update(write_observed=True, last_write_at=now, last_verification_write_at=now)
+    runtime.write_session_state(target, session_id, state)
+    assert runtime._hook_run_body("Stop", stop, pin_target=target)["result"]["decision"] == "block"
+    assert runtime._hook_run_body("Stop", stop, pin_target=target)["result"] is None
+
+
+def test_linked_sessions_dir_refuses_step_marker_without_changing_the_result(tmp_path: Path, monkeypatch) -> None:
+    target = _wired_claude(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sessions = runtime._sessions_root(target)
+    sessions.parent.mkdir(parents=True, exist_ok=True)
+    _directory_link(sessions, outside)
+
+    body = runtime._hook_run_body("PreToolUse", _payload(target, "PreToolUse"), pin_target=target)
+    assert list(outside.iterdir()) == []
+    assert body["result"] == anchored_io.integrity_envelope("PreToolUse")
+
+    control = _wired_claude(tmp_path / "control")
+    control_outside = tmp_path / "control-outside"
+    control_outside.mkdir()
+    control_sessions = runtime._sessions_root(control)
+    control_sessions.parent.mkdir(parents=True, exist_ok=True)
+    _directory_link(control_sessions, control_outside)
+    monkeypatch.setattr(hook_steps, "mark", lambda *_args, **_kwargs: None)
+    control_body = runtime._hook_run_body("PreToolUse", _payload(control, "PreToolUse"), pin_target=control)
+    assert control_body["result"] == body["result"]
+    assert list(control_outside.iterdir()) == []
+
+
+def test_timeout_followup_records_the_marker_step(tmp_path: Path) -> None:
+    target = _wired_claude(tmp_path)
+    hook_steps.mark(target, "s", "PreToolUse", "stop-receipt-gate")
+    runtime._bounded_timeout_followup("PreToolUse", target, "s", runtime.HookDegraded("hook operation timed out"))
+    _wait_for_timeout_followups()
+    history = runtime.read_session_state(target, "s")["hook_timeout_history"]
+    assert (history[-1]["event"], history[-1]["step"]) == ("PreToolUse", "stop-receipt-gate")
+
+
+def test_timeout_followup_records_unknown_for_an_unreadable_marker(tmp_path: Path) -> None:
+    target = _wired_claude(tmp_path)
+    marker = runtime._state_path(target, "s").with_suffix(".json.step")
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.mkdir()
+    runtime._bounded_timeout_followup("Stop", target, "s", runtime.HookDegraded("hook operation timed out"))
+    _wait_for_timeout_followups()
+    history = runtime.read_session_state(target, "s")["hook_timeout_history"]
+    assert (history[-1]["event"], history[-1]["step"]) == ("Stop", "unknown")
+
+
+def test_latch_doctor_reports_the_step_of_the_session_that_latched(tmp_path: Path) -> None:
+    target = _wired_claude(tmp_path)
+    now = runtime.localio.utc_now_iso()
+    base = {
+        "target": str(target),
+        "started_at": now,
+        "last_write_at": now,
+        "hook_latch_announced": True,
+    }
+    runtime.write_session_state(
+        target,
+        "latched-step",
+        {
+            **base,
+            "session_id": "latched-step",
+            "hook_timeout_count": 2,
+            "hook_latched": True,
+            "hook_timeout_history": [{"event": "Stop", "step": "stop-receipt-gate", "at": now}],
+        },
+    )
+    runtime.write_session_state(
+        target,
+        "recent-step",
+        {
+            **base,
+            "session_id": "recent-step",
+            "hook_latched": False,
+            "hook_timeout_history": [{"event": "PreToolUse", "step": "classify", "at": now}],
+        },
+    )
+    latched_state = runtime._state_path(target, "latched-step")
+    older = time.time() - 100
+    os.utime(latched_state, (older, older))
+
+    assert "last timeout Stop/stop-receipt-gate" in latch_doctor.check(target)[2]
+
+
+@pytest.mark.parametrize("mode", ["observe", "off"])
+def test_latched_stop_is_silent_outside_strict_mode(tmp_path: Path, monkeypatch, mode: str) -> None:
+    target = _wired_claude(tmp_path)
+    session_id = f"nonstrict-{mode}"
+    payload = _latched_writer(target, session_id)
+    config = target / ".brigade" / "config.json"
+    data = json.loads(config.read_text(encoding="utf-8"))
+    data.setdefault("work", {})["mode"] = mode
+    config.write_text(json.dumps(data), encoding="utf-8")
+    monkeypatch.setattr(runtime, "_receipt_since", lambda *_args, **_kwargs: False)
+
+    assert runtime.work_mode.is_strict(target) is False
+    assert runtime._hook_run_body("Stop", payload, pin_target=target)["result"] is None
+    assert "latched_stop_blocked_at" not in runtime.read_session_state(target, session_id)
