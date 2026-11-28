@@ -419,9 +419,23 @@ and its existing journal. The fact carries the operator assertion, the release
 time, the parent thread, the evidence sha256 and byte size, the task and the
 attempt. Capacity counting skips that exact claim and no other. A second release
 of the same attempt refuses `already-released`. If a native reply or
-`t3 accepted` for the released attempt arrives later, it never creates a
-correlation or a second child. It records an `accept-conflict` hold on the task
-instead, and the claim stays released.
+`t3 accepted` for the released attempt arrives later, it never creates a second
+child, but it does prove that one exists. A valid late reply therefore does two
+things: it records an `accept-conflict` hold on the task, and it appends a
+`task.native-release-reclaimed` fact for that reply so the slot occupies again.
+A malformed or mismatched reply validates first and records nothing.
+
+`t3 hold-resolve <run> <task> --native-json <that reply>` on a released attempt
+with an `accept-conflict` hold links the reply with the claim's retained request
+key under the normal correlation rules, appends an audited
+`task.native-release-voided` fact (the release it supersedes, the reply digest,
+the void time, the task and the attempt) and clears the hold. The release no
+longer stands: `t3 status` reports `released=false` and `voided=true`, and the
+task then follows the normal path through `observe`, `ack` and `finalize` as if
+it had never been released. A second void refuses `already-voided`, and a reply
+for another attempt or task refuses during validation; both write nothing.
+`hold-resolve --abandon` on a voided task behaves exactly as for any other held
+task.
 
 ## Reported correlation, not authenticated acceptance
 

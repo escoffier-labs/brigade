@@ -881,7 +881,9 @@ def accepted(*, workspace: Path, run_id: str, task_id: str, parent_thread: str, 
         events, verified, binding = _durable_claim(workspace, run_dir, task_id, parent_thread)
         result = parse_claimed_result(payload, verified=verified, binding=binding)
         _require_target(result, verified.retained.target)
-        _hold_late_reply(workspace, run_dir, events, task_id, binding.attempt_id)
+        _hold_late_reply(
+            workspace, run_dir, events, task_id, binding.attempt_id, _handle_digest(result, binding.parent_thread)
+        )
         held = _held(events, task_id)
         if held is not None:
             raise _refuse("task-held", f"the task is held ({held})")
@@ -921,6 +923,8 @@ def hold_resolve(
                 raise _refuse("task-held", f"the task is held ({held})")
             if verified.result.launch_claim is None:
                 raise _refuse("no-claim", "the task has no durable launch claim")
+        if not abandon and journal_core.voided(events, task_id) is not None:
+            raise _refuse("already-voided", "the release was already voided")
         _close_lost_request(workspace, run_dir, events, verified)
         base = {
             "schema": CORRELATION_SCHEMA,
@@ -937,7 +941,12 @@ def hold_resolve(
             raise _refuse("invalid-identity", "exactly one resolution mode is required")
         result = parse_claimed_result(payload, verified=verified, binding=binding)
         _require_target(result, verified.retained.target)
-        _hold_late_reply(workspace, run_dir, events, task_id, binding.attempt_id)
+        release = journal_core.released(events, task_id)
+        if release is not None:
+            return _void_release(workspace, run_dir, events, verified, result, binding, release, held, base)
+        _hold_late_reply(
+            workspace, run_dir, events, task_id, binding.attempt_id, _handle_digest(result, binding.parent_thread)
+        )
         if held == ACCEPT_CONFLICT:
             return _resolve_hold(workspace, run_dir, verified, result, binding, base)
         return _correlate(
@@ -998,6 +1007,91 @@ def _resolve_hold(
         "mode": "hold-resolved",
         "status": updated.status,
         "result_id": updated.result_id,
+        "replayed": False,
+    }
+
+
+def _void_release(
+    workspace: Path,
+    run_dir: Path,
+    events: Sequence[run_journal.RunEvent],
+    verified: _Verified,
+    result: NativeResult,
+    binding: ClaimBinding,
+    release: Mapping[str, Any],
+    held: str | None,
+    base: Mapping[str, Any],
+) -> dict[str, Any]:
+    """Void one release for the valid reply that proves its child exists.
+
+    The reply is linked with the claim's retained request key under the existing
+    correlation rules, then an audited void record supersedes the release and
+    the hold clears. A reply for another attempt or task never reaches here: it
+    refuses during validation, before any fact is written. A different handle
+    for the same attempt refuses ``release-mismatch`` and writes nothing.
+    """
+    if release.get("attempt_id") != binding.attempt_id:
+        raise _refuse("release-mismatch", "the release names a different attempt")
+    handle_digest = _handle_digest(result, binding.parent_thread)
+    prior = journal_core.reclaimed(events, result.task_id)
+    if prior is not None and prior.get("reply_digest") != handle_digest:
+        raise _refuse("release-mismatch", "the reply does not match the reclaimed release")
+    if held is not None and prior is None:
+        raise _refuse("journal-refused", "the held release has no reply record")
+    if prior is None:
+        _record_reclaim(workspace, run_dir, events, result.task_id, binding.attempt_id, release, handle_digest)
+    if held is None:
+        _record_held(
+            workspace,
+            run_dir,
+            result.task_id,
+            binding.attempt_id,
+            ACCEPT_CONFLICT,
+            str(release["evidence_sha256"]),
+        )
+    linked = _correlate(
+        workspace=workspace,
+        run_dir=run_dir,
+        verified=verified,
+        result=result,
+        binding=binding,
+        mode=OPERATOR_ASSERTED,
+    )
+    release_ref = journal_core.release_reference(release)
+    voided_at = run_events.format_recorded_at(datetime.now(timezone.utc))
+    _append(
+        workspace,
+        run_dir,
+        journal_core.VOIDED_EVENT,
+        {
+            "task_id": result.task_id,
+            "attempt_id": binding.attempt_id,
+            "reply_digest": handle_digest,
+            "release_ref": release_ref,
+            "voided_at": voided_at,
+        },
+        key=_key("release-voided", result.task_id, binding.attempt_id, release_ref),
+    )
+    _append(
+        workspace,
+        run_dir,
+        HOLD_RESOLVED_EVENT,
+        {
+            "task_id": result.task_id,
+            "attempt_id": binding.attempt_id,
+            "reason": ACCEPT_CONFLICT,
+            "evidence_digest": handle_digest,
+        },
+        key=_key("hold-resolved", result.task_id, binding.attempt_id, ACCEPT_CONFLICT, handle_digest),
+    )
+    return {
+        **base,
+        "mode": "hold-resolved",
+        "status": linked["status"],
+        "result_id": linked["result_id"],
+        "voided": True,
+        "voided_at": voided_at,
+        "release_ref": release_ref,
         "replayed": False,
     }
 
@@ -1164,16 +1258,64 @@ def _reply_recorded(events: Sequence[run_journal.RunEvent], task_id: str, attemp
     )
 
 
+def _record_reclaim(
+    workspace: Path,
+    run_dir: Path,
+    events: Sequence[run_journal.RunEvent],
+    task_id: str,
+    attempt_id: str,
+    release: Mapping[str, Any],
+    reply_digest: str,
+) -> Mapping[str, Any]:
+    """Put a released unit back once a valid late reply proves a child exists.
+
+    The record keeps the reply digest and an audit reference to the release it
+    supersedes. It is written before the hold, so a crash in between still
+    charges the unit instead of leaving the slot free.
+    """
+    if not journal.digest(reply_digest):
+        raise _refuse("journal-refused", "the reply digest is not usable")
+    existing = journal_core.reclaimed(events, task_id)
+    if existing is not None:
+        return existing
+    release_ref = journal_core.release_reference(release)
+    payload = {
+        "task_id": task_id,
+        "attempt_id": attempt_id,
+        "reply_digest": reply_digest,
+        "release_ref": release_ref,
+        "reclaimed_at": run_events.format_recorded_at(datetime.now(timezone.utc)),
+    }
+    _append(
+        workspace,
+        run_dir,
+        journal_core.RECLAIMED_EVENT,
+        payload,
+        key=_key("release-reclaimed", task_id, attempt_id, release_ref),
+    )
+    return payload
+
+
 def _hold_late_reply(
-    workspace: Path, run_dir: Path, events: Sequence[run_journal.RunEvent], task_id: str, attempt_id: str
+    workspace: Path,
+    run_dir: Path,
+    events: Sequence[run_journal.RunEvent],
+    task_id: str,
+    attempt_id: str,
+    reply_digest: str,
 ) -> None:
-    """Record an accept-conflict hold when a released attempt receives a reply."""
+    """Hold a released attempt that received a valid late reply, and reclaim its slot.
+
+    The reply proves a child exists, so the unit occupies again. The hold keeps
+    the task from correlating until an operator resolves it with that reply.
+    """
     release = journal_core.released(events, task_id)
     if release is None or release.get("attempt_id") != attempt_id:
         return
     evidence = release.get("evidence_sha256")
     if not journal.digest(evidence):
         raise _refuse("journal-refused", "the release record is not usable")
+    _record_reclaim(workspace, run_dir, events, task_id, attempt_id, release, reply_digest)
     _record_held(workspace, run_dir, task_id, attempt_id, ACCEPT_CONFLICT, str(evidence))
     raise _refuse("accept-conflict", "the released claim received a late native reply")
 

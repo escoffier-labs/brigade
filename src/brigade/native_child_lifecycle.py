@@ -160,6 +160,7 @@ def status(
                 "terminal": result.result_id is not None,
                 "acked": result.acknowledged,
                 "released": journal_core.released(events, task_id) is not None,
+                "voided": journal_core.voided(events, task_id) is not None,
                 "cancel_requested": journal_core.latest(events, host.cancel_event, task_id) is not None,
                 "attempt": binding.dispatch_attempt if binding is not None else None,
                 "seat_digest": journal_core.digest({"seat": result.handle.spec.seat}, host.seat_digest_domain),

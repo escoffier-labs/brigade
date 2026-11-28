@@ -309,23 +309,204 @@ def test_release_refuses_a_recorded_native_reply(tmp_path):
     assert _release_events(workspace, run_id) == []
 
 
+def _reply_digest(workspace: Path, run_id: str, payload: dict, *, task_id: str = "one") -> str:
+    """The handle digest the journal records for one reply."""
+    verified = dispatch._verified(workspace, _run_dir(workspace, run_id), only=task_id)[task_id]
+    binding = journal_core.claim_binding(_events(workspace, run_id), task_id)
+    assert binding is not None
+    result = dispatch.parse_claimed_result(payload, verified=verified, binding=binding)
+    return dispatch._handle_digest(result, binding.parent_thread)
+
+
+def _reclaim_events(workspace: Path, run_id: str) -> list:
+    return [event for event in _events(workspace, run_id) if event.event_type == journal_core.RECLAIMED_EVENT]
+
+
+def _void_events(workspace: Path, run_id: str) -> list:
+    return [event for event in _events(workspace, run_id) if event.event_type == journal_core.VOIDED_EVENT]
+
+
 @POSIX_ONLY
-def test_late_reply_after_release_holds_without_a_second_slot(tmp_path):
+def test_late_reply_after_release_holds_and_restores_the_slot(tmp_path):
     workspace, run_id = _enroll(tmp_path, ("one",))
     _claim(workspace, run_id, "one")
+    roster = admission.load_roster(workspace)
     _release(workspace, run_id, _log(tmp_path))
-    assert capacity.governed_occupancy(workspace).live == 0
+    released = capacity.governed_occupancy(workspace)
+    assert released.live == 0
+    free_after_release = capacity.assess(roster, "coder", released).free
+    assert free_after_release is not None
 
+    reply = _reply(workspace, run_id)
     with pytest.raises(dispatch.DispatchError) as refused:
-        dispatch.accepted(
-            workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_reply(workspace, run_id)
-        )
+        dispatch.accepted(workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=reply)
     assert refused.value.code == "accept-conflict"
+
     events = _events(workspace, run_id)
     assert journal_core.held(events, "one") == journal_core.ACCEPT_CONFLICT
     assert not [event for event in events if event.event_type == dispatch.CORRELATION_EVENT]
-    assert capacity_core.capacity_reasons(events) == {}
+    assert capacity_core.capacity_reasons(events) == {"one": "accept-conflict"}
+    after = capacity.governed_occupancy(workspace)
+    assert after == capacity.Occupancy(1, (("coder", 1),), True)
+    assert capacity.assess(roster, "coder", after).free == free_after_release - 1
+
+    (release,) = _release_events(workspace, run_id)
+    (reclaimed,) = [event.payload for event in _reclaim_events(workspace, run_id)]
+    assert reclaimed["reply_digest"] == _reply_digest(workspace, run_id, reply)
+    assert reclaimed["release_ref"] == journal_core.release_reference(release.payload)
+    assert reclaimed["reclaimed_at"].endswith("Z")
+
+
+@POSIX_ONLY
+def test_hold_resolve_voids_the_release_and_the_run_closes(tmp_path):
+    workspace, run_id = _enroll(tmp_path, ("one",))
+    _claim(workspace, run_id, "one")
+    _release(workspace, run_id, _log(tmp_path))
+    reply = _reply(workspace, run_id)
+    with pytest.raises(dispatch.DispatchError) as refused:
+        dispatch.accepted(workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=reply)
+    assert refused.value.code == "accept-conflict"
+
+    report = dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=reply, abandon=False)
+
+    assert report["mode"] == "hold-resolved" and report["voided"] is True
+    events = _events(workspace, run_id)
+    assert journal_core.held(events, "one") is None
+    assert journal_core.released(events, "one") is None
+    (release,) = _release_events(workspace, run_id)
+    (void,) = [event.payload for event in _void_events(workspace, run_id)]
+    assert void["reply_digest"] == _reply_digest(workspace, run_id, reply)
+    assert void["release_ref"] == journal_core.release_reference(release.payload)
+    assert void["voided_at"].endswith("Z")
+    assert void["attempt_id"] == release.payload["attempt_id"] == report["attempt_id"]
+
+    row = lifecycle.status(workspace=workspace, run_id=run_id)["tasks"][0]
+    assert row["released"] is False and row["voided"] is True and row["held_reason"] is None
+    assert row["correlated"] is True
+    assert capacity_core.capacity_reasons(events) == {"one": "awaiting-terminal"}
+
+    observed = lifecycle.observe(
+        workspace=workspace,
+        run_id=run_id,
+        task_id="one",
+        parent_thread=THREAD,
+        payload=_terminal_reply(workspace, run_id),
+    )
+    result_id = observed["result_id"]
+    assert result_id is not None
+    lifecycle.ack(workspace=workspace, run_id=run_id, task_id="one", result_id=result_id)
+    closed = lifecycle.finalize(workspace=workspace, run_id=run_id)
+    assert closed["status"] == "completed"
+    assert capacity_core.capacity_reasons(_events(workspace, run_id)) == {}
     assert capacity.governed_occupancy(workspace).live == 0
+
+
+@POSIX_ONLY
+def test_void_with_a_sibling_reply_refuses_and_writes_nothing(tmp_path):
+    workspace, run_id = _enroll(tmp_path, ("one", "two"))
+    _claim(workspace, run_id, "one")
+    _claim(workspace, run_id, "two")
+    _release(workspace, run_id, _log(tmp_path), task_id="one")
+    with pytest.raises(dispatch.DispatchError) as first:
+        dispatch.accepted(
+            workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=_reply(workspace, run_id)
+        )
+    assert first.value.code == "accept-conflict"
+    journal_path = _journal_path(workspace, run_id)
+    before = journal_path.read_bytes()
+
+    with pytest.raises(dispatch.DispatchError) as refused:
+        dispatch.hold_resolve(
+            workspace=workspace,
+            run_id=run_id,
+            task_id="one",
+            payload=_reply(workspace, run_id, "two"),
+            abandon=False,
+        )
+    assert refused.value.code == "native-mismatch"
+    assert journal_path.read_bytes() == before
+    assert journal_core.held(_events(workspace, run_id), "one") == journal_core.ACCEPT_CONFLICT
+    assert _void_events(workspace, run_id) == []
+    assert capacity_core.capacity_reasons(_events(workspace, run_id))["one"] == "accept-conflict"
+
+
+@POSIX_ONLY
+def test_second_void_refuses_and_writes_nothing(tmp_path):
+    workspace, run_id = _enroll(tmp_path, ("one",))
+    _claim(workspace, run_id, "one")
+    _release(workspace, run_id, _log(tmp_path))
+    reply = _reply(workspace, run_id)
+    with pytest.raises(dispatch.DispatchError):
+        dispatch.accepted(workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=reply)
+    dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=reply, abandon=False)
+    journal_path = _journal_path(workspace, run_id)
+    before = journal_path.read_bytes()
+
+    with pytest.raises(dispatch.DispatchError) as refused:
+        dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=reply, abandon=False)
+    assert refused.value.code == "already-voided"
+    assert journal_path.read_bytes() == before
+    assert len(_void_events(workspace, run_id)) == 1
+
+
+@POSIX_ONLY
+def test_late_observe_as_first_contact_restores_the_slot(tmp_path):
+    workspace, run_id = _enroll(tmp_path, ("one",))
+    _claim(workspace, run_id, "one")
+    _release(workspace, run_id, _log(tmp_path))
+    reply = _reply(workspace, run_id)
+
+    with pytest.raises(dispatch.DispatchError) as refused:
+        lifecycle.observe(workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=reply)
+    assert refused.value.code == "accept-conflict"
+
+    events = _events(workspace, run_id)
+    assert journal_core.held(events, "one") == journal_core.ACCEPT_CONFLICT
+    (reclaimed,) = [event.payload for event in _reclaim_events(workspace, run_id)]
+    assert reclaimed["reply_digest"] == _reply_digest(workspace, run_id, reply)
+    assert capacity_core.capacity_reasons(events) == {"one": "accept-conflict"}
+    assert capacity.governed_occupancy(workspace).live == 1
+
+
+@POSIX_ONLY
+def test_abandon_on_a_voided_task_matches_any_correlated_task(tmp_path):
+    workspace, run_id = _enroll(tmp_path, ("one",))
+    _claim(workspace, run_id, "one")
+    _release(workspace, run_id, _log(tmp_path))
+    reply = _reply(workspace, run_id)
+    with pytest.raises(dispatch.DispatchError):
+        dispatch.accepted(workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=reply)
+    dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=reply, abandon=False)
+
+    report = dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=None, abandon=True)
+
+    assert report["mode"] == journal_core.ABANDONED
+    events = _events(workspace, run_id)
+    assert journal_core.held(events, "one") == journal_core.ABANDONED
+    assert capacity_core.capacity_reasons(events) == {"one": "abandoned-unknown"}
+    with pytest.raises(dispatch.DispatchError) as refused:
+        lifecycle.finalize(workspace=workspace, run_id=run_id)
+    assert refused.value.code == "finalize-abandoned"
+
+
+@POSIX_ONLY
+def test_reclaim_and_void_leave_another_task_untouched(tmp_path):
+    workspace, run_id = _enroll(tmp_path, ("one", "two"))
+    _claim(workspace, run_id, "one")
+    _claim(workspace, run_id, "two")
+    _release(workspace, run_id, _log(tmp_path), task_id="one")
+    reply = _reply(workspace, run_id)
+    with pytest.raises(dispatch.DispatchError):
+        dispatch.accepted(workspace=workspace, run_id=run_id, task_id="one", parent_thread=THREAD, payload=reply)
+    dispatch.hold_resolve(workspace=workspace, run_id=run_id, task_id="one", payload=reply, abandon=False)
+
+    events = _events(workspace, run_id)
+    assert capacity_core.capacity_reasons(events) == {"one": "awaiting-terminal", "two": "awaiting-terminal"}
+    assert capacity.governed_occupancy(workspace) == capacity.Occupancy(2, (("coder", 2),), True)
+    rows = {row["task_id"]: row for row in lifecycle.status(workspace=workspace, run_id=run_id)["tasks"]}
+    assert rows["one"]["voided"] is True and rows["one"]["released"] is False
+    assert rows["two"]["voided"] is False and rows["two"]["released"] is False
+    assert rows["two"]["held_reason"] is None
 
 
 @POSIX_ONLY

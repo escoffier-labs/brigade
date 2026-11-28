@@ -284,6 +284,12 @@ EVENT_TYPES.update(
                 "evidence_bytes",
             }
         ),
+        # A late reply takes its released slot back, and the operator void that
+        # follows records the reply digest and the release it supersedes.
+        "task.native-release-reclaimed": frozenset(
+            {"task_id", "attempt_id", "reply_digest", "release_ref", "reclaimed_at"}
+        ),
+        "task.native-release-voided": frozenset({"task_id", "attempt_id", "reply_digest", "release_ref", "voided_at"}),
         "task.native-capacity": frozenset({"task_id", "attempt_id", "reason", "worktree_retained"}),
         # Native T3 enrollment holds one immutable delegation input asset
         # outside the journal. Only its relative name and digests are retained
@@ -346,6 +352,8 @@ _NATIVE_T3_EVENT_TYPES = frozenset(
         "task.native-cancel-requested",
         "task.native-hold-resolved",
         "task.native-released",
+        "task.native-release-reclaimed",
+        "task.native-release-voided",
         "task.native-capacity",
     }
 )
@@ -409,6 +417,10 @@ _REQUIRED_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
             "evidence_bytes",
         }
     ),
+    "task.native-release-reclaimed": frozenset(
+        {"task_id", "attempt_id", "reply_digest", "release_ref", "reclaimed_at"}
+    ),
+    "task.native-release-voided": frozenset({"task_id", "attempt_id", "reply_digest", "release_ref", "voided_at"}),
     "task.native-capacity": frozenset({"task_id", "attempt_id", "reason"}),
 }
 
@@ -691,6 +703,16 @@ def _validate_native_t3_payload(event_type: str, payload: Mapping[str, Any]) -> 
         size = payload.get("evidence_bytes")
         if type(size) is not int or size < 0:
             raise CanonicalizationError("task.native-released evidence size is invalid")
+        return
+    if event_type in {"task.native-release-reclaimed", "task.native-release-voided"}:
+        for field in ("reply_digest", "release_ref"):
+            if not run_task_journal.digest(payload.get(field)):
+                raise CanonicalizationError(f"{event_type} {field} is invalid")
+        stamp = (
+            payload.get("reclaimed_at") if event_type == "task.native-release-reclaimed" else payload.get("voided_at")
+        )
+        if not is_valid_recorded_at(stamp):
+            raise CanonicalizationError(f"{event_type} time is invalid")
         return
     if event_type == "task.native-capacity":
         from .native_child_observations import RESOURCE_STATES

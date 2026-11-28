@@ -28,6 +28,9 @@ CLAIM_EVENT = "task.native-claimed"
 HELD_EVENT = "task.native-held"
 HOLD_RESOLVED_EVENT = "task.native-hold-resolved"
 RELEASED_EVENT = "task.native-released"
+RECLAIMED_EVENT = "task.native-release-reclaimed"
+VOIDED_EVENT = "task.native-release-voided"
+_RELEASE_REFERENCE_DOMAIN = "brigade.native.release-reference.v1"
 ABANDONED = "abandoned-unknown"
 ACCEPT_CONFLICT = "accept-conflict"
 HELD_RUN_STATUS = "held"
@@ -203,7 +206,10 @@ def claim_binding(events: Sequence[run_journal.RunEvent], task_id: str) -> Claim
 
 
 def released(events: Sequence[run_journal.RunEvent], task_id: str) -> Mapping[str, Any] | None:
-    """Return the durable operator release fact for a task, if one exists."""
+    """Return the durable operator release fact for a task, if one exists.
+
+    A voided release is no longer released: the task follows the normal path.
+    """
     payload = latest(events, RELEASED_EVENT, task_id)
     if payload is None:
         return None
@@ -213,7 +219,50 @@ def released(events: Sequence[run_journal.RunEvent], task_id: str) -> Mapping[st
         or not journal.digest(payload.get("evidence_sha256"))
     ):
         raise refuse("journal-refused", "the release record is not usable")
+    void = voided(events, task_id)
+    if void is not None and void.get("release_ref") == release_reference(payload):
+        return None
     return payload
+
+
+def release_reference(release: Mapping[str, Any]) -> str:
+    """The audit reference one reclaim or void record keeps for its release."""
+    return digest(
+        {
+            "task_id": release.get("task_id"),
+            "attempt_id": release.get("attempt_id"),
+            "released_at": release.get("released_at"),
+            "evidence_sha256": release.get("evidence_sha256"),
+        },
+        _RELEASE_REFERENCE_DOMAIN,
+    )
+
+
+def _release_supersession(
+    events: Sequence[run_journal.RunEvent], task_id: str, event_type: str, time_field: str
+) -> Mapping[str, Any] | None:
+    """Validate one reclaim or void record that supersedes a release."""
+    payload = latest(events, event_type, task_id)
+    if payload is None:
+        return None
+    if (
+        not journal.digest(payload.get("attempt_id"))
+        or not journal.digest(payload.get("reply_digest"))
+        or not journal.digest(payload.get("release_ref"))
+        or not run_events.is_valid_recorded_at(payload.get(time_field))
+    ):
+        raise refuse("journal-refused", "the release supersession record is not usable")
+    return payload
+
+
+def reclaimed(events: Sequence[run_journal.RunEvent], task_id: str) -> Mapping[str, Any] | None:
+    """Return the reply that took a released slot back, if one did."""
+    return _release_supersession(events, task_id, RECLAIMED_EVENT, "reclaimed_at")
+
+
+def voided(events: Sequence[run_journal.RunEvent], task_id: str) -> Mapping[str, Any] | None:
+    """Return the operator void of a release, if one exists."""
+    return _release_supersession(events, task_id, VOIDED_EVENT, "voided_at")
 
 
 def held(events: Sequence[run_journal.RunEvent], task_id: str) -> str | None:

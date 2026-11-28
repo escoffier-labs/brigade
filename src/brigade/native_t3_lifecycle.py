@@ -103,10 +103,17 @@ def observe(*, workspace: Path, run_id: str, task_id: str, parent_thread: str, p
         events, verified, binding = dispatch._durable_claim(workspace, run_dir, task_id, parent_thread)
         result = dispatch.parse_claimed_result(payload, verified=verified, binding=binding)
         dispatch._require_target(result, verified.retained.target)
+        dispatch._hold_late_reply(
+            workspace,
+            run_dir,
+            events,
+            task_id,
+            binding.attempt_id,
+            dispatch._handle_digest(result, binding.parent_thread),
+        )
         prior = dispatch._correlation(events, task_id)
         if prior is None:
             raise dispatch._refuse("no-correlation", "the task has no recorded native correlation")
-        dispatch._hold_late_reply(workspace, run_dir, events, task_id, binding.attempt_id)
         held = dispatch._held(events, task_id)
         if held is not None:
             raise dispatch._refuse("task-held", f"the task is held ({held})")
@@ -192,8 +199,8 @@ def _describe(report: Mapping[str, Any]) -> str:
     for task in report["tasks"]:
         lines.append(
             "task {task_id} state={state} held={held_reason} correlated={correlated} "
-            "terminal={terminal} acked={acked} released={released} cancel-requested={cancel_requested} "
-            "attempt={attempt} seat={seat_digest}".format(**task)
+            "terminal={terminal} acked={acked} released={released} voided={voided} "
+            "cancel-requested={cancel_requested} attempt={attempt} seat={seat_digest}".format(**task)
         )
     return "\n".join(lines)
 

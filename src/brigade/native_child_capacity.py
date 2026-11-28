@@ -46,6 +46,8 @@ CAPACITY_UNKNOWN = "capacity-unknown"
 HOLD_EVENT = "task.native-held"
 HOLD_RESOLVED_EVENT = "task.native-hold-resolved"
 RELEASED_EVENT = "task.native-released"
+RECLAIMED_EVENT = "task.native-release-reclaimed"
+VOIDED_EVENT = "task.native-release-voided"
 LAUNCH_CLAIM = "task.launch-claimed"
 _NATIVE_KIND_PREFIX = "native-"
 # Native adapters derive run IDs as <host>-<request SHA-256>. Batch has its
@@ -63,6 +65,8 @@ _READ_EVENT_TYPES = frozenset(
         HOLD_EVENT,
         HOLD_RESOLVED_EVENT,
         RELEASED_EVENT,
+        RECLAIMED_EVENT,
+        VOIDED_EVENT,
         RESOURCE_EVENT,
     }
 )
@@ -192,6 +196,7 @@ def _live_claims(events: Sequence[run_journal.RunEvent]) -> dict[str, tuple[str,
     held: dict[str, str] = {}
     resources: dict[str, str] = {}
     released: set[str] = set()
+    release_seen: set[str] = set()
     for event in events:
         if event.event_type not in _READ_EVENT_TYPES:
             continue
@@ -212,6 +217,18 @@ def _live_claims(events: Sequence[run_journal.RunEvent]) -> dict[str, tuple[str,
             if task_id not in claims or payload.get("attempt_id") != claims[task_id][1]:
                 raise _Unverified("payload")
             released.add(task_id)
+            release_seen.add(task_id)
+        elif event.event_type in {RECLAIMED_EVENT, VOIDED_EVENT}:
+            # A late reply, and the operator void that follows it, put the
+            # released unit back. Both must name the release they supersede.
+            if (
+                task_id not in release_seen
+                or payload.get("attempt_id") != claims[task_id][1]
+                or not journal.digest(payload.get("reply_digest"))
+                or not journal.digest(payload.get("release_ref"))
+            ):
+                raise _Unverified("payload")
+            released.discard(task_id)
         elif event.event_type == "task.observed":
             # An observation counts only for the launch claim it belongs to.
             if task_id not in claims or payload.get("attempt_id") != claims[task_id][1]:

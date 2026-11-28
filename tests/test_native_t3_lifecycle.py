@@ -575,6 +575,7 @@ def test_correlation_events_and_status_carry_no_child_ids_or_text(tmp_path, caps
         "terminal",
         "acked",
         "released",
+        "voided",
         "cancel_requested",
         "attempt",
         "seat_digest",
